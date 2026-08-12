@@ -234,6 +234,10 @@
       "message": "这个 Task 的管理 Session 已不可用。",
       "hint": "请从可用的 Agent Session 创建替代 Task，再用 `vibe task remove {id}` 删除这条失去管理者的定义。"
     },
+    "taskScheduleRetired": {
+      "message": "这个一次性 Task 的计划已经结束。",
+      "hint": "请先用 `vibe task update {id} --at <time>` 设置新的未来时间，再恢复它。"
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",

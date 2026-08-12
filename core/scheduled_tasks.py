@@ -19,6 +19,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import select
@@ -113,6 +114,8 @@ from storage.background import (
     SWEEP_REASON_ORPHANED,
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
+    TASK_RETIREMENT_SCHEDULE_CONSUMED,
+    TASK_RETIREMENT_SCHEDULE_MISSED,
     SweptRun,
     WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
@@ -1057,6 +1060,8 @@ class ScheduledTask:
     created_at: str = field(default_factory=_utc_now_iso)
     updated_at: str = field(default_factory=_utc_now_iso)
     last_run_at: Optional[str] = None
+    retired_at: Optional[str] = None
+    retirement_reason: Optional[str] = None
     last_error: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
     # Command tasks run a subprocess instead of messaging an Agent. All four stay
@@ -1107,6 +1112,8 @@ class ScheduledTask:
             created_at=str(payload.get("created_at") or _utc_now_iso()),
             updated_at=str(payload.get("updated_at") or _utc_now_iso()),
             last_run_at=payload.get("last_run_at"),
+            retired_at=payload.get("retired_at"),
+            retirement_reason=payload.get("retirement_reason"),
             last_error=payload.get("last_error"),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
             shell_command=(str(payload["shell_command"]) if payload.get("shell_command") else None),
@@ -1658,6 +1665,8 @@ class ScheduledTaskStore:
                 task_id,
                 metadata=task.metadata,
                 session_id=task.session_id,
+                schedule_type=task.schedule_type,
+                retired_at=task.retired_at,
             )
         expect = self._read_state(task)
         task.enabled = enabled
@@ -1701,6 +1710,7 @@ class ScheduledTaskStore:
         # (``vibe task update`` resolved Agents and Sessions from this very object),
         # and it is what the write below re-asserts.
         expect = self._read_state(task)
+        previous_schedule = (task.schedule_type, task.run_at, task.timezone)
         task.name = name
         task.session_key = session_key
         task.session_id = session_id
@@ -1717,6 +1727,11 @@ class ScheduledTaskStore:
         task.cron = cron
         task.run_at = run_at
         task.timezone = timezone_name
+        # Changing a one-shot schedule creates a new lifecycle. The previous
+        # terminal fact remains in Run history but cannot own the new instant.
+        if (schedule_type, run_at, timezone_name) != previous_schedule:
+            task.retired_at = None
+            task.retirement_reason = None
         if update_command_fields:
             # Gated like ``cwd``: an edit that says nothing about the command must not
             # clear it, and ``last_exit_code`` is runtime state no edit ever rewrites.
@@ -1741,6 +1756,42 @@ class ScheduledTaskStore:
             self.load()
             return self._tasks[task_id]
         return task
+
+    @_serialize_task_mirror
+    def retire_missed_one_shot(
+        self,
+        task_id: str,
+        *,
+        expected_run_at: str,
+        expected_timezone: str,
+    ) -> bool:
+        """Retire the exact one-shot schedule APScheduler reported missed."""
+
+        task = self._tasks.get(task_id)
+        if (
+            task is None
+            or not task.enabled
+            or task.schedule_type != "at"
+            or task.retired_at is not None
+            or task.run_at != expected_run_at
+            or task.timezone != expected_timezone
+        ):
+            return False
+        if self._sqlite is not None:
+            landed = self._sqlite.retire_missed_one_shot(
+                task_id,
+                expected_run_at=expected_run_at,
+                expected_timezone=expected_timezone,
+            )
+            if landed:
+                self.load()
+            return landed
+        task.enabled = False
+        task.retired_at = _utc_now_iso()
+        task.retirement_reason = TASK_RETIREMENT_SCHEDULE_MISSED
+        task.updated_at = task.retired_at
+        self._save()
+        return True
 
     @_serialize_task_mirror
     def record_binding_recovery(
@@ -1898,8 +1949,16 @@ class ScheduledTaskStore:
             # message task has none and must never blank what a command fire of the
             # same definition recorded.
             task.last_exit_code = int(exit_code)
-        if disable_one_shot and task.schedule_type == "at":
+        # SQLite one-shots retire in the scheduler enqueue transaction, tied to
+        # the exact run_at/timezone that was consumed. A result arriving after
+        # the user replaces and resumes that schedule must not disable the new
+        # lifecycle. The legacy file backend has no atomic enqueue boundary, so
+        # it retains its result-time transition for compatibility.
+        if disable_one_shot and task.schedule_type == "at" and self._sqlite is None:
             task.enabled = False
+            if task.retired_at is None:
+                task.retired_at = _utc_now_iso()
+                task.retirement_reason = TASK_RETIREMENT_SCHEDULE_CONSUMED
         task.updated_at = _utc_now_iso()
         # Same reasoning as ``record_binding_recovery``, and the same reason it must be
         # guarded: this payload carries the mirror's ``session_id`` and ``enabled``, so
@@ -2321,6 +2380,8 @@ class TaskExecutionStore:
         source_kind: str = "cli",
         task: Optional[ScheduledTask] = None,
         suppress_scheduler_successor: bool = False,
+        expected_run_at: Optional[str] = None,
+        expected_timezone: Optional[str] = None,
     ) -> Optional[TaskExecutionRequest]:
         if task is None:
             request = TaskExecutionRequest(
@@ -2364,6 +2425,8 @@ class TaskExecutionStore:
             session_policy=task.session_policy,
             metadata=metadata,
             suppress_scheduler_successor=suppress_scheduler_successor,
+            expected_run_at=expected_run_at,
+            expected_timezone=expected_timezone,
         )
 
     def enqueue_definition_run(
@@ -2383,6 +2446,8 @@ class TaskExecutionStore:
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         suppress_scheduler_successor: bool = False,
+        expected_run_at: Optional[str] = None,
+        expected_timezone: Optional[str] = None,
     ) -> Optional[TaskExecutionRequest]:
         request = TaskExecutionRequest(
             id=uuid4().hex[:12],
@@ -2412,6 +2477,8 @@ class TaskExecutionStore:
         snapshot = self._sqlite.enqueue_definition_run(
             self.queued_run_payload(request),
             suppress_scheduler_successor=suppress_scheduler_successor,
+            expected_run_at=expected_run_at,
+            expected_timezone=expected_timezone,
         )
         if snapshot is None:
             return None
@@ -3833,6 +3900,7 @@ class ScheduledTaskService:
         self.store = store or ScheduledTaskStore()
         self.request_store = request_store or TaskExecutionStore()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
+        self.scheduler.add_listener(self._on_scheduler_event, EVENT_JOB_MISSED)
         self._reconcile_task: Optional[asyncio.Task] = None
         self._service_teardown_task: Optional["asyncio.Task[None]"] = None
         self._request_recovery_token: RuntimeWorkRegistrationToken | None = None
@@ -5369,7 +5437,7 @@ class ScheduledTaskService:
             return
         desired_ids = set()
         for task in self.store.list_tasks():
-            if not task.enabled:
+            if not task.enabled or task.retired_at is not None:
                 continue
             desired_ids.add(task.id)
             signature = (
@@ -5395,7 +5463,11 @@ class ScheduledTaskService:
                     replace_existing=True,
                     coalesce=True,
                     max_instances=1,
-                    args=[task.id],
+                    args=[
+                        task.id,
+                        task.run_at if task.schedule_type == "at" else None,
+                        task.timezone if task.schedule_type == "at" else None,
+                    ],
                 )
             except Exception as exc:
                 self._job_signatures.pop(task.id, None)
@@ -5422,11 +5494,63 @@ class ScheduledTaskService:
             return DateTrigger(run_date=resolve_run_at(task.run_at, task.timezone))
         raise ValueError(f"unknown schedule type: {task.schedule_type}")
 
-    async def _run_task(self, task_id: str) -> None:
+    def _on_scheduler_event(self, event: JobExecutionEvent) -> None:
+        """Persist an APScheduler-observed one-shot misfire.
+
+        A clock comparison cannot tell whether the scheduler consumed a fire.
+        This callback runs only for ``EVENT_JOB_MISSED`` and re-asserts the
+        current schedule identity before retiring it, so an event queued before
+        an edit cannot terminalize the replacement definition.
+        """
+
+        task = self.store.refresh_task(str(event.job_id))
+        if (
+            task is None
+            or task.schedule_type != "at"
+            or not task.enabled
+            or task.retired_at is not None
+            or not task.run_at
+        ):
+            return
+        try:
+            scheduled = resolve_run_at(task.run_at, task.timezone)
+        except Exception:
+            logger.warning(
+                "Ignoring misfire for task %s with an invalid stored run_at",
+                task.id,
+                exc_info=True,
+            )
+            return
+        if scheduled != event.scheduled_run_time:
+            logger.info(
+                "Ignoring stale misfire for task %s: event=%s current=%s",
+                task.id,
+                event.scheduled_run_time,
+                scheduled,
+            )
+            return
+        if self.store.retire_missed_one_shot(
+            task.id,
+            expected_run_at=task.run_at,
+            expected_timezone=task.timezone,
+        ):
+            self._job_signatures.pop(task.id, None)
+            _publish_task_definitions_updated()
+
+    async def _run_task(
+        self,
+        task_id: str,
+        expected_run_at: Optional[str] = None,
+        expected_timezone: Optional[str] = None,
+    ) -> None:
         if not self._owns_service_instance():
             return
         task = await self._run_runtime_sync(self.store.refresh_task, task_id)
         if not task or not task.enabled:
+            return
+        if expected_run_at is not None and (
+            task.run_at != expected_run_at or task.timezone != expected_timezone
+        ):
             return
         queued = await self._run_runtime_sync(
             self.request_store.enqueue_task_run,
@@ -5434,8 +5558,15 @@ class ScheduledTaskService:
             source_kind="scheduler",
             task=task,
             suppress_scheduler_successor=True,
+            expected_run_at=expected_run_at,
+            expected_timezone=expected_timezone,
         )
         if queued is not None:
+            if task.schedule_type == "at":
+                # The SQLite enqueue atomically retired the definition with this
+                # Run. Reload the process mirror and wake open Workbench pages.
+                await self._run_runtime_sync(self.store.load)
+                _publish_task_definitions_updated()
             self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
 
     def _request_partition_key(self, request: TaskExecutionRequest) -> str:
@@ -6940,15 +7071,9 @@ class ScheduledTaskService:
         """The lifecycle state the badge shows for this task — asked of the badge.
 
         The authoritative answer is ``definition_lifecycle_state``, the same SQL CASE
-        every list and count surface evaluates, so the notice copy and the badge share
-        one clock and one parse of ``run_at`` — and one priority order: an in-flight
-        execution outranks the ended predicate, so the caller sees ``running`` rather
-        than a boolean that flattened it into "not finished". The Python inference
-        below it is a FALLBACK for the file backend and for a row the read cannot
-        reach: there is no SQL badge in those worlds to disagree with, and the
-        inference asks the same question the projection encodes
-        (``compute_next_run_at`` returns ``None`` exactly when the named instant is
-        behind us, with ``enabled=True`` so the switch cannot mask the clock).
+        every list and count surface evaluates. An in-flight execution outranks the
+        persisted terminal marker, so the caller sees ``running`` while a consumed Run
+        is active. The Python fallback for the file backend follows the same facts.
         """
 
         if definition_id:
@@ -6965,13 +7090,7 @@ class ScheduledTaskService:
                     state = None
                 if state is not None:
                     return state
-        if task.schedule_type == "at" and not compute_next_run_at(
-            enabled=True,
-            schedule_type=task.schedule_type,
-            cron=task.cron,
-            run_at=task.run_at,
-            timezone_name=task.timezone,
-        ):
+        if task.schedule_type == "at" and task.retired_at is not None:
             return "finished"
         return "paused"
 
@@ -7779,7 +7898,17 @@ class ScheduledTaskService:
         escalation_run_id: Optional[str] = None
         try:
             if request.request_type in {"task_run", "scheduled"}:
-                self.store.maybe_reload()
+                # A scheduled one-shot is retired in the same SQLite transaction
+                # that created this Run. Reload unconditionally before its result
+                # writer derives a full-row compare-and-set payload, so a process
+                # mirror cannot write the pre-consumption enabled state back.
+                if (
+                    request.source_kind == "scheduler"
+                    and request.schedule_type == "at"
+                ):
+                    self.store.load()
+                else:
+                    self.store.maybe_reload()
                 task = self.store.get_task(request.task_id or "")
                 if task is None:
                     raise ValueError(f"task '{request.task_id}' not found")

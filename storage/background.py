@@ -62,6 +62,8 @@ from storage.session_reclaim import (
 logger = logging.getLogger(__name__)
 
 CALLBACK_TERMINAL_TURN_ID_METADATA_KEY = "callback_terminal_turn_id"
+TASK_RETIREMENT_SCHEDULE_CONSUMED = "schedule_consumed"
+TASK_RETIREMENT_SCHEDULE_MISSED = "schedule_missed"
 
 
 def _json_dumps(value: Any) -> str:
@@ -554,12 +556,29 @@ class TaskResumeBlocked(RuntimeError):
         self.owner_session_id = str(owner_session_id)
 
 
+class TaskScheduleRetired(RuntimeError):
+    """A consumed or missed one-shot needs a new schedule before re-enabling."""
+
+    code = "task_schedule_retired"
+
+    def __init__(self, definition_id: str) -> None:
+        super().__init__(
+            f"task {definition_id} cannot be resumed because its one-shot schedule "
+            "has already retired"
+        )
+        self.definition_id = str(definition_id)
+
+
 def require_task_resumable(
     definition_id: str,
     *,
     metadata: Any,
     session_id: Any,
+    schedule_type: Any = None,
+    retired_at: Any = None,
 ) -> None:
+    if str(schedule_type or "") == "at" and retired_at:
+        raise TaskScheduleRetired(definition_id)
     blocked = task_resume_block(metadata, session_id)
     if blocked is not None:
         raise TaskResumeBlocked(definition_id, blocked["owner_session_id"])
@@ -779,10 +798,9 @@ def definition_lifecycle_expression(definition_type: str):
     without giving it anything left to do, and reading the switch first parked
     such a row in the default Active view forever.
 
-    Both ``ended`` branches read a fact written by whatever ends the definition,
-    never a proxy for one: a watch retires when its supervisor says so, and a
-    one-shot when the clock passes the instant it names. A history column —
-    "it has run at least once" — looks like either and is neither.
+    Both ``ended`` branches read ``retired_at``, the fact written by whoever
+    ends the definition. A history column or a deadline whose clock passed can
+    look like retirement, but neither proves that the schedule was consumed.
     """
 
     in_flight = (
@@ -807,27 +825,14 @@ def definition_lifecycle_expression(definition_type: str):
             run_definitions.c.retired_at.is_not(None),
         )
     else:
-        # A cron task cannot retire itself, so a disabled one is always someone
-        # having paused it. A one-shot is over when the instant it names has
-        # passed — not when it last ran. ``vibe task run`` executes an armed
-        # task early and records ``last_run_at`` without consuming the schedule,
-        # so reading history here retired a task that was still going to fire.
-        #
-        # This is the same question ``compute_next_run_at`` answers — it returns
-        # ``None`` exactly when the instant is behind us — so the state and the
-        # time printed beside it cannot contradict each other.
-        #
-        # SQLite cannot resolve an IANA timezone and treats a naive timestamp as
-        # UTC. The connection UDF delegates that resolution to the same stdlib
-        # rule the scheduler uses, then compares two epoch values in UTC.
+        # A cron task cannot retire itself, so a disabled one without this marker
+        # is paused. For a one-shot, the scheduler stamps the marker either in the
+        # same transaction that queues its Run or from a real APScheduler misfire
+        # event. A manual early run writes only history and cannot consume the
+        # future schedule; wall-clock passage alone proves no outcome at all.
         ended = and_(
             run_definitions.c.schedule_type == "at",
-            run_definitions.c.run_at.is_not(None),
-            func.avibe_run_at_epoch(
-                run_definitions.c.run_at,
-                run_definitions.c.timezone,
-            )
-            <= (func.julianday("now") - literal(2440587.5)) * literal(86400.0),
+            run_definitions.c.retired_at.is_not(None),
         )
     return case(
         (in_flight, "running"),
@@ -863,7 +868,9 @@ def _successful_finished_definition_expression(definition_type: str, lifecycle: 
     else:
         successful_one_shot = and_(
             run_definitions.c.schedule_type == "at",
-            run_definitions.c.enabled == 0,
+            run_definitions.c.retired_at.is_not(None),
+            run_definitions.c.retirement_reason
+            == TASK_RETIREMENT_SCHEDULE_CONSUMED,
             run_definitions.c.last_run_at.is_not(None),
             no_error,
         )
@@ -874,12 +881,14 @@ def _successful_finished_definition_expression(definition_type: str, lifecycle: 
 # went, and what it caught.
 DEFINITION_RETIREMENT_COLUMNS = (
     "retired_at",
+    "retirement_reason",
     "last_finished_at",
     "last_exit_code",
     "last_error",
 )
 DEFINITION_CYCLE_COLUMNS = (
     "retired_at",
+    "retirement_reason",
     "last_started_at",
     "last_finished_at",
     "last_event_at",
@@ -954,13 +963,14 @@ def definition_lifecycle_detail(
     last_exit_code: Any = None,
     last_error: Any = None,
     timed_out: Optional[bool] = None,
+    retirement_reason: Optional[str] = None,
 ) -> Optional[str]:
-    """How a finished task/watch ended: ``normal``, ``timeout``, or ``error``.
+    """How a finished task/watch ended.
 
     Non-null only for ``finished``; the other three states are still in play and
     have no ending to report yet. Python rather than SQL because it has exactly
     one consumer — the row — and never a ``GROUP BY``: the filter groups by
-    state, and the row alone says which of the three endings it was.
+    state, and the row alone says how the definition ended.
 
     ``timed_out`` is THE ANSWER when the row has one, and the three states are
     distinct on purpose. 124 is the code the runner synthesizes for a limit it
@@ -975,6 +985,11 @@ def definition_lifecycle_detail(
 
     if lifecycle_state != "finished":
         return None
+    if (
+        definition_type == "scheduled"
+        and retirement_reason == TASK_RETIREMENT_SCHEDULE_MISSED
+    ):
+        return "missed"
     if definition_type == "scheduled" and last_run_at is None:
         return None
     if timed_out:
@@ -3214,6 +3229,8 @@ class SQLiteBackgroundTaskStore:
                         select(
                             run_definitions.c.definition_type,
                             run_definitions.c.mode,
+                            run_definitions.c.schedule_type,
+                            run_definitions.c.retired_at,
                             run_definitions.c.enabled,
                             run_definitions.c.session_id,
                             run_definitions.c.metadata_json,
@@ -3230,6 +3247,8 @@ class SQLiteBackgroundTaskStore:
                             definition_id,
                             metadata=_json_loads(current["metadata_json"], {}),
                             session_id=current["session_id"],
+                            schedule_type=current["schedule_type"],
+                            retired_at=current["retired_at"],
                         )
                     clear_columns = definition_resume_clear_columns(
                         current["definition_type"], current["mode"]
@@ -3253,6 +3272,41 @@ class SQLiteBackgroundTaskStore:
                 stmt = stmt.where(run_definitions.c.definition_type == definition_type)
             result = conn.execute(stmt)
             return bool(result.rowcount)
+
+    def retire_missed_one_shot(
+        self,
+        definition_id: str,
+        *,
+        expected_run_at: str,
+        expected_timezone: str,
+        retired_at: Optional[str] = None,
+    ) -> bool:
+        """Persist one APScheduler-owned missed ``at`` transition.
+
+        The schedule identity is part of the compare-and-set. A stale misfire
+        event from a job that was edited cannot retire the replacement schedule.
+        """
+
+        now = retired_at or _utc_now_iso()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == definition_id)
+                .where(run_definitions.c.definition_type == "scheduled")
+                .where(run_definitions.c.schedule_type == "at")
+                .where(run_definitions.c.enabled != 0)
+                .where(run_definitions.c.deleted_at.is_(None))
+                .where(run_definitions.c.retired_at.is_(None))
+                .where(run_definitions.c.run_at == expected_run_at)
+                .where(run_definitions.c.timezone == expected_timezone)
+                .values(
+                    enabled=0,
+                    retired_at=now,
+                    retirement_reason=TASK_RETIREMENT_SCHEDULE_MISSED,
+                    updated_at=now,
+                )
+            )
+        return bool(result.rowcount)
 
     def list_watches(self) -> list[dict[str, Any]]:
         stmt = self._definitions_query("watch").order_by(
@@ -3597,9 +3651,13 @@ class SQLiteBackgroundTaskStore:
         payload: dict[str, Any],
         *,
         suppress_scheduler_successor: bool = False,
+        expected_run_at: Optional[str] = None,
+        expected_timezone: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Enqueue one internally consistent snapshot of a live definition."""
 
+        if (expected_run_at is None) != (expected_timezone is None):
+            raise ValueError("expected run_at and timezone must be supplied together")
         values = self._run_values(payload)
         definition_id = str(values.get("definition_id") or "").strip()
         if not definition_id:
@@ -3644,6 +3702,10 @@ class SQLiteBackgroundTaskStore:
                     run_definitions.c.metadata_json,
                     run_definitions.c.command_json,
                     run_definitions.c.shell_command,
+                    run_definitions.c.schedule_type,
+                    run_definitions.c.run_at,
+                    run_definitions.c.timezone,
+                    run_definitions.c.retired_at,
                     run_definitions.c.enabled,
                     run_definitions.c.deleted_at,
                 )
@@ -3653,8 +3715,30 @@ class SQLiteBackgroundTaskStore:
             if definition is not None:
                 if definition["deleted_at"] is not None:
                     raise ValueError(f"definition '{definition_id}' not found")
+                scheduled_one_shot = bool(
+                    values.get("source_kind") == "scheduler"
+                    and definition["definition_type"] == "scheduled"
+                    and definition["schedule_type"] == "at"
+                )
+                if scheduled_one_shot and expected_run_at is None:
+                    raise ValueError(
+                        "scheduler one-shot enqueue requires its expected run_at and timezone"
+                    )
+                if (
+                    scheduled_one_shot and definition["retired_at"] is not None
+                ):
+                    return None
                 if not bool(definition["enabled"]):
                     raise ValueError(f"definition '{definition_id}' is disabled")
+                if (
+                    scheduled_one_shot
+                    and expected_run_at is not None
+                    and (
+                        definition["run_at"] != expected_run_at
+                        or definition["timezone"] != expected_timezone
+                    )
+                ):
+                    return None
 
                 current_name = str(definition["agent_name"] or "").strip() or None
                 identity = _resolve_agent_identity_by_name(conn, current_name)
@@ -3688,6 +3772,34 @@ class SQLiteBackgroundTaskStore:
                     message_payload_json=definition["message_payload_json"],
                     metadata_json=_json_dumps(metadata),
                 )
+            schedule_consumed = bool(
+                definition is not None
+                and scheduled_one_shot
+                and expected_run_at is not None
+            )
+            if schedule_consumed:
+                now = _utc_now_iso()
+                consumed = conn.execute(
+                    update(run_definitions)
+                    .where(run_definitions.c.id == definition_id)
+                    .where(run_definitions.c.enabled != 0)
+                    .where(run_definitions.c.deleted_at.is_(None))
+                    .where(run_definitions.c.retired_at.is_(None))
+                    .where(
+                        and_(
+                            run_definitions.c.run_at == expected_run_at,
+                            run_definitions.c.timezone == expected_timezone,
+                        )
+                    )
+                    .values(
+                        enabled=0,
+                        retired_at=now,
+                        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+                        updated_at=now,
+                    )
+                )
+                if not consumed.rowcount:
+                    return None
             enqueue_run_in_connection(conn, values)
         return {
             "agent_name": values["agent_name"],
@@ -7898,7 +8010,8 @@ class SQLiteBackgroundTaskStore:
             "updated_at": payload.get("updated_at") or payload.get("created_at"),
             "last_started_at": None,
             "last_finished_at": None,
-            "retired_at": None,
+            "retired_at": payload.get("retired_at"),
+            "retirement_reason": payload.get("retirement_reason"),
             "last_event_at": None,
             "last_run_at": payload.get("last_run_at"),
             "last_run_id": payload.get("last_run_id"),
@@ -7944,6 +8057,7 @@ class SQLiteBackgroundTaskStore:
             "last_started_at": payload.get("last_started_at"),
             "last_finished_at": payload.get("last_finished_at"),
             "retired_at": payload.get("retired_at"),
+            "retirement_reason": None,
             "last_event_at": payload.get("last_event_at"),
             "last_run_at": None,
             "last_run_id": None,
@@ -8034,6 +8148,8 @@ class SQLiteBackgroundTaskStore:
             "updated_at": row["updated_at"],
             "last_run_at": row["last_run_at"],
             "last_run_id": row["last_run_id"],
+            "retired_at": row["retired_at"],
+            "retirement_reason": row["retirement_reason"],
             "last_error": row["last_error"],
             "metadata": metadata,
             "resume_blocked": task_resume_block(metadata, row["session_id"]),
@@ -8068,6 +8184,7 @@ class SQLiteBackgroundTaskStore:
             "last_started_at": row["last_started_at"],
             "last_finished_at": row["last_finished_at"],
             "retired_at": row["retired_at"],
+            "retirement_reason": row["retirement_reason"],
             "last_event_at": row["last_event_at"],
             "last_error": row["last_error"],
             "last_exit_code": row["last_exit_code"],
@@ -8292,6 +8409,7 @@ class SQLiteBackgroundTaskStore:
                 last_exit_code=row.get("last_exit_code"),
                 last_error=row.get("last_error"),
                 timed_out=_definition_timed_out(row.get("metadata")),
+                retirement_reason=row.get("retirement_reason"),
             )
             row["next_run_at"] = compute_next_run_at(
                 enabled=bool(row.get("enabled")),

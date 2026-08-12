@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_CONSUMED,
+)
 from storage.models import agent_runs, run_definitions
 from storage.pagination import PageRequest
 from vibe import cli
@@ -287,7 +290,7 @@ def test_task_list_pagination_is_stable_across_run_at_boundary(capsys) -> None:
         store.close()
 
 
-def test_task_list_does_not_hide_an_enabled_one_shot_after_manual_run(capsys) -> None:
+def test_task_list_keeps_manual_and_unmarked_one_shots_nonterminal(capsys) -> None:
     store = SQLiteBackgroundTaskStore()
     try:
         _task(
@@ -307,12 +310,14 @@ def test_task_list_does_not_hide_an_enabled_one_shot_after_manual_run(capsys) ->
             run_at=PAST,
             enabled=False,
             last_run_at=NOW,
+            retired_at=NOW,
+            retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
         )
 
         assert cli.cmd_task_list(page_request=PageRequest(limit=20)) == 0
         rows = json.loads(capsys.readouterr().out)["definitions"]
 
         assert [row["id"] for row in rows] == ["manual-run"]
-        assert rows[0]["lifecycle_state"] == "finished"
+        assert rows[0]["lifecycle_state"] == "waiting"
     finally:
         store.close()

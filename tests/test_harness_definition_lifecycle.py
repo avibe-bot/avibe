@@ -35,6 +35,9 @@ from storage.background import (
     DEFINITION_STATUS_FILTERS,
     NO_EVENT_EXIT_CODE,
     SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_CONSUMED,
+    TASK_RETIREMENT_SCHEDULE_MISSED,
+    TaskScheduleRetired,
     _id_batches,
     compute_next_run_at,
     definition_lifecycle_detail,
@@ -48,9 +51,8 @@ from storage.settings_service import upsert_scope
 
 NOW = "2026-07-26T00:00:00+00:00"
 
-# A one-shot's state is now a question about the clock, so these two are
-# relative to the real one: the SQL compares ``run_at`` against SQLite's
-# ``now``, and a fixed literal would decide the answer by the calendar.
+# Next-fire projection still compares the schedule to the real clock. Lifecycle
+# itself reads persisted retirement and never interprets these timestamps.
 FUTURE = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
 PAST = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 
@@ -201,14 +203,81 @@ def test_process_alive_tells_a_dead_waiter_from_one_never_seen(store) -> None:
     assert died["runtime"]["running"] is False
 
 
-def test_a_disabled_cron_task_is_paused_and_a_fired_one_shot_is_finished(store) -> None:
+@pytest.mark.parametrize("definition_type", ["scheduled", "watch"])
+def test_pause_resume_and_edit_never_publish_an_inferred_pause_time(
+    store,
+    definition_type: str,
+) -> None:
+    """Pause is a state without a timestamp until the product needs that fact."""
+
+    definition_id = f"paused-{definition_type}"
+    if definition_type == "scheduled":
+        _task(store, definition_id, enabled=False, updated_at="2026-07-27T00:00:00+00:00")
+    else:
+        _watch(store, definition_id, enabled=False, updated_at="2026-07-27T00:00:00+00:00")
+    get = store.get_scheduled_task if definition_type == "scheduled" else store.get_watch
+    row = get(definition_id)
+    assert row["lifecycle_state"] == "paused"
+    assert "paused_at" not in row
+
+    assert store.set_definition_enabled(
+        definition_id,
+        True,
+        definition_type=definition_type,
+    )
+    assert store.set_definition_enabled(
+        definition_id,
+        False,
+        definition_type=definition_type,
+    )
+    if definition_type == "scheduled":
+        _task(
+            store,
+            definition_id,
+            name="renamed Friday",
+            enabled=False,
+            updated_at="2026-07-31T00:00:00+00:00",
+        )
+    else:
+        _watch(
+            store,
+            definition_id,
+            name="renamed Friday",
+            enabled=False,
+            updated_at="2026-07-31T00:00:00+00:00",
+        )
+    row = get(definition_id)
+    assert row["lifecycle_state"] == "paused"
+    assert "paused_at" not in row
+
+
+def test_disabled_definitions_need_a_persisted_retirement_fact_to_be_finished(store) -> None:
     """A cron task cannot retire itself, so switching one off is always a pause.
-    A one-shot whose scheduled instant is past is done whichever way its switch
-    points; the switch cannot create another fire."""
+    A one-shot is finished only after its scheduler owner persisted retirement;
+    a legacy row with no marker remains an honest pause rather than gaining a
+    fabricated outcome from its deadline."""
     _task(store, "cron-off", enabled=False)
     _task(store, "cron-on")
-    _task(store, "one-shot-fired-off", schedule_type="at", run_at=PAST, enabled=False, last_run_at=NOW)
-    _task(store, "one-shot-fired-on", schedule_type="at", run_at=PAST, enabled=True, last_run_at=NOW)
+    _task(
+        store,
+        "one-shot-fired-off",
+        schedule_type="at",
+        run_at=PAST,
+        enabled=False,
+        last_run_at=NOW,
+        retired_at=NOW,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+    )
+    _task(
+        store,
+        "one-shot-fired-on",
+        schedule_type="at",
+        run_at=PAST,
+        enabled=True,
+        last_run_at=NOW,
+        retired_at=NOW,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+    )
     _task(store, "one-shot-pending", schedule_type="at", run_at="2099-01-01T00:00:00+00:00", enabled=False)
 
     states = {task["id"]: task["lifecycle_state"] for task in store.list_scheduled_tasks()}
@@ -797,7 +866,7 @@ def test_a_forever_watch_retired_by_its_lifetime_says_it_timed_out(store) -> Non
     ) == "timeout"
 
 
-def test_re_enabling_a_fired_one_shot_task_does_not_make_it_waiting_again(store) -> None:
+def test_re_enabling_a_retired_one_shot_task_does_not_make_it_waiting_again(store) -> None:
     """``enabled`` is not a promise of a future fire.
 
     Switching a one-shot back on leaves its ``run_at`` in the past, so
@@ -805,7 +874,16 @@ def test_re_enabling_a_fired_one_shot_task_does_not_make_it_waiting_again(store)
     history parked such a task in the default Active view forever, inflating the
     badge with a row that will never run.
     """
-    _task(store, "fired-then-re-enabled", schedule_type="at", run_at=NOW, enabled=True, last_run_at=NOW)
+    _task(
+        store,
+        "fired-then-re-enabled",
+        schedule_type="at",
+        run_at=NOW,
+        enabled=True,
+        last_run_at=NOW,
+        retired_at=NOW,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+    )
 
     assert store.get_scheduled_task("fired-then-re-enabled")["lifecycle_state"] == "finished"
     assert compute_next_run_at(
@@ -830,18 +908,24 @@ def test_running_a_future_one_shot_by_hand_leaves_it_waiting(store) -> None:
     ) is not None
 
 
-def test_a_one_shot_whose_moment_has_passed_is_finished_even_if_it_never_ran(store) -> None:
-    """The instant is the fact, not the run history.
-
-    A task whose moment went by while the service was down has nothing left to
-    do, and saying *waiting* would promise a fire that can never come.
-    """
+def test_a_past_one_shot_without_a_recovery_fact_stays_nonterminal(store) -> None:
+    """Wall-clock passage cannot manufacture a successful or missed outcome."""
     _task(store, "missed-it", schedule_type="at", run_at=PAST, enabled=True, last_run_at=None)
 
-    assert store.get_scheduled_task("missed-it")["lifecycle_state"] == "finished"
+    row = store.get_scheduled_task("missed-it")
+    assert row["lifecycle_state"] == "waiting"
+    assert row["lifecycle_detail"] is None
     assert compute_next_run_at(
         enabled=True, schedule_type="at", cron=None, run_at=PAST, timezone_name="UTC"
     ) is None
+
+    assert store.retire_missed_one_shot(
+        "missed-it", expected_run_at=PAST, expected_timezone="UTC", retired_at=NOW
+    )
+    row = store.get_scheduled_task("missed-it")
+    assert row["lifecycle_state"] == "finished"
+    assert row["lifecycle_detail"] == "missed"
+    assert row["last_run_at"] is None
 
 
 def test_pausing_a_one_shot_before_its_moment_is_a_pause(store) -> None:
@@ -851,14 +935,18 @@ def test_pausing_a_one_shot_before_its_moment_is_a_pause(store) -> None:
     assert store.get_scheduled_task("held-back")["lifecycle_state"] == "paused"
 
 
-def test_one_shot_states_and_counts_agree_on_the_clock(store) -> None:
-    """Whatever the clock decides, the chips and the rows decide it together.
-
-    Both read ``definition_lifecycle_expression``; this pins that the ``at``
-    branch's time comparison survives the trip through ``GROUP BY``.
-    """
+def test_one_shot_states_and_counts_agree_on_persisted_retirement(store) -> None:
+    """Rows and counts share the same terminal fact, never the wall clock."""
     _task(store, "ahead", schedule_type="at", run_at=FUTURE, enabled=True, last_run_at=NOW)
-    _task(store, "behind", schedule_type="at", run_at=PAST, enabled=True)
+    _task(
+        store,
+        "behind",
+        schedule_type="at",
+        run_at=PAST,
+        enabled=False,
+        retired_at=NOW,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_MISSED,
+    )
     _task(store, "paused-ahead", schedule_type="at", run_at=FUTURE, enabled=False)
 
     page = store.list_scheduled_tasks_page(page_request=PageRequest(limit=50))
@@ -869,8 +957,8 @@ def test_one_shot_states_and_counts_agree_on_the_clock(store) -> None:
     assert (counts["waiting"], counts["finished"], counts["paused"]) == (1, 1, 1)
 
 
-def test_naive_one_shot_uses_its_task_timezone_in_rows_counts_and_next_fire(store) -> None:
-    """Offset-free ``run_at`` has one meaning across SQL and the scheduler."""
+def test_naive_one_shot_uses_its_task_timezone_for_the_next_fire_only(store) -> None:
+    """Offset-free ``run_at`` has one owner; lifecycle never reinterprets it."""
 
     now_utc = datetime.now(timezone.utc)
     los_angeles = ZoneInfo("America/Los_Angeles")
@@ -895,12 +983,40 @@ def test_naive_one_shot_uses_its_task_timezone_in_rows_counts_and_next_fire(stor
 
     rows = {row["id"]: row for row in store.list_scheduled_tasks()}
     assert rows["naive-ahead"]["lifecycle_state"] == "waiting"
-    assert rows["naive-behind"]["lifecycle_state"] == "finished"
+    assert rows["naive-behind"]["lifecycle_state"] == "waiting"
     assert rows["naive-ahead"]["next_run_at"] is not None
     assert rows["naive-behind"]["next_run_at"] is None
 
     counts = store.count_scheduled_tasks()
-    assert (counts["waiting"], counts["finished"]) == (1, 1)
+    assert (counts["waiting"], counts["finished"]) == (2, 0)
+
+
+def test_retired_one_shot_requires_a_new_schedule_before_resume(store) -> None:
+    """Every toggle doorway preserves the terminal marker and disabled switch."""
+
+    _task(
+        store,
+        "retired",
+        schedule_type="at",
+        run_at=PAST,
+        enabled=False,
+        retired_at=NOW,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_MISSED,
+    )
+
+    with pytest.raises(TaskScheduleRetired):
+        store.set_definition_enabled(
+            "retired",
+            True,
+            definition_type="scheduled",
+        )
+
+    row = store.get_scheduled_task("retired")
+    assert row["enabled"] is False
+    assert (row["retired_at"], row["retirement_reason"]) == (
+        NOW,
+        TASK_RETIREMENT_SCHEDULE_MISSED,
+    )
 
 
 def test_searching_tasks_looks_at_what_a_command_task_actually_runs(store) -> None:
@@ -1036,12 +1152,29 @@ def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_pa
     assert retired.last_finished_at is not None
     assert retired.retired_at is not None
     assert retired.last_error is None
+    assert retired.last_exit_code == 124
     assert retired.enabled is False
 
     # A later non-disabling result cannot erase a genuine retirement.
-    before = (retired.last_finished_at, retired.retired_at)
-    store.mark_cycle_result(retiring.id, exit_code=0, error=None, event_detected=True, disable=False)
-    assert (retired.last_finished_at, retired.retired_at) == before
+    before = (
+        retired.last_finished_at,
+        retired.retired_at,
+        retired.last_exit_code,
+        retired.last_error,
+    )
+    store.mark_cycle_result(
+        retiring.id,
+        exit_code=7,
+        error="late cycle failed",
+        event_detected=True,
+        disable=False,
+    )
+    assert (
+        retired.last_finished_at,
+        retired.retired_at,
+        retired.last_exit_code,
+        retired.last_error,
+    ) == before
 
     continuing = store.add_watch(
         name="continuing",

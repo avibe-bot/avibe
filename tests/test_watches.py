@@ -548,6 +548,67 @@ def test_managed_watch_store_uses_sqlite_when_path_is_default(tmp_path: Path, mo
     assert sqlite.get_watch(watch.id)["command"] == ["python3", "wait.py"]
 
 
+def test_hfr_479_late_cycle_cannot_replace_committed_watch_terminal_outcome(
+    tmp_path: Path,
+) -> None:
+    """HFR-479 -- the retiring cycle owns definition terminal fields forever."""
+
+    sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    winner = ManagedWatchStore(tmp_path / "winner.json")
+    winner._sqlite = sqlite
+    late = ManagedWatchStore(tmp_path / "late.json")
+    late._sqlite = sqlite
+    watch = winner.add_watch(
+        name="ordered retirement",
+        session_key="",
+        command=[],
+        shell_command="true",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    late.load()
+    late.maybe_reload()  # establish the invalidation baseline before retirement
+    requests = TaskExecutionStore(tmp_path / "requests")
+    requests._sqlite = sqlite
+
+    assert winner.mark_cycle_result(
+        watch.id,
+        exit_code=7,
+        error="terminal cycle failed",
+        disable=True,
+    )
+    late_run = requests.build_hook_send(
+        session_key="",
+        prompt="late cycle evidence",
+        run_type="watch",
+        definition_id=watch.id,
+        source_kind="watch",
+    )
+    assert late.mark_cycle_result(
+        watch.id,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        disable=False,
+        queued_run=late_run.to_dict(),
+    )
+
+    stored = sqlite.get_watch(watch.id)
+    assert stored is not None
+    assert stored["retired_at"] is not None
+    assert stored["last_finished_at"] == stored["retired_at"]
+    assert stored["last_exit_code"] == 7
+    assert stored["last_error"] == "terminal cycle failed"
+    assert sqlite.get_run(late_run.id) is not None
+
+
 def test_sqlite_remove_watch_soft_deletes_watch_but_keeps_runtime(tmp_path: Path) -> None:
     sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
     store = ManagedWatchStore(tmp_path / "watches.json")

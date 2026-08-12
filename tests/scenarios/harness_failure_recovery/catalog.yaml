@@ -4284,6 +4284,35 @@ scenarios:
     # Turn's sole initial accepted input. Steered or coalesced participants settle
     # locally, skip their callback, and leave the shared Session Turn untouched.
     test: tests/test_internal_server.py::test_hfr_476_run_cancel_does_not_stop_a_shared_turn
+  - id: HFR-477
+    name: one-shot Task schedule consumption is explicit and atomic
+    status: covered
+    kind: lifecycle
+    layer: contract
+    backend: shared
+    # A manual early run leaves the future schedule armed. The scheduler writes
+    # retired_at and schedule_consumed in the same transaction as its Run; the
+    # retired one-shot requires a new schedule before it can be resumed, and a
+    # late result from the old Run cannot retire that replacement schedule.
+    test: tests/test_scheduled_tasks.py::test_hfr_477_scheduler_consumes_one_shot_atomically_but_manual_run_does_not
+  - id: HFR-478
+    name: missed one-shot recovery records the exact observed schedule
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # APScheduler's misfire event records schedule_missed only while run_at and
+    # timezone still match; an event from a replaced schedule cannot retire it.
+    test: tests/test_scheduled_tasks.py::test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed
+  - id: HFR-479
+    name: Watch retirement outcome has one cycle owner
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    # A late cycle preserves the already-committed retired_at, finished time,
+    # exit code, and error while retaining its own individual Run history.
+    test: tests/test_watches.py::test_hfr_479_late_cycle_cannot_replace_committed_watch_terminal_outcome
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

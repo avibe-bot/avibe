@@ -4182,6 +4182,19 @@ def _task_resume_blocked_response(exc):
     )
 
 
+def _task_schedule_retired_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    return _coded_error_response(
+        exc.code,
+        t("error.taskScheduleRetired.message", lang),
+        409,
+        hint=t("error.taskScheduleRetired.hint", lang, id=exc.definition_id),
+        details={"task_id": exc.definition_id},
+    )
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
@@ -9254,7 +9267,7 @@ def harness_task_patch(task_id: str):
     if "enabled" not in payload:
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
     enabled = bool(payload["enabled"])
-    from storage.background import TaskResumeBlocked
+    from storage.background import TaskResumeBlocked, TaskScheduleRetired
 
     with _harness_store() as store:
         if not store.get_scheduled_task(task_id):
@@ -9263,6 +9276,8 @@ def harness_task_patch(task_id: str):
             store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
         except TaskResumeBlocked as exc:
             return _task_resume_blocked_response(exc)
+        except TaskScheduleRetired as exc:
+            return _task_schedule_retired_response(exc)
         task = store.get_scheduled_task(task_id)
     from core.inbox_events import publish_definitions_updated
 

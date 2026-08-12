@@ -1338,7 +1338,7 @@ export type HarnessSessionSummary = {
 // one-shot that finished on its own indistinguishable from one the user paused.
 // ``lifecycle_detail`` is set only on ``finished`` rows and says how they ended.
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
-export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error' | 'missed';
 export type HarnessDefinitionHealth = 'failing' | 'degraded' | 'healthy' | 'unknown';
 
 // The fields every task/watch row reads to describe its state.
@@ -1355,6 +1355,7 @@ export type HarnessDefinitionState = {
   // "how long has this been running" must come from the run that is running,
   // not from whenever the row last did anything.
   running_since: string | null;
+  retired_at?: string | null;
   // Derived from this definition's own settled run outcomes, never from
   // ``last_run_at``/``last_error``: those are overwritten on every fire, so one
   // success used to erase days of failure and a daily-failing cron rendered

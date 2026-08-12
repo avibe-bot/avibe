@@ -154,6 +154,43 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
     assert cli.ScheduledTaskStore().get_task(task.id).enabled is False
 
 
+def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = cli.ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-08-11T00:00:00+00:00",
+        timezone_name="UTC",
+    )
+    task.enabled = False
+    task.retired_at = "2026-08-11T00:00:01+00:00"
+    task.retirement_reason = "schedule_missed"
+    store.upsert_task(task)
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(
+            cli.cmd_task_set_enabled,
+            task.id,
+            True,
+        )
+
+    assert result == 1
+    assert payload["code"] == "task_schedule_retired"
+    assert payload["details"] == {"task_id": task.id}
+    saved = cli.ScheduledTaskStore().get_task(task.id)
+    assert saved is not None
+    assert saved.enabled is False
+    assert saved.retirement_reason == "schedule_missed"
+
+
 def test_task_update_preserves_archived_agent_reference(capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
     agent_store = cli.VibeAgentStore(db_path)
@@ -1250,6 +1287,10 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         run_at="2026-03-31T09:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
+    done.enabled = False
+    done.retired_at = "2026-03-31T09:00:00+08:00"
+    done.retirement_reason = "schedule_consumed"
+    store.upsert_task(done)
     store.mark_task_result(done.id, error=None)
     failed = store.add_task(
         session_key="slack::channel::C123",
@@ -1258,6 +1299,10 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         run_at="2026-03-31T10:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
+    failed.enabled = False
+    failed.retired_at = "2026-03-31T10:00:00+08:00"
+    failed.retirement_reason = "schedule_consumed"
+    store.upsert_task(failed)
     store.mark_task_result(failed.id, error="delivery failed")
 
     with patch("vibe.cli._task_store", return_value=store):

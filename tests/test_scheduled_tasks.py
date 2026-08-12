@@ -93,6 +93,7 @@ from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
     definition_lifecycle_detail,
+    resolve_run_at,
 )
 from storage.models import (
     agent_events,
@@ -2686,6 +2687,8 @@ def test_service_stop_terminalizes_inflight_run_without_replay(
         task.id,
         source_kind="scheduler",
         task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
     )
     successor = request_store.enqueue_hook_send(
         session_key="slack::channel::C123",
@@ -2847,6 +2850,8 @@ def test_service_stop_keeps_claim_cancelled_before_execution_starts_queued(
         task.id,
         source_kind="scheduler",
         task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
     )
     service = ScheduledTaskService(
         controller=SimpleNamespace(platform_settings_managers={}),
@@ -2978,6 +2983,8 @@ def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
         task.id,
         source_kind="scheduler",
         task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
     )
     started = asyncio.Event()
 
@@ -3445,6 +3452,16 @@ def test_restart_recovery_terminalizes_started_rows_and_preserves_other_owners(
             task.id,
             source_kind=source_kind,
             task=task,
+            expected_run_at=(
+                task.run_at
+                if source_kind == "scheduler" and task.schedule_type == "at"
+                else None
+            ),
+            expected_timezone=(
+                task.timezone
+                if source_kind == "scheduler" and task.schedule_type == "at"
+                else None
+            ),
         )
         assert request_store.claim(request.id) is not None
         _force_run_columns(request_store, request.id, pid=4321)
@@ -9871,6 +9888,184 @@ def test_run_task_request_does_not_disable_one_shot(tmp_path: Path) -> None:
     assert updated.last_run_at is not None
 
 
+def test_hfr_477_scheduler_consumes_one_shot_atomically_but_manual_run_does_not(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- only the scheduler may consume a one-shot definition."""
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+
+    manual = requests.enqueue_task_run(task.id, source_kind="cli", task=task)
+    assert manual is not None
+    store.load()
+    armed = store.get_task(task.id)
+    assert armed is not None
+    assert (armed.enabled, armed.retired_at, armed.retirement_reason) == (
+        True,
+        None,
+        None,
+    )
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=requests,
+    )
+    asyncio.run(service._run_task(task.id, task.run_at, task.timezone))
+
+    stored = requests._sqlite.get_scheduled_task(task.id)
+    assert stored is not None
+    assert stored["enabled"] is False
+    assert stored["retired_at"] is not None
+    assert stored["retirement_reason"] == "schedule_consumed"
+    runs = [
+        row
+        for row in requests._sqlite.list_runs()
+        if row["definition_id"] == task.id
+    ]
+    assert {row["source_kind"] for row in runs} == {"cli", "scheduler"}
+
+
+def test_hfr_477_late_consumed_run_cannot_retire_replacement_schedule(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- only the exact scheduler consumption owns retirement."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    first_run_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    replacement_run_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=first_run_at,
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=requests,
+    )
+    asyncio.run(service._run_task(task.id, first_run_at, "UTC"))
+
+    consumed = store.refresh_task(task.id)
+    assert consumed is not None and consumed.retired_at is not None
+    store.update_task(
+        task.id,
+        name=consumed.name,
+        session_key=consumed.session_key,
+        session_id=consumed.session_id,
+        prompt=consumed.prompt,
+        schedule_type="at",
+        post_to=consumed.post_to,
+        deliver_key=consumed.deliver_key,
+        cron=None,
+        run_at=replacement_run_at,
+        timezone_name="UTC",
+        agent_name=consumed.agent_name,
+        session_policy=consumed.session_policy,
+    )
+    store.set_enabled(task.id, True)
+
+    assert store.mark_task_result(task.id, error=None, disable_one_shot=True)
+
+    replacement = store.refresh_task(task.id)
+    assert replacement is not None
+    assert (replacement.enabled, replacement.run_at) == (True, replacement_run_at)
+    assert (replacement.retired_at, replacement.retirement_reason) == (None, None)
+    assert replacement.last_run_at is not None
+
+
+def test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-478 -- missed recovery records evidence and rejects stale events."""
+
+    from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    original_run_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    replacement_run_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=original_run_at,
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    stale_event = JobExecutionEvent(
+        EVENT_JOB_MISSED,
+        task.id,
+        "default",
+        resolve_run_at(original_run_at, "UTC"),
+    )
+
+    store.update_task(
+        task.id,
+        name=task.name,
+        session_key=task.session_key,
+        session_id=task.session_id,
+        prompt=task.prompt,
+        schedule_type="at",
+        post_to=task.post_to,
+        deliver_key=task.deliver_key,
+        cron=None,
+        run_at=replacement_run_at,
+        timezone_name="UTC",
+        agent_name=task.agent_name,
+        session_policy=task.session_policy,
+    )
+    service._on_scheduler_event(stale_event)
+    current = store.refresh_task(task.id)
+    assert current is not None
+    assert (current.enabled, current.retired_at, current.retirement_reason) == (
+        True,
+        None,
+        None,
+    )
+
+    missed_event = JobExecutionEvent(
+        EVENT_JOB_MISSED,
+        task.id,
+        "default",
+        resolve_run_at(replacement_run_at, "UTC"),
+    )
+    service._on_scheduler_event(missed_event)
+    missed = store.refresh_task(task.id)
+    assert missed is not None
+    assert missed.enabled is False
+    assert missed.retired_at is not None
+    assert missed.retirement_reason == "schedule_missed"
+    assert [
+        row
+        for row in service.request_store._sqlite.list_runs()
+        if row["definition_id"] == task.id
+    ] == []
+
+
 def test_start_keeps_watcher_alive_after_initial_reconcile_failure(tmp_path: Path) -> None:
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     controller = SimpleNamespace(platform_settings_managers={})
@@ -13130,7 +13325,13 @@ def test_a_refused_result_stamp_cannot_complete_the_run_ok(tmp_path: Path, monke
 
     calls: list = []
     service = _scheduled_service_with_ledger(tmp_path, store, calls)
-    queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    queued = service.request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+    )
     claimed = service.request_store.claim(queued.id)
     assert claimed is not None
 
@@ -13208,6 +13409,8 @@ def test_refused_task_stamp_fails_durable_run_and_reconciles_its_delivery(
         task.id,
         source_kind="scheduler",
         task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
     )
     claimed = service.request_store.claim(queued.id)
     assert claimed is not None
@@ -14833,7 +15036,11 @@ def _fire_command_task(
     """Fire one definition through the REAL claimed-request path; return its run row."""
 
     queued = service.request_store.enqueue_task_run(
-        task.id, source_kind="scheduler", task=task
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at if task.schedule_type == "at" else None,
+        expected_timezone=task.timezone if task.schedule_type == "at" else None,
     )
     claimed = service.request_store.claim(queued.id)
     assert claimed is not None

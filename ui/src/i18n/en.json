@@ -3306,6 +3306,7 @@
       "normal": "Finished",
       "timeout": "Timed out",
       "error": "Failed",
+      "missed": "Missed",
       "unknown": "Unknown"
     },
     "kind": {

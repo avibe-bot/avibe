@@ -77,7 +77,7 @@ describe('lifecycleLabel', () => {
     ['timeout', 'harness.lifecycle.timeout'],
     ['error', 'harness.lifecycle.error'],
     [null, 'harness.lifecycle.finished'],
-    ['missed', 'harness.lifecycle.finished'],
+    ['missed', 'harness.lifecycle.missed'],
   ] as const;
 
   it.each(outcomes)('maps finished detail %s to %s', (detail, expected) => {
@@ -110,6 +110,7 @@ describe('lifecycleLabel', () => {
       'normal',
       'timeout',
       'error',
+      'missed',
       'unknown',
     ]);
   });
@@ -740,8 +741,8 @@ describe('definitionRowLine', () => {
     ],
     [
       'a one-shot with no recorded run or finish',
-      { schedule_type: 'at', run_at: at(-DAY), updated_at: at(-3 * DAY) },
-      at(-DAY),
+      { schedule_type: 'at', run_at: at(-DAY), retired_at: at(-HOUR), updated_at: at(-3 * DAY) },
+      at(-HOUR),
     ],
     ['a retired watch', { mode: 'once', last_finished_at: at(-DAY), updated_at: at(-3 * DAY) }, at(-DAY)],
     ['a cron task', { cron: '0 * * * *', last_run_at: at(-HOUR), updated_at: at(-3 * DAY) }, at(-HOUR)],

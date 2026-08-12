@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260811_0052"
+HEAD_REVISION = "20260812_0053"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -1964,6 +1964,52 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
 
     assert "retired_at" in columns
     assert row == ("2026-07-26T00:00:00+00:00", None)
+    assert version == (HEAD_REVISION,)
+
+
+def test_retirement_reason_migration_preserves_legacy_unknowns(tmp_path: Path) -> None:
+    """0053 adds no inferred reason from clocks, edits, or run history."""
+
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0052")
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            insert into run_definitions (
+                id, definition_type, schedule_type, run_at, enabled,
+                last_run_at, retired_at, created_at, updated_at, metadata_json
+            ) values (?, 'scheduled', 'at', ?, 0, ?, ?, ?, ?, '{}')
+            """,
+            (
+                (
+                    "legacy-ran",
+                    "2026-07-26T09:00:00+00:00",
+                    "2026-07-26T09:01:00+00:00",
+                    "2026-07-26T09:01:00+00:00",
+                    "2026-07-25T00:00:00+00:00",
+                    "2026-07-31T00:00:00+00:00",
+                ),
+                (
+                    "legacy-missed",
+                    "2026-07-26T10:00:00+00:00",
+                    None,
+                    "2026-07-26T10:00:01+00:00",
+                    "2026-07-25T00:00:00+00:00",
+                    "2026-07-31T00:00:00+00:00",
+                ),
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "select id, retirement_reason from run_definitions order by id"
+        ).fetchall()
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert rows == [("legacy-missed", None), ("legacy-ran", None)]
     assert version == (HEAD_REVISION,)
 
 
@@ -5072,10 +5118,12 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
                         "session_id": "sesk8m4q2p7x",
                         "session_key": "slack::channel::C123",
                         "prompt": "hello",
-                        "schedule_type": "cron",
-                        "cron": "0 * * * *",
+                        "schedule_type": "at",
+                        "run_at": "2026-05-15T01:00:00+00:00",
                         "timezone": "UTC",
-                        "enabled": True,
+                        "enabled": False,
+                        "retired_at": "2026-05-15T01:00:00+00:00",
+                        "retirement_reason": "schedule_consumed",
                         "created_at": "2026-05-15T00:00:00+00:00",
                         "updated_at": "2026-05-15T00:00:00+00:00",
                     }
@@ -5099,7 +5147,8 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
                         "lifetime_timeout_seconds": 3600,
                         "retry_exit_codes": [75],
                         "retry_delay_seconds": 30,
-                        "enabled": True,
+                        "enabled": False,
+                        "retired_at": "2026-05-15T02:00:00+00:00",
                         "created_at": "2026-05-15T00:00:00+00:00",
                         "updated_at": "2026-05-15T00:00:00+00:00",
                     }
@@ -5149,12 +5198,25 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
     assert report.counts["background_runs_imported"] == 2
     with sqlite3.connect(db_path) as conn:
         tasks = conn.execute(
-            "select definition_type, session_id, legacy_session_key from run_definitions order by id"
+            "select definition_type, session_id, legacy_session_key, retired_at, retirement_reason "
+            "from run_definitions order by id"
         ).fetchall()
         runs = conn.execute("select id, run_type, status, session_id, error from agent_runs order by id").fetchall()
     assert tasks == [
-        ("scheduled", "sesk8m4q2p7x", "slack::channel::C123"),
-        ("watch", "sesk8m4q2p7x", "slack::channel::C123"),
+        (
+            "scheduled",
+            "sesk8m4q2p7x",
+            "slack::channel::C123",
+            "2026-05-15T01:00:00+00:00",
+            "schedule_consumed",
+        ),
+        (
+            "watch",
+            "sesk8m4q2p7x",
+            "slack::channel::C123",
+            "2026-05-15T02:00:00+00:00",
+            None,
+        ),
     ]
     assert runs == [
         ("hook-1", "hook_send", "queued", "sesk8m4q2p7x", None),

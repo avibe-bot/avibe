@@ -234,6 +234,10 @@
       "message": "This Task's managing Session is no longer available.",
       "hint": "Create a replacement Task from an available Agent Session, then remove this orphaned definition with `vibe task remove {id}`."
     },
+    "taskScheduleRetired": {
+      "message": "This one-shot Task's schedule has already ended.",
+      "hint": "Set a new future time with `vibe task update {id} --at <time>`, then resume it."
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",
