@@ -1011,8 +1011,10 @@ def test_model_hub_oauth_blocks_recovery_before_external_auth(tmp_path):
     assert adapter.secret_lengths == []
 
 
-def test_chain_route_reorders_exact_persisted_hops(monkeypatch, tmp_path):
-    service, _, _ = _service(tmp_path)
+def test_chain_route_preserves_submitted_hops_against_opposite_source_order(
+    monkeypatch, tmp_path
+):
+    service, store, _ = _service(tmp_path)
     first = asyncio.run(
         _create_source(
             service,
@@ -1036,9 +1038,13 @@ def test_chain_route_reorders_exact_persisted_hops(monkeypatch, tmp_path):
         )
     )
     model_id = "claude-opus-4-6"
+    store.config.agents["claude"].sources.order = [first["id"], second["id"]]
     hops = [
         {"source_id": second["id"], "model_id": model_id},
         {"source_id": first["id"], "model_id": model_id},
+    ]
+    assert store.config.agents["claude"].sources.order == [
+        hop["source_id"] for hop in reversed(hops)
     ]
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
@@ -1059,6 +1065,10 @@ def test_chain_route_reorders_exact_persisted_hops(monkeypatch, tmp_path):
         (hop["source_id"], hop["model_id"]) for hop in hops
     ]
     assert body["chain"]["current"] == {"source_id": second["id"], "model_id": model_id}
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in store.config.agents["claude"].routes[model_id].hops
+    ] == [(hop["source_id"], hop["model_id"]) for hop in hops]
 
 
 def test_delete_guard_reports_only_routes_emptied_by_this_mutation(tmp_path):

@@ -529,6 +529,46 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
         assert required in ac_54
 
 
+def test_per_model_route_put_does_not_consume_stored_source_order():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
+
+    route_row = next(
+        line
+        for line in api_contract.splitlines()
+        if line.startswith("| PUT `/api/models/agents/<backend>/chain?model=<id>`")
+    )
+    assert "handler never reads `sources.order`" in route_row
+    assert "submitted `hops` carry no Source-order semantics" in route_row
+
+    source_order_contract = api_contract.split("## Per-backend source order", 1)[1].split(
+        "### Direct-to-Gateway native adoption", 1
+    )[0]
+    assert "only server-side post-creation" in source_order_contract
+    assert "implicitly reads and applies the stored Source order" in source_order_contract
+
+    exact_route_contract = api_contract.split("### Exact Route-chain configuration", 1)[
+        1
+    ].split("## Source creation outcome", 1)[0]
+    assert "per-model PUT persists the explicit submitted order" in exact_route_contract
+    assert "never reads `sources.order`" in exact_route_contract
+    assert "request still carries only explicit `hops`" in exact_route_contract
+
+    section_42 = model_hub_plan.split("### 4.2 Gateway strategy", 1)[1].split(
+        "### 4.3 Runtime resolution", 1
+    )[0]
+    section_46 = model_hub_plan.split(
+        "### 4.6 Configured-chain storage and mutation", 1
+    )[1].split("### 4.7", 1)[0]
+    for authority in (section_42, section_46):
+        assert "server" in authority
+        assert "per-model" in authority
+        assert (
+            "does not read `sources.order`" in authority
+            or "never reads `sources.order`" in authority
+        )
+
+
 def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     validator = Draft7Validator(_schema("guard-refusal.schema.json"))
     hop = {

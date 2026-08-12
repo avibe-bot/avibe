@@ -36,7 +36,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
-| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; it is the `mutation.route_replace` row of the authoritative mutation matrix. A visible noninterrupting hop removal is ordinary success; only a resulting protected-supply interruption enters the guard. |
+| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; the handler never reads `sources.order`, and the submitted `hops` carry no Source-order semantics. It is the `mutation.route_replace` row of the authoritative mutation matrix. A visible noninterrupting hop removal is ordinary success; only a resulting protected-supply interruption enters the guard. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
@@ -355,9 +355,9 @@ It stores only `sources.order`, never reads or writes a Route chain, and therefo
 returns a guarded `409`. This is the G-9 tombstone: adding a guard branch would imply an
 order save is allowed to mutate supply, which violates S-1.
 
-`POST /api/models/agents/<backend>/chains/reorder` is the only operation that applies
-the stored Source order to existing Routes. For each Route, give every hop its original
-zero-based index `i` and sort by this total key:
+`POST /api/models/agents/<backend>/chains/reorder` is the only server-side post-creation
+operation that implicitly reads and applies the stored Source order to existing Routes.
+For each Route, give every hop its original zero-based index `i` and sort by this total key:
 
 ```text
 source_id in sources.order  -> (0, sources.order.index(source_id), i)
@@ -396,6 +396,9 @@ does not satisfy the recognition predicate.
 Every menu model stores one `hops` array. Each hop is an exact
 `{source_id, model_id}` pair; a differing upstream id is the mapping itself, not a
 separate mapping object. A write validates only newly introduced or changed pairs.
+The per-model PUT persists the explicit submitted order and never reads `sources.order`.
+An editor may sort its local draft from the Source-order projection already on the page,
+but the request still carries only explicit `hops`, with no stored-order instruction.
 The whole-array PUT uses `force` plus the optional echoed `would_remove_hops` and
 `would_interrupt` arrays in the JSON body only when the submitted edit would interrupt
 protected supply. A successful write returns `{chain, removed_hops, interrupted}`.
@@ -1067,6 +1070,7 @@ contract harness and API-boundary tests enforce:
 | authority registry and mirror relations are generated from live files in the same test run; every registered closed branch has a consumer and every registered consumer resolves to one authority | `mirror-registry.json` harness |
 | every non-null `then` constraint has matching `required` | contract harness |
 | every `sources.order` id exists, is unique, and is eligible | config loader + source-order route |
+| the per-model Route PUT accepts only explicit `hops` and its server path never reads or implicitly applies `sources.order`; only the all-chain reorder operation does so after creation | API route negative fixture |
 | eligibility contains one row per source and every ordered source is eligible | AgentSupply assembler |
 | every AgentSupply eligibility row carries `in_current_model_chain` and `process_availability_reason`; membership nullability follows `selected_model_id`, and only a native source may carry `native_cli_unavailable` | AgentSupply assembler |
 | `AgentChain.chain` re-echoes the stored exact hops in the same order, including missing, model-unsupported, and process-unavailable native CLI items; `AgentChain.current` is null or identifies one exact hop in that array | chain assembler |
