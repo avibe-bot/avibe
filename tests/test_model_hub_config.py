@@ -775,6 +775,72 @@ def test_model_hub_ui_state_completeness_is_generated_from_live_files():
     assert result["ok"], result["findings"]
 
 
+def _assert_segmentation_conserved(result: dict) -> None:
+    segmentation = result["segmentation"]
+    assert segmentation["source_lines"] == segmentation["line_partition_total"]
+    assert segmentation["source_lines"] == sum(segmentation["line_kinds"].values())
+    for name in ("table_cells", "code_spans", "arrow_landings"):
+        inventory = segmentation[name]
+        assert inventory["total"] == inventory["admitted"] + inventory["malformed"]
+
+
+def test_model_hub_ui_gate_total_segmentation_conserves_every_candidate_family():
+    result = check_model_hub_ui_states(Path.cwd())
+
+    _assert_segmentation_conserved(result)
+    assert all(result["segmentation"][name]["total"] > 0 for name in (
+        "table_cells",
+        "code_spans",
+        "arrow_landings",
+    ))
+
+
+def test_model_hub_ui_gate_rejects_nonliteral_gap_header_without_shrinking(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = (
+        "| # | Surface | Missing | Evidence / disposition "
+        "(contract baseline `1993f4fd0`) |"
+    )
+    after = "| # | Surface | Missing | Garbage |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    _assert_segmentation_conserved(result)
+    assert result["input_scale"]["contract-gap candidates"] == baseline["input_scale"][
+        "contract-gap candidates"
+    ]
+    assert any("contract-gap register header" in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_rejects_narrow_registry_separator_without_shrinking(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = (
+        "| Frame | State | Entry condition | Failure / pending | Copy keys | Exit |\n"
+        "| --- | --- | --- | --- | --- | --- |"
+    )
+    after = "| Frame | State | Entry condition | Failure / pending | Copy keys | Exit |\n| --- |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    _assert_segmentation_conserved(result)
+    assert result["input_scale"]["state-register candidates"] == baseline["input_scale"][
+        "state-register candidates"
+    ]
+    assert any("separator has 1 cells" in finding["message"] for finding in result["findings"])
+
+
 @pytest.mark.parametrize(
     ("claim", "message"),
     [
@@ -1078,6 +1144,32 @@ def test_model_hub_ui_gate_preserves_pathless_register_route_candidate(tmp_path:
     )
 
 
+def test_model_hub_ui_gate_preserves_pathless_route_in_nonverb_register_context(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "| §1.4 | Start failed | `POST /api/models/oauth/start` did not put a flow"
+    after = "| §1.4 | Start failed | `POST` did not put a flow"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    _assert_segmentation_conserved(result)
+    assert result["input_scale"]["state-register route candidates"] == baseline[
+        "input_scale"
+    ]["state-register route candidates"]
+    assert result["segmentation"]["code_spans"]["total"] == baseline["segmentation"][
+        "code_spans"
+    ]["total"]
+    assert any(
+        "Start failed" in finding["message"] and "`POST` with no path" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
 def test_model_hub_ui_gate_keeps_unqualified_exits_in_their_frame(tmp_path: Path):
     spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
     baseline = check_model_hub_ui_states(Path.cwd())
@@ -1377,6 +1469,95 @@ def test_model_hub_ui_gate_validates_shared_frame_exit_before_frame_resolution(
     assert any(
         "Committed projection stale" in finding["message"]
         and "has no exit" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_validates_shared_frame_failure_landing_without_shrinking(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    row = next(
+        line
+        for line in spec.splitlines()
+        if line.startswith("| §1.2 / §1.6 / §1.9 / §1.10 / §1.11 | Committed projection stale")
+    )
+    cells = row.split("|")
+    cells[4] = " → Vanished forever "
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(row, "|".join(cells), 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    _assert_segmentation_conserved(result)
+    assert result["input_scale"]["state-register candidates"] == baseline["input_scale"][
+        "state-register candidates"
+    ]
+    assert any(
+        "Committed projection stale" in finding["message"]
+        and "Vanished forever" in finding["message"]
+        and "every owner" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_resolves_explicit_exit_frame_without_shrinking(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "Hub 重新拉取 → §1.6 Refetching"
+    after = "Hub 重新拉取 → §1.99 Refetching"
+    assert spec.count(before) >= 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    _assert_segmentation_conserved(result)
+    assert result["input_scale"]["state-register candidates"] == baseline["input_scale"][
+        "state-register candidates"
+    ]
+    assert result["segmentation"]["arrow_landings"]["total"] == baseline[
+        "segmentation"
+    ]["arrow_landings"]["total"]
+    assert any("names `§1.99`, which is no frame" in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_rejects_placeholder_state_identity_without_shrinking(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "| §1.1 | Per-source `error` |"
+    after = "| §1.1 | — |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    _assert_segmentation_conserved(result)
+    assert result["input_scale"]["state-register candidates"] == baseline["input_scale"][
+        "state-register candidates"
+    ]
+    assert any("placeholder-only state identity `—`" in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_rejects_cross_origin_revision_override(tmp_path: Path):
+    baseline = check_model_hub_ui_states("HEAD")
+    other_checkout = tmp_path / "other-checkout"
+    other_checkout.mkdir()
+
+    result = check_model_hub_ui_states("HEAD", authorities=other_checkout)
+
+    _assert_segmentation_conserved(result)
+    assert baseline["input_mode"] == "same_run_git_rev"
+    assert result["input_mode"] == "malformed_cross_origin"
+    assert result["authority_origin"] == baseline["authority_origin"]
+    assert result["segmentation"] == baseline["segmentation"]
+    assert result["input_scale"] == baseline["input_scale"]
+    assert any(
+        "authority override is invalid for a revision target" in finding["message"]
         for finding in result["findings"]
     )
 

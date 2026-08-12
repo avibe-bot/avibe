@@ -83,6 +83,7 @@ API_CONTRACT = CONTRACTS / "api.md"
 
 MODE_FILES = "same_run_live_files"
 MODE_REV = "same_run_git_rev"
+MODE_INVALID_ORIGIN = "malformed_cross_origin"
 
 
 # --- the gate's one input origin --------------------------------------------
@@ -222,7 +223,7 @@ class Origin:
 
 def resolve_inputs(
     target: str | Path, authorities: str | Path | None = None
-) -> tuple[str, str, Origin]:
+) -> tuple[str, str, Origin, tuple[str, ...]]:
     """The document to check, how it was read, and the origin of every authority.
 
     `target` is a checkout, a file, or a git revision. The authority origin
@@ -239,9 +240,21 @@ def resolve_inputs(
             text = here.read(SPEC)
             if text is None:
                 raise SystemExit(f"{here.label} holds no {SPEC}")
-            return text, here.mode, stated or here
+            provenance = (
+                "authority override is invalid for a checkout target; all authorities were read "
+                "from the target checkout"
+                if stated is not None
+                else ""
+            )
+            return (
+                text,
+                MODE_INVALID_ORIGIN if provenance else here.mode,
+                here,
+                tuple(filter(None, (provenance,))),
+            )
         if candidate.is_file():
-            origin = stated or Origin.containing(candidate)
+            containing = Origin.containing(candidate)
+            origin = containing or stated
             if origin is None:
                 raise SystemExit(
                     f"{candidate} is in no checkout that holds {API_CONTRACT}, so this run has "
@@ -249,13 +262,35 @@ def resolve_inputs(
                     f"revision, or state whose authorities it borrows: "
                     f"check(<document>, authorities=<checkout or revision>)"
                 )
-            return Origin.read_detached(candidate), MODE_FILES, origin
+            provenance = (
+                "authority override is invalid for a checked-out document; all authorities were "
+                "read from the document checkout"
+                if containing is not None and stated is not None
+                else ""
+            )
+            return (
+                Origin.read_detached(candidate),
+                MODE_INVALID_ORIGIN if provenance else MODE_FILES,
+                containing or origin,
+                tuple(filter(None, (provenance,))),
+            )
     rev, _, rel = str(target).partition(":")
     here = Origin.resolve(rev)
     text = here.read(rel or SPEC)
     if text is None:
         raise SystemExit(f"{here.label} holds no {rel or SPEC}")
-    return text, here.mode, stated or here
+    provenance = (
+        "authority override is invalid for a revision target; all authorities were read from the "
+        "target revision"
+        if stated is not None
+        else ""
+    )
+    return (
+        text,
+        MODE_INVALID_ORIGIN if provenance else here.mode,
+        here,
+        tuple(filter(None, (provenance,))),
+    )
 
 
 ROUTE_RE = re.compile(r"`(POST|PUT|PATCH|DELETE) (/api/[^`]*)`")
@@ -274,6 +309,33 @@ BARE_METHOD_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE)`")
 # `(`POST` / `PUT` / `PATCH` / `DELETE`)` names the method set, not any route —
 # a bare method flanked by a slash-joined sibling is the vocabulary, not a call.
 METHOD_LIST_RE = re.compile(r"`\s*/\s*`")
+BARE_METHOD_REFERENCE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "typed request reference",
+        re.compile(
+            r"\b(?:same|guarded|mode|repeated mode)\s+`(?P<method>GET|POST|PUT|PATCH|DELETE)`",
+            re.I,
+        ),
+    ),
+    (
+        "typed request result",
+        re.compile(
+            r"\bthe\s+`(?P<method>GET|POST|PUT|PATCH|DELETE)`\s+"
+            r"(?:came back refused|failed|never answered)",
+            re.I,
+        ),
+    ),
+)
+
+
+def bare_method_is_reference(cell: str, method: str) -> bool:
+    """Phase-2 classification for an already-admitted bare method token."""
+
+    return any(
+        match.group("method").upper() == method
+        for _name, rule in BARE_METHOD_REFERENCE_RULES
+        for match in rule.finditer(cell)
+    )
 # Which §1 frame a sentence points at. Only `1.` — a §4 or §0 reference is a
 # pointer into the contract or the registers, and neither is a frame claim.
 FRAME_REF_RE = re.compile(r"§(1\.\d+)(?![\w.-])")
@@ -365,21 +427,49 @@ class RegisterRouteClaim(NamedTuple):
 
     method: str
     route: str | None
+    malformed: str | None
 
 
 def register_route_claims(cell: str) -> tuple[RegisterRouteClaim, ...]:
-    """Return every typed or malformed route claim in one register cell."""
-    claims = [
-        RegisterRouteClaim(method, normalize_route(method, path))
-        for method, path in ANY_ROUTE_RE.findall(cell)
-    ]
-    for match in BARE_METHOD_RE.finditer(cell):
-        prefix = cell[max(0, match.start() - 56) : match.start()]
-        if not re.search(r"\b(?:send|sends|call|calls|invoke|invokes)\b", prefix):
+    """Classify every HTTP-shaped code token in a structured register cell.
+
+    The cell is already admitted by the state-register table. Context words are
+    therefore evidence for phase-2 meaning only; they may never decide whether
+    a backticked method-shaped token exists. A complete route and the same token
+    after its path is deleted both contribute exactly one candidate.
+    """
+
+    claims: list[RegisterRouteClaim] = []
+    for candidate in code_span_candidates(cell):
+        token = candidate.text
+        route = re.fullmatch(r"([A-Z][A-Z0-9_-]*)([ \t]*)(/[^`\s][^`]*)", token)
+        if route:
+            method, delimiter, path = route.groups()
+            malformed = None
+            if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                malformed = f"has unsupported HTTP method `{method}`"
+            elif delimiter != " ":
+                malformed = "has malformed method/path delimiter"
+            elif not path.startswith("/api/"):
+                malformed = "has malformed API path"
+            claims.append(
+                RegisterRouteClaim(
+                    method,
+                    normalize_route(method, path) if malformed is None else None,
+                    malformed,
+                )
+            )
             continue
-        if re.search(r"\b(?:same|mode|value|reading)\b[^.;]{0,36}$", prefix):
-            continue
-        claims.append(RegisterRouteClaim(match.group(1), None))
+        if token in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            claims.append(
+                RegisterRouteClaim(
+                    token,
+                    None,
+                    None
+                    if bare_method_is_reference(cell, token)
+                    else "with no path",
+                )
+            )
     return tuple(claims)
 
 
@@ -764,12 +854,6 @@ TREAT_RE = re.compile(r"\bF([1-5])\b")
 TREAT_CANDIDATE_RE = re.compile(
     r"(?<![A-Za-z0-9_])(F\d+|F[A-Za-z_][A-Za-z0-9_-]*?(?=\s*→))"
 )
-GOTO_RE = re.compile(r"→\s*([^,;.]+)")
-# What an exit cell says after an arrow, up to the next arrow or the end of the
-# cell. Not a destination — a segment, handed whole to a lookup, because this
-# document's exit cells are sentences and the destination inside one cannot be
-# carved out by a pattern without getting it wrong on the rows that are right.
-ARROW_SEGMENT_RE = re.compile(r"→([^→]*)")
 # 「A or B」, 「A / B」 — one segment naming two landings.
 ALTERNATIVE_RE = re.compile(r"\s+or\s+|\s*/\s*")
 PHRASE_END_RE = re.compile(r"[,.:;—]")
@@ -780,6 +864,59 @@ def phrase(text: str) -> tuple[str, str]:
     body = text.strip().strip("*").strip()
     m = PHRASE_END_RE.search(body)
     return (body[: m.start()].strip() if m else body).strip("*").strip(), (m.group(0) if m else "")
+
+
+class LandingResolution(NamedTuple):
+    """One admitted landing string, resolved or explained as malformed."""
+
+    frame: str
+    state: str
+    error: str | None
+
+
+def explicit_frame_landings(segment: str, frames: Universe, states: Universe) -> tuple[LandingResolution, ...]:
+    """Resolve every explicit §frame + state landing; never skip one.
+
+    The segment has already been admitted by phase 1. This parser is therefore a
+    total function over every explicit `§...` token it contains: a malformed
+    frame spelling, an unknown frame, or an unknown state returns an error
+    record rather than `continue`.
+    """
+
+    results: list[LandingResolution] = []
+    candidates = list(re.finditer(r"^\s*§([^\s,;|]+)(?:\s+([^;|]+))?", segment))
+    for candidate in candidates:
+        frame = candidate.group(1).rstrip(".,")
+        possessive = frame.endswith(("'s", "’s"))
+        if possessive:
+            frame = frame[:-2]
+        tail = (candidate.group(2) or "").strip()
+        state, _stop = phrase(tail)
+        if not re.fullmatch(r"1\.\d+", frame):
+            results.append(LandingResolution(frame, state, f"has malformed frame identity `§{frame}`"))
+            continue
+        if frames.resolve(frame).empty:
+            results.append(LandingResolution(frame, state, f"names `§{frame}`, which is no frame"))
+            continue
+        if possessive or state.startswith(("with ", "whose ")):
+            results.append(LandingResolution(frame, "", None))
+            continue
+        if not state:
+            results.append(LandingResolution(frame, state, "names an explicit frame with no landing state"))
+            continue
+        hit = states.resolve(f"{frame} · {state}")
+        if hit.empty:
+            results.append(
+                LandingResolution(frame, state, f"names 「{state}」, which §{frame} files as no state")
+            )
+            continue
+        if hit.ambiguous:
+            results.append(
+                LandingResolution(frame, state, f"names 「{state}」 ambiguously in §{frame}")
+            )
+            continue
+        results.append(LandingResolution(frame, state, None))
+    return tuple(results)
 
 # A key whose name declares a condition. Deliberately narrow: every member is a
 # word the document uses to mean "something is wrong, missing, or pending", and
@@ -1534,6 +1671,134 @@ LOADER_ARMS: dict[str, tuple[str, ...]] = {
 }
 
 
+class SourceSegment(NamedTuple):
+    """One source line, classified before any semantic reader sees it."""
+
+    line: int
+    kind: str
+    text: str
+
+
+class StructuralCandidate(NamedTuple):
+    """A phase-1 structural unit; validity never decides its admission."""
+
+    line: int
+    text: str
+    admitted: bool
+    start: int = 0
+
+
+def table_cell_candidates(line: str, line_no: int = 0) -> tuple[StructuralCandidate, ...]:
+    """Phase-1 cells for one table-shaped line, without semantic filtering."""
+
+    return tuple(
+        StructuralCandidate(line_no, cell.strip(), True)
+        for cell in line.strip().strip("|").split("|")
+    )
+
+
+def code_span_candidates(line: str, line_no: int = 0) -> tuple[StructuralCandidate, ...]:
+    """Phase-1 units for every opening backtick, closed or not."""
+
+    pieces = line.split("`")
+    return tuple(
+        StructuralCandidate(line_no, pieces[index], index + 1 < len(pieces))
+        for index in range(1, len(pieces), 2)
+    )
+
+
+def arrow_landing_candidates(line: str, line_no: int = 0) -> tuple[StructuralCandidate, ...]:
+    """Phase-1 units for every arrow, including empty landing strings."""
+
+    candidates: list[StructuralCandidate] = []
+    for arrow in re.finditer(r"→", line):
+        tail = line[arrow.end() :]
+        stop = min(
+            (
+                position
+                for marker in ("→", "|", ";")
+                if (position := tail.find(marker)) >= 0
+            ),
+            default=len(tail),
+        )
+        landing = tail[:stop].strip()
+        candidates.append(StructuralCandidate(line_no, landing, bool(landing), arrow.start()))
+    return tuple(candidates)
+
+
+LINE_CLASSIFIERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("blank", re.compile(r"^\s*$")),
+    ("heading", re.compile(r"^#{1,6}(?:\s|$)")),
+    ("table", re.compile(r"^\s*\|")),
+)
+
+
+@dataclass(frozen=True)
+class Segmentation:
+    """Phase 1: a total, lossless structural partition of the spec.
+
+    Every source line has exactly one primary class. Nested structural units
+    are then inventoried without asking whether their syntax is valid: every
+    Markdown row yields all of its cells, every opening backtick yields a code
+    candidate, and every arrow yields a landing candidate. Phase 2 may accept
+    or reject those units, but cannot make them cease to exist.
+    """
+
+    lines: tuple[SourceSegment, ...]
+    table_cells: tuple[StructuralCandidate, ...]
+    code_spans: tuple[StructuralCandidate, ...]
+    arrow_landings: tuple[StructuralCandidate, ...]
+
+    @classmethod
+    def from_text(cls, text: str) -> "Segmentation":
+        lines: list[SourceSegment] = []
+        table_cells: list[StructuralCandidate] = []
+        code_spans: list[StructuralCandidate] = []
+        arrow_landings: list[StructuralCandidate] = []
+        for line_no, line in enumerate(text.split("\n"), start=1):
+            kind = next(
+                (name for name, pattern in LINE_CLASSIFIERS if pattern.match(line)),
+                "prose",
+            )
+            lines.append(SourceSegment(line_no, kind, line))
+            if kind == "table":
+                table_cells.extend(table_cell_candidates(line, line_no))
+            code_spans.extend(code_span_candidates(line, line_no))
+            arrow_landings.extend(arrow_landing_candidates(line, line_no))
+        return cls(tuple(lines), tuple(table_cells), tuple(code_spans), tuple(arrow_landings))
+
+    @staticmethod
+    def _balance(candidates: tuple[StructuralCandidate, ...]) -> dict[str, int]:
+        admitted = sum(candidate.admitted for candidate in candidates)
+        malformed = len(candidates) - admitted
+        return {"total": len(candidates), "admitted": admitted, "malformed": malformed}
+
+    def inventory(self) -> dict[str, Any]:
+        line_kinds = {
+            kind: sum(segment.kind == kind for segment in self.lines)
+            for kind in (*[name for name, _pattern in LINE_CLASSIFIERS], "prose")
+        }
+        return {
+            "source_lines": len(self.lines),
+            "line_kinds": line_kinds,
+            "line_partition_total": sum(line_kinds.values()),
+            "table_cells": self._balance(self.table_cells),
+            "code_spans": self._balance(self.code_spans),
+            "arrow_landings": self._balance(self.arrow_landings),
+        }
+
+    def conservation_failures(self) -> tuple[str, ...]:
+        inventory = self.inventory()
+        failures: list[str] = []
+        if inventory["source_lines"] != inventory["line_partition_total"]:
+            failures.append("phase-1 source-line partition is not conservative")
+        for name in ("table_cells", "code_spans", "arrow_landings"):
+            balance = inventory[name]
+            if balance["admitted"] + balance["malformed"] != balance["total"]:
+                failures.append(f"phase-1 {name} inventory is not conservative")
+        return tuple(failures)
+
+
 class Document:
     """The document, its section geometry, and the declared slice each arm reads.
 
@@ -1543,7 +1808,8 @@ class Document:
     """
 
     def __init__(self, text: str) -> None:
-        self._lines = text.split("\n")
+        self.segmentation = Segmentation.from_text(text)
+        self._lines = [segment.text for segment in self.segmentation.lines]
         self.fingerprint = hashlib.sha256(text.encode()).hexdigest()[:16]
         self.requested: set[str] = set()
         self._spans: list[tuple[str, int, int]] = []
@@ -1593,6 +1859,49 @@ class Document:
 
 
 SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
+SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
+
+
+@dataclass(frozen=True)
+class RegistryRule:
+    """Phase-2 validation data for one section-owned registry."""
+
+    label: str
+    expected_header: tuple[str, ...]
+    header_patterns: tuple[re.Pattern[str] | None, ...] = ()
+
+    def normalized_header(self, cells: tuple[str, ...]) -> tuple[str, ...]:
+        if len(cells) != len(self.expected_header):
+            return cells
+        normalized = list(cells)
+        for index, pattern in enumerate(self.header_patterns):
+            if pattern is not None and pattern.fullmatch(cells[index]):
+                normalized[index] = self.expected_header[index]
+        return tuple(normalized)
+
+
+STATE_REGISTRY_RULE = RegistryRule(
+    "§0.8 state register",
+    ("Frame", "State", "Entry condition", "Failure / pending", "Copy keys", "Exit"),
+)
+TREATMENT_REGISTRY_RULE = RegistryRule(
+    "§0.8 failure-treatment register",
+    ("#", "Treatment", "What the user sees"),
+)
+SLOT_REGISTRY_RULE = RegistryRule(
+    "§0.9 interpolation-slot register",
+    ("Slot", "Filled with", "Absent when", "Interpolated by"),
+)
+GAP_REGISTRY_RULE = RegistryRule(
+    "§0.5 contract-gap register",
+    ("#", "Surface", "Missing", "Evidence / disposition (contract baseline `<revision>`)"),
+    (
+        None,
+        None,
+        None,
+        re.compile(r"Evidence / disposition \(contract baseline `[A-Za-z0-9]+`\)"),
+    ),
+)
 
 
 class RegistryTable(NamedTuple):
@@ -1607,8 +1916,7 @@ class RegistryTable(NamedTuple):
 def registry_table(
     numbered: list[tuple[int, str]],
     *,
-    label: str,
-    expected_header: tuple[str, ...],
+    rule: RegistryRule,
 ) -> RegistryTable:
     """Inventory the one table in a registry section before validating its rows.
 
@@ -1617,16 +1925,25 @@ def registry_table(
     required semantic cell therefore changes findings, never the row inventory.
     """
 
-    candidates: list[tuple[int, tuple[str, ...], bool]] = []
+    label = rule.label
+    expected_header = rule.expected_header
+    candidates: list[tuple[int, tuple[str, ...], bool, tuple[str, ...]]] = []
     for pos, (line_no, line) in enumerate(numbered):
         if not line.startswith("|"):
             continue
-        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
-        next_is_separator = (
-            pos + 1 < len(numbered) and SEPARATOR_RE.match(numbered[pos + 1][1].strip()) is not None
-        )
-        if next_is_separator or cells == expected_header:
-            candidates.append((pos, cells, next_is_separator))
+        cells = tuple(candidate.text for candidate in table_cell_candidates(line, line_no))
+        separator_cells: tuple[str, ...] = ()
+        next_is_separator = False
+        if pos + 1 < len(numbered) and SEPARATOR_RE.match(numbered[pos + 1][1].strip()):
+            next_is_separator = True
+            separator_cells = tuple(
+                candidate.text
+                for candidate in table_cell_candidates(
+                    numbered[pos + 1][1], numbered[pos + 1][0]
+                )
+            )
+        if next_is_separator or rule.normalized_header(cells) == expected_header:
+            candidates.append((pos, cells, next_is_separator, separator_cells))
 
     if not candidates:
         return RegistryTable(
@@ -1636,12 +1953,13 @@ def registry_table(
             ((label, f"{label} has no {len(expected_header)}-column table header"),),
         )
 
-    def score(candidate: tuple[int, tuple[str, ...], bool]) -> int:
+    def score(candidate: tuple[int, tuple[str, ...], bool, tuple[str, ...]]) -> int:
+        normalized = rule.normalized_header(candidate[1])
         return (
-            abs(len(candidate[1]) - len(expected_header))
+            abs(len(normalized) - len(expected_header))
             + sum(
                 actual.lower() != expected.lower()
-                for actual, expected in zip(candidate[1], expected_header)
+                for actual, expected in zip(normalized, expected_header)
             )
         )
 
@@ -1651,7 +1969,7 @@ def registry_table(
         for candidate in candidates
         if score(candidate) == best_score or score(candidate) <= 1
     ]
-    pos, header, _separator_is_valid = selected[0]
+    pos, header, _separator_is_valid, _separator_cells = selected[0]
     header_line = numbered[pos][0]
     malformed: list[tuple[int | str, str]] = []
     if len(selected) > 1:
@@ -1664,9 +1982,9 @@ def registry_table(
 
     rows: list[tuple[int, tuple[str, ...], str]] = []
     candidate_positions = {candidate[0] for candidate in candidates}
-    for table_pos, table_header, separator_is_valid in selected:
+    for table_pos, table_header, separator_is_valid, separator_cells in selected:
         table_header_line = numbered[table_pos][0]
-        if table_header != expected_header:
+        if rule.normalized_header(table_header) != expected_header:
             malformed.append(
                 (
                     table_header_line,
@@ -1676,6 +1994,16 @@ def registry_table(
         if not separator_is_valid:
             malformed.append(
                 (table_header_line, f"{label} header has no Markdown separator row")
+            )
+        elif len(separator_cells) != len(table_header) or any(
+            SEPARATOR_CELL_RE.fullmatch(cell) is None for cell in separator_cells
+        ):
+            malformed.append(
+                (
+                    numbered[table_pos + 1][0],
+                    f"{label} separator has {len(separator_cells)} cells; "
+                    f"its header has {len(table_header)}",
+                )
             )
 
         row_pos = table_pos + (2 if separator_is_valid else 1)
@@ -1689,7 +2017,7 @@ def registry_table(
                 malformed.append((line_no, f"{label} contains an unexpected separator row"))
                 row_pos += 1
                 continue
-            cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+            cells = tuple(candidate.text for candidate in table_cell_candidates(line, line_no))
             rows.append((line_no, cells, line))
             row_pos += 1
 
@@ -1744,15 +2072,7 @@ def parse(doc: Document) -> dict[str, Any]:
     broken_rows: list[dict[str, Any]] = []
     state_table = registry_table(
         doc.scope("register"),
-        label="§0.8 state register",
-        expected_header=(
-            "Frame",
-            "State",
-            "Entry condition",
-            "Failure / pending",
-            "Copy keys",
-            "Exit",
-        ),
+        rule=STATE_REGISTRY_RULE,
     )
     for where, said in state_table.malformed:
         broken_rows.append(
@@ -1788,11 +2108,17 @@ def parse(doc: Document) -> dict[str, Any]:
             "copy": cells[4],
             "exit": cells[5],
         }
-        empty_required = [name for name, value in required.items() if not value]
+        empty_required = [
+            name
+            for name, value in required.items()
+            if not value
+        ]
         problems = [
             *(f"has an empty required {name} cell" for name in empty_required),
             *copy_field.malformed,
         ]
+        if cells[1] == "—":
+            problems.append("has placeholder-only state identity `—`")
         if cells[2] == "—":
             problems.append("has placeholder-only entry condition `—`")
         if not re.fullmatch(r"§1\.\d+(?:\s*/\s*§1\.\d+)*", cells[0]):
@@ -1859,7 +2185,7 @@ def parse(doc: Document) -> dict[str, Any]:
         # lost is exactly what a wrong cell count makes unknowable, so the
         # payload says `None` rather than guessing a column alignment, and the
         # arms that iterate the register never see this row at all.
-        if not broken["state"]:
+        if not broken["state"] or broken["state"] == "—":
             continue
         frame = broken["frame"].lstrip("§")
         states.define(
@@ -1891,8 +2217,7 @@ def parse(doc: Document) -> dict[str, Any]:
     treatments = Universe("treatments", "spec", "A", reject_repeats=True)
     treatment_table = registry_table(
         doc.scope("treatments"),
-        label="§0.8 failure-treatment register",
-        expected_header=("#", "Treatment", "What the user sees"),
+        rule=TREATMENT_REGISTRY_RULE,
     )
     for where, said in treatment_table.malformed:
         treatments.malformed(where, said)
@@ -1957,8 +2282,7 @@ def parse(doc: Document) -> dict[str, Any]:
     slots = Universe("slots", "spec", "B", reject_repeats=True)
     slot_table = registry_table(
         doc.scope("slots"),
-        label="§0.9 interpolation-slot register",
-        expected_header=("Slot", "Filled with", "Absent when", "Interpolated by"),
+        rule=SLOT_REGISTRY_RULE,
     )
     for where, said in slot_table.malformed:
         slots.malformed(where, said)
@@ -2758,26 +3082,9 @@ def registered_gaps(doc: Document) -> Universe:
     """
     gaps = Universe("gaps", "spec", "E", reject_repeats=True)
     gap_scope = doc.scope("gap registry")
-    gap_header_tail = next(
-        (
-            cells[-1]
-            for _line, text in gap_scope
-            if text.startswith("|")
-            and len(cells := tuple(cell.strip() for cell in text.strip().strip("|").split("|")))
-            == 4
-            and cells[:3] == ("#", "Surface", "Missing")
-        ),
-        "Evidence / disposition",
-    )
     table = registry_table(
         gap_scope,
-        label="§0.5 contract-gap register",
-        expected_header=(
-            "#",
-            "Surface",
-            "Missing",
-            gap_header_tail,
-        ),
+        rule=GAP_REGISTRY_RULE,
     )
     for where, said in table.malformed:
         gaps.malformed(where, said)
@@ -3570,7 +3877,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     it only for a document that lives outside any checkout, which is the one case
     that has no authorities to default to.
     """
-    text, mode, origin = resolve_inputs(target, authorities)
+    text, mode, origin, provenance_findings = resolve_inputs(target, authorities)
     doc = Document(text)
     fingerprint = doc.fingerprint
     p = parse(doc)
@@ -3593,6 +3900,9 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
 
     def add(cls: str, where: str, msg: str) -> None:
         findings.append({"class": cls, "where": where, "message": msg})
+
+    for message in provenance_findings:
+        add("E", "input origin", message)
 
     # ---- A ------------------------------------------------------------------
     auth = load_authorities(origin)
@@ -3678,12 +3988,6 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         # answered by what it says, so both halves are read; what a treatment
         # buys is only the right to say nothing about a landing.
         row_frames = FRAME_REF_RE.findall(r["frame"])
-        if len(row_frames) != 1:
-            # A shared row deliberately owns the same state in several frames;
-            # its local transitions cannot be resolved against one invented
-            # owner. Presence under every named frame is checked below.
-            continue
-        frame = row_frames[0]
         # The latest register often delegates classification to one of its
         # closed matrices (E*, M*, RR-*, PD-*, C*). Those identifiers are the
         # treatment: the cell is not also required to repeat an F number or one
@@ -3721,10 +4025,11 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 elif named and state_u.resolve(f"{target} · {named}").empty:
                     add("A", f"L{r['line']}", f"「{r['state']}」 defers to 「{named}」 in §{target}, which files no such state")
             continue
-        goto = GOTO_RE.search(cell)
-        if goto:
+        landing_candidates = arrow_landing_candidates(cell, r["line"])
+        if landing_candidates:
             targets = []
-            for raw_target in re.split(r"[/,]| or ", goto.group(1)):
+            landing_phrase = re.split(r"[,.;]", landing_candidates[0].text, maxsplit=1)[0]
+            for raw_target in re.split(r"[/,]| or ", landing_phrase):
                 target = re.sub(
                     r"\s+for\s+E\d+[a-z]?\b.*$", "", raw_target.strip()
                 ).strip()
@@ -3737,7 +4042,11 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             # (「Ready」 is a different state in every frame) and has to land on
             # exactly one row: none means the exit points nowhere, several means
             # it points at two states at once, and neither is an exit.
-            hits = [state_u.resolve(f"{frame} · {t}") for t in targets]
+            hits = [
+                state_u.resolve(f"{owner} · {target}")
+                for owner in row_frames
+                for target in targets
+            ]
             if targets and all(not h.empty and not h.ambiguous for h in hits):
                 continue
             if cited_treatments:
@@ -3745,7 +4054,23 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     "A",
                     f"L{r['line']}",
                     f"「{r['state']}」 treats its failure with {'/'.join(cited_treatments)} "
-                    f"and then lands nowhere §{frame} files: {cell!r}",
+                    f"and then lands nowhere every owner frame "
+                    f"§{'/§'.join(row_frames)} files: {cell!r}",
+                )
+                continue
+            state_shaped_targets = [
+                target
+                for target in targets
+                if target[0].isascii()
+                and target[0].isupper()
+                and re.match(r"^(?:[A-Z]{1,3}-?\d+|[A-Z]\d+[a-z]?)\b", target) is None
+            ]
+            if state_shaped_targets:
+                add(
+                    "A",
+                    f"L{r['line']}",
+                    f"「{r['state']}」 failure lands nowhere every owner frame "
+                    f"§{'/§'.join(row_frames)} files: {cell!r}",
                 )
                 continue
         if cited_treatments:
@@ -3909,12 +4234,12 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     f"`{'`/`'.join(bare)}` with no path, so no route arm can read the claim",
                 )
     for r, cell_name, claim in register_route_inventory:
-        if claim.route is not None:
+        if claim.malformed is None:
             continue
         add(
             "A",
             f"L{r['line']}",
-            f"§0.8 「{r['state']}」 {cell_name} cell names `{claim.method}` with no path, "
+            f"§0.8 「{r['state']}」 {cell_name} cell `{claim.method}` {claim.malformed}, "
             "so no route arm can bind the row's claim",
         )
 
@@ -4317,8 +4642,6 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         if not r["exit"] or r["exit"] == "—":
             add("C", f"L{r['line']}", f"「{r['state']}」 has no exit")
             continue
-        if len(FRAME_REF_RE.findall(r["frame"])) != 1:
-            continue
         # And that the exit go somewhere. Class A resolves the destination of a
         # *failure* cell and has since the round that found 「F1 → Vanished
         # forever」; the success cell one column over was read for whether it was
@@ -4338,8 +4661,12 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         # a capitalised segment, the rest is the sentence qualifying it, and
         # 「→ Vanished forever」 is a segment that opens like a state name and
         # opens with none.
-        frame = FRAME_REF_RE.findall(r["frame"])[0]
-        local_rows = [r for r in reg if frame in FRAME_REF_RE.findall(r["frame"])]
+        owning_frames = FRAME_REF_RE.findall(r["frame"])
+        local_rows = [
+            row
+            for row in reg
+            if set(owning_frames) & set(FRAME_REF_RE.findall(row["frame"]))
+        ]
 
         def row_match_length(said: str, row: dict[str, Any]) -> int:
             lengths: list[int] = []
@@ -4359,18 +4686,28 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             return [row for score, row in scored if score == best and score > 0]
 
         explicitly_owned_landings: set[int] = set()
-        for arrow in ARROW_SEGMENT_RE.finditer(r["exit"]):
-            segment = arrow.group(1)
-            prefix_text = r["exit"][: arrow.start()]
+        for landing_candidate in arrow_landing_candidates(r["exit"], r["line"]):
+            segment = landing_candidate.text
+            explicit = explicit_frame_landings(segment, frame_u, state_u)
+            for landing in explicit:
+                if landing.error:
+                    add(
+                        "C",
+                        f"L{r['line']}",
+                        f"「{r['state']}」 exit {landing.error}",
+                    )
+            if explicit:
+                continue
+            prefix_text = r["exit"][: landing_candidate.start]
             clause_start = max(prefix_text.rfind(";"), prefix_text.rfind(". "))
             clause = f"{prefix_text[clause_start + 1:]} {segment}"
-            explicit_foreign_frames = frame_refs(clause, frame_u) - {frame}
+            explicit_foreign_frames = frame_refs(clause, frame_u) - set(owning_frames)
             # A colon introduces one dispatch list. Its explicit frame context
             # owns every semicolon-delimited branch until the sentence ends.
             sentence_start = prefix_text.rfind(". ") + 1
             sentence_prefix = prefix_text[sentence_start:]
             if ":" in sentence_prefix:
-                explicit_foreign_frames |= frame_refs(sentence_prefix, frame_u) - {frame}
+                explicit_foreign_frames |= frame_refs(sentence_prefix, frame_u) - set(owning_frames)
             for branch in ALTERNATIVE_RE.split(segment.split(";")[0]):
                 said, stop = phrase(branch)
                 if not said or "§" in said or stop == ":":
@@ -4395,7 +4732,8 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                         add(
                             "C",
                             f"L{r['line']}",
-                            f"「{r['state']}」 exits to case-mangled state 「{said}」 in §{frame}",
+                            f"「{r['state']}」 exits to case-mangled state 「{said}」 in "
+                            f"§{'/§'.join(owning_frames)}",
                         )
                     continue
                 if not said[0].isascii() or not said[0].isupper():
@@ -4443,7 +4781,8 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 add(
                     "C",
                     f"L{r['line']}",
-                    f"「{r['state']}」 exits to 「{said}」, which opens with no state §{frame} files",
+                    f"「{r['state']}」 exits to 「{said}」, which opens with no state "
+                    f"§{'/§'.join(owning_frames)} files",
                 )
 
     # Arm N — the exit cell against the frame's own enumeration of the payload.
@@ -4759,7 +5098,13 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         for where, said in u.unreadable:
             add(u.owner, f"L{where}" if isinstance(where, int) else str(where), said)
 
+    segmentation = doc.segmentation.inventory()
     scale = {
+        "segmentation source lines": segmentation["source_lines"],
+        "segmentation classified lines": segmentation["line_partition_total"],
+        "segmentation table cells": segmentation["table_cells"]["total"],
+        "segmentation code candidates": segmentation["code_spans"]["total"],
+        "segmentation landing candidates": segmentation["arrow_landings"]["total"],
         "register rows": len(reg),
         "state-register candidates": p["registry candidates"]["state"],
         "failure-treatment candidates": p["registry candidates"]["treatment"],
@@ -4822,7 +5167,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         for k, v in scale.items()
         if v == 0 and k not in TARGET_ZERO | {"authority: precise line citations"}
     ]
-    broken = self_test(auth, origin)
+    broken = [*self_test(auth, origin), *doc.segmentation.conservation_failures()]
     # A declared range nobody asks for is a constraint that binds nothing — the
     # arm was deleted, or renamed, or quietly went back to reading everything.
     # Cheap to check here, and the only place that can see all of it at once.
@@ -4832,6 +5177,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "input_mode": mode,
         "input_fingerprint": fingerprint,
         "authority_origin": origin.label,
+        "segmentation": segmentation,
         "input_scale": scale,
         "empty_inventories": empty,
         "broken_arms": broken,
