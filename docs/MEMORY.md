@@ -107,18 +107,21 @@ reaches a terminal result.
 4. **Reinitialize Memory**: Use it only as a last resort when the earlier actions
    cannot recover Memory. It is available on the Memory Runtime card under
    **Settings > Dependencies** when the
-   pinned, installed Memory artifact is valid. It permanently deletes exactly
-   the installed Memory root (`memory`) and the mutable Memory state root
-   (`state/memory`). Only a successful cutover starts fresh, usable Memory. It
+   pinned, installed Memory artifact is valid. It permanently deletes local
+   Memory data and related operational state from the mixed-purpose `memory`
+   and `state/memory` storage locations. The former may include profiles,
+   facts, indexes, call diagnostics, and runtime files; the latter may include
+   processing queues, recovery progress, and coordination state. Only a
+   successful cutover starts fresh, usable Memory. It
    preserves Memory settings and credentials, the pinned, installed Memory
-   artifact, original Avibe chats, and data outside those two roots. If engine
+   artifact, original Avibe chats, and data outside those two locations. If engine
    or sidecar activation fails after deletion, the old contents under `memory`
    and `state/memory` stay deleted, but construction of the fresh runtime may
-   have recreated empty or partial roots. Reinitialize Memory reports a visible status
-   for each root independently: **deleted**, **partially deleted**, **absent**,
-   or **retained**. Settings also shows a generic failure status, not a
-   per-root error or reason; read each root's status independently rather than
-   treating the result as a clean reset. If a root is **retained** or
+   have recreated empty or partial directories. Reinitialize Memory reports a
+   visible status for each storage location independently: **deleted**, **partially
+   deleted**, **absent**, or **retained**. Settings also shows a generic failure
+   status, not a per-location error or reason; read each location's status independently
+   rather than treating the result as a clean reset. If a root is **retained** or
    **partially deleted**, inspect the service logs and filesystem permissions
    for that root and correct the deletion failure. If deletion completed but
    engine or sidecar activation failed because a persisted LLM or Embedding
@@ -130,13 +133,13 @@ reaches a terminal result.
    Memory stays fenced and unavailable while the factory-reset recovery intent
    is pending.
    Retry is idempotent: it continues any remaining deletion while preserving
-   the truthful outcome reported for each root.
+   the truthful outcome reported for each storage location.
 
 ### Reinitialize Memory
 
-When Memory state is corrupt beyond rebuild, use **Reinitialize Memory** beside Repair on the Memory Runtime card in Settings > Dependencies. The action remains visible but unavailable until the pinned `memory-runtime` artifact is installed and ready; repair that artifact first when it is invalid. The confirmation pauses for five seconds and names the exact two mutable roots that will be removed: `<effective_home>/memory` and `<effective_home>/state/memory`.
+When Memory state is corrupt beyond rebuild, use **Reinitialize Memory** beside Repair on the Memory Runtime card in Settings > Dependencies. The action remains visible but unavailable until the pinned `memory-runtime` artifact is installed and ready; repair that artifact first when it is invalid. The confirmation pauses for five seconds and explains that it will delete local Memory data and related operational state before attempting to start a brand-new Memory engine. It also warns that startup can fail after deletion and the old data will not be restored. The mixed-purpose storage locations are labeled **Primary Memory storage** and **Memory state storage**; their technical paths, `<effective_home>/memory` and `<effective_home>/state/memory`, remain available as secondary details.
 
-Reinitialize Memory keeps Memory settings, credentials, and the installed artifact. The request waits for its final result and reports each root independently, so a partial deletion is shown as partial rather than claimed as a clean success. A durable internal `factory_reset` recovery intent makes retry idempotent after a crash; while that intent is pending, other Memory controls remain disabled and the action is labeled **Retry initialization**. Reinitialize Memory is not a secure wipe and does not remove original chats or copies already sent to remote endpoints.
+Reinitialize Memory keeps Memory settings, credentials, and the installed artifact. The request waits for its final result and reports the two storage locations independently, so a partial deletion is shown as partial rather than claimed as a clean success. A durable internal `factory_reset` recovery intent makes retry idempotent after a crash; while that intent is pending, other Memory controls remain disabled and the action is labeled **Retry initialization**. Reinitialize Memory is not a secure wipe and does not remove original chats or copies already sent to remote endpoints.
 
 ## Capture delivery and flush coordination
 

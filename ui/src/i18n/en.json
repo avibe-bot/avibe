@@ -4285,25 +4285,32 @@
       "button": "Reinitialize Memory",
       "retry": "Retry initialization",
       "artifactRepairRequired": "Reinitializing Memory is unavailable until the pinned Memory artifact is installed and ready. Repair it first.",
-      "dependenciesHint": "Permanently replaces both mutable Memory roots. Settings and the installed runtime are retained.",
+      "dependenciesHint": "Permanently deletes local Memory data and related operational state. Settings and the installed runtime are retained.",
       "settingsUnavailable": "Memory settings are unavailable. Re-check before reinitializing.",
       "confirmTitle": "Reinitialize Memory?",
-      "confirmDescription": "This permanently removes both mutable Memory roots. Settings and the installed Memory artifact are retained.",
+      "confirmDescription": "This permanently deletes local Memory data and related operational state, then attempts to start a brand-new Memory engine. Even if deletion succeeds, the new engine may fail to start and the old data will not be restored. Memory settings, credentials, the installed runtime, and original chats are kept.",
       "confirmLabel": "Reinitialize Memory",
-      "deletesTitle": "This deletes exactly:",
-      "deletes": [
-        "The installed Memory root (memory)",
-        "The mutable Memory state root (state/memory)"
-      ],
+      "deletesTitle": "This attempts to permanently delete:",
+      "roots": {
+        "primaryStorage": {
+          "label": "Primary Memory storage",
+          "description": "May include profiles, facts, indexes, call diagnostics, and runtime files"
+        },
+        "memoryStateStorage": {
+          "label": "Memory state storage",
+          "description": "May include processing queues, recovery progress, and coordination state"
+        }
+      },
+      "technicalPath": "Technical path: {{path}}",
       "retainsTitle": "This keeps:",
       "retains": [
         "Memory settings and credentials",
         "The pinned, installed Memory artifact",
-        "Original Avibe chats and data outside these roots"
+        "Original Avibe chats and data outside these storage locations"
       ],
       "resultTitle": "Memory initialization result",
-      "resultCompleted": "The fresh Memory state is ready. The per-root report below is authoritative.",
-      "rootOutcome": "{{path}}: {{deleted}}",
+      "resultCompleted": "The new Memory engine is ready. The storage-location report below is authoritative.",
+      "rootOutcome": "{{label}}: {{deleted}}",
       "unknownRoot": "unknown root",
       "deleted": "deleted",
       "partial": "partially deleted",

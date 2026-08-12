@@ -49,6 +49,11 @@ const DEP_META: Record<string, DepMeta> = {
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
 };
 
+const MEMORY_ROOT_COPY = {
+  memory: 'primaryStorage',
+  'state/memory': 'memoryStateStorage',
+} as const;
+
 export const SettingsDependenciesPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -285,16 +290,21 @@ export const SettingsDependenciesPage: React.FC = () => {
                         {reinitializeResult.roots ? (
                           <ul className="mt-2 flex flex-col gap-1 text-muted">
                             {reinitializeResult.roots.map((root) => (
-                              <li key={root.path}>{t('memory.factoryReset.rootOutcome', {
-                                path: root.path,
-                                deleted: root.deleted
-                                  ? root.error
-                                    ? t('memory.factoryReset.partial')
-                                    : t('memory.factoryReset.deleted')
-                                  : root.existed === false
-                                    ? t('memory.factoryReset.absent')
-                                    : t('memory.factoryReset.retained'),
-                              })}</li>
+                              <li key={root.path} className="flex flex-col">
+                                <span>{t('memory.factoryReset.rootOutcome', {
+                                  label: t(`memory.factoryReset.roots.${MEMORY_ROOT_COPY[root.path]}.label`),
+                                  deleted: root.deleted
+                                    ? root.error
+                                      ? t('memory.factoryReset.partial')
+                                      : t('memory.factoryReset.deleted')
+                                    : root.existed === false
+                                      ? t('memory.factoryReset.absent')
+                                      : t('memory.factoryReset.retained'),
+                                })}</span>
+                                <span className="font-mono text-[10px] text-muted">
+                                  {t('memory.factoryReset.technicalPath', { path: root.path })}
+                                </span>
+                              </li>
                             ))}
                           </ul>
                         ) : null}
@@ -341,10 +351,14 @@ export const SettingsDependenciesPage: React.FC = () => {
           <div className="rounded-[10px] border border-border bg-surface-2 px-3 py-2.5">
             <div className="mb-1 font-semibold text-foreground">{t('memory.factoryReset.deletesTitle')}</div>
             <ul className="flex flex-col gap-1">
-              {(t('memory.factoryReset.deletes', { returnObjects: true }) as string[]).map((line, idx) => (
-                <li key={idx} className="flex gap-2 text-muted">
+              {(Object.entries(MEMORY_ROOT_COPY) as Array<[keyof typeof MEMORY_ROOT_COPY, typeof MEMORY_ROOT_COPY[keyof typeof MEMORY_ROOT_COPY]]>).map(([path, copyKey]) => (
+                <li key={path} className="flex gap-2 text-muted">
                   <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
-                  {line}
+                  <span className="flex flex-col">
+                    <span className="font-medium text-foreground">{t(`memory.factoryReset.roots.${copyKey}.label`)}</span>
+                    <span>{t(`memory.factoryReset.roots.${copyKey}.description`)}</span>
+                    <span className="font-mono text-[10px]">{t('memory.factoryReset.technicalPath', { path })}</span>
+                  </span>
                 </li>
               ))}
             </ul>
