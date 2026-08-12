@@ -14,5 +14,5 @@ observations:
     required_updates:
       - keep the confirmation limited to the two mutable roots and retained settings/artifact
       - await the final response and render each root outcome
-      - label a pending durable intent Retry factory reset and disable competing controls
+      - label a pending durable intent Retry initialization and disable competing controls
       - do not add polling, operation dashboards, or a generic operation abstraction

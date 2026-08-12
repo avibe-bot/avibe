@@ -28,6 +28,7 @@ capabilities:
     scenario_tests:
       - tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py
     unit_or_contract_tests:
+      - ui/src/components/settings/SettingsDependenciesPage.test.tsx
       - ui/src/components/settings/SettingsMemoryPage.test.tsx
       - ui/src/components/settings/memory/MemorySettingsPanel.test.tsx
   - id: memory_repair

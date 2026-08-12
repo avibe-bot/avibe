@@ -1317,7 +1317,7 @@
     "memory_repair_failed": "Repairing the Memory index failed. Check the current health and try again when ready.",
     "memory_rebuild_root_busy": "Another process is using the Memory root. Wait and retry the rebuild.",
     "memory_operation_in_progress": "A Memory operation is already in progress. Wait for it to finish.",
-    "memory_factory_reset_failed": "Factory reset could not finish. Memory data may be partially deleted; retry from Settings → Memory.",
+    "memory_factory_reset_failed": "Reinitializing Memory could not finish. Memory data may be partially deleted; retry from Settings → Dependencies.",
     "memory_embedding_rebuild_required": "Changing the embedding endpoint or model rebuilds the Memory index. Confirm to continue."
   },
   "apps": {
@@ -3861,8 +3861,8 @@
       "userId": "User ID",
       "noPreview": "No text preview available.",
       "recorderDegraded": "New model calls aren't being logged right now. Existing entries are still readable.",
-      "recorderCorrupt": "The model call log is corrupt. Use Clear all to remove it before logging can resume.",
-      "clearAction": "Open Clear all",
+      "recorderCorrupt": "The model call log is corrupt. Use Clear Memory Data to remove it before logging can resume.",
+      "clearAction": "Open Clear Memory Data",
       "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
       "sectionPartial": "{{section}} is partially available ({{reason}}).",
       "sectionStale": "{{section}} is stale ({{reason}}).",
@@ -3970,7 +3970,7 @@
         "The local Memory queue keeps raw messages and attachment copies while they wait to process. If a submission needs manual recovery, those copies can remain after processing stops.",
         "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
         "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
-        "Clear all deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
+        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "clearKeyLabel": "Clear the saved key",
@@ -3986,8 +3986,8 @@
       "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local index. Your memories are kept."
     },
     "clear": {
-      "button": "Clear all",
-      "confirmTitle": "Clear all Memory data for this installation?",
+      "button": "Clear Memory Data",
+      "confirmTitle": "Clear Memory Data for this installation?",
       "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and messages waiting to process.",
       "removesTitle": "This deletes:",
       "removes": [
@@ -4004,18 +4004,20 @@
         "Anything outside the Memory folder (like logs and backups)",
         "Physical traces on the disk (this is not a secure wipe)"
       ],
-      "confirmLabel": "Clear all",
+      "confirmLabel": "Clear Memory Data",
       "clearing": "Clearing…",
       "cleared": "Memory data cleared.",
       "failed": "Clear failed."
     },
     "factoryReset": {
-      "button": "Factory reset",
-      "retry": "Retry factory reset",
-      "artifactRepairRequired": "Factory reset is unavailable until the pinned Memory artifact is valid. Repair it from Dependencies.",
-      "confirmTitle": "Factory reset Memory?",
+      "button": "Reinitialize Memory",
+      "retry": "Retry initialization",
+      "artifactRepairRequired": "Reinitializing Memory is unavailable until the pinned Memory artifact is installed and ready. Repair it first.",
+      "dependenciesHint": "Permanently replaces both mutable Memory roots. Settings and the installed runtime are retained.",
+      "settingsUnavailable": "Memory settings are unavailable. Re-check before reinitializing.",
+      "confirmTitle": "Reinitialize Memory?",
       "confirmDescription": "This permanently removes both mutable Memory roots. Settings and the installed Memory artifact are retained.",
-      "confirmLabel": "Factory reset",
+      "confirmLabel": "Reinitialize Memory",
       "deletesTitle": "This deletes exactly:",
       "deletes": [
         "The installed Memory root (memory)",
@@ -4027,7 +4029,7 @@
         "The pinned, installed Memory artifact",
         "Original Avibe chats and data outside these roots"
       ],
-      "resultTitle": "Factory reset result",
+      "resultTitle": "Memory initialization result",
       "resultCompleted": "The fresh Memory state is ready. The per-root report below is authoritative.",
       "rootOutcome": "{{path}}: {{deleted}}",
       "unknownRoot": "unknown root",
@@ -4035,8 +4037,8 @@
       "partial": "partially deleted",
       "absent": "absent",
       "retained": "retained",
-      "completed": "Memory factory reset completed.",
-      "failed": "Memory factory reset failed. Check the result and retry when ready."
+      "completed": "Memory initialization completed.",
+      "failed": "Memory initialization failed. Check the result and retry when ready."
     },
     "kind": {
       "profile": "Profile",

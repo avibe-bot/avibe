@@ -688,7 +688,7 @@
         "capabilityUnavailable": "Memory capability unavailable",
         "processingFailed": "Memory processing failed",
         "clearFailed": "Memory clear failed",
-        "factoryResetFailed": "Memory factory reset failed",
+        "factoryResetFailed": "Memory initialization failed",
         "unknown": "unknown reason"
       },
       "fault": {
