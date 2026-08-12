@@ -74,8 +74,12 @@ while IFS= read -r f; do
   discovered=$((discovered + 1))
   selected=$((selected + 1))
   started_at=$(date +%s)
-  "${PYTEST[@]}" "$f" -m "not integration" -p no:randomly -o addopts="" -q
+  echo "Starting $f"
+  timeout 300 "${PYTEST[@]}" "$f" -m "not integration" -p no:randomly -o addopts="" -q
   rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "TIMEOUT(300s): $f hung and was killed."
+  fi
   finished_at=$(date +%s)
   elapsed=$((finished_at - started_at))
   echo "Finished $f in ${elapsed}s with exit code $rc."
