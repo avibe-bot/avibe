@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from core.reply_enhancer import strip_quick_reply_buttons
 from .types import BackendSessionTitle, NativeResumeSession
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def normalize_preview_text(text: str) -> str:
     if not text:
         return ""
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = strip_quick_reply_buttons(cleaned)
     if "\n---\n" in cleaned:
         cleaned = cleaned.split("\n---\n", 1)[0]
     lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
@@ -52,6 +54,7 @@ def normalize_multiline_preview_text(text: str) -> str:
     if not text:
         return ""
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = strip_quick_reply_buttons(cleaned)
     if "\n---\n" in cleaned:
         cleaned = cleaned.split("\n---\n", 1)[0]
 

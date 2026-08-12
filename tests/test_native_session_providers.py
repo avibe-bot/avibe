@@ -6,7 +6,12 @@ from pathlib import Path
 from types import SimpleNamespace
 import json
 
-from modules.agents.native_sessions.base import build_resume_preview, build_tail_preview
+from modules.agents.native_sessions.base import (
+    build_resume_preview,
+    build_tail_preview,
+    normalize_multiline_preview_text,
+    normalize_preview_text,
+)
 from modules.agents.native_sessions import claude as claude_module
 from modules.agents.native_sessions.claude import ClaudeNativeSessionProvider, encode_project_path
 from modules.agents.native_sessions import codex as codex_module
@@ -605,3 +610,16 @@ def test_build_resume_preview_preserves_line_breaks() -> None:
     text = "第一段第一行\n第二行\n\n第三行\n---\n[button]"
 
     assert build_resume_preview(text, limit=200) == "第一段第一行\n第二行\n\n第三行"
+
+
+def test_native_session_previews_strip_unseparated_quick_replies() -> None:
+    text = "Done\n[A] | [B]"
+
+    assert normalize_preview_text(text) == "Done"
+    assert normalize_multiline_preview_text(text) == "Done"
+
+
+def test_native_session_previews_preserve_markdown_table_rows() -> None:
+    text = "Option | Status\n--- | ---\n[Docs](https://example.com) | [Issue](https://example.com/1)"
+
+    assert normalize_preview_text(text) == "Option | Status --- | --- [Docs](https://example.com) | [Issue](https://example.com/1)"

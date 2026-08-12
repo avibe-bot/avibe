@@ -175,13 +175,13 @@ _BUTTON_LINE_TOKEN = (
     + r"|<https?://[^|>\r\n]+\|[^>\r\n]+>)"
 )
 _UNSEPARATED_BUTTON_ROW_RE = re.compile(
-    r"(?:^|\n)"
+    r"(?:^|\r?\n)"
     r"([ \t]*"
     + _BUTTON_LINE_TOKEN
     + r"[ \t]*(?:[|｜][ \t]*"
     + _BUTTON_LINE_TOKEN
     + r"[ \t]*)+)"
-    r"(?:\n[ \t]*)*$"
+    r"(?:\r?\n[ \t]*)*$"
 )
 
 # Individual button tokens. Link variants are accepted for compatibility only;
@@ -197,6 +197,17 @@ _BUTTON_TOKEN_RE = re.compile(
 # (Detection matches the whole block instead of scanning for ``|``, which a URL
 # may itself contain.)
 _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+")
+
+
+def _is_markdown_table_delimiter_before(text: str, start: int) -> bool:
+    """Return whether a separator-free row follows a Markdown table delimiter."""
+    line = text[:start].splitlines()[-1].strip() if text[:start] else ""
+    if "|" not in line:
+        return False
+    cells = line.strip("|").split("|")
+    return len(cells) >= 2 and all(
+        re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in cells
+    )
 
 # Silent output blocks are intentionally simple and model-facing. Once a real
 # opener is found outside code, its contents are opaque until the closing tag.
@@ -942,6 +953,11 @@ def _extract_buttons(
     if m is None:
         return [], text
 
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and _is_markdown_table_delimiter_before(
+        text, m.start()
+    ):
+        return [], text
+
     block = m.group(1)
     # A block made up solely of plain Markdown links with no ``|``/``｜``
     # separator is a genuine reference-link section (``---\n[Release notes](…)``,
@@ -966,3 +982,9 @@ def _extract_buttons(
 
     cleaned = text[: m.start()]
     return buttons, cleaned
+
+
+def strip_quick_reply_buttons(text: str) -> str:
+    """Remove a trailing quick-reply row while preserving all other markup."""
+    _, cleaned = _extract_buttons(text)
+    return cleaned

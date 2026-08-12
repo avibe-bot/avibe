@@ -1468,6 +1468,24 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_markdown_table_last_row(self):
+        text = (
+            "Option | Status\n"
+            "--- | ---\n"
+            "[Docs](https://example.com) | [Issue](https://example.com/1)"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_accepts_unseparated_buttons_with_crlf(self):
+        reply = process_reply("Done\r\n[A] | [B]\r\n")
+
+        self.assertEqual(reply.text, "Done")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
     def test_process_reply_ignores_bare_angle_link_as_quick_reply_button(self):
         text = "Done.\n\n---\n<https://github.com/avibe-bot/avibe/pull/298>"
         reply = process_reply(text)
