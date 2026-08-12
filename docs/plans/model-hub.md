@@ -439,10 +439,15 @@ inventory result reorders existing configuration. `created_at` remains ordinary 
 metadata for audit/display; routing and placement never read or mutate it.
 
 The explicit `POST /api/models/agents/<backend>/chains/reorder` operation is the sole
-post-creation consumer of the current Source-order sequence. It reorders existing hops
-only, preserves every exact `(source_id, model_id)` member and mapping, and never reruns
-matching. Its complete stable order is defined in §4.6. Because it cannot remove supply,
-it has no guarded `409`, `force`, or interruption branch even when the first hop changes.
+server-side post-creation operation that implicitly applies the stored Source-order
+sequence to existing Routes. It reorders existing hops only, preserves every exact
+`(source_id, model_id)` member and mapping, and never reruns matching. Its complete stable
+order is defined in §4.6. A user-authored per-model `hops` PUT carries only the submitted
+explicit hop order, and its server handler never reads `sources.order`; an editor may use
+its page-held Source-order projection to help sort a local draft, but that draft becomes
+explicit `hops` with no Source-order semantics on the wire. Because the all-chain operation
+cannot remove supply, it has no guarded `409`, `force`, or interruption branch even when
+the first hop changes.
 
 On `PATCH /api/models/agents/<backend>/mode`, a `direct` → `hub` transition also owns
 one bounded adoption transaction. If the backend has a sanctioned, recognized CLI
@@ -1279,9 +1284,11 @@ current order and `(1, i, i)` otherwise, then sort lexicographically. Thus all l
 Sources come first in configured order, hops sharing a listed Source retain their
 relative order, and all unlisted-Source hops follow while retaining their mutual
 relative order. The operation is idempotent, never runs matching, and never adds,
-removes, remaps, guards, or reports interruption. It is the only existing-chain
-consumer of `sources.order`; storing a new Source order alone leaves every Route byte-
-identical.
+removes, remaps, guards, or reports interruption. It is the only server-side existing-
+chain operation that implicitly reads and applies `sources.order`; storing a new Source
+order alone leaves every Route byte-identical. A per-model Route PUT is instead an explicit
+user-authored `hops` replacement: its handler does not read `sources.order`, even when the
+client used its already-held Source-order projection as a local draft-sorting aid.
 
 `hops` may be empty and is always present. A newly introduced menu model starts with an
 empty route; catalog expansion and inventory refresh do not retroactively match it.
