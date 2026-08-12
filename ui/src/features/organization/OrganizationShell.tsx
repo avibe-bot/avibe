@@ -48,7 +48,6 @@ function GateState() {
   const { t } = useTranslation();
   const { gate, signIn, retry } = useOrganization();
   const { capabilities } = useInstanceAuthorization();
-  const backToControlPanelPath = useBackToControlPanelPath();
   const cloudNotConnectedPath = capabilities.can_use_system ? '/admin/remote-access' : backToControlPanelPath;
   const cloudNotConnectedLabel = capabilities.can_use_system
     ? t('organization.actions.openRemoteAccess')
