@@ -48,6 +48,7 @@ function GateState() {
   const { t } = useTranslation();
   const { gate, signIn, retry } = useOrganization();
   const { capabilities } = useInstanceAuthorization();
+  const backToControlPanelPath = useBackToControlPanelPath();
   const cloudNotConnectedPath = capabilities.can_use_system ? '/admin/remote-access' : backToControlPanelPath;
   const cloudNotConnectedLabel = capabilities.can_use_system
     ? t('organization.actions.openRemoteAccess')
@@ -137,7 +138,6 @@ function OrganizationNavbar() {
     session,
     signOut,
   } = useOrganization();
-  const backToControlPanelPath = useBackToControlPanelPath();
   const switchOrganization = async (organizationId: string) => {
     const destination = organizationSwitchDestination(location.pathname);
     if (destination) navigate(destination, { replace: true });
