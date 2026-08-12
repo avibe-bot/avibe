@@ -5,6 +5,7 @@ import io
 import json
 import os
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from scripts.build_memory_runtime import (
     LOCK_SHA256,
     PYTHON_VERSION,
     UV_VERSION,
+    _temporary_directory,
     create_archive,
     prune_runtime,
 )
@@ -39,6 +41,31 @@ def test_release_workflows_emit_metadata_for_the_current_runtime_version() -> No
         workflow = (workflows / name).read_text(encoding="utf-8")
         assert expected in workflow
         assert "memory-runtime-1.2.1-${{ matrix.artifact }}.json" not in workflow
+
+
+def test_release_workflows_build_memory_runtime_under_runner_temp() -> None:
+    workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
+
+    for name in ("release_ai.yml", "publish.yml"):
+        workflow = (workflows / name).read_text(encoding="utf-8")
+        build_step = workflow.split("- name: Build Memory Runtime bundle", 1)[1]
+        build_step = build_step.split("- name: Upload Memory Runtime bundle", 1)[0]
+        assert "TMPDIR: ${{ runner.temp }}" in build_step
+
+
+def test_memory_runtime_scratch_paths_resolve_the_system_temp_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_temp = tmp_path / "real-temp"
+    real_temp.mkdir()
+    linked_temp = tmp_path / "linked-temp"
+    linked_temp.symlink_to(real_temp, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(linked_temp))
+
+    with _temporary_directory("memory-runtime-test-") as scratch:
+        assert scratch.parent == real_temp.resolve(strict=True)
+        assert scratch == scratch.resolve(strict=True)
 
 
 def test_github_only_release_runs_memory_runtime_guard_before_uploading_assets() -> None:

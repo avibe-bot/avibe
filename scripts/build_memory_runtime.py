@@ -14,6 +14,8 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
@@ -53,6 +55,15 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@contextmanager
+def _temporary_directory(prefix: str) -> Iterator[Path]:
+    """Create scratch space beneath the canonical system temp directory."""
+
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
+        yield Path(temporary)
 
 
 def _platform_tag() -> str:
@@ -142,8 +153,8 @@ def create_archive(*, runtime_root: Path, output: Path, platform: str) -> dict[s
 def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
     """Extract and smoke the final bytes in a new directory."""
 
-    with tempfile.TemporaryDirectory(prefix="avibe-memory-runtime-verify-") as temporary_value:
-        destination = Path(temporary_value) / "runtime"
+    with _temporary_directory("avibe-memory-runtime-verify-") as temporary:
+        destination = temporary / "runtime"
         destination.mkdir()
         destination_resolved = destination.resolve()
         with tarfile.open(archive_path, "r:gz") as archive:
@@ -171,8 +182,8 @@ def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
         if _sha256(binary) != binary_sha256:
             raise SystemExit("Memory Runtime extracted Python checksum mismatch")
         _smoke(binary, cwd=destination.parent)
-        with tempfile.TemporaryDirectory(prefix="mrv-health-", dir="/tmp") as health_home:
-            _sidecar_health_smoke(binary, effective_home=Path(health_home))
+        with _temporary_directory("mrv-health-") as health_home:
+            _sidecar_health_smoke(binary, effective_home=health_home)
 
 
 def prune_runtime(runtime_root: Path) -> None:
@@ -329,8 +340,7 @@ def build_runtime(
     if uv_identity.split()[:2] != ["uv", UV_VERSION]:
         raise SystemExit(f"Memory Runtime builder requires uv {UV_VERSION}")
 
-    with tempfile.TemporaryDirectory(prefix="avibe-memory-runtime-") as temporary_value:
-        temporary = Path(temporary_value)
+    with _temporary_directory("avibe-memory-runtime-") as temporary:
         _run([uv_command, "python", "install", python_version], cwd=temporary)
         found = _run(
             [uv_command, "python", "find", "--no-project", "--managed-python", python_version],
