@@ -1945,6 +1945,39 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_legacy_bare_file_links_accept_ascii_spaces(self):
+        enhanced = process_reply(
+            "[download](file:///tmp/My Report.md) and "
+            '![image](file:///tmp/图片 文件.png "preview")'
+        )
+
+        self.assertEqual(enhanced.text, "download and image")
+        self.assertEqual(
+            [(file.path, file.is_image) for file in enhanced.files],
+            [
+                ("/tmp/My Report.md", False),
+                ("/tmp/图片 文件.png", True),
+            ],
+        )
+
+    def test_legacy_bare_file_link_extension_rejects_near_neighbors(self):
+        specimens = [
+            "[newline](file:///tmp/My\nReport.md)",
+            "[tab](file:///tmp/My\tReport.md)",
+            "[unclosed](file:///tmp/My Report.md",
+            "[upper](FILE:///tmp/My Report.md)",
+            "`[code](file:///tmp/My Report.md)`",
+            '<span title="[html](file:///tmp/My Report.md)">visible</span>',
+            '[outer](https://example.com "[inner](file:///tmp/My Report.md)")',
+            r"\[escaped](file:///tmp/My Report.md)",
+        ]
+
+        for text in specimens:
+            with self.subTest(text=text):
+                enhanced = process_reply(text)
+                self.assertEqual(enhanced.text, text)
+                self.assertEqual(enhanced.files, [])
+
     def test_angle_wrapped_file_links_unescape_angle_brackets_in_paths(self):
         enhanced = process_reply(r"[report](<file:///tmp/a\>b.md>)")
 
@@ -2034,6 +2067,37 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enhanced.text, text)
         self.assertEqual(enhanced.files, [])
 
+    def test_file_link_parser_keeps_malformed_authority_verbatim(self):
+        text = "[bad](<file://[bad/path>)"
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
+    def test_file_link_parser_skips_offset_maps_without_captures(self):
+        with patch.object(
+            reply_enhancer,
+            "_inline_source_offsets",
+            wraps=reply_enhancer._inline_source_offsets,
+        ) as source_offsets:
+            enhanced = process_reply("ordinary reply " + "x" * 100000)
+
+        self.assertEqual(enhanced.files, [])
+        source_offsets.assert_not_called()
+
+    def test_file_link_parser_maps_captured_inline_source(self):
+        with patch.object(
+            reply_enhancer,
+            "_inline_source_offsets",
+            wraps=reply_enhancer._inline_source_offsets,
+        ) as source_offsets:
+            enhanced = process_reply("> [report](<file:///tmp/report.md>)")
+
+        self.assertEqual(enhanced.text, "> report")
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/report.md"])
+        self.assertGreaterEqual(source_offsets.call_count, 1)
+
     def test_angle_wrapped_file_links_require_whitespace_before_title(self):
         text = '[report](<file:///tmp/report.md>"download")'
 
@@ -2115,6 +2179,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         elapsed = time.perf_counter() - started
 
         self.assertEqual([file.path for file in enhanced.files], ["/tmp/report.md"])
+        self.assertLess(elapsed, 10.0)
+
+    def test_legacy_bare_file_link_scans_malformed_destination_in_bounded_time(self):
+        text = "[missing](file:///tmp/" + "a " * 50000 + "tail"
+
+        started = time.perf_counter()
+        enhanced = process_reply(text)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
         self.assertLess(elapsed, 10.0)
 
     def test_unwrapped_file_link_parser_keeps_existing_destination_behavior(self):

@@ -167,6 +167,31 @@ def test_rewrite_angle_wrapped_file_links(tmp_path):
     assert sorted(row["kind"] for row in rows) == ["file", "image"]
 
 
+def test_rewrite_legacy_bare_space_link_and_reject_malformed_authority(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    report = tmp_path / "My Report.md"
+    report.write_text("report", encoding="utf-8")
+    malformed = "[bad](<file://[bad/path>)"
+    text = f'[report](file://{report} "download") and {malformed}'
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(
+            conn,
+            scope_id=scope_id,
+            session_id="sess_x",
+            text=text,
+        )
+
+    assert out.startswith("[report](/api/media/")
+    assert out.endswith(f' "download") and {malformed}')
+    with engine.connect() as conn:
+        rows = conn.execute(select(media_objects)).mappings().all()
+    assert [row["local_path"] for row in rows] == [str(report.resolve())]
+
+
 def test_rewrite_does_not_materialize_file_links_inside_code(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

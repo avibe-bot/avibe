@@ -478,6 +478,151 @@ def _normalize_file_destination(value: str) -> str:
     return unescapeAll(_protect_file_uri_delimiters(value))
 
 
+def _mask_legacy_bare_file_link_spaces(source: str) -> str:
+    """Make only legacy bare ``file://`` path spaces parseable by CommonMark.
+
+    The returned source is the same length as the input. MarkdownIt still owns
+    link/image syntax and nesting; replacing the spaces only lets it evaluate
+    the one historical extension that CommonMark rejects lexically.
+    """
+    marker = "](file://"
+    if marker not in source or " " not in source:
+        return source
+
+    masked: List[str] | None = None
+    search_start = 0
+    while True:
+        marker_start = source.find(marker, search_start)
+        if marker_start < 0:
+            break
+        destination_start = marker_start + 2
+        cursor = destination_start + len("file://")
+        depth = 0
+        slash_count = 0
+        space_offsets: List[int] = []
+        destination_end = -1
+        while cursor < len(source):
+            char = source[cursor]
+            if char in "\t\r\n":
+                break
+            if char == "\\":
+                slash_count += 1
+                cursor += 1
+                continue
+
+            escaped = slash_count % 2 == 1
+            slash_count = 0
+            if char == " " and depth >= 0:
+                space_offsets.append(cursor)
+            elif char == "(" and not escaped:
+                depth += 1
+            elif char == ")" and not escaped:
+                if depth == 0:
+                    destination_end = cursor
+                    break
+                depth -= 1
+            cursor += 1
+
+        if destination_end >= 0 and space_offsets:
+            title_separator = _legacy_bare_title_separator(
+                source,
+                destination_start,
+                destination_end,
+            )
+            if title_separator is not None:
+                space_offsets = [
+                    offset for offset in space_offsets if offset < title_separator
+                ]
+            if not space_offsets:
+                search_start = destination_end + 1
+                continue
+            if masked is None:
+                masked = list(source)
+            for offset in space_offsets:
+                masked[offset] = "_"
+            search_start = destination_end + 1
+        elif cursor >= len(source):
+            break
+        else:
+            search_start = cursor + 1
+
+    return "".join(masked) if masked is not None else source
+
+
+def _legacy_bare_title_separator(
+    source: str,
+    destination_start: int,
+    destination_end: int,
+) -> int | None:
+    """Return the ASCII-space separator before a standard trailing title."""
+    if destination_end <= destination_start + 2:
+        return None
+    closer = source[destination_end - 1]
+    opener = "(" if closer == ")" else closer
+    if opener not in "\"'(":
+        return None
+
+    cursor = destination_end - 2
+    title_start = -1
+    while cursor >= destination_start:
+        if source[cursor] != opener:
+            cursor -= 1
+            continue
+        slash_start = cursor
+        while slash_start > destination_start and source[slash_start - 1] == "\\":
+            slash_start -= 1
+        if (cursor - slash_start) % 2 == 0:
+            title_start = cursor
+            break
+        cursor = slash_start - 1
+    if title_start <= destination_start or source[title_start - 1] != " ":
+        return None
+
+    title = _FILE_LINK_MARKDOWN.helpers.parseLinkTitle(
+        source,
+        title_start,
+        destination_end,
+    )
+    if not title.ok or title.pos != destination_end:
+        return None
+    separator = title_start - 1
+    while separator > destination_start and source[separator - 1] == " ":
+        separator -= 1
+    return separator
+
+
+def _inline_file_link_captures(
+    content: str,
+) -> list[tuple[int, int, bool, int, int, int, int]]:
+    """Capture CommonMark links plus the bounded legacy bare-space extension."""
+    env: dict = {_FILE_LINK_CAPTURES_KEY: []}
+    _FILE_LINK_MARKDOWN.inline.parse(content, _FILE_LINK_MARKDOWN, env, [])
+    captures = list(env[_FILE_LINK_CAPTURES_KEY])
+
+    compatibility_source = _mask_legacy_bare_file_link_spaces(content)
+    if compatibility_source == content:
+        return captures
+
+    compatibility_env: dict = {_FILE_LINK_CAPTURES_KEY: []}
+    _FILE_LINK_MARKDOWN.inline.parse(
+        compatibility_source,
+        _FILE_LINK_MARKDOWN,
+        compatibility_env,
+        [],
+    )
+    claimed_spans = {(capture[0], capture[1]) for capture in captures}
+    for capture in compatibility_env[_FILE_LINK_CAPTURES_KEY]:
+        destination = content[capture[5] : capture[6]]
+        if (
+            (capture[0], capture[1]) not in claimed_spans
+            and content[capture[5] - 1 : capture[5]] != "<"
+            and destination.startswith("file://")
+            and " " in destination
+        ):
+            captures.append(capture)
+    return captures
+
+
 def _strip_file_links(text: str) -> str:
     """Replace file links outside Markdown code with their labels."""
     return _strip_file_links_with_mask(text, _mask_markdown_code(text))[0]
@@ -581,20 +726,16 @@ def _file_link_matches(
     code_ranges, inline_ranges, _ = _markdown_block_ranges(text)
     captures: list[tuple[int, int, bool, int, int, int, int]] = []
     for source_start, source_end, content in inline_ranges:
-        env: dict = {_FILE_LINK_CAPTURES_KEY: []}
-        _FILE_LINK_MARKDOWN.inline.parse(
-            content,
-            _FILE_LINK_MARKDOWN,
-            env,
-            [],
-        )
+        inline_captures = _inline_file_link_captures(content)
+        if not inline_captures:
+            continue
         offsets = _inline_source_offsets(
             text,
             source_start,
             source_end,
             content,
         )
-        for capture in env[_FILE_LINK_CAPTURES_KEY]:
+        for capture in inline_captures:
             mapped = _map_file_link_capture(capture, offsets)
             if mapped is not None:
                 captures.append(mapped)
@@ -603,14 +744,9 @@ def _file_link_matches(
         for source_start, source_end in code_ranges:
             if "[" not in markdown_mask[source_start:source_end]:
                 continue
-            fallback_env: dict = {_FILE_LINK_CAPTURES_KEY: []}
-            _FILE_LINK_MARKDOWN.inline.parse(
-                text[source_start:source_end],
-                _FILE_LINK_MARKDOWN,
-                fallback_env,
-                [],
-            )
-            for capture in fallback_env[_FILE_LINK_CAPTURES_KEY]:
+            for capture in _inline_file_link_captures(
+                text[source_start:source_end]
+            ):
                 captures.append(
                     (
                         source_start + capture[0],
@@ -645,7 +781,10 @@ def _file_link_matches(
         ):
             continue
         normalized_url = _normalize_file_destination(text[url_start:url_end])
-        parsed = _parse_file_uri(normalized_url)
+        try:
+            parsed = _parse_file_uri(normalized_url)
+        except ValueError:
+            continue
         path = _file_uri_to_local_path(parsed)
         if parsed.scheme.casefold() != "file" or not os.path.isabs(path):
             continue

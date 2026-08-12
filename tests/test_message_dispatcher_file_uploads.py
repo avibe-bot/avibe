@@ -112,6 +112,33 @@ class MessageDispatcherFileUploadTests(unittest.IsolatedAsyncioTestCase):
             [("C1", str(file_path.resolve()), "preview.png")],
         )
 
+    async def test_legacy_bare_space_image_ignores_malformed_authority(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController())
+        im_client = _StubIMClient()
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "preview image.png"
+            file_path.write_bytes(b"png")
+            malformed = "[bad](<file://[bad/path>)"
+            enhanced = process_reply(
+                f"![preview](file://{file_path}) and {malformed}"
+            )
+
+            self.assertEqual(enhanced.text, f"preview and {malformed}")
+            self.assertEqual(len(enhanced.files), 1)
+            await dispatcher._upload_file_links(
+                im_client,
+                context,
+                enhanced.files,
+            )
+
+        self.assertEqual(
+            im_client.image_uploads,
+            [("C1", str(file_path.resolve()), "preview.png")],
+        )
+        self.assertEqual(im_client.file_uploads, [])
+
     async def test_upload_file_link_allows_path_outside_cwd(self):
         dispatcher = ConsolidatedMessageDispatcher(_StubController())
         im_client = _StubIMClient()
