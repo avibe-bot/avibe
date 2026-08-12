@@ -1949,7 +1949,6 @@ class ScheduledTaskStore:
                 or task.run_at != expected_schedule_generation["run_at"]
                 or task.timezone != expected_schedule_generation["timezone"]
                 or task.retired_at != expected_schedule_generation["retired_at"]
-                or task.updated_at != expected_schedule_generation["retired_at"]
                 or task.retirement_reason != TASK_RETIREMENT_SCHEDULE_CONSUMED
                 or task.last_run_id != expected_terminal_run_id
             ):

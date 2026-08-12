@@ -843,7 +843,6 @@ def task_schedule_owner_unchanged(
         unchanged_text(run_definitions.c.run_at, generation["run_at"]),
         unchanged_text(run_definitions.c.timezone, generation["timezone"]),
         unchanged_text(run_definitions.c.retired_at, generation["retired_at"]),
-        unchanged_text(run_definitions.c.updated_at, generation["retired_at"]),
         run_definitions.c.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED,
         run_definitions.c.last_run_id == run_id,
         exact_owner_run,
@@ -4042,6 +4041,16 @@ class SQLiteBackgroundTaskStore:
                         error=terminal_error,
                         completed_at=now,
                         updated_at=now,
+                    )
+                    _merge_owed_failure_notice(
+                        values,
+                        conn=conn,
+                        run_id=str(values["id"]),
+                        status=values["status"],
+                        source_kind=values.get("source_kind"),
+                        parent_run_id=values.get("parent_run_id"),
+                        row_metadata_json=values["metadata_json"],
+                        now=now,
                     )
             enqueue_run_in_connection(conn, values)
         return {

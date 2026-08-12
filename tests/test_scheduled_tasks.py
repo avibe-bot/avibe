@@ -10374,6 +10374,77 @@ def test_hfr_477_result_cas_rejects_replacement_after_mirror_read(
     assert replacement.last_run_at is None
 
 
+def test_hfr_477_consumed_result_survives_unrelated_definition_edit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- mutable copy edits do not replace the consumed generation."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = store.add_task(
+        name="generation A",
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="existing",
+    )
+    queued = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+        expected_job_id="generation-a",
+    )
+    assert queued is not None
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=requests,
+    )
+    assert store.maybe_reload() is False
+
+    async def _edit_while_running(**_kwargs):
+        writer = ScheduledTaskStore()
+        current = writer.get_task(task.id)
+        assert current is not None
+        writer.update_task(
+            task.id,
+            name="renamed while running",
+            session_key=current.session_key,
+            session_id=current.session_id,
+            prompt="edited prompt",
+            schedule_type=current.schedule_type,
+            post_to=current.post_to,
+            deliver_key=current.deliver_key,
+            cron=current.cron,
+            run_at=current.run_at,
+            timezone_name=current.timezone,
+            agent_name=current.agent_name,
+            session_policy=current.session_policy,
+        )
+        return TaskDispatchResult(error=None)
+
+    service._execute_request = _edit_while_running
+    claimed = requests.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    settled = requests.get_run(queued.id)
+    assert settled is not None and settled["status"] == "succeeded"
+    current = store.refresh_task(task.id)
+    assert current is not None
+    assert (current.name, current.prompt) == ("renamed while running", "edited prompt")
+    assert current.last_run_id == queued.id
+    assert current.retired_at == task_schedule_generation(queued.metadata)["retired_at"]
+    assert current.last_run_at is not None
+    assert current.last_error is None
+
+
 def test_hfr_477_enqueue_exception_records_failed_terminal_owner(
     tmp_path: Path,
     monkeypatch,
@@ -10423,11 +10494,33 @@ def test_hfr_477_enqueue_exception_records_failed_terminal_owner(
     assert owner is not None and owner["status"] == "failed"
     assert "queue unavailable" in owner["error"]
     assert task_schedule_generation(owner["metadata"])["job_id"] == "generation-a"
+    notice = requests._sqlite.owed_failure_notice(owner["id"])
+    assert notice is not None and notice["state"] == "pending"
+    assert [row["id"] for row in requests._sqlite.list_owed_failure_notices()] == [
+        owner["id"]
+    ]
     compact = requests._sqlite.list_scheduled_tasks_page(
         page_request=PageRequest(limit=20),
         include_successful_finished=False,
     )
     assert task.id in {item["id"] for item in compact.items}
+
+    emitted: list[str] = []
+
+    async def _emit(run, _notice, evidence):
+        emitted.append(run["id"])
+        evidence.delivered_id = "notice-1"
+        evidence.persisted_row = {"id": "notice-1"}
+        evidence.send_returned = True
+        return True
+
+    service._emit_failure_notice = _emit
+    service._owns_service_instance = lambda: True
+    asyncio.run(service._drain_failure_notices())
+
+    assert emitted == [owner["id"]]
+    sent = requests._sqlite.owed_failure_notice(owner["id"])
+    assert sent is not None and sent["state"] == "sent"
 
 
 def test_hfr_477_job_error_event_recovers_only_registered_generation(
