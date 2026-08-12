@@ -311,7 +311,8 @@ def test_harness_status_cli_returns_one_unified_payload(monkeypatch, capsys) -> 
         lambda: SimpleNamespace(sqlite_backend=sqlite_store),
     )
 
-    async def _controller_snapshot():
+    async def _controller_snapshot(*, run_ids):
+        assert run_ids == []
         return {
             "status_code": 200,
             "body": {
@@ -352,7 +353,8 @@ def test_harness_status_cli_revalidates_runs_after_ownership_snapshot(
         lambda: SimpleNamespace(sqlite_backend=sqlite_store),
     )
 
-    async def _controller_snapshot():
+    async def _controller_snapshot(*, run_ids):
+        assert run_ids == ["run-finished"]
         return {
             "status_code": 200,
             "body": {
@@ -369,6 +371,40 @@ def test_harness_status_cli_revalidates_runs_after_ownership_snapshot(
     payload = json.loads(capsys.readouterr().out)
     assert payload["runs"] == []
     assert payload["anomalies"] == []
+
+
+def test_harness_status_cli_preserves_pre_snapshot_run_truncation(
+    monkeypatch, capsys
+) -> None:
+    runs = [{"id": f"run-{index}", "status": "running"} for index in range(101)]
+    sqlite_store = SimpleNamespace(
+        list_active_runs=lambda *, limit: runs,
+        active_run_ids=lambda run_ids: {"run-0"},
+        list_enabled_definitions=lambda definition_type, *, limit: [],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_task_request_store",
+        lambda: SimpleNamespace(sqlite_backend=sqlite_store),
+    )
+
+    async def _controller_snapshot(*, run_ids):
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "agents": [],
+                "owned_run_ids": ["run-0"],
+                "ownership_available": True,
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "list_running_agents", _controller_snapshot)
+
+    assert cli.cmd_harness_status(SimpleNamespace()) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["id"] for row in payload["runs"]] == ["run-0"]
+    assert payload["truncated"]["runs"] is True
 
 
 def test_harness_cli_help_uses_configured_language(monkeypatch, capsys) -> None:
@@ -407,5 +443,37 @@ def test_enabled_tasks_are_bounded_after_next_fire_ordering(tmp_path) -> None:
         tasks = store.list_enabled_definitions("scheduled", limit=2)
 
         assert [task["id"] for task in tasks] == ["task-imminent", "task-later"]
+    finally:
+        store.close()
+
+
+def test_enabled_watches_prioritize_dead_waiters_before_limit(tmp_path) -> None:
+    store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
+    try:
+        for index in range(3):
+            store.upsert_watch(
+                {
+                    "id": f"watch-{index}",
+                    "name": f"watch-{index}",
+                    "shell_command": "true",
+                    "enabled": True,
+                    "created_at": f"2026-08-12T00:00:0{index}+00:00",
+                    "updated_at": f"2026-08-12T00:00:0{index}+00:00",
+                }
+            )
+        store.write_watch_runtime(
+            {"watches": {"watch-0": {"running": True, "pid": 42}}},
+            updated_at="2026-08-12T00:00:03+00:00",
+        )
+        store.write_watch_runtime(
+            {"watches": {}},
+            updated_at="2026-08-12T00:00:04+00:00",
+        )
+
+        watches = store.list_enabled_definitions("watch", limit=2)
+
+        assert watches[0]["id"] == "watch-0"
+        assert watches[0]["process_alive"] is False
+        assert len(watches) == 2
     finally:
         store.close()

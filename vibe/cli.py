@@ -3240,9 +3240,14 @@ def cmd_harness_status(_args) -> int:
             "scheduled",
             limit=fetch_limit,
         )
+        runs_truncated = len(raw_runs) > MAX_PAGE_LIMIT
 
         try:
-            response = asyncio.run(internal_client.list_running_agents())
+            response = asyncio.run(
+                internal_client.list_running_agents(
+                    run_ids=[str(row.get("id")) for row in raw_runs if row.get("id")]
+                )
+            )
             body = response.get("body") if isinstance(response, dict) else None
             runtime_snapshot = dict(body) if isinstance(body, dict) else {}
             status_code = response.get("status_code") if isinstance(response, dict) else None
@@ -3282,7 +3287,7 @@ def cmd_harness_status(_args) -> int:
             tasks=raw_tasks[:MAX_PAGE_LIMIT],
             runtime_snapshot=runtime_snapshot,
             truncated={
-                "runs": len(raw_runs) > MAX_PAGE_LIMIT,
+                "runs": runs_truncated,
                 "watches": len(raw_watches) > MAX_PAGE_LIMIT,
                 "tasks": len(raw_tasks) > MAX_PAGE_LIMIT,
             },

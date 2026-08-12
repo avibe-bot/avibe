@@ -3892,7 +3892,24 @@ class SQLiteBackgroundTaskStore:
                     key=_scheduled_next_fire_sort_key,
                 )
             else:
+                runtime_status = (
+                    select(agent_runs.c.status)
+                    .where(agent_runs.c.run_type == _WATCH_RUNTIME_RUN_TYPE)
+                    .where(agent_runs.c.definition_id == run_definitions.c.id)
+                    .order_by(agent_runs.c.updated_at.desc(), agent_runs.c.id.desc())
+                    .limit(1)
+                    .scalar_subquery()
+                )
+                dead_waiter_rank = case(
+                    (
+                        runtime_status.is_not(None)
+                        & ~runtime_status.in_(_status_query_values("running")),
+                        0,
+                    ),
+                    else_=1,
+                )
                 stmt = stmt.order_by(
+                    dead_waiter_rank,
                     run_definitions.c.updated_at.desc(),
                     run_definitions.c.id.desc(),
                 ).limit(row_limit)

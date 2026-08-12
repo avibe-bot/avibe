@@ -6531,6 +6531,8 @@ def test_owned_run_sweep_retries_terminal_turn_settlement_before_orphaning(
             select(agent_runs.c.status).where(agent_runs.c.id == run_id)
         ).scalar_one() == "running"
 
+    assert run_id not in manager.snapshot_owned_agent_run_ids({run_id})
+    assert settlement.calls == 1
     assert run_id not in manager.owned_agent_run_ids()
     assert settlement.calls == 2
     with engine.connect() as conn:

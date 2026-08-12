@@ -378,6 +378,38 @@ def test_memory_final_flush_delegates_identity_to_controller() -> None:
     controller.memory_scope_for_cli_session.assert_not_called()
 
 
+def test_running_agents_snapshot_bounds_ownership_candidates(monkeypatch) -> None:
+    controller = _build_controller_double()
+    captured = []
+
+    def _snapshot(_controller, *, ownership_candidate_run_ids=None):
+        captured.append(ownership_candidate_run_ids)
+        return {"ok": True, "agents": [], "owned_run_ids": []}
+
+    monkeypatch.setattr("core.services.running_agents.snapshot_running_agents", _snapshot)
+    app = internal_server.create_app(controller)
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            valid = await client.post(
+                "/internal/running-agents/snapshot",
+                json={"run_ids": ["run-a", "run-b"]},
+            )
+            oversized = await client.post(
+                "/internal/running-agents/snapshot",
+                json={"run_ids": [f"run-{index}" for index in range(102)]},
+            )
+        return valid, oversized
+
+    valid, oversized = asyncio.run(_exercise())
+
+    assert valid.status_code == 200
+    assert oversized.status_code == 400
+    assert oversized.json()["error"] == "invalid_run_candidates"
+    assert captured == [["run-a", "run-b"]]
+
+
 def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() -> None:
     controller = _build_controller_double()
     controller.memory_scope_for_cli_session = Mock(

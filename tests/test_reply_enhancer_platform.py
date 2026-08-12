@@ -1595,7 +1595,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--session-key", prompt)
         self.assertNotIn("Channel-level session key:", prompt)
         self.assertIn("### Inspecting Harness state", prompt)
-        self.assertIn("Use `vibe data query` to inspect Avibe state with guarded read-only SQL", prompt)
+        self.assertIn("Use `vibe harness status` first for active Runs", prompt)
+        self.assertIn(
+            "Use `vibe data query` for deeper guarded read-only SQL before changing a Harness",
+            prompt,
+        )
         self.assertIn("select name from sqlite_master where type='table' order by name", prompt)
         self.assertIn("schema discovery, current session lookup, existing task/watch inspection, Agent run history", prompt)
         self.assertIn("### Choosing the right Harness shape", prompt)
