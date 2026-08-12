@@ -50,8 +50,8 @@ const DEP_META: Record<string, DepMeta> = {
 };
 
 const MEMORY_ROOT_COPY = {
-  memory: 'content',
-  'state/memory': 'runtimeState',
+  memory: 'primaryStorage',
+  'state/memory': 'memoryStateStorage',
 } as const;
 
 export const SettingsDependenciesPage: React.FC = () => {

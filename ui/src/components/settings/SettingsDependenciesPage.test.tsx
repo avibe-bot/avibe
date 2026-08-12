@@ -197,11 +197,11 @@ describe('SettingsDependenciesPage Memory reinitialization', () => {
     expect(dialog.dataset.holdSeconds).toBe('5');
     expect(dialog.dataset.title).toBe('memory.factoryReset.confirmTitle');
     expect(dialog.dataset.confirmLabel).toBe('memory.factoryReset.confirmLabel');
-    expect(screen.getByText('memory.factoryReset.roots.content.label')).toBeTruthy();
-    expect(screen.getByText('memory.factoryReset.roots.content.description')).toBeTruthy();
+    expect(screen.getByText('memory.factoryReset.roots.primaryStorage.label')).toBeTruthy();
+    expect(screen.getByText('memory.factoryReset.roots.primaryStorage.description')).toBeTruthy();
     expect(screen.getByText('memory.factoryReset.technicalPath:memory')).toBeTruthy();
-    expect(screen.getByText('memory.factoryReset.roots.runtimeState.label')).toBeTruthy();
-    expect(screen.getByText('memory.factoryReset.roots.runtimeState.description')).toBeTruthy();
+    expect(screen.getByText('memory.factoryReset.roots.memoryStateStorage.label')).toBeTruthy();
+    expect(screen.getByText('memory.factoryReset.roots.memoryStateStorage.description')).toBeTruthy();
     expect(screen.getByText('memory.factoryReset.technicalPath:state/memory')).toBeTruthy();
     expect(api.factoryResetMemory).not.toHaveBeenCalled();
   });
@@ -264,8 +264,8 @@ describe('SettingsDependenciesPage Memory reinitialization', () => {
     await user.click(screen.getByRole('button', { name: 'confirm-reinitialize' }));
 
     await waitFor(() => expect(screen.queryByTestId('reinitialize-confirm')).toBeNull());
-    expect(screen.getByText('memory.factoryReset.rootOutcome:memory.factoryReset.roots.content.label:memory.factoryReset.partial')).toBeTruthy();
-    expect(screen.getByText('memory.factoryReset.rootOutcome:memory.factoryReset.roots.runtimeState.label:memory.factoryReset.absent')).toBeTruthy();
+    expect(screen.getByText('memory.factoryReset.rootOutcome:memory.factoryReset.roots.primaryStorage.label:memory.factoryReset.partial')).toBeTruthy();
+    expect(screen.getByText('memory.factoryReset.rootOutcome:memory.factoryReset.roots.memoryStateStorage.label:memory.factoryReset.absent')).toBeTruthy();
     expect(screen.getByText('memory.factoryReset.technicalPath:memory')).toBeTruthy();
     expect(screen.getByText('memory.factoryReset.technicalPath:state/memory')).toBeTruthy();
   });

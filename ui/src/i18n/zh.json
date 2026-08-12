@@ -4013,20 +4013,20 @@
       "button": "重新初始化记忆",
       "retry": "重试初始化",
       "artifactRepairRequired": "固定的记忆运行时未安装并就绪前无法重新初始化记忆。请先修复。",
-      "dependenciesHint": "永久替换记忆内容和运行状态；记忆设置和已安装的运行时会保留。",
+      "dependenciesHint": "永久删除本机记忆数据和相关运行状态；记忆设置和已安装的运行时会保留。",
       "settingsUnavailable": "记忆设置暂不可用。请重新检查后再初始化。",
       "confirmTitle": "重新初始化记忆？",
-      "confirmDescription": "将永久删除本机的记忆内容和运行状态，并重新创建记忆引擎。记忆设置、凭据、已安装的运行时和原始聊天记录会保留。",
+      "confirmDescription": "这会永久删除本机记忆数据和相关运行状态，然后尝试启动一个全新的记忆引擎。即使数据删除成功，新引擎也可能无法启动，旧数据不会恢复。记忆设置、凭据、已安装的运行时和原始聊天记录会保留。",
       "confirmLabel": "重新初始化记忆",
-      "deletesTitle": "只会删除：",
+      "deletesTitle": "将尝试永久删除：",
       "roots": {
-        "content": {
-          "label": "记忆内容",
-          "description": "画像、事实、索引及待处理数据"
+        "primaryStorage": {
+          "label": "主要记忆存储",
+          "description": "可能包含画像、事实、索引、调用诊断和运行文件"
         },
-        "runtimeState": {
-          "label": "运行状态",
-          "description": "处理队列、恢复进度和运行记录"
+        "memoryStateStorage": {
+          "label": "记忆状态存储",
+          "description": "可能包含处理队列、恢复进度和协调状态"
         }
       },
       "technicalPath": "技术路径：{{path}}",
@@ -4034,10 +4034,10 @@
       "retains": [
         "记忆设置和凭据",
         "已固定并安装的记忆运行时",
-        "原始 Avibe 聊天记录以及记忆内容和运行状态之外的数据"
+        "原始 Avibe 聊天记录以及这些存储位置之外的数据"
       ],
       "resultTitle": "记忆初始化结果",
-      "resultCompleted": "全新的记忆引擎已就绪。下方记忆内容和运行状态报告是最终结果。",
+      "resultCompleted": "新的记忆引擎已就绪。下方存储位置报告是最终结果。",
       "rootOutcome": "{{label}}：{{deleted}}",
       "unknownRoot": "未知根目录",
       "deleted": "已删除",

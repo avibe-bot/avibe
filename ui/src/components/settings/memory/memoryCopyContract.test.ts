@@ -64,30 +64,32 @@ describe('Memory UI copy contracts', () => {
     expect(zh.memory.log.callStage.cascade).not.toContain('队列');
   });
 
-  it('presents reinitialization roots as user data areas with secondary technical paths', () => {
+  it('presents reinitialization roots as mixed storage locations with secondary technical paths', () => {
     expect(en.memory.factoryReset.confirmDescription).toBe(
-      'This permanently deletes Memory content and runtime state on this device, then creates a fresh Memory engine. Memory settings, credentials, the installed runtime, and original chats are kept.',
+      'This permanently deletes local Memory data and related operational state, then attempts to start a brand-new Memory engine. Even if deletion succeeds, the new engine may fail to start and the old data will not be restored. Memory settings, credentials, the installed runtime, and original chats are kept.',
     );
-    expect(en.memory.factoryReset.roots.content).toEqual({
-      label: 'Memory content',
-      description: 'Profiles, facts, indexes, and pending work',
+    expect(en.memory.factoryReset.deletesTitle).toBe('This attempts to permanently delete:');
+    expect(en.memory.factoryReset.roots.primaryStorage).toEqual({
+      label: 'Primary Memory storage',
+      description: 'May include profiles, facts, indexes, call diagnostics, and runtime files',
     });
-    expect(en.memory.factoryReset.roots.runtimeState).toEqual({
-      label: 'Runtime state',
-      description: 'Processing queues, recovery progress, and operational records',
+    expect(en.memory.factoryReset.roots.memoryStateStorage).toEqual({
+      label: 'Memory state storage',
+      description: 'May include processing queues, recovery progress, and coordination state',
     });
     expect(en.memory.factoryReset.technicalPath).toContain('{{path}}');
 
     expect(zh.memory.factoryReset.confirmDescription).toBe(
-      '将永久删除本机的记忆内容和运行状态，并重新创建记忆引擎。记忆设置、凭据、已安装的运行时和原始聊天记录会保留。',
+      '这会永久删除本机记忆数据和相关运行状态，然后尝试启动一个全新的记忆引擎。即使数据删除成功，新引擎也可能无法启动，旧数据不会恢复。记忆设置、凭据、已安装的运行时和原始聊天记录会保留。',
     );
-    expect(zh.memory.factoryReset.roots.content).toEqual({
-      label: '记忆内容',
-      description: '画像、事实、索引及待处理数据',
+    expect(zh.memory.factoryReset.deletesTitle).toBe('将尝试永久删除：');
+    expect(zh.memory.factoryReset.roots.primaryStorage).toEqual({
+      label: '主要记忆存储',
+      description: '可能包含画像、事实、索引、调用诊断和运行文件',
     });
-    expect(zh.memory.factoryReset.roots.runtimeState).toEqual({
-      label: '运行状态',
-      description: '处理队列、恢复进度和运行记录',
+    expect(zh.memory.factoryReset.roots.memoryStateStorage).toEqual({
+      label: '记忆状态存储',
+      description: '可能包含处理队列、恢复进度和协调状态',
     });
     expect(zh.memory.factoryReset.technicalPath).toContain('{{path}}');
   });
