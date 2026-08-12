@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 import type { ComponentProps } from 'react';
 import { render, screen } from '@testing-library/react';
+import { createInstance } from 'i18next';
 import userEvent from '@testing-library/user-event';
-import { I18nextProvider } from 'react-i18next';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
 
 import i18n from '@/i18n';
+import en from '../../../i18n/en.json';
+import zh from '../../../i18n/zh.json';
 import { AgentCard as RuntimeAgentCard } from './AgentCard';
 import { modelChainKey, NOMINAL_MODEL_BASELINE } from './modelRows';
 import { readyRegion } from './regionRead';
@@ -20,6 +23,17 @@ const runtime: RuntimeDependency = {
 };
 const AgentCard = (props: Omit<ComponentProps<typeof RuntimeAgentCard>, 'runtime'>) =>
   <RuntimeAgentCard {...props} runtime={freshRuntimeProjection(readyRegion(runtime))} />;
+
+const localeInstance = (lng: 'en' | 'zh') => {
+  const instance = createInstance();
+  void instance.use(initReactI18next).init({
+    lng,
+    fallbackLng: 'en',
+    resources: { en: { translation: en }, zh: { translation: zh } },
+    interpolation: { escapeValue: false },
+  });
+  return instance;
+};
 
 const source = (id: string, name: string): Source => ({
   id, last_discovered_at: null, kind: 'api_key', vendor: 'anthropic', display_name: name,
@@ -36,6 +50,15 @@ const hubAgent: AgentSupply = {
 afterEach(cleanup);
 
 describe('AgentCard', () => {
+  it.each([
+    ['en', 'Gateway · Supply unavailable for now'],
+    ['zh', '网关 · 供给暂不可用'],
+  ] as const)('renders the waiting umbrella in %s', (lng, copy) => {
+    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, supply_status: 'waiting' }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    expect(screen.getByText(copy)).toBeTruthy();
+  });
+
   it('derives takeover from the exact current hop', () => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ contract_version: 5, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
