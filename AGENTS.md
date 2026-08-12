@@ -142,6 +142,14 @@ Agent routing model:
   `scope_settings.agent_backend` are not route selectors; new routing must follow
   the selected Vibe Agent and its backend
 
+Persisted-shape rule:
+
+- on-disk artifacts written by any released version are a shipped surface, even
+  behind a feature flag
+- a schema change must load older releases' files via migration or safe
+  degradation (a broken optional-feature section disables that feature and
+  warns; startup never fails), with load fixtures covering the released shapes
+
 Source-of-truth rule:
 
 - when changing persistent product behavior, align with V2 config and current Web UI flows rather than legacy assumptions
