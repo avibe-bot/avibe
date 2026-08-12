@@ -24,7 +24,6 @@ from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
     ProtocolSSEState,
-    SSE_MAX_FRAME_BYTES,
     SSEFrameLimitError,
     observe_protocol_response,
 )
@@ -573,8 +572,6 @@ async def _read_stream_prelude(
                 ),
             )
         payload.extend(chunk)
-        if len(payload) > SSE_MAX_FRAME_BYTES:
-            raise SSEFrameLimitError("SSE prelude exceeds the configured limit")
         wire_state.observe(chunk)
     return bytes(payload), wire_state, None
 

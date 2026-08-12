@@ -56,7 +56,6 @@ from .adapter import (
 from .classification import (
     ResolutionDecision,
     classify_outcome,
-    machine_error_codes,
     source_settlement_allowed,
     source_settlement_rule,
     terminal_outcome_category,
@@ -262,6 +261,7 @@ class ResolvedInvocation:
     outcome: Optional[RawCallOutcome]
     supply_channel: Literal["native_cli", "hub"] = "hub"
     credential_ref: Optional[str] = None
+    settlement_generation: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -536,6 +536,8 @@ class ModelHubService:
             lambda _backend, _source: True
         )
         self._mutation_lock = asyncio.Lock()
+        self._next_settlement_generation = 0
+        self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
         self._engine_preparation_failed = False
 
@@ -667,6 +669,13 @@ class ModelHubService:
             logger.warning("Skipped Model Hub runtime-state persistence during config recovery")
             return False
         return True
+
+    def _reserve_settlement_generation(self, source_id: str) -> int:
+        self._next_settlement_generation += 1
+        self._latest_source_attempt_generation[source_id] = (
+            self._next_settlement_generation
+        )
+        return self._next_settlement_generation
 
     def _ensure_config_writable(self) -> None:
         ensure_writable = getattr(self.store, "ensure_writable", None)
@@ -3193,8 +3202,7 @@ class ModelHubService:
             return "models.source.cooldown.network", "network"
         if outcome.kind == RawOutcomeKind.TIMEOUT:
             return "models.source.cooldown.timeout", "network"
-        text = " ".join((*machine_error_codes(outcome), outcome.redacted_message or "")).lower()
-        if outcome.http_status == 401 and decision.reason in {
+        if decision.reason in {
             "credential_expired",
             "credential_revoked",
         }:
@@ -3203,11 +3211,9 @@ class ModelHubService:
                 "credential_revoked": "models.source.needs_action.credential_revoked",
             }[decision.reason]
             return detail_key, cast(EventReason, decision.reason)
-        if outcome.http_status == 402 or "balance" in text:
+        if decision.reason == "balance_exhausted":
             return "models.source.needs_action.balance_exhausted", "balance_exhausted"
-        if outcome.http_status == 403 and any(
-            marker in text for marker in ("ban", "suspend", "disabled account")
-        ):
+        if decision.reason == "account_banned":
             return "models.source.needs_action.account_banned", "account_banned"
         if outcome.http_status == 403:
             return "models.source.needs_action.credential_revoked", "credential_revoked"
@@ -3229,7 +3235,13 @@ class ModelHubService:
         detail_key: str,
         reason: EventReason,
         emit_event: bool = True,
+        settlement_generation: Optional[int] = None,
     ) -> bool:
+        generation = (
+            settlement_generation
+            if settlement_generation is not None
+            else self._reserve_settlement_generation(source_id)
+        )
         async with self._mutation_lock:
             config = self.store.load()
             try:
@@ -3237,6 +3249,13 @@ class ModelHubService:
             except ModelHubError:
                 return True
             if not source_settlement_allowed(source.state.status, reason):
+                return True
+            settlement_rule = source_settlement_rule(reason)
+            latest_generation = self._latest_source_attempt_generation.get(
+                source.id,
+                generation,
+            )
+            if generation < latest_generation:
                 return True
             status: Literal["error", "needs_action"] = (
                 "error"
@@ -3326,6 +3345,7 @@ class ModelHubService:
 
         await self._prepare_engine_for_demand()
         started_at = time.monotonic()
+        settlement_generation = self._reserve_settlement_generation(source.id)
         handle = await self._engine_call(
             self.adapter.invoke(
                 source.id,
@@ -3366,26 +3386,14 @@ class ModelHubService:
                 "models.source.cooldown.timeout",
             }:
                 latency_ms = None
-            if event_reason in {
-                "quota_exhausted",
-                "rate_limited",
-                "server_error",
-                "network",
-            }:
-                await self._cooldown(
+            if event_reason is not None:
+                await self._settle_fallback_source(
                     source,
                     decision,
-                    agent=cast(EventAgent, backend),
-                    model_id=chain_payload["model_id"],
-                    detail_key=error_key,
-                )
-            elif event_reason is not None:
-                await self._set_source_blocker(
-                    source.id,
                     backend=cast(BackendName, backend),
                     model_id=chain_payload["model_id"],
                     detail_key=error_key,
-                    reason=event_reason,
+                    settlement_generation=settlement_generation,
                 )
         return {
             "contract_version": PROBE_RESULT_CONTRACT_VERSION,
@@ -3953,6 +3961,8 @@ class ModelHubService:
         backend: BackendName,
         model_id: str,
         emit_event: bool = True,
+        detail_key: Optional[str] = None,
+        settlement_generation: Optional[int] = None,
     ) -> tuple[EventReason, bool]:
         """Persist one fallback-class Source result before the turn settles."""
 
@@ -3960,16 +3970,19 @@ class ModelHubService:
             raise AssertionError("fallback-class outcome must retain its Source reason")
         event_reason = cast(EventReason, decision.reason)
         settlement_rule = source_settlement_rule(event_reason)
+        if not settlement_rule.may_write_health:
+            return event_reason, True
         if settlement_rule.status == "cooldown":
             persisted = await self._cooldown(
                 source,
                 decision,
                 agent=cast(EventAgent, backend),
                 model_id=model_id,
+                detail_key=detail_key,
                 emit_event=emit_event,
             )
         else:
-            detail_key = {
+            blocker_detail_key = detail_key or {
                 "credential_expired": "models.source.needs_action.oauth_expired",
                 "credential_revoked": "models.source.needs_action.credential_revoked",
                 "balance_exhausted": "models.source.needs_action.balance_exhausted",
@@ -3980,9 +3993,10 @@ class ModelHubService:
                 source.id,
                 backend=backend,
                 model_id=model_id,
-                detail_key=detail_key,
+                detail_key=blocker_detail_key,
                 reason=event_reason,
                 emit_event=emit_event,
+                settlement_generation=settlement_generation,
             )
         return event_reason, persisted
 
@@ -4045,8 +4059,8 @@ class ModelHubService:
         if (
             category == "fallback_source"
             and outcome.stream_started
-            and outcome.kind == RawOutcomeKind.NETWORK_ERROR
             and decision.reason == "network"
+            and not source_settlement_rule(decision.reason).may_write_health
         ):
             # G-34 owns the future projection for a truncated stream whose
             # transport failure leaves the same hop current.
@@ -4141,7 +4155,7 @@ class ModelHubService:
         if decision.action != "surface":
             raise AssertionError("consumed streams cannot retry or fall through")
         source_transition_persisted: bool | None = None
-        if decision.reason is not None and outcome.kind != RawOutcomeKind.NETWORK_ERROR:
+        if decision.reason is not None:
             config = self.store.load()
             source = next(
                 (item for item in config.sources if item.id == resolved.source_id),
@@ -4153,6 +4167,7 @@ class ModelHubService:
                     decision,
                     backend=resolved.backend,
                     model_id=resolved.requested_model_id,
+                    settlement_generation=resolved.settlement_generation,
                 )
         return HandleSettlement(
             outcome=outcome,
@@ -4415,6 +4430,7 @@ class ModelHubService:
                 )
             await self._prepare_engine_for_demand(already_synced=engine_prepared)
             engine_prepared = True
+            settlement_generation = self._reserve_settlement_generation(source.id)
             if attempt_observer is not None:
                 attempt_observer(
                     source.id,
@@ -4448,6 +4464,7 @@ class ModelHubService:
                     handle=handle,
                     outcome=None,
                     credential_ref=source.credential_ref,
+                    settlement_generation=settlement_generation,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             if decision.action == "refresh":
@@ -4477,6 +4494,7 @@ class ModelHubService:
                         handle=handle,
                         outcome=None,
                         credential_ref=source.credential_ref,
+                        settlement_generation=settlement_generation,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
             if attempt_observer is not None:
@@ -4505,19 +4523,17 @@ class ModelHubService:
                     handle=handle,
                     outcome=outcome,
                     credential_ref=source.credential_ref,
+                    settlement_generation=settlement_generation,
                 )
             if decision.action == "surface":
                 source_transition_persisted: bool | None = None
-                if (
-                    outcome.stream_started
-                    and decision.reason is not None
-                    and outcome.kind != RawOutcomeKind.NETWORK_ERROR
-                ):
+                if outcome.stream_started and decision.reason is not None:
                     _reason, source_transition_persisted = await self._settle_fallback_source(
                         source,
                         decision,
                         backend=cast(BackendName, backend),
                         model_id=model_id,
+                        settlement_generation=settlement_generation,
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
@@ -4537,15 +4553,13 @@ class ModelHubService:
                     ),
                 )
             if decision.action == "fallback":
-                if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
-                    event_reason = cast(EventReason, "network")
-                else:
-                    event_reason, _persisted = await self._settle_fallback_source(
-                        source,
-                        decision,
-                        backend=cast(BackendName, backend),
-                        model_id=model_id,
-                    )
+                event_reason, _persisted = await self._settle_fallback_source(
+                    source,
+                    decision,
+                    backend=cast(BackendName, backend),
+                    model_id=model_id,
+                    settlement_generation=settlement_generation,
+                )
                 globally_blocked_source_ids.add(source.id)
                 failed_source = source
                 failed_reason = event_reason

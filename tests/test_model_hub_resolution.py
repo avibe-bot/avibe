@@ -90,6 +90,38 @@ def test_source_settlement_authority_never_downgrades_a_decided_error() -> None:
     assert source_settlement_allowed("cooldown", "unclassified_error") is True
 
 
+def test_transport_settlement_reasons_cannot_write_source_health() -> None:
+    transport_reasons = {
+        reason
+        for reason, rule in SOURCE_SETTLEMENT_AUTHORITY.items()
+        if not rule.may_write_health
+    }
+    classified_reasons = {
+        decision.reason
+        for kind in RawOutcomeKind
+        for decision in (
+            classify_outcome(
+                RawCallOutcome(
+                    kind=kind,
+                    http_status=200,
+                    error_code=None,
+                    redacted_message=None,
+                    stream_started=False,
+                    model_id="model-a",
+                    source_id="src_transport1",
+                )
+            ),
+        )
+        if decision.reason is not None
+    }
+    assert transport_reasons <= classified_reasons
+    assert all(
+        rule.status != "cooldown" or rule.may_write_health
+        for reason, rule in SOURCE_SETTLEMENT_AUTHORITY.items()
+        if reason not in transport_reasons
+    )
+
+
 def test_source_settlement_authority_is_transitive() -> None:
     representatives = {
         rule.status: reason

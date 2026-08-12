@@ -36,6 +36,7 @@ class SourceSettlementRule:
 
     status: Literal["cooldown", "needs_action", "error"]
     priority: int
+    may_write_health: bool = True
 
 
 # One strict authority order prevents late weaker verdicts from changing history.
@@ -43,7 +44,7 @@ SOURCE_SETTLEMENT_AUTHORITY: Mapping[str, SourceSettlementRule] = {
     "quota_exhausted": SourceSettlementRule("cooldown", 10),
     "rate_limited": SourceSettlementRule("cooldown", 10),
     "server_error": SourceSettlementRule("cooldown", 10),
-    "network": SourceSettlementRule("cooldown", 10),
+    "network": SourceSettlementRule("cooldown", 10, may_write_health=False),
     "unclassified_error": SourceSettlementRule("error", 20),
     "credential_expired": SourceSettlementRule("needs_action", 30),
     "credential_revoked": SourceSettlementRule("needs_action", 30),

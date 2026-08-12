@@ -32,7 +32,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import SSE_MAX_LINE_BYTES
+from core.handlers.model_hub.stream_wire import SSE_MAX_FRAME_BYTES, SSE_MAX_LINE_BYTES
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
@@ -52,6 +52,43 @@ STREAM_TRANSPORT_BOUNDARIES = json.loads(
     (MODEL_HUB_FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8")
 )["cases"]
 DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
+
+
+def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() -> None:
+    keepalive = b": " + b"k" * (SSE_MAX_LINE_BYTES - 4) + b"\n\n"
+    first = keepalive * (SSE_MAX_FRAME_BYTES // len(keepalive) + 1)
+    output = b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
+
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            return output
+
+    response = SimpleNamespace(content=Content(), status=200)
+    source = SourceRecord(
+        source_id="src_keepalive1",
+        vendor="anthropic",
+        protocol="anthropic",
+        base_url="https://example.test",
+        credential_ref="cred_keepalive1",
+        allowed_origins=("codex",),
+        model_ids=("claude-sonnet-4-5",),
+        prefix="keepalive",
+    )
+
+    prelude, state, outcome = asyncio.run(
+        client_module._read_stream_prelude(
+            response=response,
+            first=first,
+            source=source,
+            model_id="claude-sonnet-4-5",
+            protocol="anthropic",
+            timeout=1,
+        )
+    )
+
+    assert prelude == first + output
+    assert state.model_output_started is True
+    assert outcome is None
 
 
 def _write_fixture_archive(tmp_path: Path, *, version: str = "7.2.95") -> tuple[Path, bytes]:

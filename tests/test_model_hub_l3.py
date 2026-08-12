@@ -1997,7 +1997,7 @@ def test_gateway_streamed_fallback_settles_source_before_rendering_next_current(
                 assert payload["error"] == {
                     "type": "stream_interrupted",
                     "code": "stream_interrupted",
-                    "message": i18n_t("modelHub.launch.retry", "en"),
+                    "message": i18n_t("modelHub.errors.stream_interrupted", "en"),
                 }
         finally:
             await gateway.close()
@@ -2006,10 +2006,10 @@ def test_gateway_streamed_fallback_settles_source_before_rendering_next_current(
             (first.id, "shared-model", "codex")
         ]
         persisted = {source.id: source for source in service.store.load().sources}
-        assert persisted[first.id].state.status == "cooldown"
+        assert persisted[first.id].state.status == "standby"
         assert persisted[second.id].state.status == "standby"
         assert service.agent_chain("codex", requested_model)["current"] == {
-            "source_id": second.id,
+            "source_id": first.id,
             "model_id": "shared-model",
         }
 
@@ -2085,7 +2085,7 @@ def test_gateway_live_settlement_emits_matrix_copy_before_eof(
             terminal.removeprefix(b"\ndata: {}\n\nevent: error\ndata: ")
         )
         assert payload["sequence_number"] == 8
-        assert payload["code"] == "modelHub.launch.retry"
+        assert payload["code"] == "modelHub.errors.stream_interrupted"
         assert response.eof_called
 
     asyncio.run(exercise())
@@ -2251,7 +2251,7 @@ def test_preoutput_network_fallback_does_not_mutate_source_health(
             "failed_terminal",
             "standby",
         ),
-        (RawOutcomeKind.TIMEOUT, 200, None, "failed_terminal", "cooldown"),
+        (RawOutcomeKind.TIMEOUT, 200, None, "failed_terminal", "standby"),
     ],
 )
 def test_gateway_handle_terminal_matrix_always_uses_service_settlement(
@@ -5247,6 +5247,51 @@ def test_probe_401_uses_exact_credential_refresh_capability(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
+    ("refreshable", "expected_detail"),
+    (
+        (False, "models.source.needs_action.credential_revoked"),
+        (True, "models.source.needs_action.oauth_expired"),
+    ),
+)
+def test_probe_2xx_native_auth_error_uses_classified_blocker_detail(
+    tmp_path: Path,
+    refreshable: bool,
+    expected_detail: str,
+) -> None:
+    source = _source("src_probe2xxauth", "Native auth envelope")
+    outcomes = [
+        _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=200,
+            code="invalid_api_key",
+            source_id=source.id,
+        )
+    ]
+    if refreshable:
+        outcomes.append(
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=200,
+                code="invalid_api_key",
+                source_id=source.id,
+            )
+        )
+    service = _service(tmp_path, sources=[source], outcomes=outcomes)
+    model = _canonicalize_fixed_test_routes(service)["claude"]
+    adapter = cast(ProbeAdapter, service.adapter)
+    if refreshable:
+        assert source.credential_ref is not None
+        adapter.refreshable_credential_refs.add(source.credential_ref)
+
+    result = asyncio.run(service.probe_agent("claude", model))
+
+    assert result["error"] == expected_detail
+    persisted = service.store.load().sources[0].state
+    assert persisted.status == "needs_action"
+    assert persisted.detail_key == expected_detail
+
+
+@pytest.mark.parametrize(
     ("backend", "source_protocol", "request_protocol", "request_keys"),
     [
         (
@@ -5648,6 +5693,40 @@ def test_late_transient_settlement_preserves_needs_action_state(
     persisted = service.store.load().sources[0]
     assert persisted.state.status == "needs_action"
     assert persisted.state.detail_key == "models.source.needs_action.credential_revoked"
+
+
+def test_late_equal_priority_blocker_preserves_the_newer_reason(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_blockerorder", "Shared credential")
+    service = _service(tmp_path, sources=[source])
+    menu_models = _canonicalize_fixed_test_routes(service)
+    older_generation = service._reserve_settlement_generation(source.id)
+    newer_generation = service._reserve_settlement_generation(source.id)
+
+    async def settle_in_completion_order() -> None:
+        await service._set_source_blocker(
+            source.id,
+            backend="claude",
+            model_id=menu_models["claude"],
+            detail_key="models.source.needs_action.account_banned",
+            reason="account_banned",
+            settlement_generation=newer_generation,
+        )
+        await service._set_source_blocker(
+            source.id,
+            backend="codex",
+            model_id=menu_models["codex"],
+            detail_key="models.source.needs_action.oauth_expired",
+            reason="credential_expired",
+            settlement_generation=older_generation,
+        )
+
+    asyncio.run(settle_in_completion_order())
+
+    persisted = service.store.load().sources[0]
+    assert persisted.state.status == "needs_action"
+    assert persisted.state.detail_key == "models.source.needs_action.account_banned"
 
 
 def test_event_emission_rejects_unknown_source_ids(tmp_path: Path) -> None:
