@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from config import paths
-from config.v2_config import MemoryConfig, V2Config, atomic_update_memory
+from config.v2_config import (
+    MEMORY_RECOVERY_INTENTS,
+    MemoryConfig,
+    V2Config,
+    atomic_update_memory,
+)
 from core.memory.artifact import (
     EVEROS_VERSION,
     MemoryArtifactCandidate,
@@ -419,7 +424,7 @@ class MemoryRuntime:
         self._store = opened
         self._module = module
         self._require_maintenance().attach_store(opened)
-        if self._maintenance_open() or self.factory_reset_pending:
+        if self._maintenance_open() or self.recovery_pending:
             module.pause_claims()
         self._store_error = None
         self._configure_insight_reader(self._config)
@@ -431,6 +436,32 @@ class MemoryRuntime:
         """Whether the local store opened. False keeps every read closed."""
 
         return self._module is not None and not self._retired
+
+    @property
+    def recovery_pending(self) -> bool:
+        """Whether this aggregate is fenced by any durable recovery intent."""
+
+        return any(
+            getattr(config, "recovery_intent", None) in MEMORY_RECOVERY_INTENTS
+            for config in (self._config, self._restart_config)
+        )
+
+    def _durable_recovery_intent(self) -> str | None:
+        """Return the persisted recovery intent matching this runtime fence."""
+
+        try:
+            durable_intent = V2Config.load().memory.recovery_intent
+        except Exception:
+            logger.exception("Memory artifact admission could not load durable recovery intent")
+            return None
+        if durable_intent not in MEMORY_RECOVERY_INTENTS:
+            return None
+        if not any(
+            config.recovery_intent == durable_intent
+            for config in (self._config, self._restart_config)
+        ):
+            return None
+        return durable_intent
 
     @property
     def factory_reset_pending(self) -> bool:
@@ -2089,7 +2120,7 @@ class MemoryRuntime:
         replay = deepcopy(self._restart_config)
         if not replay.enabled:
             return {"ok": False, "error": "memory_disabled"}
-        if replay.recovery_intent in {"rebuild", "factory_reset"}:
+        if replay.recovery_intent in MEMORY_RECOVERY_INTENTS:
             if replay.recovery_intent == "factory_reset":
                 return {"ok": False, "error": "memory_operation_in_progress"}
             return {"ok": False, "error": "memory_embedding_rebuild_required"}
@@ -2358,6 +2389,34 @@ class MemoryRuntime:
                     "ok": True,
                     "result": "completed_empty",
                 }
+                # Empty rebuilds still own a provider-root format transition.
+                # Complete and verify it before clearing the durable retry fence.
+                try:
+                    async with self.module.provider_root_lifecycle():
+                        meta = await asyncio.to_thread(self._store.ensure_meta)
+                        active_metadata = self._active_provider_root_metadata()
+                        root_rollback = await run_blocking(
+                            self._provider_root_owner.activate_empty_format,
+                            meta,
+                            active_metadata,
+                        )
+                        try:
+                            await run_blocking(
+                                self._provider_root_owner.ensure,
+                                meta,
+                                active_metadata,
+                            )
+                        except Exception:
+                            if root_rollback is not None:
+                                await run_blocking(root_rollback.rollback)
+                            raise
+                except Exception:
+                    self._runtime_error = "memory_rebuild_failed"
+                    return {
+                        "ok": False,
+                        "error": self._runtime_error,
+                        "result": "failed",
+                    }
 
             settled = await run_blocking(
                 self._settle_rebuild_intent,
@@ -2601,18 +2660,23 @@ class MemoryRuntime:
     ) -> None:
         """Bridge the synchronous shared installer into the controller loop."""
 
-        # A durable factory-reset marker deliberately fences runtime activation.
-        # Repair still needs to publish an admitted pointer so the next reset
-        # attempt can proceed, but it must not resurrect the pending runtime.
-        if (
-            getattr(self._config, "recovery_intent", None) == "factory_reset"
-            or getattr(self._restart_config, "recovery_intent", None) == "factory_reset"
-        ):
+        # Factory reset deletes retained roots, so its durable fence may admit
+        # the pointer without inspecting them. Rebuild preserves retained data
+        # and therefore requires ProviderRoot.inspect() to have established
+        # compatibility before pointer-only admission.
+        durable_intent = (
+            self._durable_recovery_intent() if self.recovery_pending else None
+        )
+        if durable_intent == "factory_reset":
             commit()
             return
 
         if root_state is None:
             raise MemoryRuntimeActivationError("memory provider root could not be inspected")
+
+        if durable_intent == "rebuild":
+            commit()
+            return
 
         loop = self._activation_loop
         if loop is None or loop.is_closed():
