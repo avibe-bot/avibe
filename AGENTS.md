@@ -142,19 +142,13 @@ Agent routing model:
   `scope_settings.agent_backend` are not route selectors; new routing must follow
   the selected Vibe Agent and its backend
 
-Persisted-shape compatibility rule (2026-08-12, learned from PR #1345 — a schema
-change crashed startup for real users before the feature even launched):
+Persisted-shape rule:
 
-- config files and other on-disk artifacts written by any **released** Avibe
-  version are a shipped surface, even when the feature that owns them is still
-  behind a flag; "the feature is unreleased" never implies "no external consumers"
-- every change to a persisted shape must answer "what happens when the previous
-  release's file is loaded by this code" with **migration or safe degradation** —
-  a broken or unknown optional-feature section disables that feature, preserves
-  the original file, and logs a warning; startup must never fail because of it
-- each persisted-schema evolution must land with load-fixture tests covering the
-  historical released shapes (extend the fixture set added by PR #1345); a schema
-  PR without them is incomplete
+- on-disk artifacts written by any released version are a shipped surface, even
+  behind a feature flag
+- a schema change must load older releases' files via migration or safe
+  degradation (a broken optional-feature section disables that feature and
+  warns; startup never fails), with load fixtures covering the released shapes
 
 Source-of-truth rule:
 
