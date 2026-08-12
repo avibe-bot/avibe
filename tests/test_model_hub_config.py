@@ -970,6 +970,51 @@ def test_model_hub_ui_gate_preserves_unquoted_mapping_table_candidate(tmp_path: 
     )
 
 
+def test_model_hub_ui_gate_gap_header_baseline_is_typed_provenance(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = (
+        "| # | Surface | Missing | Evidence / disposition "
+        "(contract baseline `1993f4fd0`) |"
+    )
+    after = before.replace("1993f4fd0", "nextbasis1")
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    scale = "contract-gap candidates"
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert not any(
+        "contract-gap register header" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_copy_key_inheritance_preserves_row_inventory(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "Same normal-frame keys as Ready"
+    after = "Same normal-frame keys as Missing state"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    scale = "state-register candidates"
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(
+        "inherits Copy keys from `Missing state`" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
 @pytest.mark.parametrize("replacement", ("`Anthropic`", "anthropic"))
 def test_model_hub_ui_gate_preserves_malformed_mapping_values(
     tmp_path: Path, replacement: str
@@ -1191,8 +1236,8 @@ def test_model_hub_ui_gate_registry_mutations_preserve_candidate_inventory(
         ),
         (
             "contract-gap candidates",
-            "| # | Surface | Missing | Evidence / disposition (contract baseline `ea26ee6a0`) |",
-            "| # | Surface name | Missing | Evidence / disposition (contract baseline `ea26ee6a0`) |",
+            "| # | Surface | Missing | Evidence / disposition (contract baseline `1993f4fd0`) |",
+            "| # | Surface name | Missing | Evidence / disposition (contract baseline `1993f4fd0`) |",
             "contract-gap register header",
         ),
     ],
@@ -1317,7 +1362,7 @@ def test_model_hub_ui_gate_validates_shared_frame_exit_before_frame_resolution(
     row = next(
         line
         for line in spec.splitlines()
-        if line.startswith("| §1.6 / §1.9 / §1.10 / §1.11 | Committed projection stale")
+        if line.startswith("| §1.2 / §1.6 / §1.9 / §1.10 / §1.11 | Committed projection stale")
     )
     cells = row.split("|")
     cells[-2] = " — "

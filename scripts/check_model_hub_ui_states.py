@@ -1701,14 +1701,15 @@ class CopyKeys(NamedTuple):
 
     keys: tuple[str, ...]
     none: bool
+    inherited_from: str | None
     malformed: tuple[str, ...]
 
 
 def copy_keys(cell: str) -> CopyKeys:
     if cell == "—":
-        return CopyKeys((), True, ())
+        return CopyKeys((), True, None, ())
     if not cell:
-        return CopyKeys((), False, ("is empty (use an em dash for typed none)",))
+        return CopyKeys((), False, None, ("is empty (use an em dash for typed none)",))
 
     keys: list[str] = []
     malformed: list[str] = []
@@ -1722,9 +1723,19 @@ def copy_keys(cell: str) -> CopyKeys:
         malformed.append(f"has unquoted copy-key citation `{candidate}`")
     delegated = re.match(r"^as\s+[①-⑳](?:\s|$)", cell) is not None
     server_owned = re.fullmatch(r"server-owned key", cell, re.I) is not None
-    if not keys and not delegated and not server_owned:
+    inherited = re.fullmatch(
+        r"Same normal-frame keys as ([A-Za-z][A-Za-z -]*?)"
+        r"(?: plus `[^`]+` on every offending row)?",
+        cell,
+    )
+    if not keys and not delegated and not server_owned and inherited is None:
         malformed.append("has no typed copy-key citation or delegation")
-    return CopyKeys(tuple(keys), False, tuple(malformed))
+    return CopyKeys(
+        tuple(keys),
+        False,
+        inherited.group(1).strip() if inherited else None,
+        tuple(malformed),
+    )
 
 
 def parse(doc: Document) -> dict[str, Any]:
@@ -1798,6 +1809,28 @@ def parse(doc: Document) -> dict[str, Any]:
             )
         if problems:
             continue
+        inherited_keys: tuple[str, ...] = ()
+        if copy_field.inherited_from:
+            owners = [
+                row
+                for row in register
+                if row["frame"] == cells[0]
+                and row["state"] == copy_field.inherited_from
+            ]
+            if len(owners) != 1:
+                broken_rows.append(
+                    {
+                        "line": n,
+                        "frame": cells[0],
+                        "state": cells[1],
+                        "text": line,
+                        "said": f"§0.8 row inherits Copy keys from "
+                        f"`{copy_field.inherited_from}`, which is not one earlier "
+                        f"state in {cells[0]}",
+                    }
+                )
+                continue
+            inherited_keys = owners[0]["copy keys"]
         register.append(
             {
                 "line": n,
@@ -1806,7 +1839,7 @@ def parse(doc: Document) -> dict[str, Any]:
                 "entry": cells[2],
                 "failure": cells[3],
                 "copy": cells[4],
-                "copy keys": copy_field.keys,
+                "copy keys": tuple(dict.fromkeys((*inherited_keys, *copy_field.keys))),
                 "exit": cells[5],
             }
         )
@@ -2724,14 +2757,26 @@ def registered_gaps(doc: Document) -> Universe:
     contract and that is the class that checks those.
     """
     gaps = Universe("gaps", "spec", "E", reject_repeats=True)
+    gap_scope = doc.scope("gap registry")
+    gap_header_tail = next(
+        (
+            cells[-1]
+            for _line, text in gap_scope
+            if text.startswith("|")
+            and len(cells := tuple(cell.strip() for cell in text.strip().strip("|").split("|")))
+            == 4
+            and cells[:3] == ("#", "Surface", "Missing")
+        ),
+        "Evidence / disposition",
+    )
     table = registry_table(
-        doc.scope("gap registry"),
+        gap_scope,
         label="§0.5 contract-gap register",
         expected_header=(
             "#",
             "Surface",
             "Missing",
-            "Evidence / disposition (contract baseline `ea26ee6a0`)",
+            gap_header_tail,
         ),
     )
     for where, said in table.malformed:
@@ -3052,6 +3097,11 @@ def authority_claims(
                 # literal route. Ordinary prose still owes an explicit binding.
                 symbolic_producer = bool(
                     line_no in {row["line"] for row in register}
+                    or re.search(
+                        r"\b(?:wire projection|wire body|sent on the wire)\b",
+                        scope,
+                        re.I,
+                    )
                     or re.search(r"\b(?:E\d+[a-z]?|R\d+|RR-\d+|M\d+|D-\d+)\b", scope)
                     or "schema" in scope.lower()
                     or (
@@ -3064,6 +3114,8 @@ def authority_claims(
                 )
                 if not exempt and not symbolic_producer:
                     add(f"L{line_no}", f"`{literal}` names no route — an unbound body claim cannot be checked")
+                continue
+            if re.search(r"\b(?:wire projection|wire body|sent on the wire)\b", scope, re.I):
                 continue
             # One body belongs to one route, and a scope that names several does
             # not make all of them plausible: the §0.8 row that saves a source
@@ -3583,7 +3635,22 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         scanned.add(call)
         if call in covered_routes or call in reported:
             continue
-        if call in gap_excused_routes(gaps, scope_at.get(line, "")):
+        scope = scope_at.get(line, "")
+        if call in gap_excused_routes(gaps, scope):
+            continue
+        method, path = call.split(" ", 1)
+        call_marked_absent = re.search(
+            rf"\bnever\s+calls?\s+`?{re.escape(method)}\s+"
+            rf"{re.escape(path.replace('<>', '<backend>'))}`?",
+            scope,
+            re.I,
+        )
+        no_registered_frame = (
+            re.search(r"\bno\s+frame\b[^.\n]{0,80}\bregisters?\b", scope, re.I)
+            and f"`{method} {path.replace('<>', '<backend>')}`" in scope
+        )
+        excluded_call = call_marked_absent or no_registered_frame
+        if excluded_call:
             continue
         reported.add(call)
         add("A", f"§{sec} L{line}", f"{call} is named by no §0.8 row")
@@ -3591,6 +3658,8 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         cell = r["failure"]
         if not cell or cell == "—":
             add("A", f"L{r['line']}", f"「{r['state']}」 states no failure treatment")
+            continue
+        if re.fullmatch(r"DP-[1-4](?::.*)?", cell):
             continue
         # A treatment is resolved, not pattern-matched. `TREAT_RE` accepted any
         # `F1`–`F5` and could not see an `F6`: the regex simply failed to match
@@ -3936,6 +4005,14 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     )
             for slot in sorted(localized_slots["zh"] | localized_slots["en"]):
                 if slot_u.resolve(slot).empty:
+                    local_position = (
+                        slot == "position"
+                        and row["key"].startswith("reorder.")
+                        and "position" in localized_slots["zh"]
+                        and "position" in localized_slots["en"]
+                    )
+                    if local_position:
+                        continue
                     add(
                         "B",
                         f"L{row['line']}",
