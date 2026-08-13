@@ -136,7 +136,7 @@ def _memory_settings_payload() -> dict:
     payload["repair_available"] = (
         memory.recovery_intent is None and _memory_repair_available()
     )
- 
+
     return payload
 
 
