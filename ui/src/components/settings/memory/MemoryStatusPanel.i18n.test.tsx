@@ -85,6 +85,8 @@ describe('MemoryStatusPanel anomaly error localization', () => {
   it.each([
     ['en', 'memory_provider_timeout', en.errors.memory_provider_timeout],
     ['zh', 'memory_processing_failed', zh.errors.memory_processing_failed],
+    ['en', 'memory_clear_marker_unreadable', en.errors.memory_clear_marker_unreadable],
+    ['zh', 'memory_clear_legacy_abort_unsupported', zh.errors.memory_clear_legacy_abort_unsupported],
     ['zh', 'future_provider_failure', 'future_provider_failure'],
   ] as const)('renders %s error %s as %s', (language, errorCode, expected) => {
     renderAnomaly(language, errorCode);

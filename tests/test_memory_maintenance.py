@@ -178,6 +178,20 @@ async def test_corrupt_marker_can_be_replaced_by_user_clear(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_explicit_clear_consumes_unreadable_legacy_journal(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"not sqlite")
+    maintenance, _port = _maintenance(tmp_path)
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "completed"
+    assert not journal.exists()
+    assert maintenance.is_open() is False
+
+
+@pytest.mark.asyncio
 async def test_boot_quiesce_failure_persists_failed_marker(tmp_path: Path):
     maintenance, port = _maintenance(tmp_path)
     meta = maintenance._store.ensure_meta()  # type: ignore[union-attr]

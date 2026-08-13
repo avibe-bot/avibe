@@ -2220,6 +2220,8 @@ async def test_runtime_reconcile_completes_readable_clear_marker_on_boot(
     tmp_path: Path,
     memory_runtime_factory,
 ) -> None:
+    """MEMORY-CLEAR-202: runtime boot retries a failed marker after lease release."""
+
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),

@@ -1591,6 +1591,8 @@
     "memory_provider_response_invalid": "记忆返回了无效的响应。",
     "memory_processing_failed": "记忆处理失败。",
     "memory_clear_failed": "清除记忆数据失败。",
+    "memory_clear_marker_unreadable": "无法读取记忆清除状态。请再次执行清除以修复。",
+    "memory_clear_legacy_abort_unsupported": "旧版记忆恢复状态无法继续。请执行清除以替换它。",
     "memory_restart_failed": "重启记忆引擎失败。",
     "memory_runtime_unpublished": "当前 Avibe 版本尚未发布记忆运行时。",
     "memory_runtime_manifest_missing": "记忆运行时的清单缺失。",

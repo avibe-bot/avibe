@@ -1591,6 +1591,8 @@
     "memory_provider_response_invalid": "Memory returned an invalid response.",
     "memory_processing_failed": "Memory processing failed.",
     "memory_clear_failed": "Clearing Memory data failed.",
+    "memory_clear_marker_unreadable": "Memory Clear state could not be read. Run Clear again to repair it.",
+    "memory_clear_legacy_abort_unsupported": "An older Memory restore state cannot be resumed. Run Clear to replace it.",
     "memory_restart_failed": "Restarting the Memory engine failed.",
     "memory_runtime_unpublished": "This Avibe version hasn't published a memory runtime yet.",
     "memory_runtime_manifest_missing": "The memory runtime manifest is missing.",

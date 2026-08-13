@@ -163,6 +163,20 @@ class ClearIntentStore:
             if os.path.lexists(self.path):
                 raise ClearIntentError("Memory clear intent marker could not be removed") from error
 
+    def consume_legacy_clear_state(self) -> None:
+        """Remove the released clear journal after an explicit replacement Clear."""
+
+        legacy_path = self.home / LEGACY_JOURNAL_RELATIVE_PATH
+        try:
+            remove_confined_path(self.home, legacy_path)
+        except FileNotFoundError:
+            return
+        except (ConfinedFilesystemError, OSError) as error:
+            if os.path.lexists(legacy_path):
+                raise ClearIntentError(
+                    "legacy Memory clear journal could not be removed"
+                ) from error
+
     def migrate_legacy(self, *, current_epoch: int | None) -> ClearIntent | None:
         """Convert one released clear journal before deleting its old storage."""
 
