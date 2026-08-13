@@ -213,6 +213,10 @@ def _project_for_context(
             str(project.get("id") or ""),
         )
     }
+    if not context.has_role("editor"):
+        # Viewer responses must not disclose host-local filesystem details.
+        payload["folder_path"] = ""
+        payload["metadata"] = {}
     return payload
 
 

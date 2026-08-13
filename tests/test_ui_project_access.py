@@ -624,6 +624,13 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     engine.dispose()
 
     viewer = _remote_client(config, role="viewer", email="alice@example.com")
+    viewer_projects = _get(viewer, "/api/projects").get_json()["projects"]
+    viewer_project = next(row for row in viewer_projects if row["id"] == ids["project_a"])
+    assert viewer_project["folder_path"] == ""
+    assert viewer_project["metadata"] == {}
+    viewer_project_detail = _get(viewer, f"/api/projects/{ids['project_a']}").get_json()
+    assert viewer_project_detail["folder_path"] == ""
+    assert viewer_project_detail["metadata"] == {}
     assert _get(viewer, f"/api/sessions/{ids['session_a']}").status_code == 200
     assert _get(viewer, f"/api/sessions/{ids['session_b']}").status_code == 404
     headers = csrf_headers(viewer, REMOTE_ORIGIN)
@@ -734,6 +741,34 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     assert local_session_a["workdir"] == str((tmp_path / "project-a").resolve())
     assert local_session_a["metadata"] == {"host_session_hint": "/private/session"}
     assert local.get(f"/api/sessions/{ids['unscoped']}", base_url="http://localhost").status_code == 200
+
+
+def test_show_page_payload_redacts_path_for_viewers(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, _ids = _setup_state(tmp_path)
+    monkeypatch.setattr(
+        api,
+        "list_show_pages",
+        lambda **_kwargs: {
+            "ok": True,
+            "count": 1,
+            "pages": [{"session_id": "ses-page", "path": "/private/show-page"}],
+        },
+    )
+
+    viewer = _remote_client(config, role="viewer", email="alice@example.com")
+    viewer_page = next(
+        page for page in _get(viewer, "/api/show-pages").get_json()["pages"]
+        if page["session_id"] == "ses-page"
+    )
+    assert "path" not in viewer_page
+
+    editor = _remote_client(config, role="editor", email="alice@example.com")
+    editor_page = next(
+        page for page in _get(editor, "/api/show-pages").get_json()["pages"]
+        if page["session_id"] == "ses-page"
+    )
+    assert editor_page["path"] == "/private/show-page"
 
 
 def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) -> None:

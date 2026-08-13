@@ -5052,8 +5052,11 @@ def _is_remote_show_page_request() -> bool:
     )
 
 
-def _show_page_payload_for_request(payload: dict) -> dict:
-    return payload
+def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
+    context = _request_authorization_context(context)
+    if context is None or context.has_role("editor"):
+        return payload
+    return {key: value for key, value in payload.items() if key != "path"}
 
 
 @app.route("/api/show-pages", methods=["GET"])
@@ -5063,14 +5066,13 @@ def show_pages_list_get():
     context = getattr(g, "authorization_context", None)
     resource_context = _request_authorization_context(context)
     payload = api.list_show_pages(user_context=resource_context)
-    if _is_remote_show_page_request():
-        payload = {
-            **payload,
-            "pages": [
-                _show_page_payload_for_request(page)
-                for page in payload.get("pages", [])
-            ],
-        }
+    payload = {
+        **payload,
+        "pages": [
+            _show_page_payload_for_request(page, context)
+            for page in payload.get("pages", [])
+        ],
+    }
     return jsonify(payload)
 
 
@@ -5098,12 +5100,14 @@ def show_page_ensure_post(session_id):
     from vibe import api
 
     try:
+        context = _request_authorization_context()
         return jsonify(
             _show_page_payload_for_request(
                 api.ensure_show_page(
                     session_id,
-                    user_context=_request_authorization_context(),
-                )
+                    user_context=context,
+                ),
+                context,
             )
         )
     except ShowPageError as exc:
