@@ -365,7 +365,10 @@ _EDITOR_HTTP_NAMESPACES = (
     "/api/harness",
     "/api/terminal",
 )
-_VIEWER_HTTP_NAMESPACES = ("/api/web-push",)
+_VIEWER_HTTP_NAMESPACES = (
+    "/api/memory",
+    "/api/web-push",
+)
 _VIEWER_HTTP_MUTATION_RULES = (
     ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
 )
