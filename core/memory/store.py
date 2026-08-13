@@ -25,6 +25,15 @@ from core.memory.observations import (
     FlushSucceeded,
     FlushUnknown,
 )
+from core.memory.project_ids import (
+    DEFAULT_MEMORY_PROJECT_ID,
+    MAX_NAMED_MEMORY_PROJECTS,
+    is_legacy_memory_project_id,
+    is_named_memory_project_id,
+    is_new_stored_memory_project_id,
+    is_persisted_memory_project_id,
+    is_writable_memory_project_id,
+)
 from core.memory.types import (
     MemoryErrorCode,
     MemoryFailureLogEntry,
@@ -35,7 +44,7 @@ from core.memory.types import (
 
 MEMORY_STORE_FILENAME = "memory.sqlite"
 MEMORY_STORE_DIRNAME = "memory"
-MEMORY_STORE_SCHEMA_VERSION = 2
+MEMORY_STORE_SCHEMA_VERSION = 3
 MAX_NONTERMINAL_QUEUE_ROWS = 500
 MAX_MESSAGE_ATTEMPTS = 3
 TERMINAL_TOMBSTONE_LIMIT = 100_000
@@ -48,6 +57,7 @@ _MEMORY_STORE_TABLES = frozenset(
         "memory_session_flush_state",
         "memory_capture_queue",
         "memory_flush_settlements",
+        "memory_projects",
     }
 )
 _MEMORY_STORE_REQUIRED_COLUMNS = {
@@ -87,6 +97,14 @@ _MEMORY_STORE_REQUIRED_COLUMNS = {
             "operation_token",
             "recovery_origin",
             "attempts",
+        }
+    ),
+    "memory_projects": frozenset(
+        {
+            "principal_id",
+            "project_id",
+            "created_at",
+            "last_written_at",
         }
     ),
 }
@@ -523,7 +541,7 @@ def _migrate_v0_to_v2(
                 )
         conn.execute("DROP TABLE memory_capture_queue_v0")
         conn.execute("DROP TABLE memory_meta_v0")
-        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version = 2")
     except BaseException:
         conn.execute("ROLLBACK")
         raise
@@ -572,7 +590,143 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
             WHERE singleton = 1
             """
         )
-        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version = 2")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Widen project_ref and add the durable project catalog."""
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DROP INDEX IF EXISTS ix_memory_capture_due")
+        conn.execute("DROP INDEX IF EXISTS ix_memory_capture_session_generation")
+        conn.execute("ALTER TABLE memory_capture_queue RENAME TO memory_capture_queue_v2")
+        conn.execute(
+            """
+            CREATE TABLE memory_capture_queue (
+                source_message_digest TEXT PRIMARY KEY,
+                epoch INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                provider_session_ref TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation >= 1),
+                principal_id TEXT NOT NULL CHECK (
+                    length(principal_id) = 34
+                    AND substr(principal_id, 1, 2) = 'u-'
+                    AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
+                ),
+                project_ref TEXT NOT NULL CHECK (
+                    project_ref = 'default'
+                    OR (
+                        length(project_ref) = 34
+                        AND substr(project_ref, 1, 2) = 'p-'
+                        AND substr(project_ref, 3) NOT GLOB '*[^0-9a-f]*'
+                    )
+                    OR (
+                        length(project_ref) BETWEEN 1 AND 63
+                        AND substr(project_ref, 1, 1) GLOB '[a-z]'
+                        AND project_ref NOT GLOB '*[^a-z0-9_-]*'
+                        AND project_ref NOT IN ('all', 'personal', 'default')
+                        AND substr(project_ref, 1, 2) NOT IN ('p-', 'u-')
+                    )
+                ),
+                provenance TEXT NOT NULL CHECK (provenance IN ('user_input', 'agent')),
+                payload_text TEXT,
+                payload_attachments TEXT,
+                attachment_bundle_id TEXT REFERENCES memory_attachment_bundle(bundle_id) ON DELETE RESTRICT,
+                occurred_at_ms INTEGER NOT NULL,
+                provider_timestamp_ms INTEGER NOT NULL,
+                state TEXT NOT NULL CHECK (
+                    state IN ('pending', 'processing', 'delivered', 'dead', 'manual_required')
+                ),
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                next_retry_at TEXT,
+                lease_owner TEXT,
+                lease_at TEXT,
+                lease_token INTEGER NOT NULL DEFAULT 0 CHECK (lease_token >= 0),
+                last_error TEXT CHECK (
+                    last_error IS NULL OR last_error IN (
+                        'memory_disabled', 'memory_invalid_input', 'memory_input_too_large',
+                        'memory_queue_full', 'memory_low_disk_space', 'memory_store_unavailable',
+                        'memory_runtime_missing', 'memory_runtime_unsupported',
+                        'memory_runtime_install_failed', 'memory_sidecar_unavailable',
+                        'memory_provider_timeout', 'memory_provider_response_invalid',
+                        'memory_processing_failed', 'memory_clear_failed'
+                    )
+                ),
+                add_request_id TEXT,
+                add_status TEXT CHECK (add_status IS NULL OR add_status IN ('accumulated', 'extracted')),
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                CHECK (
+                    (state IN ('pending', 'processing', 'manual_required') AND payload_text IS NOT NULL)
+                    OR (state IN ('delivered', 'dead') AND payload_text IS NULL)
+                )
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO memory_capture_queue SELECT * FROM memory_capture_queue_v2"
+        )
+        conn.execute("DROP TABLE memory_capture_queue_v2")
+        conn.execute(
+            """
+            CREATE INDEX ix_memory_capture_due
+                ON memory_capture_queue (epoch, state, next_retry_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX ix_memory_capture_session_generation
+                ON memory_capture_queue (provider_session_ref, epoch, generation, state)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_projects (
+                principal_id TEXT NOT NULL CHECK (
+                    length(principal_id) = 34
+                    AND substr(principal_id, 1, 2) = 'u-'
+                    AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
+                ),
+                project_id TEXT NOT NULL CHECK (
+                    project_id = 'default'
+                    OR (
+                        length(project_id) BETWEEN 1 AND 63
+                        AND substr(project_id, 1, 1) GLOB '[a-z]'
+                        AND project_id NOT GLOB '*[^a-z0-9_-]*'
+                        AND project_id NOT IN ('all', 'personal', 'default')
+                        AND substr(project_id, 1, 2) NOT IN ('p-', 'u-')
+                    )
+                ),
+                created_at TEXT NOT NULL,
+                last_written_at TEXT NOT NULL,
+                PRIMARY KEY (principal_id, project_id)
+            )
+            """
+        )
+        for row in conn.execute(
+            "SELECT DISTINCT principal_id, project_ref FROM memory_capture_queue"
+        ):
+            project_ref = str(row["project_ref"])
+            if not is_new_stored_memory_project_id(project_ref):
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO memory_projects (
+                    principal_id, project_id, created_at, last_written_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (str(row["principal_id"]), project_ref, utc_now_iso(), utc_now_iso()),
+            )
+        leftover = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if leftover:
+            raise RuntimeError("Memory store foreign keys failed after v3 migration")
+        conn.execute("PRAGMA user_version = 3")
         _verify_current_schema(conn)
     except BaseException:
         conn.execute("ROLLBACK")
@@ -706,7 +860,14 @@ class QueueStats:
 
 @dataclass(frozen=True)
 class EnqueueResult:
-    outcome: Literal["accepted", "duplicate", "queue_full", "clearing", "timestamp_invalid"]
+    outcome: Literal[
+        "accepted",
+        "duplicate",
+        "queue_full",
+        "clearing",
+        "timestamp_invalid",
+        "project_limit",
+    ]
     row: QueueRow | None = None
 
 
@@ -992,6 +1153,27 @@ class MemoryStore:
         meta = self.get_meta()
         return bool(meta and meta.clear_in_progress)
 
+    def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
+        """Return implicit default plus catalogued named slugs for one principal."""
+
+        if not is_principal_id(principal_id):
+            raise ValueError("invalid Memory principal")
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT project_id, last_written_at FROM memory_projects
+                WHERE principal_id = ? AND project_id != ?
+                ORDER BY last_written_at DESC, project_id ASC
+                """,
+                (principal_id, DEFAULT_MEMORY_PROJECT_ID),
+            ).fetchall()
+        named = tuple(
+            str(row["project_id"])
+            for row in rows
+            if is_named_memory_project_id(str(row["project_id"]))
+        )
+        return (DEFAULT_MEMORY_PROJECT_ID, *named)
+
     def record_capture_skip(self, error: MemoryErrorCode | None) -> None:
         """Record a closed admission skip without retaining rejected input."""
 
@@ -1026,7 +1208,7 @@ class MemoryStore:
 
         if (
             not is_principal_id(principal_id)
-            or not is_project_id(project_ref)
+            or not is_writable_memory_project_id(project_ref)
             or provenance not in {"user_input", "agent"}
         ):
             raise ValueError("invalid Memory capture identity")
@@ -1043,6 +1225,12 @@ class MemoryStore:
                 (source_message_digest,),
             ).fetchone()
             if existing is not None:
+                _upsert_memory_project(
+                    conn,
+                    principal_id=principal_id,
+                    project_id=project_ref,
+                    now=now,
+                )
                 return EnqueueResult(outcome="duplicate", row=_queue_from_row(existing))
 
             pending_count = int(
@@ -1063,6 +1251,26 @@ class MemoryStore:
             if provider_timestamp_ms > max_provider_timestamp_ms:
                 self._record_capture_skip_in_connection(conn, None, now)
                 return EnqueueResult(outcome="timestamp_invalid")
+            if is_named_memory_project_id(project_ref):
+                existing_named = conn.execute(
+                    """
+                    SELECT 1 FROM memory_projects
+                    WHERE principal_id = ? AND project_id = ?
+                    """,
+                    (principal_id, project_ref),
+                ).fetchone()
+                if existing_named is None:
+                    named_count = int(
+                        conn.execute(
+                            """
+                            SELECT COUNT(*) FROM memory_projects
+                            WHERE principal_id = ? AND project_id != ?
+                            """,
+                            (principal_id, DEFAULT_MEMORY_PROJECT_ID),
+                        ).fetchone()[0]
+                    )
+                    if named_count >= MAX_NAMED_MEMORY_PROJECTS:
+                        return EnqueueResult(outcome="project_limit")
 
             session_id_ref = _provider_session_ref(
                 meta.scope_key,
@@ -1175,6 +1383,12 @@ class MemoryStore:
                     provider_timestamp_ms,
                     now,
                 ),
+            )
+            _upsert_memory_project(
+                conn,
+                principal_id=principal_id,
+                project_id=project_ref,
+                now=now,
             )
             return EnqueueResult(
                 outcome="accepted",
@@ -2920,6 +3134,7 @@ class MemoryStore:
             conn.execute("DELETE FROM memory_flush_settlements")
             conn.execute("DELETE FROM memory_session_flush_state")
             conn.execute("DELETE FROM memory_attachment_bundle")
+            conn.execute("DELETE FROM memory_projects")
             conn.execute(
                 """
                 UPDATE memory_meta
@@ -3135,15 +3350,14 @@ class MemoryStore:
 
     def _initialize(self) -> None:
         schema_sql = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+        v2_schema_sql = Path(__file__).with_name("schema_v2.sql").read_text(encoding="utf-8")
         # Store migrations deliberately compose on this already-open connection.
         with self._connection() as conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             application_tables = _application_tables(conn)
-            if version == 1:
-                _migrate_v1_to_v2(conn)
-            elif version not in {0, MEMORY_STORE_SCHEMA_VERSION}:
+            if version not in {0, 1, 2, MEMORY_STORE_SCHEMA_VERSION}:
                 raise RuntimeError(f"Unsupported Memory store schema version: {version}")
-            elif version == 0:
+            if version == 0:
                 if not application_tables:
                     _install_clean_schema(conn, schema_sql, application_tables)
                 else:
@@ -3155,9 +3369,15 @@ class MemoryStore:
                         )
                     _migrate_v0_to_v2(
                         conn,
-                        schema_sql,
+                        v2_schema_sql,
                         has_provider_ref=has_provider_ref,
                     )
+                    version = 2
+            if version == 1:
+                _migrate_v1_to_v2(conn)
+                version = 2
+            if version == 2:
+                _migrate_v2_to_v3(conn)
             _verify_current_schema(conn)
 
     @contextmanager
@@ -3635,13 +3855,27 @@ def is_principal_id(value: object) -> bool:
 
 
 def is_project_id(value: object) -> bool:
-    """Return whether a value has the exact opaque Memory project shape."""
+    """Compatibility alias for persisted project ids. Do not use on new writes."""
 
-    return (
-        isinstance(value, str)
-        and len(value) == 34
-        and value.startswith("p-")
-        and all(character in "0123456789abcdef" for character in value[2:])
+    return is_persisted_memory_project_id(value)
+
+
+def _upsert_memory_project(
+    conn: sqlite3.Connection,
+    *,
+    principal_id: str,
+    project_id: str,
+    now: str,
+) -> None:
+    if not is_new_stored_memory_project_id(project_id):
+        return
+    conn.execute(
+        """
+        INSERT INTO memory_projects (principal_id, project_id, created_at, last_written_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(principal_id, project_id) DO UPDATE SET last_written_at = excluded.last_written_at
+        """,
+        (principal_id, project_id, now, now),
     )
 
 

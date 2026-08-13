@@ -699,6 +699,7 @@
         "search": "Search local Memory",
         "remember": "Queue durable personal context",
         "query": "Search query",
+        "project": "Memory project: default or a named slug such as billing",
         "limit": "Maximum results (1-20)",
         "text": "Text to remember (maximum 4,000 characters)",
         "json": "Print machine-readable output"

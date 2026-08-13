@@ -267,6 +267,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("## Personal Memory", enabled_prompt)
         self.assertIn('`vibe memory search "<query>" --json`', enabled_prompt)
+        self.assertIn("cannot be `all`, `personal`", enabled_prompt)
+        self.assertIn("start with `p-` / `u-`", enabled_prompt)
         self.assertIn("`vibe memory profile --json`", enabled_prompt)
         self.assertIn("`vibe memory status --json`", enabled_prompt)
         self.assertIn('`vibe memory remember "<text>" --json`', enabled_prompt)

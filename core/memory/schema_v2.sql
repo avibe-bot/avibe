@@ -98,19 +98,9 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
         AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
     ),
     project_ref TEXT NOT NULL CHECK (
-        project_ref = 'default'
-        OR (
-            length(project_ref) = 34
-            AND substr(project_ref, 1, 2) = 'p-'
-            AND substr(project_ref, 3) NOT GLOB '*[^0-9a-f]*'
-        )
-        OR (
-            length(project_ref) BETWEEN 1 AND 63
-            AND substr(project_ref, 1, 1) GLOB '[a-z]'
-            AND project_ref NOT GLOB '*[^a-z0-9_-]*'
-            AND project_ref NOT IN ('all', 'personal', 'default')
-            AND substr(project_ref, 1, 2) NOT IN ('p-', 'u-')
-        )
+        length(project_ref) = 34
+        AND substr(project_ref, 1, 2) = 'p-'
+        AND substr(project_ref, 3) NOT GLOB '*[^0-9a-f]*'
     ),
     provenance TEXT NOT NULL CHECK (provenance IN ('user_input', 'agent')),
     payload_text TEXT,
@@ -144,27 +134,6 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
         (state IN ('pending', 'processing', 'manual_required') AND payload_text IS NOT NULL)
         OR (state IN ('delivered', 'dead') AND payload_text IS NULL)
     )
-);
-
-CREATE TABLE IF NOT EXISTS memory_projects (
-    principal_id TEXT NOT NULL CHECK (
-        length(principal_id) = 34
-        AND substr(principal_id, 1, 2) = 'u-'
-        AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
-    ),
-    project_id TEXT NOT NULL CHECK (
-        project_id = 'default'
-        OR (
-            length(project_id) BETWEEN 1 AND 63
-            AND substr(project_id, 1, 1) GLOB '[a-z]'
-            AND project_id NOT GLOB '*[^a-z0-9_-]*'
-            AND project_id NOT IN ('all', 'personal', 'default')
-            AND substr(project_id, 1, 2) NOT IN ('p-', 'u-')
-        )
-    ),
-    created_at TEXT NOT NULL,
-    last_written_at TEXT NOT NULL,
-    PRIMARY KEY (principal_id, project_id)
 );
 
 CREATE INDEX IF NOT EXISTS ix_memory_capture_due

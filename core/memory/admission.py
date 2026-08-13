@@ -101,15 +101,12 @@ class CaptureAdmission:
             return None
 
     def project_for(self, facts: InboundTurnFacts) -> str | None:
-        """Derive this turn's opaque project, or None when cwd is unresolved."""
+        """Return the default Memory project. User turns do not use workdir."""
 
-        workdir = facts.workdir
-        if not isinstance(workdir, str) or not workdir or workdir != workdir.strip():
-            return None
-        try:
-            return self._principals.project_for_workdir(workdir)
-        except Exception:
-            return None
+        del facts
+        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
+
+        return DEFAULT_MEMORY_PROJECT_ID
 
     def admits(self, facts: InboundTurnFacts) -> bool:
         """Admit an attributed human Workbench turn or a bound private IM turn."""

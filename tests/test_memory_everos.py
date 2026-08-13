@@ -30,7 +30,7 @@ from core.memory.types import (
 )
 
 
-PROJECT = "p-22222222222222222222222222222222"
+PROJECT = "default"
 PRINCIPAL = "owner-1"
 SESSION_REF = ProviderSessionRef(
     principal_id=PRINCIPAL,

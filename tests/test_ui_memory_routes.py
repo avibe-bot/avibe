@@ -911,13 +911,13 @@ def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch,
     assert user_keys == ["avibe:local"]
 
 
-def test_memory_search_requires_csrf_and_only_forwards_query_and_policy(monkeypatch, tmp_path) -> None:
+def test_memory_search_requires_csrf_and_only_forwards_query_policy_and_optional_project(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     calls: list[tuple[str, dict[str, object], str]] = []
 
-    async def search(query: str, policy: dict[str, object], *, user_key: str):
-        calls.append((query, policy, user_key))
+    async def search(query: str, policy: dict[str, object], *, user_key: str, project: str | None = None):
+        calls.append((query, policy, user_key, project))
         return {"status_code": 200, "body": {"status": "ok", "items": [], "warnings": []}}
 
     monkeypatch.setattr(internal_client, "memory_search", search)
@@ -950,6 +950,7 @@ def test_memory_search_requires_csrf_and_only_forwards_query_and_policy(monkeypa
                 "include_current_session": False,
             },
             "avibe:local",
+            None,
         )
     ]
     assert response.headers["cache-control"] == "no-store"

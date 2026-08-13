@@ -39,7 +39,7 @@ from core.memory.types import (
 
 
 PRINCIPAL = "u-11111111111111111111111111111111"
-PROJECT = "p-22222222222222222222222222222222"
+PROJECT = "default"
 
 
 def _maintenance(runtime: MemoryRuntime) -> MemoryMaintenance:

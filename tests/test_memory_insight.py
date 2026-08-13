@@ -17,8 +17,8 @@ from core.memory.types import ProviderSessionRef
 
 ALICE = "u-" + "a" * 32
 BOB = "u-" + "b" * 32
-PROJECT = "p-" + "1" * 32
-OTHER_PROJECT = "p-" + "2" * 32
+PROJECT = "default"
+OTHER_PROJECT = "billing"
 
 
 def _json(value: object) -> str:
@@ -491,7 +491,7 @@ def test_scoped_and_admin_memcell_queries_keep_distinct_fail_closed_authorizatio
         "mc_bad_project",
         ALICE,
         timestamp_ms=2_000,
-        project="missing-provenance",
+        project="all",
     )
     _insert_memcell(insight_paths, "mc_bad_owner", ALICE, timestamp_ms=1_000)
     with sqlite3.connect(insight_paths.system_db_path) as conn:

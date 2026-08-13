@@ -554,9 +554,18 @@ def cmd_memory(args) -> int:
         elif operation == "profile":
             response = internal_client.memory_profile_sync(**access)
         elif operation == "search":
-            response = internal_client.memory_search_sync(query, args.limit, **access)
+            response = internal_client.memory_search_sync(
+                query,
+                args.limit,
+                project=getattr(args, "project", None),
+                **access,
+            )
         else:
-            response = internal_client.memory_remember_sync(query, **access)
+            response = internal_client.memory_remember_sync(
+                query,
+                project=getattr(args, "project", None),
+                **access,
+            )
     except internal_client.InternalServerUnavailable:
         return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json, language=language)
 
@@ -14243,6 +14252,11 @@ def build_parser():
         help=i18n_t("memory.cli.help.limit", memory_help_language),
     )
     memory_search_parser.add_argument(
+        "--project",
+        default=None,
+        help=i18n_t("memory.cli.help.project", memory_help_language),
+    )
+    memory_search_parser.add_argument(
         "--json",
         action="store_true",
         help=i18n_t("memory.cli.help.json", memory_help_language),
@@ -14254,6 +14268,11 @@ def build_parser():
     memory_remember_parser.add_argument(
         "text",
         help=i18n_t("memory.cli.help.text", memory_help_language),
+    )
+    memory_remember_parser.add_argument(
+        "--project",
+        default=None,
+        help=i18n_t("memory.cli.help.project", memory_help_language),
     )
     memory_remember_parser.add_argument(
         "--json",

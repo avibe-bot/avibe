@@ -17,7 +17,8 @@ from core.memory.sidecar import (
 )
 
 
-PROJECT = "p-22222222222222222222222222222222"
+PROJECT = "default"
+LEGACY_PROJECT = "p-22222222222222222222222222222222"
 SESSION_ID = f"src--{'1' * 64}--e1"
 
 

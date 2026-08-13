@@ -1,0 +1,48 @@
+version: 1
+capability:
+  id: memory_search
+  name: Default Memory project and explicit named projects
+  canonical_tests:
+    - tests/test_memory_admission.py
+    - tests/test_memory_store.py
+    - tests/test_internal_server.py
+status_legend:
+  covered: executable evidence exists
+  partial: contract coverage exists
+scenarios:
+  - id: MEMORY-SEARCH-001
+    name: User turns land in default and Settings default search can retrieve them
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/test_memory_admission.py::test_user_turns_capture_into_default_without_a_workdir
+  - id: MEMORY-SEARCH-002
+    name: Named remember is isolated from default search
+    status: partial
+    kind: happy_path
+    layer: contract
+    test: tests/test_memory_project_ids.py::test_parsers_reject_empty_and_mixed_case
+  - id: MEMORY-SEARCH-003
+    name: Settings all searches this principal only
+    status: partial
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_project_ids.py::test_ui_parser_accepts_all_agent_does_not
+  - id: MEMORY-SEARCH-004
+    name: Agent cannot search all; reserved ids are rejected
+    status: covered
+    kind: validation
+    layer: contract
+    test: tests/test_memory_project_ids.py::test_ui_parser_accepts_all_agent_does_not
+  - id: MEMORY-SEARCH-005
+    name: v2 stores migrate and accept default enqueue
+    status: covered
+    kind: migration
+    layer: contract
+    test: tests/test_memory_store.py::test_store_migrates_v2_queue_and_accepts_default_project
+  - id: MEMORY-SEARCH-006
+    name: Final flush visits every current session scope
+    status: partial
+    kind: lifecycle
+    layer: contract
+    test: tests/test_memory_store.py::test_session_scope_recovery_survives_store_reopen_and_separates_sessions
