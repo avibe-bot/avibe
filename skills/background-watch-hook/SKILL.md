@@ -258,6 +258,7 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --repo avibe-bot/avibe --pr 151 \
   --sha "$HEAD_SHA" --branch "$BRANCH" \
   --workflow CI --workflow Lint \
+  --actionable-only \
   --state-file "$STATE_FILE" --seed-state
 
 # Push or post the review trigger only after the combined baseline is durable.

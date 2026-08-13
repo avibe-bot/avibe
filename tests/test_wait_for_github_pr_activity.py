@@ -816,6 +816,50 @@ def test_combined_ci_mode_requires_exact_sha_and_workflow() -> None:
     assert "--new-prs" in (module._validate_ci_args(new_pr_mode) or "")
 
 
+def test_pr_only_watch_identity_keeps_the_legacy_material() -> None:
+    module = _load_module()
+    args = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--actionable-only"]
+    )
+    expected_material = json.dumps(
+        {
+            "mode": "pr",
+            "actionable_only": True,
+            "include_self_comments": False,
+            "ignore_authors": [],
+            "ignore_comment_patterns": [],
+        },
+        sort_keys=True,
+    )
+    expected = module.hashlib.sha256(
+        f"wait_pr/{module.STATE_FILE_VERSION}/{expected_material}".encode()
+    ).hexdigest()[:16]
+
+    assert module._watch_identity(args) == expected
+
+
+def test_combined_watch_identity_includes_ci_contract() -> None:
+    module = _load_module()
+    pr_only = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--actionable-only"]
+    )
+    combined = module._build_parser().parse_args(
+        [
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "153",
+            "--actionable-only",
+            "--sha",
+            "abc123",
+            "--workflow",
+            "CI",
+        ]
+    )
+
+    assert module._watch_identity(pr_only) != module._watch_identity(combined)
+
+
 def test_combined_pr_waiter_reports_ci_completion(tmp_path) -> None:
     module = _load_module()
     state_file = tmp_path / "pr-153-combined.json"
@@ -874,6 +918,87 @@ def test_combined_pr_waiter_reports_ci_completion(tmp_path) -> None:
     assert fetch_calls == 2
     assert "GitHub Actions success for avibe-bot/avibe@abc123 on feature" in stdout.getvalue()
     assert "CI: status=completed conclusion=success" in stdout.getvalue()
+
+
+def test_combined_settle_does_not_report_a_stale_ci_success_after_a_rerun_starts() -> None:
+    module = _load_module()
+    fetch_calls = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": "abc123"}
+        if fetch_calls == 1:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 1,
+            }
+        elif fetch_calls == 2:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 2,
+            }
+            state["review_comments"] = [_review_comment(501)]
+        else:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "in_progress",
+                "conclusion": None,
+                "run_attempt": 2,
+            }
+            state["review_comments"] = [_review_comment(501)]
+        state["actions"] = [action]
+        return state, 2
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "abc123",
+                "--branch",
+                "feature",
+                "--workflow",
+                "CI",
+                "--settle",
+                "1",
+                "--timeout",
+                "0",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    output = stdout.getvalue()
+    assert rc == 0
+    assert fetch_calls == 5
+    assert "review_comment #501" in output
+    assert "GitHub Actions success" not in output
 
 
 def test_main_reduces_unauthenticated_new_pr_interval_after_bootstrap() -> None:

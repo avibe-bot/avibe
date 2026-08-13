@@ -98,6 +98,7 @@ def normalize_selected_runs(selected: dict[str, list[dict[str, Any]]]) -> dict[s
                 "conclusion": run.get("conclusion"),
                 "head_sha": run.get("head_sha"),
                 "head_branch": run.get("head_branch"),
+                "run_attempt": run.get("run_attempt"),
             }
             for run in runs
         ]

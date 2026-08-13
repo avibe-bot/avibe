@@ -906,20 +906,28 @@ def _watch_identity(args: argparse.Namespace) -> str:
     only in those can share cursors without losing anything.
     """
 
-    material = json.dumps(
-        {
-            "mode": "new-prs" if args.new_prs else "pr",
-            "actionable_only": bool(args.actionable_only),
-            "include_self_comments": bool(args.include_self_comments),
-            "ignore_authors": sorted(_normalize_authors(args.ignore_author)),
-            "ignore_comment_patterns": sorted(set(args.ignore_comment_pattern or [])),
-            "ci_sha": args.sha,
-            "ci_branch": args.branch,
-            "ci_workflows": list(args.workflow or []),
-            "ci_success_conclusions": sorted(_parse_success_conclusions(args.success_conclusion)),
-        },
-        sort_keys=True,
-    )
+    material_fields = {
+        "mode": "new-prs" if args.new_prs else "pr",
+        "actionable_only": bool(args.actionable_only),
+        "include_self_comments": bool(args.include_self_comments),
+        "ignore_authors": sorted(_normalize_authors(args.ignore_author)),
+        "ignore_comment_patterns": sorted(set(args.ignore_comment_pattern or [])),
+    }
+    # Keep the v0.14 PR-only identity stable. Adding CI fields to that hash would
+    # make every existing PR-only state file look owned by a different watch after
+    # upgrading, even though its report contract has not changed.
+    if _ci_enabled(args):
+        material_fields.update(
+            {
+                "ci_sha": args.sha,
+                "ci_branch": args.branch,
+                "ci_workflows": list(args.workflow or []),
+                "ci_success_conclusions": sorted(
+                    _parse_success_conclusions(args.success_conclusion)
+                ),
+            }
+        )
+    material = json.dumps(material_fields, sort_keys=True)
     return hashlib.sha256(f"wait_pr/{STATE_FILE_VERSION}/{material}".encode()).hexdigest()[:16]
 
 
@@ -2130,6 +2138,21 @@ def main() -> int:
                     head_sha=args.sha,
                 )
 
+        def _actions_waiting_for_terminal_result() -> bool:
+            if not ci_enabled:
+                return False
+            current_actions = normalize_selected_runs(selected_actions)
+            if actions_snapshot is not None and current_actions == actions_snapshot:
+                return False
+            actions_output, _failed = render_actions_result(
+                repo=args.repo,
+                branch=args.branch,
+                head_sha=args.sha,
+                selected=selected_actions,
+                success_conclusions=success_conclusions,
+            )
+            return actions_output is None
+
         def _advance_since() -> None:
             nonlocal review_comment_since, issue_comment_since
             review_comment_since = later_since(review_comment_since, state["review_comments"])
@@ -2211,6 +2234,13 @@ def main() -> int:
                 return first
 
             best = first
+            best_pr_only = _render(pending) if ci_enabled else None
+
+            def _fallback() -> tuple[str | None, int, int, int, int, str]:
+                if _actions_waiting_for_terminal_result():
+                    return best_pr_only or (None, *best[1:])
+                return best
+
             for _round in range(SETTLE_MAX_ROUNDS):
                 # The batch is already worth a turn, so waiting for the rest of it must
                 # not push the waiter past its own deadline: `vibe watch` kills the
@@ -2227,7 +2257,7 @@ def main() -> int:
                             "reporting the batch seen so far.",
                             file=sys.stderr,
                         )
-                        return best
+                        return _fallback()
                 time.sleep(settle_seconds)
                 settle_request = github_request(
                     lambda: _fetch_state(
@@ -2250,15 +2280,20 @@ def main() -> int:
                         f"Settle re-poll failed: {settle_request.error}; reporting the batch seen so far.",
                         file=sys.stderr,
                     )
-                    return best
+                    return _fallback()
                 if settle_request.value is None:
                     print(
                         "Settle re-poll returned no state; reporting the batch seen so far.",
                         file=sys.stderr,
                     )
-                    return best
+                    return _fallback()
                 state, _count = settle_request.value
                 _refresh_actions()
+                pr_candidate = _render(pending)
+                if _actions_waiting_for_terminal_result():
+                    if pr_candidate[0] is not None:
+                        best_pr_only = pr_candidate
+                    continue
                 # Rendered from the same cursors as the first hit, so the result is a
                 # superset rather than a second, partial report.
                 candidate = _render_combined(pending)
@@ -2267,7 +2302,7 @@ def main() -> int:
                 if candidate[1:] == best[1:]:
                     return candidate
                 best = candidate
-            return best
+            return _fallback()
 
         pending_cursors = (
             review_cursor,

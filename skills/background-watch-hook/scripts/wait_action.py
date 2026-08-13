@@ -28,6 +28,7 @@ from _github_actions_wait import (  # noqa: E402
     DEFAULT_SUCCESS_CONCLUSIONS,
     TERMINAL_STATUS,
     fetch_workflow_runs as _fetch_workflow_runs,
+    normalize_selected_runs as _normalize_selected_runs,
     render_actions_result as _render_actions_result,
     select_matching_runs as _select_latest_runs_by_workflow,
 )
@@ -43,6 +44,7 @@ def _write_cursor_output(path: str | None, *, selected: dict[str, list[dict[str,
                 "id": run.get("id"),
                 "status": run.get("status"),
                 "conclusion": run.get("conclusion"),
+                "run_attempt": run.get("run_attempt"),
                 "html_url": run.get("html_url"),
             }
             for run in runs
