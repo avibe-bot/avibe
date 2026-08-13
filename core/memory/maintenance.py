@@ -20,6 +20,7 @@ from core.memory.clear_intent import (
     LEGACY_ABORT_ERROR_CODE,
     cleanup_legacy_backup_storage,
 )
+from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.store import MemoryStore
 
 
@@ -98,13 +99,8 @@ class MemoryMaintenance:
         self._intent = ClearIntentStore(effective_home)
         self._initialization_error: Exception | None = None
         self._intent_error: Exception | None = None
+        self._legacy_migration_deferred = False
         self._closing = False
-        try:
-            failures = cleanup_legacy_backup_storage(effective_home)
-            for relative in failures:
-                logger.warning("Legacy Memory cleanup could not remove %s", relative)
-        except Exception:
-            logger.warning("Legacy Memory backup cleanup could not complete", exc_info=True)
         self._migrate_legacy(store)
 
     @property
@@ -115,10 +111,31 @@ class MemoryMaintenance:
         self._store = store
         self._migrate_legacy(store)
 
-    def _migrate_legacy(self, store: MemoryStore | None) -> None:
+    def _migrate_legacy(self, store: MemoryStore | None, *, lease_held: bool = False) -> None:
         if self._intent_error is not None:
             return
+        lease = None
+        if not lease_held:
+            lease = MemoryOperationLease(self._intent.home)
+            try:
+                lease.acquire()
+            except MemoryOperationBusy:
+                self._legacy_migration_deferred = True
+                logger.warning(
+                    "Legacy Memory cleanup deferred while another operation owns the lease"
+                )
+                return
+            except Exception:
+                logger.warning("Legacy Memory cleanup lease could not be acquired", exc_info=True)
+                return
         try:
+            self._legacy_migration_deferred = False
+            try:
+                failures = cleanup_legacy_backup_storage(self._intent.home)
+                for relative in failures:
+                    logger.warning("Legacy Memory cleanup could not remove %s", relative)
+            except Exception:
+                logger.warning("Legacy Memory backup cleanup could not complete", exc_info=True)
             current_epoch = store.ensure_meta().epoch if store is not None else None
             self._intent.migrate_legacy(current_epoch=current_epoch)
         except ClearIntentUnreadable as error:
@@ -127,9 +144,16 @@ class MemoryMaintenance:
         except Exception as error:
             self._initialization_error = error
             logger.exception("Memory Clear state migration failed")
+        finally:
+            if lease is not None:
+                lease.release()
 
     def is_open(self) -> bool:
-        if self._initialization_error is not None or self._intent_error is not None:
+        if (
+            self._initialization_error is not None
+            or self._intent_error is not None
+            or self._legacy_migration_deferred
+        ):
             return True
         try:
             return self._intent.load() is not None
@@ -192,6 +216,8 @@ class MemoryMaintenance:
         clear_in_progress = self._read_projection()
         if self._initialization_error is not None or self._intent_error is not None:
             block_reason = "memory_clear_failed"
+        elif self._legacy_migration_deferred:
+            block_reason = "memory_operation_in_progress"
         elif clear_in_progress is None:
             block_reason = None
         elif clear_in_progress.state == "failed":
@@ -239,7 +265,11 @@ class MemoryMaintenance:
     async def reconcile_pending(self) -> bool:
         """Finish a marker-owned Clear during boot/reconcile."""
 
-        if self._intent_error is not None or self._store is None:
+        if self._store is None:
+            return False
+        if self._legacy_migration_deferred:
+            self._migrate_legacy(self._store, lease_held=True)
+        if self._intent_error is not None:
             return False
         try:
             intent = await self._run_maintenance_io(self._intent.load)
@@ -293,39 +323,66 @@ class MemoryMaintenance:
                 if intent is None:
                     meta = await self._run_maintenance_io(self._store.ensure_meta)
                     intent = ClearIntent.new(operator_ref=operator_ref, pre_epoch=meta.epoch)
-                    await self._run_maintenance_io(lambda: self._intent.write(intent))
-                    self._intent_error = None
+                    write_intent = True
                 elif intent.state == "failed":
                     meta = await self._run_maintenance_io(self._store.ensure_meta)
                     if meta.epoch not in {intent.pre_epoch, intent.target_epoch}:
                         intent = ClearIntent.new(operator_ref=operator_ref, pre_epoch=meta.epoch)
                     else:
                         intent = intent.deleting()
-                    await self._run_maintenance_io(lambda: self._intent.write(intent))
-                    self._intent_error = None
+                    write_intent = True
+                else:
+                    write_intent = False
                 try:
-                    await self._run_maintenance_io(self._store.begin_clear_fence)
-                    await self._runtime.pause_claims()
-                    await self._runtime.quiesce(False)
+                    await self._settle_prepare_clear(intent, write_intent=write_intent)
                 except asyncio.CancelledError:
-                    self._runtime.resume_claims()
+                    await self._record_failure(intent, "memory_clear_failed")
                     raise
                 except Exception:
-                    self._runtime.resume_claims()
                     await self._record_failure(intent, "memory_clear_failed")
                     return ClearResult(status="failed", error="memory_clear_failed")
-                try:
-                    await self._run_maintenance_io(self._intent.consume_legacy_clear_state)
-                except asyncio.CancelledError:
-                    await self._record_failure(intent, "memory_clear_failed")
-                    raise
-                except Exception:
-                    await self._record_failure(intent, "memory_clear_failed")
-                    return self._failed_result()
                 assert intent is not None
                 return await self._run_clear_intent(intent, operator_ref=operator_ref, boot=boot)
             finally:
                 self._runtime.leave_maintenance()
+
+    async def _settle_prepare_clear(self, intent: ClearIntent, *, write_intent: bool) -> None:
+        cancellation: asyncio.CancelledError | None = None
+
+        async def prepare() -> None:
+            nonlocal cancellation
+            assert self._store is not None
+            if write_intent:
+                try:
+                    await self._run_maintenance_io(lambda: self._intent.write(intent))
+                except asyncio.CancelledError as error:
+                    # The blocking write has settled durably; finish the
+                    # safety fence before propagating the caller cancellation.
+                    cancellation = error
+                self._intent_error = None
+            await self._runtime.pause_claims()
+            await self._run_maintenance_io(self._store.begin_clear_fence)
+            await self._runtime.quiesce(False)
+            await self._run_maintenance_io(self._intent.consume_legacy_clear_state)
+            if cancellation is not None:
+                raise cancellation
+
+        task = asyncio.create_task(prepare())
+        outer_cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                outer_cancellation = outer_cancellation or error
+            except Exception:
+                break
+        if outer_cancellation is not None:
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise outer_cancellation
+        task.result()
 
     async def _run_clear_intent(
         self,

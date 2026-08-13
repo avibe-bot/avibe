@@ -46,6 +46,28 @@ def test_marker_schema_rejects_non_uuid4_and_extra_fields(tmp_path: Path):
         ClearIntentStore(tmp_path).load()
 
 
+@pytest.mark.parametrize("schema_version", (True, 1.0))
+def test_marker_schema_rejects_non_integer_versions(tmp_path: Path, schema_version: object):
+    marker = tmp_path / MARKER_RELATIVE_PATH
+    marker.parent.mkdir(parents=True)
+    intent = ClearIntent.new(operator_ref="user-1", pre_epoch=1)
+    payload = {
+        "schema_version": schema_version,
+        "operation_id": intent.operation_id,
+        "operator_ref": intent.operator_ref,
+        "pre_epoch": intent.pre_epoch,
+        "target_epoch": intent.target_epoch,
+        "state": intent.state,
+        "error_code": intent.error_code,
+        "created_at": intent.created_at,
+        "updated_at": intent.updated_at,
+    }
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).load()
+
+
 def test_marker_reader_rejects_oversized_regular_file(tmp_path: Path):
     marker = tmp_path / MARKER_RELATIVE_PATH
     marker.parent.mkdir(parents=True)

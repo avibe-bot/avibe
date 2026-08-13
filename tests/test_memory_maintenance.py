@@ -12,6 +12,7 @@ from core.memory.clear_intent import (
     DEFAULT_CLEAR_SURFACES,
 )
 from core.memory.maintenance import MemoryMaintenance
+from core.memory.operation_lock import MemoryOperationLease
 from core.memory.store import MemoryStore
 
 
@@ -241,6 +242,56 @@ async def test_legacy_journal_removal_failure_keeps_claims_fenced(tmp_path: Path
     assert failed is not None
     assert failed.state == "failed"
     assert failed.error_code == "memory_clear_failed"
+
+
+@pytest.mark.asyncio
+async def test_marker_write_cancellation_settles_claim_fence(tmp_path: Path, monkeypatch):
+    import asyncio
+    import threading
+
+    maintenance, port = _maintenance(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    original_write = maintenance._intent.write
+
+    def gated_write(intent):
+        started.set()
+        release.wait()
+        original_write(intent)
+
+    monkeypatch.setattr(maintenance._intent, "write", gated_write)
+    clear_task = asyncio.create_task(maintenance.clear(operator_ref="user-1"))
+    assert await asyncio.to_thread(started.wait, 1.0)
+    clear_task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await clear_task
+
+    assert port.claim_events == ["pause", "quiesce"]
+    assert port.resumed == 0
+    assert maintenance._store is not None
+    assert maintenance._store.clear_in_progress() is True
+    failed = ClearIntentStore(tmp_path).load()
+    assert failed is not None
+    assert failed.state == "failed"
+
+
+def test_legacy_cleanup_defers_while_operation_lease_is_busy(tmp_path: Path):
+    snapshot = tmp_path / "state/memory/clear-snapshots/snapshot.json"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("retained", encoding="utf-8")
+    lease = MemoryOperationLease(tmp_path)
+    lease.acquire()
+    try:
+        maintenance, _port = _maintenance(tmp_path)
+        assert snapshot.read_text(encoding="utf-8") == "retained"
+        assert maintenance.is_open() is True
+    finally:
+        lease.release()
+
+    _maintenance(tmp_path)
+    assert not snapshot.parent.exists()
 
 
 @pytest.mark.asyncio

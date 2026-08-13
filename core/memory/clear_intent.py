@@ -319,7 +319,14 @@ def _encode(intent: ClearIntent) -> dict[str, object]:
 
 def _decode(payload: bytes) -> ClearIntent:
     value = json.loads(payload.decode("utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != MARKER_SCHEMA_VERSION:
+    if not isinstance(value, dict):
+        raise ValueError("unsupported clear intent schema")
+    schema_version = value.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != MARKER_SCHEMA_VERSION
+    ):
         raise ValueError("unsupported clear intent schema")
     required = {"operation_id", "operator_ref", "pre_epoch", "target_epoch", "state", "error_code", "created_at", "updated_at"}
     if set(value) != required | {"schema_version"}:
