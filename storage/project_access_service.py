@@ -376,6 +376,14 @@ def get_session_project_id(conn: Connection, session_id: str) -> str | None:
     return project_id_from_scope_id(scope_id)
 
 
+def session_exists(conn: Connection, session_id: str) -> bool:
+    """Return whether the session row still exists."""
+
+    return conn.execute(
+        select(agent_sessions.c.id).where(agent_sessions.c.id == session_id).limit(1)
+    ).scalar_one_or_none() is not None
+
+
 def accessible_project_ids(
     conn: Connection,
     context: AuthorizationContext,

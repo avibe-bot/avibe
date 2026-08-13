@@ -5068,6 +5068,8 @@ def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) ->
     from storage import resource_access_service
 
     session_id = str(payload.get("session_id") or "")
+    if not project_access_service.session_exists(conn, session_id):
+        return {key: value for key, value in payload.items() if key != "path"}
     project_id = project_access_service.get_session_project_id(conn, session_id)
     effective_role = project_access_service.get_effective_session_role(
         conn,
