@@ -294,8 +294,6 @@ class ClearIntentStore:
                     target_epoch = pre_epoch + 1
                 else:
                     target_epoch = pre_epoch + 1
-                    if current_epoch not in {pre_epoch, target_epoch}:
-                        raise ValueError("legacy clear epoch is not replay-safe")
             else:
                 if (
                     not isinstance(target_value, int)
@@ -306,6 +304,11 @@ class ClearIntentStore:
                 target_epoch = target_value
             if target_epoch != pre_epoch + 1:
                 raise ValueError("legacy clear target epoch is invalid")
+            if current_epoch is not None and current_epoch not in {
+                pre_epoch,
+                target_epoch,
+            }:
+                raise ValueError("legacy clear epoch is not replay-safe")
             state = row["state"]
             if state not in {
                 "preparing",

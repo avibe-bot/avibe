@@ -164,6 +164,26 @@ def _write_backup_restore_journal(tmp_path: Path, *, state: str, open_slot: int 
     return journal
 
 
+def _write_legacy_abort_journal(tmp_path: Path) -> Path:
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, resolution TEXT, "
+        "started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-abort", "user-1", 0, 1, "recovery_needed", "abort", "now"),
+    )
+    _add_surface_receipts(connection, "legacy-abort")
+    connection.commit()
+    connection.close()
+    journal.chmod(0o600)
+    return journal
+
+
 @pytest.mark.asyncio
 async def test_clear_writes_marker_and_repeats_four_surfaces(tmp_path: Path):
     maintenance, port = _maintenance(tmp_path)
@@ -471,22 +491,7 @@ async def test_unreadable_legacy_backup_restore_blocks_explicit_clear(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_legacy_abort_exposes_replacement_clear_and_clears_fence(tmp_path: Path):
-    journal = tmp_path / "state/memory/clear-journal.sqlite"
-    journal.parent.mkdir(parents=True)
-    connection = sqlite3.connect(journal)
-    connection.execute(
-        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
-        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, resolution TEXT, "
-        "started_at TEXT, open_slot INTEGER)"
-    )
-    connection.execute(
-        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-        ("legacy-abort", "user-1", 0, 1, "recovery_needed", "abort", "now"),
-    )
-    _add_surface_receipts(connection, "legacy-abort")
-    connection.commit()
-    connection.close()
-    journal.chmod(0o600)
+    _write_legacy_abort_journal(tmp_path)
 
     maintenance, _port = _maintenance(tmp_path)
     assert (await maintenance.observe()).can_clear is True
@@ -497,6 +502,41 @@ async def test_legacy_abort_exposes_replacement_clear_and_clears_fence(tmp_path:
     assert maintenance._legacy_abort_open is False
     assert maintenance._legacy_migration_deferred is False
     assert maintenance.is_open() is False
+
+
+@pytest.mark.asyncio
+async def test_replacement_clear_stops_if_followup_legacy_cleanup_is_deferred(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _write_legacy_abort_journal(tmp_path)
+    backup_journal = _write_backup_restore_journal(
+        tmp_path,
+        state="completed",
+        open_slot=None,
+    )
+    from core.memory import clear_intent
+
+    original_remove = clear_intent.remove_confined_path
+
+    def fail_backup_journal_remove(home: Path, path: Path):
+        if path == backup_journal:
+            raise clear_intent.ConfinedFilesystemError("journal is busy")
+        return original_remove(home, path)
+
+    monkeypatch.setattr(
+        clear_intent,
+        "remove_confined_path",
+        fail_backup_journal_remove,
+    )
+    maintenance, port = _maintenance(tmp_path)
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "failed"
+    assert result.error == "memory_clear_failed"
+    assert port.deleted == []
+    assert maintenance._legacy_migration_deferred is True
+    assert backup_journal.exists()
 
 
 def test_terminal_legacy_backup_restore_is_removed(tmp_path: Path):
@@ -869,3 +909,28 @@ def test_orphaned_queue_clear_fence_is_exposed_for_explicit_repair(tmp_path: Pat
     assert observation.error_code == "memory_clear_failed"
     payload = asyncio.run(maintenance.observe())
     assert payload.can_clear is True
+
+
+def test_queue_fence_read_failure_is_retryable(tmp_path: Path, monkeypatch):
+    maintenance, _port = _maintenance(tmp_path)
+    store = maintenance._store
+    assert store is not None
+    reads = 0
+
+    def fail_fence_read():
+        nonlocal reads
+        reads += 1
+        if reads <= 2:
+            raise OSError("temporary queue read failure")
+        return False
+
+    monkeypatch.setattr(store, "clear_in_progress", fail_fence_read)
+
+    assert maintenance.is_open() is True
+    observation = asyncio.run(maintenance.observe())
+    assert observation.can_clear is True
+    assert observation.clear_in_progress is not None
+    assert observation.clear_in_progress.operation_id == "orphaned-fence"
+    assert maintenance.ready is True
+
+    assert maintenance.is_open() is False

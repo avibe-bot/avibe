@@ -170,6 +170,31 @@ def test_legacy_open_journal_migrates_then_removes_journal(tmp_path: Path):
     assert not journal.exists()
 
 
+def test_legacy_open_journal_rejects_epoch_outside_replay_window(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    operation_id = "2f7e31f4-ecf6-4c11-a3ed-e6e4e30e5b0f"
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
+        (operation_id, "user-1", 2, 3, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    _add_surface_receipts(connection, operation_id)
+    connection.commit()
+    connection.close()
+    os.chmod(journal, 0o600)
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=4)
+
+    assert journal.exists()
+    assert not (tmp_path / MARKER_RELATIVE_PATH).exists()
+
+
 def test_legacy_operation_token_is_accepted_by_new_marker_reader(tmp_path: Path):
     journal = tmp_path / "state/memory/clear-journal.sqlite"
     journal.parent.mkdir(parents=True)

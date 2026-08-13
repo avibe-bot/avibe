@@ -236,8 +236,9 @@ class MemoryMaintenance:
                 if self._store.clear_in_progress():
                     return True
             except Exception:
-                self._initialization_error = ClearIntentError(
-                    "Memory Clear fence state could not be read"
+                logger.warning(
+                    "Memory Clear fence state could not be read; keeping Memory fenced",
+                    exc_info=True,
                 )
                 return True
         try:
@@ -303,8 +304,9 @@ class MemoryMaintenance:
                 try:
                     orphaned_fence = self._store.clear_in_progress()
                 except Exception:
-                    self._initialization_error = ClearIntentError(
-                        "Memory Clear fence state could not be read"
+                    logger.warning(
+                        "Memory Clear fence state could not be read; exposing retry",
+                        exc_info=True,
                     )
                     orphaned_fence = True
                 if orphaned_fence:
@@ -513,6 +515,8 @@ class MemoryMaintenance:
                 raise write_error
             if cancellation is not None:
                 raise cancellation
+            if self.has_legacy_restore_authority() or self._legacy_migration_deferred:
+                raise ClearIntentError("Legacy Memory cleanup remains deferred")
 
         task = asyncio.create_task(prepare())
         outer_cancellation: asyncio.CancelledError | None = None
