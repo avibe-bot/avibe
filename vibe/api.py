@@ -12371,9 +12371,16 @@ async def upload_skill_zip(
     import zipfile
 
     from vibe.authorization import require_instance_role
+    from core.services import skills as skills_service
 
     context = resolve_resource_access_context() if user_context is None else user_context
-    require_instance_role(context, "editor")
+    try:
+        if project_id:
+            skills_service.require_project_editor_access(context, project_id)
+        else:
+            require_instance_role(context, "editor")
+    except skills_service.SkillsError as exc:
+        return {"ok": False, "error": {"code": exc.code, "message": exc.message}}
 
     max_b64 = 24 * 1024 * 1024  # ~18 MB archive — skills are tiny; cap the body.
     max_uncompressed = 64 * 1024 * 1024

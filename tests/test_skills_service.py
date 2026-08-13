@@ -470,6 +470,85 @@ def test_active_org_members_list_project_skills_without_project_acl(monkeypatch,
         engine.dispose()
 
 
+def test_effective_project_viewer_gets_safe_skill_payload_and_cannot_mutate(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    listing = {
+        "ok": True,
+        "skills": [
+            {
+                **_skill_row("project-skill"),
+                "scope": "project",
+                "path": str(project_dir / ".agents" / "skills" / "project-skill"),
+            }
+        ],
+    }
+    try:
+        with engine.begin() as connection:
+            project = projects_service.create_project(connection, str(project_dir))
+            result = project_access_service.apply_project_access_intent(
+                connection,
+                {
+                    "project_id": project["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "organization_id": "org-1",
+                    "bindings": [
+                        {
+                            "principal_kind": "email",
+                            "principal_value": "member-1@example.com",
+                            "access_role": "viewer",
+                        }
+                    ],
+                },
+            )
+            assert result.outcome == "applied"
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="skill",
+                resource_id=skills.skill_resource_id(
+                    "codex",
+                    scope="project",
+                    project_dir=str(project_dir),
+                    project_id=project["id"],
+                    name="project-skill",
+                ),
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="public",
+            )
+
+        recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", recorder)
+        viewer = _organization_context("member-1")
+        safe = _run(
+            skills.list_skills(
+                "askill",
+                scope="project",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=viewer,
+            )
+        )
+        assert safe["skills"][0]["path"] == ""
+
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.add_skill(
+                    "askill",
+                    "gh:owner/repo",
+                    scope="project",
+                    project_dir=str(project_dir),
+                    project_id=project["id"],
+                    user_context=viewer,
+                )
+            )
+        assert len(recorder.calls) == 1
+    finally:
+        engine.dispose()
+
+
 def test_active_org_skill_listing_returns_complete_runtime_payload(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     raw_skill = {

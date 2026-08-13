@@ -193,6 +193,31 @@ def test_upload_preserves_project_id_for_real_project(monkeypatch):
     }
 
 
+def test_project_viewer_cannot_reach_skill_mutations(monkeypatch):
+    denied = ui_server._coded_error_response(
+        "resource_access_forbidden",
+        "Skill access is not permitted.",
+        403,
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_require_project_editor_for_skill_mutation",
+        lambda project_id, **_kwargs: denied if project_id == "proj-viewer" else None,
+    )
+    monkeypatch.setattr(ui_server, "_resolve_project_dir", lambda _project_id: "/tmp/project")
+    monkeypatch.setattr(api, "add_skill", _boom)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/skills",
+        json={"project_id": "proj-viewer", "source": "gh:owner/repo"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"]["code"] == "resource_access_forbidden"
+
+
 @pytest.mark.parametrize(
     "method,path,attr,payload",
     [

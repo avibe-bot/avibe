@@ -780,6 +780,48 @@ def test_show_page_payload_redacts_path_for_viewers(monkeypatch, tmp_path) -> No
     assert owner_page["path"] == "/private/show-page"
 
 
+def test_show_page_mutation_payload_redacts_direct_and_nested_pages(monkeypatch) -> None:
+    context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        subject="user-editor",
+        is_remote=True,
+    )
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr(
+        project_access_service,
+        "get_effective_session_role",
+        lambda _conn, _context, _session_id: "viewer",
+    )
+
+    direct = ui_server._show_page_response_for_request(
+        {"ok": True, "session_id": "session-a", "path": "/private/page"},
+        context,
+    )
+    nested = ui_server._show_page_response_for_request(
+        {
+            "ok": True,
+            "page": {"session_id": "session-a", "path": "/private/page"},
+        },
+        context,
+    )
+
+    assert "path" not in direct
+    assert "path" not in nested["page"]
+
+
 def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
