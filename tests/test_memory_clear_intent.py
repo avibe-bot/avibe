@@ -41,6 +41,14 @@ def _add_surface_receipts(connection: sqlite3.Connection, operation_id: str, sta
         )
 
 
+def _add_recovery_from_column(connection: sqlite3.Connection, operation_id: str, state: str) -> None:
+    connection.execute("ALTER TABLE clear_operation ADD COLUMN recovery_from_state TEXT")
+    connection.execute(
+        "UPDATE clear_operation SET recovery_from_state = ? WHERE operation_id = ?",
+        (state, operation_id),
+    )
+
+
 def test_marker_write_is_atomic_and_round_trips(tmp_path: Path):
     store = ClearIntentStore(tmp_path)
     intent = ClearIntent.new(operator_ref="user-1", pre_epoch=4)

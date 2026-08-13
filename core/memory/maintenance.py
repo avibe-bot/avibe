@@ -20,6 +20,7 @@ from core.memory.clear_intent import (
     DEFAULT_CLEAR_SURFACES,
     LEGACY_ABORT_ERROR_CODE,
     cleanup_legacy_backup_storage,
+    inspect_legacy_clear_abort,
     inspect_legacy_backup_restore,
 )
 from core.memory.confined_filesystem import ConfinedFilesystemError, required_no_follow_flag
@@ -104,6 +105,7 @@ class MemoryMaintenance:
         self._intent_error: Exception | None = None
         self._legacy_migration_deferred = False
         self._legacy_restore_open = False
+        self._legacy_abort_open = False
         self._closing = False
         try:
             required_no_follow_flag()
@@ -157,7 +159,15 @@ class MemoryMaintenance:
                 logger.warning("Legacy Memory cleanup lease could not be acquired", exc_info=True)
                 return
         try:
+            if inspect_legacy_clear_abort(self._intent.home):
+                self._legacy_abort_open = True
+                self._legacy_migration_deferred = True
+                logger.warning(
+                    "Legacy Memory abort restore remains open; retaining journal and snapshots"
+                )
+                return
             backup_restore = inspect_legacy_backup_restore(self._intent.home)
+            self._legacy_abort_open = False
             if backup_restore == "open":
                 self._legacy_restore_open = True
                 self._legacy_migration_deferred = True
@@ -175,6 +185,7 @@ class MemoryMaintenance:
             current_epoch = store.ensure_meta().epoch if store is not None else None
             self._intent.migrate_legacy(current_epoch=current_epoch)
             self._legacy_migration_deferred = False
+            self._legacy_abort_open = False
         except ClearIntentUnreadable as error:
             if os.path.lexists(
                 self._intent.home / "state/memory/backup-restore-journal.sqlite"
@@ -220,7 +231,13 @@ class MemoryMaintenance:
     def can_disable_without_authority(self) -> bool:
         # A pure disable is still safe when a marker cannot be read. Enabled
         # Memory remains fenced until the marker is repaired or re-run.
-        return self._initialization_error is not None or self._intent_error is not None
+        return (
+            self._initialization_error is not None
+            or self._intent_error is not None
+            or self._legacy_restore_open
+            or self._legacy_abort_open
+            or self._legacy_migration_deferred
+        )
 
     def has_open_restore(self) -> bool:
         return self._legacy_restore_open
@@ -389,6 +406,8 @@ class MemoryMaintenance:
     async def _run_clear(self, *, operator_ref: str, boot: bool) -> ClearResult:
         if self._store is None:
             raise MemoryStoreUnavailableError("Memory store is unavailable")
+        if self._legacy_restore_open:
+            return ClearResult(status="failed", error="memory_operation_in_progress")
         async with self._runtime.exclusive_fence():
             self._runtime.enter_maintenance()
             try:
@@ -449,6 +468,7 @@ class MemoryMaintenance:
             await self._run_maintenance_io(self._store.begin_clear_fence)
             await self._runtime.quiesce(False)
             await self._run_maintenance_io(self._intent.consume_legacy_clear_state)
+            await self._run_maintenance_io(self._intent.consume_legacy_snapshots)
             if write_error is not None:
                 raise write_error
             if cancellation is not None:
@@ -479,25 +499,12 @@ class MemoryMaintenance:
         boot: bool,
     ) -> ClearResult:
         assert self._store is not None
+        if self._legacy_restore_open:
+            return ClearResult(status="failed", error="memory_operation_in_progress")
         try:
             for surface in DEFAULT_CLEAR_SURFACES:
                 await self._runtime.delete_surface(surface, intent.target_epoch)
             final_cancellation: asyncio.CancelledError | None = None
-            release_outcome: dict[str, BaseException] = {}
-
-            def release_fence() -> None:
-                try:
-                    self._store.release_clear_fence()
-                except BaseException as error:
-                    release_outcome["error"] = error
-                    raise
-
-            try:
-                await self._run_maintenance_io(release_fence)
-            except asyncio.CancelledError as error:
-                if "error" in release_outcome:
-                    raise release_outcome["error"]
-                final_cancellation = error
             try:
                 remove_outcome: dict[str, BaseException] = {}
 
@@ -533,6 +540,21 @@ class MemoryMaintenance:
                     error="memory_clear_failed",
                     clear_in_progress=self._read_projection() or _projection(intent.failed("memory_clear_failed")),
                 )
+            release_outcome: dict[str, BaseException] = {}
+
+            def release_fence() -> None:
+                try:
+                    self._store.release_clear_fence()
+                except BaseException as error:
+                    release_outcome["error"] = error
+                    raise
+
+            try:
+                await self._run_maintenance_io(release_fence)
+            except asyncio.CancelledError as error:
+                if "error" in release_outcome:
+                    raise release_outcome["error"]
+                final_cancellation = error
         except asyncio.CancelledError:
             await self._record_failure(intent, "memory_clear_failed")
             raise

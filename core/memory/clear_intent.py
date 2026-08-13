@@ -198,6 +198,13 @@ class ClearIntentStore:
         except (ConfinedFilesystemError, OSError) as error:
             raise ClearIntentError("legacy Memory clear journal could not be removed") from error
 
+    def consume_legacy_snapshots(self) -> None:
+        _remove_required(
+            self.home,
+            self.home / LEGACY_SNAPSHOT_RELATIVE_PATH,
+            "legacy Memory clear snapshots",
+        )
+
     def migrate_legacy(self, *, current_epoch: int | None) -> ClearIntent | None:
         """Convert one released clear journal before deleting its old storage."""
 
@@ -381,6 +388,33 @@ def cleanup_legacy_backup_storage(effective_home: Path | str) -> tuple[str, ...]
         if not _best_effort_remove(home, home / relative):
             failures.append(relative)
     return tuple(failures)
+
+
+def inspect_legacy_clear_abort(effective_home: Path | str) -> bool:
+    """Return whether a released clear chose Abort and still owns snapshots."""
+
+    home = Path(os.path.abspath(os.path.expanduser(os.fspath(effective_home))))
+    journal_path = home / LEGACY_JOURNAL_RELATIVE_PATH
+    if not os.path.lexists(journal_path):
+        return False
+    connection = None
+    try:
+        connection = PrivateSqliteDatabase(home, journal_path).connect()
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(clear_operation)")
+        }
+        if "resolution" not in columns:
+            return False
+        row = connection.execute(
+            "SELECT COUNT(*) FROM clear_operation "
+            "WHERE open_slot = 1 AND state = 'recovery_needed' AND resolution = 'abort'"
+        ).fetchone()
+        return row is not None and row[0] == 1
+    except (ConfinedFilesystemError, sqlite3.Error, OSError) as error:
+        raise ClearIntentUnreadable("legacy Memory clear journal is unreadable") from error
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def inspect_legacy_backup_restore(effective_home: Path | str) -> Literal["absent", "terminal", "open"]:
@@ -615,23 +649,58 @@ def _validate_legacy_surfaces(
                 not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
             ):
                 raise ValueError("legacy clear surface digest is invalid")
-    expected_states = {
-        "preparing": {"pending"},
-        "prepared": {"snapshotted"},
-        "deleting": {"snapshotted", "deleted"},
-        # Recovery can be interrupted during either the delete or restore
-        # direction, so every released surface state is possible here.
-        "recovery_needed": {"pending", "snapshotted", "deleted", "restored"},
-        "completed": {"deleted"},
-        "aborted": {"restored"},
-    }
-    if set(states.values()) - expected_states[operation_state]:
-        raise ValueError("legacy clear surface state contradicts operation state")
-    if operation_state == "recovery_needed":
-        if resolution != "abort" and "restored" in states.values():
-            raise ValueError("legacy clear resume has restored surfaces")
-        if resolution == "abort" and set(states.values()) == {"pending"}:
+    state_set = set(states.values())
+    if operation_state == "preparing":
+        if state_set not in ({"pending"}, {"snapshotted"}):
+            raise ValueError("legacy clear preparing receipts are inconsistent")
+    elif operation_state == "prepared":
+        if state_set != {"snapshotted"}:
+            raise ValueError("legacy clear prepared receipts are inconsistent")
+    elif operation_state == "deleting":
+        if not state_set <= {"snapshotted", "deleted"}:
+            raise ValueError("legacy clear deleting receipts are inconsistent")
+    elif operation_state == "recovery_needed":
+        recovery_from = _legacy_recovery_from_state(connection, operation_id)
+        if recovery_from is None and resolution == "abort":
+            if state_set not in (
+                {"snapshotted"},
+                {"snapshotted", "deleted"},
+                {"deleted"},
+                {"restored"},
+            ):
+                raise ValueError("legacy clear abort receipts are inconsistent")
+            return
+        valid_states = {
+            "preparing": ({"pending"}, {"snapshotted"}),
+            "prepared": ({"snapshotted"},),
+            "deleting": (
+                {"snapshotted"},
+                {"snapshotted", "deleted"},
+                {"deleted"},
+            ),
+        }
+        if recovery_from not in valid_states or state_set not in valid_states[recovery_from]:
+            raise ValueError("legacy clear recovery receipts contradict their source state")
+        if resolution == "abort" and state_set == {"pending"}:
             raise ValueError("legacy clear abort has no prepared surfaces")
+    elif operation_state == "completed":
+        if state_set != {"deleted"}:
+            raise ValueError("legacy clear completed receipts are inconsistent")
+    elif operation_state == "aborted" and state_set != {"restored"}:
+        raise ValueError("legacy clear aborted receipts are inconsistent")
+
+
+def _legacy_recovery_from_state(connection: sqlite3.Connection, operation_id: str) -> object:
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(clear_operation)")
+    }
+    if "recovery_from_state" not in columns:
+        return None
+    row = connection.execute(
+        "SELECT recovery_from_state FROM clear_operation WHERE operation_id = ?",
+        (operation_id,),
+    ).fetchone()
+    return None if row is None else row[0]
 
 
 def _best_effort_remove(home: Path, path: Path) -> bool:

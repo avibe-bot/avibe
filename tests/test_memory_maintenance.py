@@ -227,7 +227,7 @@ async def test_marker_removal_failure_retries_after_surfaces_are_terminal(
     assert intent is not None
     assert intent.state == "failed"
     assert maintenance._store is not None
-    assert maintenance._store.clear_in_progress() is False
+    assert maintenance._store.clear_in_progress() is True
 
     assert await maintenance.reconcile_pending() is True
     assert remove_calls == 2
