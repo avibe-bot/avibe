@@ -563,9 +563,12 @@ def _policy_allows(
     if context.is_instance_owner:
         return True
     # Skill and Vault ACL rows remain persisted for compatibility, but Editor
-    # runtime access intentionally ignores them in this MVP.
+    # runtime access intentionally ignores them for validated remote sessions.
+    # Direct non-remote contexts still use the stored policy so service-level
+    # ACL checks cannot be bypassed by a caller-supplied role alone.
     if resource_kind in {"skill", "vault_secret"}:
-        return context.has_role("editor")
+        if context.is_remote and context.is_active_organization_member and context.has_role("editor"):
+            return True
     if resource_kind == "show_page" and context.can_use_show_page(resource_id):
         return True
     if context.instance_access_source == "show_page_email":

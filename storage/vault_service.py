@@ -1815,9 +1815,12 @@ def _require_secret_resource_management(conn: Connection, row: dict[str, Any], u
 
     from storage import resource_access_service
 
+    context = resolve_resource_access_context(user_context)
+    if not context.is_instance_owner:
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
     resource_id = str(row.get("id") or "")
     if not resource_id or not resource_access_service.can_manage_resource_acl(
-        user_context,
+        context,
         "vault_secret",
         resource_id,
         connection=conn,
@@ -4863,10 +4866,7 @@ def _audit_snapshot_allows(context: Any, snapshot: dict[str, Any]) -> bool:
         if not isinstance(resource, dict) or not str(resource.get("name") or "") or not str(resource.get("resource_id") or ""):
             return False
         policy = resource.get("policy")
-        if not (
-            resource_access_service.can_use_resource_policy_snapshot(context, policy)
-            or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
-        ):
+        if not resource_access_service.can_use_resource_policy_snapshot(context, policy):
             return False
     return True
 
@@ -4951,10 +4951,7 @@ def _audit_secret_name_allowed(
             str(secret_row.id),
             connection=conn,
         )
-        allowed = bool(
-            resource_access_service.can_use_resource_policy_snapshot(context, policy)
-            or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
-        )
+        allowed = bool(resource_access_service.can_use_resource_policy_snapshot(context, policy))
     else:
         has_tombstone, policy = _deleted_audit_policy_snapshot(
             conn,
@@ -4963,14 +4960,11 @@ def _audit_secret_name_allowed(
         )
         allowed = bool(
             has_tombstone
-            and (
-                resource_access_service.can_use_resource_policy_snapshot(context, policy)
-                or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
-            )
+            and resource_access_service.can_use_resource_policy_snapshot(context, policy)
         )
         if not has_tombstone:
             allowed = bool(
-                context.has_role("editor")
+                context.is_remote and context.has_role("editor")
             )
     access_by_name[name] = allowed
     return allowed
@@ -4987,7 +4981,7 @@ def _require_audit_row_access(
     tombstone_policies: dict[str, tuple[bool, Any]] | None = None,
 ) -> None:
     context = resolve_resource_access_context(user_context)
-    if context.has_role("editor"):
+    if context.is_remote and context.has_role("editor"):
         return
 
     snapshot_present, snapshot = _audit_access_snapshot(row)
@@ -5032,7 +5026,7 @@ def list_audit(
     requested_limit = max(0, limit)
     if requested_limit == 0:
         return []
-    if context.has_role("editor"):
+    if context.is_remote and context.has_role("editor"):
         query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
         if secret_name is not None:
             query = query.where(vault_audit.c.secret_name == secret_name)
