@@ -860,6 +860,103 @@ def test_combined_watch_identity_includes_ci_contract() -> None:
     assert module._watch_identity(pr_only) != module._watch_identity(combined)
 
 
+def test_combined_watch_migrates_the_legacy_sha_identity(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    args = module._build_parser().parse_args(
+        [
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "153",
+            "--sha",
+            "new-sha",
+            "--branch",
+            "feature",
+            "--workflow",
+            "CI",
+        ]
+    )
+    legacy_identity = module._watch_identity(args, legacy_ci_sha="old-sha")
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": legacy_identity,
+                "owner": "wat_123",
+                "head_sha": "old-sha",
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = module._watch_identity(args)
+    aliases = module._legacy_watch_identity_aliases(args, str(state_file))
+    saved = module._load_state_file(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity=identity,
+        watch_id="wat_123",
+        watch_identity_aliases=aliases,
+    )
+
+    assert saved["watch"] == legacy_identity
+    assert legacy_identity in aliases
+    module._write_state_file(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity=identity,
+        watch_id="wat_123",
+        watch_identity_aliases=aliases,
+        head_sha="new-sha",
+        actions={"CI": []},
+    )
+    assert json.loads(state_file.read_text(encoding="utf-8"))["watch"] == identity
+
+
+def test_fresh_combined_baseline_rejects_a_stale_sha(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    state = _pr_state()
+    state["pull_request"]["head"] = {"sha": "new-sha"}
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", return_value=(state, 1)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "old-sha",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert "does not match --sha old-sha" in stderr.getvalue()
+    assert not state_file.exists()
+
+
 def test_combined_pr_waiter_reports_ci_completion(tmp_path) -> None:
     module = _load_module()
     state_file = tmp_path / "pr-153-combined.json"

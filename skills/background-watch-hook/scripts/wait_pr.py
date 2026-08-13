@@ -892,7 +892,7 @@ def _startup_failure_exit_code(error: Any) -> int:
     return RETRY_EXIT_CODE if isinstance(error, InitialRequestRetriesExhausted) else 1
 
 
-def _watch_identity(args: argparse.Namespace) -> str:
+def _watch_identity(args: argparse.Namespace, *, legacy_ci_sha: str | None = None) -> str:
     """A stable digest of the options that decide what this watch reports.
 
     Ownership by repo and PR alone cannot tell two watches on the same PR apart --
@@ -919,7 +919,6 @@ def _watch_identity(args: argparse.Namespace) -> str:
     if _ci_enabled(args):
         material_fields.update(
             {
-                "ci_sha": args.sha,
                 "ci_branch": args.branch,
                 "ci_workflows": list(args.workflow or []),
                 "ci_success_conclusions": sorted(
@@ -927,8 +926,52 @@ def _watch_identity(args: argparse.Namespace) -> str:
                 ),
             }
         )
+        if legacy_ci_sha is not None:
+            material_fields["ci_sha"] = legacy_ci_sha
     material = json.dumps(material_fields, sort_keys=True)
     return hashlib.sha256(f"wait_pr/{STATE_FILE_VERSION}/{material}".encode()).hexdigest()[:16]
+
+
+def _legacy_watch_identity_aliases(
+    args: argparse.Namespace,
+    path: str | None,
+) -> set[str]:
+    """Return released combined identities that can be migrated at this path.
+
+    Before combined waiting was stabilized, the CI target SHA was part of the watch
+    identity. A head change therefore made an otherwise identical watch look foreign.
+    Only hashes derived from this path's own recorded PR/Actions head are accepted;
+    this is a narrow migration, not a general identity bypass.
+    """
+
+    if not path or not _ci_enabled(args):
+        return set()
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    if payload.get("version") != STATE_FILE_VERSION:
+        return set()
+    if payload.get("repo") != args.repo or payload.get("pr") != args.pr:
+        return set()
+
+    candidate_shas: set[str] = set()
+    for value in (args.sha, payload.get("head_sha")):
+        if isinstance(value, str) and value:
+            candidate_shas.add(value)
+    actions = payload.get(ACTIONS_SNAPSHOT_KEY)
+    if isinstance(actions, dict):
+        for runs in actions.values():
+            if not isinstance(runs, list):
+                continue
+            for run in runs:
+                if isinstance(run, dict):
+                    value = run.get("head_sha")
+                    if isinstance(value, str) and value:
+                        candidate_shas.add(value)
+    return {_watch_identity(args, legacy_ci_sha=sha) for sha in candidate_shas}
 
 
 def _managed_watch_id() -> str | None:
@@ -952,6 +995,7 @@ def _owner_conflict(
     pr_number: int | None,
     watch_identity: str | None,
     watch_id: str | None,
+    watch_identity_aliases: set[str] | None = None,
 ) -> str | None:
     """Why ``owner`` is somebody else's claim on the path, or ``None`` when it is ours.
 
@@ -972,7 +1016,12 @@ def _owner_conflict(
     saved_repo, saved_pr, saved_watch, saved_owner = owner
     if saved_repo != repo or saved_pr != pr_number:
         return f"belongs to {saved_repo}#{saved_pr}, not {repo}#{pr_number}"
-    if saved_watch is not None and watch_identity is not None and saved_watch != watch_identity:
+    if (
+        saved_watch is not None
+        and watch_identity is not None
+        and saved_watch != watch_identity
+        and saved_watch not in (watch_identity_aliases or set())
+    ):
         return (
             f"belongs to another watch on {saved_repo}#{saved_pr} with different "
             "reporting filters"
@@ -994,6 +1043,7 @@ def _load_state_file(
     pr_number: int | None,
     watch_identity: str | None = None,
     watch_id: str | None = None,
+    watch_identity_aliases: set[str] | None = None,
 ) -> dict[str, Any]:
     """Read cursors left behind by an earlier run of this same waiter.
 
@@ -1035,6 +1085,7 @@ def _load_state_file(
         pr_number=pr_number,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} {conflict}")
@@ -1225,6 +1276,7 @@ def _verify_state_file_writable(
     pr_number: int | None,
     watch_identity: str | None = None,
     watch_id: str | None = None,
+    watch_identity_aliases: set[str] | None = None,
 ) -> None:
     """Claim the requested state file, and fail before the first poll if it is unusable.
 
@@ -1292,6 +1344,7 @@ def _verify_state_file_writable(
             pr_number=pr_number,
             watch_identity=watch_identity,
             watch_id=watch_id,
+            watch_identity_aliases=watch_identity_aliases,
         )
         if conflict is not None:
             return
@@ -1337,6 +1390,7 @@ def _write_state_file(
     pr_number: int | None,
     watch_identity: str | None = None,
     watch_id: str | None = None,
+    watch_identity_aliases: set[str] | None = None,
     **fields: Any,
 ) -> None:
     if not path:
@@ -1362,6 +1416,7 @@ def _write_state_file(
         pr_number=pr_number,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} now {conflict}")
@@ -1546,6 +1601,7 @@ def _resolve_staged_state(
     pr_number: int | None,
     watch_identity: str | None,
     watch_id: str | None,
+    watch_identity_aliases: set[str] | None = None,
     return_replay: bool = False,
 ) -> dict[str, Any] | tuple[dict[str, Any], str | None]:
     """Promote acknowledged state or replay its persisted event payload.
@@ -1594,6 +1650,7 @@ def _resolve_staged_state(
         pr_number=pr_number,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
         **fields,
     )
     return (resolved, None) if return_replay else resolved
@@ -1760,6 +1817,7 @@ def main() -> int:
         return 2
 
     watch_identity = _watch_identity(args)
+    watch_identity_aliases = _legacy_watch_identity_aliases(args, args.state_file)
     watch_id = _managed_watch_id()
     delivery_stamp = _last_delivery()
     two_phase = watch_id is not None
@@ -1779,6 +1837,7 @@ def main() -> int:
         pr_number=args.pr,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     replay_output = _staged_replay_output(saved, delivery_stamp)
     if replay_output is not None:
@@ -1887,6 +1946,16 @@ def main() -> int:
         return 1
     selected_actions: dict[str, list[dict[str, Any]]] = {}
     state, requests_per_poll_count = initial_request.value
+    if args.pr is not None and ci_enabled and not initial_resume:
+        observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
+        if observed_head_sha.casefold() != args.sha.casefold():
+            print(
+                "Refusing to establish a combined baseline: PR head "
+                f"{observed_head_sha} does not match --sha {args.sha}. "
+                "Refresh the SHA and retry.",
+                file=sys.stderr,
+            )
+            return 2
     if ci_enabled:
         selected_actions = select_matching_runs(
             state.get("actions", []),
@@ -1903,6 +1972,7 @@ def main() -> int:
         pr_number=args.pr,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     saved = _load_state_file(
         args.state_file,
@@ -1910,6 +1980,7 @@ def main() -> int:
         pr_number=args.pr,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     saved, replay_output = _resolve_staged_state(
         args.state_file,
@@ -1919,6 +1990,7 @@ def main() -> int:
         pr_number=args.pr,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
         return_replay=True,
     )
     if replay_output is not None:
@@ -2204,6 +2276,7 @@ def main() -> int:
                 pr_number=args.pr,
                 watch_identity=watch_identity,
                 watch_id=watch_id,
+                watch_identity_aliases=watch_identity_aliases,
                 **fields,
             )
 
