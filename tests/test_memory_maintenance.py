@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import asyncio
+import sqlite3
 
 import pytest
 
@@ -292,6 +294,50 @@ def test_legacy_cleanup_defers_while_operation_lease_is_busy(tmp_path: Path):
 
     _maintenance(tmp_path)
     assert not snapshot.parent.exists()
+
+
+def test_legacy_cleanup_lease_failure_fences_memory(tmp_path: Path, monkeypatch):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"not sqlite")
+    from core.memory import maintenance as maintenance_module
+
+    def fail_acquire(_lease):
+        raise OSError("lock path unavailable")
+
+    monkeypatch.setattr(maintenance_module.MemoryOperationLease, "acquire", fail_acquire)
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.is_open() is True
+    assert (maintenance._initialization_error is not None)
+
+
+def test_deferred_legacy_migration_is_retryable_after_lease_release(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-one", "user-1", 0, 1, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+    journal.chmod(0o600)
+    lease = MemoryOperationLease(tmp_path)
+    lease.acquire()
+    try:
+        maintenance, _port = _maintenance(tmp_path)
+        assert maintenance.is_open() is True
+    finally:
+        lease.release()
+
+    assert asyncio.run(maintenance.reconcile_pending()) is True
+    assert ClearIntentStore(tmp_path).load() is None
+    assert not journal.exists()
 
 
 @pytest.mark.asyncio

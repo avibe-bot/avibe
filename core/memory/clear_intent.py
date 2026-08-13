@@ -193,7 +193,11 @@ class ClearIntentStore:
 
         existing = self.load()
         if existing is not None:
-            _best_effort_remove(self.home, self.home / LEGACY_JOURNAL_RELATIVE_PATH)
+            _remove_required(
+                self.home,
+                self.home / LEGACY_JOURNAL_RELATIVE_PATH,
+                "legacy Memory clear journal",
+            )
             return existing
         journal_path = self.home / LEGACY_JOURNAL_RELATIVE_PATH
         if not os.path.lexists(journal_path):
@@ -201,17 +205,20 @@ class ClearIntentStore:
         connection = None
         try:
             connection = PrivateSqliteDatabase(self.home, journal_path).connect()
-            row = connection.execute(
-                "SELECT * FROM clear_operation WHERE open_slot = 1 LIMIT 1"
-            ).fetchone()
+            rows = connection.execute(
+                "SELECT * FROM clear_operation WHERE open_slot = 1"
+            ).fetchall()
         except (ConfinedFilesystemError, sqlite3.Error, OSError) as error:
             raise ClearIntentUnreadable("legacy Memory clear journal is unreadable") from error
         finally:
             if connection is not None:
                 connection.close()
-        if row is None:
-            _best_effort_remove(self.home, journal_path)
+        if not rows:
+            _remove_required(self.home, journal_path, "legacy Memory clear journal")
             return None
+        if len(rows) != 1:
+            raise ClearIntentUnreadable("legacy Memory clear journal has multiple open operations")
+        row = rows[0]
         try:
             operation_id = str(row["operation_id"])
             operator_ref = str(row["operator_ref"])
@@ -256,7 +263,7 @@ class ClearIntentStore:
             if resolution not in valid_resolution[state]:
                 raise ValueError("legacy clear resolution is out of state")
             if state in {"completed", "aborted"}:
-                _best_effort_remove(self.home, journal_path)
+                _remove_required(self.home, journal_path, "legacy Memory clear journal")
                 return None
         except (KeyError, TypeError, ValueError, IndexError) as error:
             raise ClearIntentUnreadable("legacy Memory clear journal has invalid shape") from error
@@ -275,7 +282,7 @@ class ClearIntentStore:
             updated_at=now,
         )
         self.write(intent)
-        _best_effort_remove(self.home, journal_path)
+        _remove_required(self.home, journal_path, "legacy Memory clear journal")
         return intent
 
 
@@ -301,6 +308,19 @@ def _best_effort_remove(home: Path, path: Path) -> bool:
             _ = error
             return False
     return not os.path.lexists(path)
+
+
+def _remove_required(home: Path, path: Path, description: str) -> None:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise ClearIntentError(f"{description} could not be inspected") from error
+    try:
+        remove_confined_path(home, path)
+    except (ConfinedFilesystemError, OSError) as error:
+        raise ClearIntentError(f"{description} could not be removed durably") from error
 
 
 def _encode(intent: ClearIntent) -> dict[str, object]:
@@ -359,7 +379,8 @@ def _decode(payload: bytes) -> ClearIntent:
         or any(ord(char) < 0x20 for char in operator_ref)
     ):
         raise ValueError("invalid clear intent operator")
-    if value["state"] not in {"deleting", "failed"}:
+    state = value["state"]
+    if state not in {"deleting", "failed"}:
         raise ValueError("invalid clear intent state")
     error_code = value["error_code"]
     if error_code is not None and (
@@ -369,6 +390,10 @@ def _decode(payload: bytes) -> ClearIntent:
         or any(ord(char) < 0x20 for char in error_code)
     ):
         raise ValueError("invalid clear intent error")
+    if state == "deleting" and error_code is not None:
+        raise ValueError("deleting clear intent cannot have an error")
+    if error_code == LEGACY_ABORT_ERROR_CODE and state != "failed":
+        raise ValueError("legacy abort error requires a failed clear intent")
     for field in ("created_at", "updated_at"):
         if not isinstance(value[field], str) or not value[field]:
             raise ValueError(f"invalid clear intent {field}")

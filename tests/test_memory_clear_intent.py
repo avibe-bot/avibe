@@ -9,6 +9,7 @@ import pytest
 
 from core.memory.clear_intent import (
     ClearIntent,
+    ClearIntentError,
     ClearIntentStore,
     ClearIntentUnreadable,
     MARKER_RELATIVE_PATH,
@@ -59,6 +60,33 @@ def test_marker_schema_rejects_non_integer_versions(tmp_path: Path, schema_versi
         "target_epoch": intent.target_epoch,
         "state": intent.state,
         "error_code": intent.error_code,
+        "created_at": intent.created_at,
+        "updated_at": intent.updated_at,
+    }
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).load()
+
+
+@pytest.mark.parametrize(
+    ("state", "error_code"),
+    (("deleting", "memory_clear_failed"), ("deleting", "memory_clear_legacy_abort_unsupported")),
+)
+def test_marker_schema_rejects_contradictory_state_and_error(
+    tmp_path: Path, state: str, error_code: str
+):
+    marker = tmp_path / MARKER_RELATIVE_PATH
+    marker.parent.mkdir(parents=True)
+    intent = ClearIntent.new(operator_ref="user-1", pre_epoch=1)
+    payload = {
+        "schema_version": 1,
+        "operation_id": intent.operation_id,
+        "operator_ref": intent.operator_ref,
+        "pre_epoch": intent.pre_epoch,
+        "target_epoch": intent.target_epoch,
+        "state": state,
+        "error_code": error_code,
         "created_at": intent.created_at,
         "updated_at": intent.updated_at,
     }
@@ -208,6 +236,64 @@ def test_legacy_open_journal_without_target_epoch_defers_until_store_epoch(tmp_p
     assert intent.pre_epoch == 2
     assert intent.target_epoch == 3
     assert not journal.exists()
+
+
+def test_legacy_journal_rejects_multiple_open_operations(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.executemany(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
+        (
+            ("legacy-one", "user-1", 2, 3, "deleting", "2026-08-13T00:00:00Z"),
+            ("legacy-two", "user-2", 2, 3, "recovery_needed", "2026-08-13T00:00:01Z"),
+        ),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(journal, 0o600)
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=2)
+
+    assert journal.exists()
+
+
+def test_legacy_migration_requires_durable_journal_removal(tmp_path: Path, monkeypatch):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-one", "user-1", 2, 3, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(journal, 0o600)
+
+    from core.memory import clear_intent
+
+    original_remove = clear_intent.remove_confined_path
+
+    def remove_then_fail(home, path):
+        if path == journal:
+            journal.unlink()
+            raise clear_intent.ConfinedFilesystemError("journal fsync failed")
+        return original_remove(home, path)
+
+    monkeypatch.setattr(clear_intent, "remove_confined_path", remove_then_fail)
+    with pytest.raises(ClearIntentError):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=2)
+
+    assert ClearIntentStore(tmp_path).load() is not None
 
 
 def test_legacy_journal_symlink_is_unreadable(tmp_path: Path):

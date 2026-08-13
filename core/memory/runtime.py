@@ -960,7 +960,7 @@ class MemoryRuntime:
                 self._runtime_error = "memory_operation_in_progress"
                 return {"ok": False, "error": self._runtime_error}
             try:
-                recovered = await self._maintenance.recover_boot()
+                recovered = await self._maintenance.recover_boot(lease_held=True)
             finally:
                 await run_blocking(lease.release)
             if not recovered:

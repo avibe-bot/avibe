@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,6 +122,14 @@ class MemoryMaintenance:
     def _migrate_legacy(self, store: MemoryStore | None, *, lease_held: bool = False) -> None:
         if self._intent_error is not None:
             return
+        legacy_paths = (
+            self._intent.home / "state/memory/clear-journal.sqlite",
+            self._intent.home / "state/memory/clear-snapshots",
+            self._intent.home / "state/memory/backup-restore-journal.sqlite",
+            self._intent.home / "state/memory/backups",
+        )
+        if not any(os.path.lexists(path) for path in legacy_paths):
+            return
         lease = None
         if not lease_held:
             lease = MemoryOperationLease(self._intent.home)
@@ -133,6 +142,9 @@ class MemoryMaintenance:
                 )
                 return
             except Exception:
+                self._initialization_error = ClearIntentError(
+                    "Legacy Memory cleanup lease could not be acquired"
+                )
                 logger.warning("Legacy Memory cleanup lease could not be acquired", exc_info=True)
                 return
         try:
@@ -185,6 +197,8 @@ class MemoryMaintenance:
             or self._intent_error is not None
         ):
             return False
+        if self._legacy_migration_deferred:
+            return True
         try:
             return self._intent.load() is not None
         except ClearIntentUnreadable:
@@ -269,14 +283,18 @@ class MemoryMaintenance:
     async def clear(self, *, operator_ref: str) -> ClearResult:
         return await self._run_clear(operator_ref=operator_ref, boot=False)
 
-    async def reconcile_pending(self) -> bool:
+    async def reconcile_pending(self, *, lease_held: bool = False) -> bool:
         """Finish a marker-owned Clear during boot/reconcile."""
 
         if self._store is None:
             return False
         if self._legacy_migration_deferred:
-            self._migrate_legacy(self._store, lease_held=True)
-        if self._intent_error is not None:
+            self._migrate_legacy(self._store, lease_held=lease_held)
+        if (
+            self._initialization_error is not None
+            or self._intent_error is not None
+            or self._legacy_migration_deferred
+        ):
             return False
         try:
             intent = await self._run_maintenance_io(self._intent.load)
@@ -417,6 +435,9 @@ class MemoryMaintenance:
                     )
                 except ClearIntentError:
                     logger.exception("Memory Clear recovery marker could not be retained")
+                    self._intent_error = ClearIntentError(
+                        "Memory Clear recovery marker could not be retained"
+                    )
                 return ClearResult(
                     status="failed",
                     error="memory_clear_failed",
@@ -448,8 +469,8 @@ class MemoryMaintenance:
             clear_in_progress=self._read_projection(),
         )
 
-    async def recover_boot(self) -> bool:
-        return await self.reconcile_pending()
+    async def recover_boot(self, *, lease_held: bool = False) -> bool:
+        return await self.reconcile_pending(lease_held=lease_held)
 
     def ensure_housekeeping(self) -> None:
         return None
