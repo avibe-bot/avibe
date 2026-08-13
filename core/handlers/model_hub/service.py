@@ -1051,9 +1051,17 @@ class ModelHubService:
             observation.outcome is not ObservationOutcome.OBSERVED
             or observation.protocol is None
         ):
+            detail_by_outcome = {
+                ObservationOutcome.AMBIGUOUS: "modelHub.errors.ambiguous_source",
+                ObservationOutcome.UNREACHABLE: "modelHub.errors.source_unreachable",
+                ObservationOutcome.AUTHENTICATION_FAILED: "modelHub.errors.authentication_failed",
+                ObservationOutcome.ADAPTER_ERROR: "modelHub.errors.observation_failed",
+                ObservationOutcome.TIMEOUT: "modelHub.errors.source_timeout",
+            }
             raise ModelHubError(
                 "discovery_failed",
                 status=422,
+                detail=detail_by_outcome.get(observation.outcome),
                 data={"observation": self._observation_payload(observation)},
             )
         return observation

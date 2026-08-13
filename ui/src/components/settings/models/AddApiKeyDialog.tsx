@@ -67,6 +67,23 @@ const failureCopy = (cause: AddApiKeyFailure): string => {
   }
 };
 
+const observationFailureCopy = (observation: SourceObservation | undefined): string | null => {
+  if (!observation) return null;
+  if (observation.outcome === 'authentication_failed') return 'settings.models.addKey.fail.auth';
+  if (observation.outcome === 'unreachable' || observation.outcome === 'timeout') return 'settings.models.addKey.fail.network';
+  if (observation.outcome === 'ambiguous') return 'settings.models.addKey.fail.undetermined';
+  if (observation.outcome === 'observed' && observation.discovery === 'failed') return 'settings.models.addKey.fail.inventory';
+  return 'settings.models.addKey.fail.unclassified';
+};
+
+const failureMessageKey = (failure: ReturnType<typeof apiFailure>): string | null => {
+  if (!failure) return null;
+  const observationKey = observationFailureCopy(failure.observation);
+  if (observationKey) return observationKey;
+  if (failure.detail?.startsWith('modelHub.errors.')) return failure.detail;
+  return failure.code || null;
+};
+
 export const AddApiKeyDialog: React.FC<{
   open: boolean;
   onClose: () => void;
@@ -124,7 +141,7 @@ export const AddApiKeyDialog: React.FC<{
         && failure.responseStatus < 500
         && failure.responseStatus !== 409;
       continuation.settle(seq, () => setPhase(definitiveClientFailure
-        ? { kind: 'persist_failure', messageKey: failure.detail ?? failure.code ?? null, protocolOrder }
+        ? { kind: 'persist_failure', messageKey: failureMessageKey(failure), protocolOrder }
         : { kind: 'save_unconfirmed', protocolOrder }));
     }
   }, [continuation, createdDelivery, draft]);

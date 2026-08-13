@@ -183,6 +183,30 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeNull();
   });
 
+  it('opens the subscription vendor picker and OAuth flow from the Sources card', async () => {
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+
+    expect((await screen.findByRole('dialog')).textContent).toMatch(/Add Claude subscription|添加 anthropic 订阅/i);
+  });
+
+  it('returns focus to Add subscription when the OAuth flow is cancelled', async () => {
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await userEvent.click(trigger);
+    await userEvent.click(screen.getByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+    const cancelButtons = screen.getAllByRole('button', { name: /^Cancel$|^取消$/i });
+    await userEvent.click(cancelButtons[cancelButtons.length - 1]);
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
   it('lands the operational overview without waiting for event history', async () => {
     const pendingEvents = deferred<[]>();
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);

@@ -1,11 +1,13 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, Info, LoaderCircle, Route } from 'lucide-react';
+import { ArrowLeft, Gauge, Info, LoaderCircle, Route, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { AdvancedRow } from './AdvancedRow';
 import { EnableGatewayDialog } from './EnableGatewayDialog';
 import { GatewayModule } from './GatewayModule';
@@ -286,6 +288,10 @@ export const SettingsModelsPage: React.FC = () => {
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [installOpen, setInstallOpen] = React.useState(false);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
+  const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
+  const [subscriptionVendor, setSubscriptionVendor] = React.useState<string | null>(null);
+  const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const subscriptionCloseTimer = React.useRef<number | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
@@ -831,6 +837,31 @@ export const SettingsModelsPage: React.FC = () => {
       reconcile: refresh,
     });
   };
+  const subscriptionAdded = React.useCallback((source?: Source) => {
+    if (!source) {
+      void refresh();
+      return;
+    }
+    sourceEntityAuthority.landLatest(source);
+    selectSource(source.id);
+    void refresh();
+    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
+    subscriptionCloseTimer.current = window.setTimeout(() => {
+      subscriptionCloseTimer.current = null;
+      setSubscriptionVendor(null);
+    }, 1400);
+  }, [refresh, selectSource, sourceEntityAuthority]);
+  const closeSubscription = React.useCallback(() => {
+    if (subscriptionCloseTimer.current !== null) {
+      window.clearTimeout(subscriptionCloseTimer.current);
+      subscriptionCloseTimer.current = null;
+    }
+    setSubscriptionVendor(null);
+    window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
+  }, []);
+  React.useEffect(() => () => {
+    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
+  }, []);
 
   return (
     <ModelHubShell
@@ -862,7 +893,7 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'sources' ? <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
-                        <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
+                        <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={() => setSubscriptionPickerOpen(true)} subscriptionTriggerRef={subscriptionTriggerRef} />
                         <div className="hidden lg:block" aria-hidden="true" />
                         <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
@@ -874,6 +905,43 @@ export const SettingsModelsPage: React.FC = () => {
                   </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
                 </div>}
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
+      <Dialog open={subscriptionPickerOpen} onOpenChange={setSubscriptionPickerOpen}>
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>{t('settings.models.subscriptionPicker.title')}</DialogTitle>
+            <DialogDescription>{t('settings.models.subscriptionPicker.detail')}</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(['anthropic', 'openai'] as const).map((vendor) => (
+              <Button
+                key={vendor}
+                type="button"
+                variant="outline"
+                className="h-auto justify-start gap-3 px-3 py-3 text-left"
+                onClick={() => {
+                  setSubscriptionPickerOpen(false);
+                  setSubscriptionVendor(vendor);
+                }}
+              >
+                <span className="model-hub-accent-tile--mint grid size-8 shrink-0 place-items-center rounded-lg"><Sparkles className="model-hub-accent-ink--mint size-4" /></span>
+                <span className="flex flex-col items-start">
+                  <span className="font-semibold">{t(`settings.models.subscriptionPicker.${vendor}.title`)}</span>
+                  <span className="text-[11px] text-muted">{t(`settings.models.subscriptionPicker.${vendor}.detail`)}</span>
+                </span>
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+      {subscriptionVendor && (
+        <OAuthConnectDialog
+          open
+          vendor={subscriptionVendor}
+          sources={sources}
+          onClose={closeSubscription}
+          onConnected={subscriptionAdded}
+        />
+      )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}

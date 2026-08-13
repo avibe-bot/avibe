@@ -1571,6 +1571,27 @@ def test_authentication_failure_observation_never_creates_a_source(tmp_path):
     assert adapter.revoked == ["cred_00000001"]
 
 
+def test_create_failure_preserves_human_safe_observation_detail(tmp_path):
+    adapter = FakeAdapter()
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+        reachable=True,
+        authenticated=False,
+        protocol=None,
+        discovery=ObservationDiscovery.NOT_ATTEMPTED,
+        model_ids=(),
+    )
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(service.create_source({"kind": "api_key", "vendor": "custom", "key": "sk-test-detail"}))
+
+    assert exc.value.code == "discovery_failed"
+    assert exc.value.detail == "modelHub.errors.authentication_failed"
+    assert exc.value.data["observation"]["outcome"] == "authentication_failed"
+    assert store.load().sources == []
+
+
 @pytest.mark.parametrize(
     ("adapter_result", "expected_outcome"),
     [

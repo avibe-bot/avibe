@@ -190,6 +190,8 @@ export class ApiCallError extends Error {
   serverNamed: boolean;
   /** HTTP status observed by this client. Absent when no response arrived. */
   responseStatus?: number;
+  /** Safe, structured add-time observation returned with a rejected create. */
+  observation?: SourceObservation;
   constructor(
     code: string,
     detail?: string,
@@ -198,6 +200,7 @@ export class ApiCallError extends Error {
     interrupted: SupplyGap[] = [],
     wouldRemoveHops: RouteHopRef[] = [],
     responseStatus?: number,
+    observation?: SourceObservation,
   ) {
     super(detail || code);
     this.name = 'ApiCallError';
@@ -208,6 +211,7 @@ export class ApiCallError extends Error {
     this.interrupted = interrupted;
     this.wouldRemoveHops = wouldRemoveHops;
     this.responseStatus = responseStatus;
+    this.observation = observation;
   }
 }
 
@@ -249,6 +253,7 @@ export const apiFailure = (
   interrupted: SupplyGap[];
   wouldRemoveHops: RouteHopRef[];
   responseStatus?: number;
+  observation?: SourceObservation;
 } | null =>
   err instanceof ApiCallError
     ? {
@@ -259,6 +264,7 @@ export const apiFailure = (
         interrupted: err.interrupted,
         wouldRemoveHops: err.wouldRemoveHops,
         responseStatus: err.responseStatus,
+        observation: err.observation,
       }
     : null;
 
@@ -286,6 +292,9 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
       supplyGaps(envelope.interrupted_pairs),
       routeHopRefs(envelope.would_remove_hops),
       res.status,
+      typeof envelope.observation === 'object' && envelope.observation !== null
+        ? envelope.observation as SourceObservation
+        : undefined,
     );
   }
   return payload as T;

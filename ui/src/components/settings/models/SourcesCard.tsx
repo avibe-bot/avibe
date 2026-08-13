@@ -14,7 +14,9 @@ export const SourcesCard: React.FC<{
   readFailureCopy?: string;
   onOpenSource: (source: Source) => void;
   onAddApiKey: () => void;
-}> = ({ read, onRetry, readFailureCopy, onOpenSource, onAddApiKey }) => {
+  onAddSubscription: () => void;
+  subscriptionTriggerRef?: React.Ref<HTMLButtonElement>;
+}> = ({ read, onRetry, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionTriggerRef }) => {
   const { t } = useTranslation();
   const sources = foldRegionRead<Source[], Source[] | undefined>(read, {
     loading: () => undefined,
@@ -52,14 +54,12 @@ export const SourcesCard: React.FC<{
               </>}
       </div>
       <div className="flex h-14 shrink-0 items-center gap-2 border-t border-border px-3.5">
-        {/* G-21: the frame supplies no vendor for the per-vendor subscription
-            dialog. Keep the drawn command visible without inventing a picker or
-            a default vendor. */}
         <Button
+          ref={subscriptionTriggerRef}
           variant="default"
           size="xs"
-          disabled
           className="model-hub-footer-action shadow-none disabled:opacity-100"
+          onClick={onAddSubscription}
         >
           <Plus className="size-3" />
           {t('settings.models.upstream.addSubscription')}
