@@ -481,6 +481,7 @@ def _validate_legacy_backup_row(row: sqlite3.Row) -> None:
         "state",
         "started_at",
         "updated_at",
+        "terminal_at",
         "attempt_count",
         "last_error",
         "open_slot",
@@ -516,6 +517,27 @@ def _validate_legacy_backup_row(row: sqlite3.Row) -> None:
         raise ValueError("invalid legacy backup attempt count")
     if row["last_error"] not in {None, "memory_clear_failed"}:
         raise ValueError("invalid legacy backup error")
+    state = row["state"]
+    terminal_at = row["terminal_at"]
+    open_slot = row["open_slot"]
+    execution_token = row["execution_token"]
+    if state == "completed":
+        if open_slot is not None or not isinstance(terminal_at, str) or not terminal_at.strip():
+            raise ValueError("invalid completed legacy backup restore state")
+        if row["last_error"] is not None or execution_token is not None:
+            raise ValueError("completed legacy backup restore has recovery fields")
+    elif state == "restoring":
+        if open_slot != 1 or isinstance(open_slot, bool) or terminal_at is not None:
+            raise ValueError("invalid restoring legacy backup restore state")
+        if row["last_error"] is not None or not isinstance(execution_token, str):
+            raise ValueError("restoring legacy backup restore has invalid recovery fields")
+    elif state == "recovery_needed":
+        if open_slot != 1 or isinstance(open_slot, bool) or terminal_at is not None:
+            raise ValueError("invalid recovering legacy backup restore state")
+        if row["last_error"] != "memory_clear_failed" or execution_token is not None:
+            raise ValueError("recovering legacy backup restore has invalid recovery fields")
+    else:
+        raise ValueError("invalid legacy backup restore state")
     if (
         not isinstance(row["revision"], int)
         or isinstance(row["revision"], bool)

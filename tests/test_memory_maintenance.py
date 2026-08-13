@@ -116,6 +116,18 @@ def _write_backup_restore_journal(tmp_path: Path, *, state: str, open_slot: int 
     journal = tmp_path / "state/memory/backup-restore-journal.sqlite"
     journal.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(journal)
+    if state == "completed":
+        terminal_at = "2026-08-13T00:00:01Z"
+        last_error = None
+        execution_token = None
+    elif state == "recovery_needed":
+        terminal_at = None
+        last_error = "memory_clear_failed"
+        execution_token = None
+    else:
+        terminal_at = None
+        last_error = None
+        execution_token = "b" * 32
     connection.execute(
         """
         CREATE TABLE backup_restore_operation (
@@ -137,12 +149,12 @@ def _write_backup_restore_journal(tmp_path: Path, *, state: str, open_slot: int 
             state,
             "2026-08-13T00:00:00Z",
             "2026-08-13T00:00:00Z",
-            None,
+            terminal_at,
             1,
-            None,
+            last_error,
             open_slot,
             1,
-            None,
+            execution_token,
         ),
     )
     connection.commit()
@@ -419,6 +431,52 @@ def test_open_legacy_backup_restore_is_preserved_and_fences_memory(tmp_path: Pat
     assert backup.read_text(encoding="utf-8") == "retained"
 
 
+@pytest.mark.asyncio
+async def test_unreadable_legacy_backup_restore_blocks_explicit_clear(tmp_path: Path):
+    journal = tmp_path / "state/memory/backup-restore-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"not sqlite")
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.has_legacy_restore_authority() is True
+    assert (await maintenance.observe()).can_clear is False
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "failed"
+    assert result.error == "memory_operation_in_progress"
+    assert journal.exists()
+
+
+@pytest.mark.asyncio
+async def test_legacy_abort_exposes_replacement_clear_and_clears_fence(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, resolution TEXT, "
+        "started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-abort", "user-1", 0, 1, "recovery_needed", "abort", "now"),
+    )
+    _add_surface_receipts(connection, "legacy-abort")
+    connection.commit()
+    connection.close()
+    journal.chmod(0o600)
+
+    maintenance, _port = _maintenance(tmp_path)
+    assert (await maintenance.observe()).can_clear is True
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "completed"
+    assert maintenance._legacy_abort_open is False
+    assert maintenance._legacy_migration_deferred is False
+    assert maintenance.is_open() is False
+
+
 def test_terminal_legacy_backup_restore_is_removed(tmp_path: Path):
     journal = _write_backup_restore_journal(tmp_path, state="completed", open_slot=None)
     backup = tmp_path / "state/memory/backups/backup-one/manifest.json"
@@ -431,6 +489,20 @@ def test_terminal_legacy_backup_restore_is_removed(tmp_path: Path):
     assert maintenance.is_open() is False
     assert not journal.exists()
     assert not backup.exists()
+
+
+def test_malformed_terminal_legacy_backup_restore_is_retained(tmp_path: Path):
+    journal = _write_backup_restore_journal(tmp_path, state="completed", open_slot=None)
+    connection = sqlite3.connect(journal)
+    connection.execute("UPDATE backup_restore_operation SET terminal_at = NULL")
+    connection.commit()
+    connection.close()
+
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.has_legacy_restore_authority() is True
+    assert maintenance.is_open() is True
+    assert journal.exists()
 
 
 def test_failed_legacy_backup_cleanup_retains_migration_fence(

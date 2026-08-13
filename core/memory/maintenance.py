@@ -105,6 +105,7 @@ class MemoryMaintenance:
         self._intent_error: Exception | None = None
         self._legacy_migration_deferred = False
         self._legacy_restore_open = False
+        self._legacy_restore_unreadable = False
         self._legacy_abort_open = False
         self._closing = False
         try:
@@ -135,6 +136,8 @@ class MemoryMaintenance:
         if not any(os.path.lexists(path) for path in legacy_paths):
             self._legacy_migration_deferred = False
             self._legacy_restore_open = False
+            self._legacy_restore_unreadable = False
+            self._legacy_abort_open = False
             return
         if store is None and os.path.lexists(
             self._intent.home / "state/memory/clear-journal.sqlite"
@@ -159,15 +162,8 @@ class MemoryMaintenance:
                 logger.warning("Legacy Memory cleanup lease could not be acquired", exc_info=True)
                 return
         try:
-            if inspect_legacy_clear_abort(self._intent.home):
-                self._legacy_abort_open = True
-                self._legacy_migration_deferred = True
-                logger.warning(
-                    "Legacy Memory abort restore remains open; retaining journal and snapshots"
-                )
-                return
             backup_restore = inspect_legacy_backup_restore(self._intent.home)
-            self._legacy_abort_open = False
+            self._legacy_restore_unreadable = False
             if backup_restore == "open":
                 self._legacy_restore_open = True
                 self._legacy_migration_deferred = True
@@ -176,6 +172,14 @@ class MemoryMaintenance:
                 )
                 return
             self._legacy_restore_open = False
+            if inspect_legacy_clear_abort(self._intent.home):
+                self._legacy_abort_open = True
+                self._legacy_migration_deferred = True
+                logger.warning(
+                    "Legacy Memory abort restore remains open; retaining journal and snapshots"
+                )
+                return
+            self._legacy_abort_open = False
             failures = cleanup_legacy_backup_storage(self._intent.home)
             if failures:
                 self._legacy_migration_deferred = True
@@ -191,6 +195,7 @@ class MemoryMaintenance:
                 self._intent.home / "state/memory/backup-restore-journal.sqlite"
             ):
                 self._legacy_migration_deferred = True
+                self._legacy_restore_unreadable = True
                 logger.warning(
                     "Legacy Memory backup restore state is unreadable; keeping Memory fenced"
                 )
@@ -241,6 +246,11 @@ class MemoryMaintenance:
 
     def has_open_restore(self) -> bool:
         return self._legacy_restore_open
+
+    def has_legacy_restore_authority(self) -> bool:
+        """Return whether an old backup restore still needs to be resolved."""
+
+        return self._legacy_restore_open or self._legacy_restore_unreadable
 
     def has_readable_intent(self) -> bool:
         """Return whether boot can safely replay a readable Clear marker."""
@@ -318,6 +328,7 @@ class MemoryMaintenance:
         can_clear = self.ready and (
             block_reason is None
             or self._intent_error is not None
+            or (self._legacy_abort_open and not self.has_legacy_restore_authority())
             or (clear_in_progress is not None and clear_in_progress.state == "failed")
         )
         return MaintenanceObservation(
@@ -406,7 +417,7 @@ class MemoryMaintenance:
     async def _run_clear(self, *, operator_ref: str, boot: bool) -> ClearResult:
         if self._store is None:
             raise MemoryStoreUnavailableError("Memory store is unavailable")
-        if self._legacy_restore_open:
+        if self.has_legacy_restore_authority():
             return ClearResult(status="failed", error="memory_operation_in_progress")
         async with self._runtime.exclusive_fence():
             self._runtime.enter_maintenance()
@@ -469,6 +480,10 @@ class MemoryMaintenance:
             await self._runtime.quiesce(False)
             await self._run_maintenance_io(self._intent.consume_legacy_clear_state)
             await self._run_maintenance_io(self._intent.consume_legacy_snapshots)
+            # Re-scan retired artifacts while the replacement operation owns
+            # the lease, clearing an abort-only fence without dropping a
+            # separate unresolved backup-restore authority.
+            self._migrate_legacy(self._store, lease_held=True)
             if write_error is not None:
                 raise write_error
             if cancellation is not None:
