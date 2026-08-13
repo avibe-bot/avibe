@@ -40,6 +40,12 @@ MARKER_SCHEMA_VERSION = 1
 LEGACY_ABORT_ERROR_CODE = "memory_clear_legacy_abort_unsupported"
 MAX_CLEAR_INTENT_BYTES = 16 * 1024
 _LEGACY_OPERATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_LEGACY_BACKUP_OPERATION_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
+_LEGACY_BACKUP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_LEGACY_TOKEN_RE = re.compile(r"[0-9a-f]{32}\Z")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_LEGACY_ROWS = 1024
+_MAX_LEGACY_FIELD_BYTES = 4096
 
 
 class ClearIntentError(RuntimeError):
@@ -209,23 +215,34 @@ class ClearIntentStore:
         connection = None
         try:
             connection = PrivateSqliteDatabase(self.home, journal_path).connect()
-            rows = connection.execute("SELECT * FROM clear_operation").fetchall()
-        except (ConfinedFilesystemError, sqlite3.Error, OSError) as error:
-            raise ClearIntentUnreadable("legacy Memory clear journal is unreadable") from error
-        finally:
-            if connection is not None:
-                connection.close()
-        open_rows = []
-        try:
+            rows = []
+            cursor = connection.execute("SELECT * FROM clear_operation")
+            for row_number, candidate in enumerate(cursor, start=1):
+                if row_number > _MAX_LEGACY_ROWS:
+                    raise ValueError("legacy Memory clear journal has too many rows")
+                _validate_legacy_row_size(candidate)
+                rows.append(candidate)
+
+            open_rows = []
             for candidate in rows:
                 state = candidate["state"]
                 open_slot = candidate["open_slot"]
                 started_at = candidate["started_at"]
                 if not isinstance(started_at, str) or not started_at.strip():
                     raise ValueError("legacy clear timestamp is invalid")
+                operation_id = _validated_legacy_operation_id(candidate["operation_id"])
+                _validated_legacy_operator(candidate["operator_ref"])
                 if state in {"completed", "aborted"}:
                     if open_slot is not None:
                         raise ValueError("terminal legacy clear row has an open slot")
+                    resolution = candidate["resolution"] if "resolution" in candidate.keys() else None
+                    _validate_legacy_resolution(state, resolution)
+                    _validate_legacy_surfaces(
+                        connection,
+                        operation_id=operation_id,
+                        operation_state=state,
+                        resolution=resolution,
+                    )
                 elif state in {"preparing", "prepared", "deleting", "recovery_needed"}:
                     if (
                         not isinstance(open_slot, int)
@@ -236,17 +253,17 @@ class ClearIntentStore:
                     open_rows.append(candidate)
                 else:
                     raise ValueError("legacy Memory clear journal has an invalid state")
-        except (KeyError, TypeError, ValueError, IndexError) as error:
-            raise ClearIntentUnreadable("legacy Memory clear journal has invalid rows") from error
-        if not open_rows:
-            _remove_required(self.home, journal_path, "legacy Memory clear journal")
-            return None
-        if len(open_rows) != 1:
-            raise ClearIntentUnreadable("legacy Memory clear journal has multiple open operations")
-        row = open_rows[0]
-        try:
-            operation_id = str(row["operation_id"])
-            operator_ref = str(row["operator_ref"])
+
+            if not open_rows:
+                connection.close()
+                connection = None
+                _remove_required(self.home, journal_path, "legacy Memory clear journal")
+                return None
+            if len(open_rows) != 1:
+                raise ValueError("legacy Memory clear journal has multiple open operations")
+            row = open_rows[0]
+            operation_id = _validated_legacy_operation_id(row["operation_id"])
+            operator_ref = _validated_legacy_operator(row["operator_ref"])
             pre_epoch_value = row["pre_epoch"]
             if (
                 not isinstance(pre_epoch_value, int)
@@ -267,10 +284,11 @@ class ClearIntentStore:
                 # rule can distinguish a queue clear that already advanced the
                 # epoch from one that did not.
                 if current_epoch is None:
-                    return None
-                target_epoch = pre_epoch + 1
-                if current_epoch not in {pre_epoch, target_epoch}:
-                    raise ValueError("legacy clear epoch is not replay-safe")
+                    target_epoch = pre_epoch + 1
+                else:
+                    target_epoch = pre_epoch + 1
+                    if current_epoch not in {pre_epoch, target_epoch}:
+                        raise ValueError("legacy clear epoch is not replay-safe")
             else:
                 if (
                     not isinstance(target_value, int)
@@ -303,32 +321,57 @@ class ClearIntentStore:
             }
             if resolution not in valid_resolution[state]:
                 raise ValueError("legacy clear resolution is out of state")
-            if state in {"completed", "aborted"}:
-                _remove_required(self.home, journal_path, "legacy Memory clear journal")
+            _validate_legacy_surfaces(
+                connection,
+                operation_id=operation_id,
+                operation_state=state,
+                resolution=resolution,
+            )
+            if target_value is None and current_epoch is None:
                 return None
-        except (KeyError, TypeError, ValueError, IndexError) as error:
-            raise ClearIntentUnreadable("legacy Memory clear journal has invalid shape") from error
-        migrated_state = "failed" if resolution == "abort" else "deleting"
-        migrated_error = LEGACY_ABORT_ERROR_CODE if resolution == "abort" else None
-        now = _utc_now()
-        intent = ClearIntent(
-            schema_version=MARKER_SCHEMA_VERSION,
-            operation_id=operation_id,
-            operator_ref=operator_ref,
-            pre_epoch=pre_epoch,
-            target_epoch=target_epoch,
-            state=migrated_state,
-            error_code=migrated_error,
-            created_at=started_at,
-            updated_at=now,
-        )
-        self.write(intent)
-        _remove_required(self.home, journal_path, "legacy Memory clear journal")
-        return intent
+            migrated_state = "failed" if resolution == "abort" else "deleting"
+            migrated_error = LEGACY_ABORT_ERROR_CODE if resolution == "abort" else None
+            now = _utc_now()
+            intent = ClearIntent(
+                schema_version=MARKER_SCHEMA_VERSION,
+                operation_id=operation_id,
+                operator_ref=operator_ref,
+                pre_epoch=pre_epoch,
+                target_epoch=target_epoch,
+                state=migrated_state,
+                error_code=migrated_error,
+                created_at=started_at,
+                updated_at=now,
+            )
+            connection.close()
+            connection = None
+            self.write(intent)
+            _remove_required(self.home, journal_path, "legacy Memory clear journal")
+            return intent
+        except ClearIntentError:
+            raise
+        except (
+            ConfinedFilesystemError,
+            sqlite3.Error,
+            OSError,
+            UnicodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            IndexError,
+        ) as error:
+            raise ClearIntentUnreadable("legacy Memory clear journal is unreadable") from error
+        finally:
+            if connection is not None:
+                connection.close()
 
 
 def cleanup_legacy_backup_storage(effective_home: Path | str) -> tuple[str, ...]:
     home = Path(os.path.abspath(os.path.expanduser(os.fspath(effective_home))))
+    if inspect_legacy_backup_restore(home) == "open":
+        # An open restore is still an authority fence. Leave both the journal
+        # and its backup tree in place until a supported recovery path exists.
+        return (BACKUP_JOURNAL_RELATIVE_PATH, BACKUP_ROOT_RELATIVE_PATH)
     failures: list[str] = []
     for relative in (
         BACKUP_JOURNAL_RELATIVE_PATH,
@@ -338,6 +381,257 @@ def cleanup_legacy_backup_storage(effective_home: Path | str) -> tuple[str, ...]
         if not _best_effort_remove(home, home / relative):
             failures.append(relative)
     return tuple(failures)
+
+
+def inspect_legacy_backup_restore(effective_home: Path | str) -> Literal["absent", "terminal", "open"]:
+    """Classify the retired backup-restore journal without mutating it."""
+
+    home = Path(os.path.abspath(os.path.expanduser(os.fspath(effective_home))))
+    journal_path = home / BACKUP_JOURNAL_RELATIVE_PATH
+    if not os.path.lexists(journal_path):
+        return "absent"
+    connection = None
+    try:
+        connection = PrivateSqliteDatabase(home, journal_path).connect()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "backup_restore_operation" not in tables:
+            raise ValueError("legacy backup restore journal schema is incomplete")
+        open_count = 0
+        for row_number, row in enumerate(
+            connection.execute("SELECT * FROM backup_restore_operation"), start=1
+        ):
+            if row_number > _MAX_LEGACY_ROWS:
+                raise ValueError("legacy backup restore journal has too many rows")
+            _validate_legacy_row_size(row)
+            _validate_legacy_backup_row(row)
+            state = row["state"]
+            open_slot = row["open_slot"]
+            if state == "completed":
+                if open_slot is not None:
+                    raise ValueError("terminal backup restore row has an open slot")
+            elif state in {"restoring", "recovery_needed"}:
+                if open_slot != 1 or isinstance(open_slot, bool):
+                    raise ValueError("open backup restore row has no open slot")
+                open_count += 1
+            else:
+                raise ValueError("legacy backup restore state is invalid")
+        if open_count > 1:
+            raise ValueError("legacy backup restore journal has multiple open operations")
+        return "open" if open_count else "terminal"
+    except (ConfinedFilesystemError, sqlite3.Error, OSError, KeyError, TypeError, ValueError) as error:
+        raise ClearIntentUnreadable("legacy backup restore journal is unreadable") from error
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _validate_legacy_row_size(row: sqlite3.Row) -> None:
+    for value in row:
+        if isinstance(value, str) and len(value.encode("utf-8")) > _MAX_LEGACY_FIELD_BYTES:
+            raise ValueError("legacy journal field is too large")
+        if isinstance(value, (bytes, bytearray, memoryview)) and len(value) > _MAX_LEGACY_FIELD_BYTES:
+            raise ValueError("legacy journal field is too large")
+
+
+def _validate_legacy_backup_row(row: sqlite3.Row) -> None:
+    required = {
+        "operation_id",
+        "backup_id",
+        "manifest_sha256",
+        "surface_digests_json",
+        "state",
+        "started_at",
+        "updated_at",
+        "attempt_count",
+        "last_error",
+        "open_slot",
+        "revision",
+        "execution_token",
+    }
+    if not required.issubset(row.keys()):
+        raise ValueError("legacy backup restore journal schema is incomplete")
+    if (
+        not isinstance(row["operation_id"], str)
+        or _LEGACY_BACKUP_OPERATION_ID_RE.fullmatch(row["operation_id"]) is None
+    ):
+        raise ValueError("invalid legacy backup restore operation id")
+    if (
+        not isinstance(row["backup_id"], str)
+        or _LEGACY_BACKUP_ID_RE.fullmatch(row["backup_id"]) is None
+    ):
+        raise ValueError("invalid legacy backup id")
+    if (
+        not isinstance(row["manifest_sha256"], str)
+        or _SHA256_RE.fullmatch(row["manifest_sha256"]) is None
+    ):
+        raise ValueError("invalid legacy backup manifest digest")
+    if not isinstance(row["started_at"], str) or not row["started_at"].strip():
+        raise ValueError("invalid legacy backup start time")
+    if not isinstance(row["updated_at"], str) or not row["updated_at"].strip():
+        raise ValueError("invalid legacy backup update time")
+    if (
+        not isinstance(row["attempt_count"], int)
+        or isinstance(row["attempt_count"], bool)
+        or row["attempt_count"] < 1
+    ):
+        raise ValueError("invalid legacy backup attempt count")
+    if row["last_error"] not in {None, "memory_clear_failed"}:
+        raise ValueError("invalid legacy backup error")
+    if (
+        not isinstance(row["revision"], int)
+        or isinstance(row["revision"], bool)
+        or row["revision"] < 1
+    ):
+        raise ValueError("invalid legacy backup revision")
+    token = row["execution_token"]
+    if token is not None and (
+        not isinstance(token, str) or _LEGACY_TOKEN_RE.fullmatch(token) is None
+    ):
+        raise ValueError("invalid legacy backup execution token")
+    try:
+        decoded = json.loads(row["surface_digests_json"])
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid legacy backup surface digests") from error
+    if not isinstance(decoded, dict) or not decoded:
+        raise ValueError("invalid legacy backup surface digests")
+    for path, digest in decoded.items():
+        if not isinstance(path, str) or not path or path.startswith("/") or "\x00" in path:
+            raise ValueError("invalid legacy backup surface path")
+        if digest is not None and (
+            not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
+        ):
+            raise ValueError("invalid legacy backup surface digest")
+
+
+def _validated_legacy_operation_id(value: object) -> str:
+    if not isinstance(value, str) or _LEGACY_OPERATION_ID_RE.fullmatch(value) is None:
+        raise ValueError("invalid legacy Memory clear operation id")
+    return value
+
+
+def _validated_legacy_operator(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > 512
+        or any(ord(character) < 0x20 for character in value)
+    ):
+        raise ValueError("invalid legacy Memory clear operator reference")
+    return value
+
+
+def _validate_legacy_resolution(state: object, resolution: object) -> None:
+    if resolution not in {None, "resume", "abort"}:
+        raise ValueError("legacy clear resolution is invalid")
+    valid_resolution = {
+        "completed": {None, "resume"},
+        "aborted": {"abort"},
+    }
+    if resolution not in valid_resolution[state]:
+        raise ValueError("legacy clear resolution is out of state")
+
+
+def _validate_legacy_surfaces(
+    connection: sqlite3.Connection,
+    *,
+    operation_id: str,
+    operation_state: str,
+    resolution: object,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "clear_surface" not in tables:
+        raise ValueError("legacy clear journal is missing surface receipts")
+    rows = []
+    for row_number, row in enumerate(
+        connection.execute(
+            "SELECT * FROM clear_surface WHERE operation_id = ?", (operation_id,)
+        ),
+        start=1,
+    ):
+        if row_number > len(DEFAULT_CLEAR_SURFACES):
+            raise ValueError("legacy clear journal has too many surface receipts")
+        _validate_legacy_row_size(row)
+        rows.append(row)
+    if len(rows) != len(DEFAULT_CLEAR_SURFACES):
+        raise ValueError("legacy clear journal has incomplete surface receipts")
+    expected_paths = {surface.surface: surface.relative_path for surface in DEFAULT_CLEAR_SURFACES}
+    states: dict[str, str] = {}
+    for row in rows:
+        required = {"operation_id", "surface", "relative_path", "state"}
+        if not required.issubset(row.keys()):
+            raise ValueError("legacy clear surface receipt is incomplete")
+        if row["operation_id"] != operation_id:
+            raise ValueError("legacy clear surface operation id is invalid")
+        surface = row["surface"]
+        if not isinstance(surface, str) or surface not in expected_paths or surface in states:
+            raise ValueError("legacy clear surface name is invalid")
+        if row["relative_path"] != expected_paths[surface]:
+            raise ValueError("legacy clear surface path is invalid")
+        state = row["state"]
+        if state not in {"pending", "snapshotted", "deleted", "restored"}:
+            raise ValueError("legacy clear surface state is invalid")
+        states[surface] = state
+        if "relative_snapshot_path" in row.keys():
+            snapshot_path = row["relative_snapshot_path"]
+            if state == "pending":
+                if snapshot_path is not None:
+                    raise ValueError("pending legacy clear surface has a snapshot")
+            elif not isinstance(snapshot_path, str) or not snapshot_path:
+                raise ValueError("legacy clear surface snapshot is invalid")
+        if "present" in row.keys():
+            present = row["present"]
+            if state == "pending":
+                if present is not None:
+                    raise ValueError("pending legacy clear surface has presence data")
+            elif present not in {0, 1} or isinstance(present, bool):
+                raise ValueError("legacy clear surface presence is invalid")
+        pre_digest = row["pre_clear_digest"] if "pre_clear_digest" in row.keys() else None
+        snapshot_digest = row["snapshot_digest"] if "snapshot_digest" in row.keys() else None
+        if state == "pending" and (pre_digest is not None or snapshot_digest is not None):
+            raise ValueError("pending legacy clear surface has a digest")
+        if state != "pending" and "present" in row.keys():
+            if present == 0 and (pre_digest is not None or snapshot_digest is not None):
+                raise ValueError("absent legacy clear surface has a digest")
+            if present == 1 and (
+                not isinstance(pre_digest, str)
+                or _SHA256_RE.fullmatch(pre_digest) is None
+                or not isinstance(snapshot_digest, str)
+                or _SHA256_RE.fullmatch(snapshot_digest) is None
+            ):
+                raise ValueError("present legacy clear surface is missing digests")
+        for digest_name in ("pre_clear_digest", "snapshot_digest"):
+            if digest_name not in row.keys():
+                continue
+            digest = row[digest_name]
+            if digest is not None and (
+                not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
+            ):
+                raise ValueError("legacy clear surface digest is invalid")
+    expected_states = {
+        "preparing": {"pending"},
+        "prepared": {"snapshotted"},
+        "deleting": {"snapshotted", "deleted"},
+        # Recovery can be interrupted during either the delete or restore
+        # direction, so every released surface state is possible here.
+        "recovery_needed": {"pending", "snapshotted", "deleted", "restored"},
+        "completed": {"deleted"},
+        "aborted": {"restored"},
+    }
+    if set(states.values()) - expected_states[operation_state]:
+        raise ValueError("legacy clear surface state contradicts operation state")
+    if operation_state == "recovery_needed":
+        if resolution != "abort" and "restored" in states.values():
+            raise ValueError("legacy clear resume has restored surfaces")
+        if resolution == "abort" and set(states.values()) == {"pending"}:
+            raise ValueError("legacy clear abort has no prepared surfaces")
 
 
 def _best_effort_remove(home: Path, path: Path) -> bool:

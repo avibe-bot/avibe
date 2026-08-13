@@ -88,6 +88,69 @@ def _maintenance(tmp_path: Path) -> tuple[MemoryMaintenance, _Port]:
     return maintenance, port
 
 
+def _add_surface_receipts(connection: sqlite3.Connection, operation_id: str) -> None:
+    connection.execute(
+        """
+        CREATE TABLE clear_surface (
+            operation_id TEXT,
+            surface TEXT,
+            relative_path TEXT,
+            relative_snapshot_path TEXT,
+            present INTEGER,
+            pre_clear_digest TEXT,
+            snapshot_digest TEXT,
+            state TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    for surface in ("queue", "provider", "call_log", "attachments"):
+        path = next(item.relative_path for item in DEFAULT_CLEAR_SURFACES if item.surface == surface)
+        connection.execute(
+            "INSERT INTO clear_surface VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (operation_id, surface, path, f"state/memory/clear-snapshots/{operation_id}/{surface}", 0, None, None, "snapshotted", "now"),
+        )
+
+
+def _write_backup_restore_journal(tmp_path: Path, *, state: str, open_slot: int | None) -> Path:
+    journal = tmp_path / "state/memory/backup-restore-journal.sqlite"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        """
+        CREATE TABLE backup_restore_operation (
+            operation_id TEXT, backup_id TEXT, manifest_sha256 TEXT,
+            surface_digests_json TEXT, state TEXT, started_at TEXT,
+            updated_at TEXT, terminal_at TEXT, attempt_count INTEGER,
+            last_error TEXT, open_slot INTEGER, revision INTEGER,
+            execution_token TEXT
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO backup_restore_operation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "a" * 32,
+            "backup-one",
+            "a" * 64,
+            '{"state/memory/memory.sqlite":null}',
+            state,
+            "2026-08-13T00:00:00Z",
+            "2026-08-13T00:00:00Z",
+            None,
+            1,
+            None,
+            open_slot,
+            1,
+            None,
+        ),
+    )
+    connection.commit()
+    connection.close()
+    journal.chmod(0o600)
+    return journal
+
+
 @pytest.mark.asyncio
 async def test_clear_writes_marker_and_repeats_four_surfaces(tmp_path: Path):
     maintenance, port = _maintenance(tmp_path)
@@ -341,6 +404,56 @@ def test_legacy_cleanup_lease_failure_fences_memory(tmp_path: Path, monkeypatch)
     assert (maintenance._initialization_error is not None)
 
 
+def test_open_legacy_backup_restore_is_preserved_and_fences_memory(tmp_path: Path):
+    journal = _write_backup_restore_journal(tmp_path, state="recovery_needed", open_slot=1)
+    backup = tmp_path / "state/memory/backups/backup-one/manifest.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("retained", encoding="utf-8")
+
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.has_open_restore() is True
+    assert maintenance.is_open() is True
+    assert maintenance._legacy_migration_deferred is True
+    assert journal.exists()
+    assert backup.read_text(encoding="utf-8") == "retained"
+
+
+def test_terminal_legacy_backup_restore_is_removed(tmp_path: Path):
+    journal = _write_backup_restore_journal(tmp_path, state="completed", open_slot=None)
+    backup = tmp_path / "state/memory/backups/backup-one/manifest.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("obsolete", encoding="utf-8")
+
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.has_open_restore() is False
+    assert maintenance.is_open() is False
+    assert not journal.exists()
+    assert not backup.exists()
+
+
+def test_failed_legacy_backup_cleanup_retains_migration_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    journal = _write_backup_restore_journal(tmp_path, state="completed", open_slot=None)
+    from core.memory import clear_intent
+
+    original_remove = clear_intent.remove_confined_path
+
+    def fail_journal_remove(home: Path, path: Path):
+        if path == journal:
+            raise clear_intent.ConfinedFilesystemError("journal is busy")
+        return original_remove(home, path)
+
+    monkeypatch.setattr(clear_intent, "remove_confined_path", fail_journal_remove)
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.is_open() is True
+    assert maintenance._legacy_migration_deferred is True
+    assert journal.exists()
+
+
 def test_legacy_migration_retries_after_transient_store_failure(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     journal = tmp_path / "state/memory/clear-journal.sqlite"
@@ -354,6 +467,7 @@ def test_legacy_migration_retries_after_transient_store_failure(tmp_path: Path, 
         "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, 1)",
         ("legacy-one", "user-1", 0, "deleting", "2026-08-13T00:00:00Z"),
     )
+    _add_surface_receipts(connection, "legacy-one")
     connection.commit()
     connection.close()
     journal.chmod(0o600)
@@ -392,6 +506,7 @@ def test_deferred_legacy_migration_is_retryable_after_lease_release(tmp_path: Pa
         "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
         ("legacy-one", "user-1", 0, 1, "deleting", "2026-08-13T00:00:00Z"),
     )
+    _add_surface_receipts(connection, "legacy-one")
     connection.commit()
     connection.close()
     journal.chmod(0o600)

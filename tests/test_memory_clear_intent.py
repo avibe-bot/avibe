@@ -12,8 +12,33 @@ from core.memory.clear_intent import (
     ClearIntentError,
     ClearIntentStore,
     ClearIntentUnreadable,
+    DEFAULT_CLEAR_SURFACES,
     MARKER_RELATIVE_PATH,
 )
+
+
+def _add_surface_receipts(connection: sqlite3.Connection, operation_id: str, state: str = "snapshotted") -> None:
+    connection.execute(
+        """
+        CREATE TABLE clear_surface (
+            operation_id TEXT,
+            surface TEXT,
+            relative_path TEXT,
+            relative_snapshot_path TEXT,
+            present INTEGER,
+            pre_clear_digest TEXT,
+            snapshot_digest TEXT,
+            state TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    for surface in ("queue", "provider", "call_log", "attachments"):
+        path = next(item.relative_path for item in DEFAULT_CLEAR_SURFACES if item.surface == surface)
+        connection.execute(
+            "INSERT INTO clear_surface VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (operation_id, surface, path, f"state/memory/clear-snapshots/{operation_id}/{surface}", 0, None, None, state, "now"),
+        )
 
 
 def test_marker_write_is_atomic_and_round_trips(tmp_path: Path):
@@ -123,6 +148,7 @@ def test_legacy_open_journal_migrates_then_removes_journal(tmp_path: Path):
         "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
         (operation_id, "user-1", 2, 3, "deleting", "2026-08-13T00:00:00Z"),
     )
+    _add_surface_receipts(connection, operation_id)
     connection.commit()
     connection.close()
     os.chmod(journal, 0o600)
@@ -149,6 +175,7 @@ def test_legacy_operation_token_is_accepted_by_new_marker_reader(tmp_path: Path)
         "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
         (legacy_id, "user-1", 2, 3, "deleting", "2026-08-13T00:00:00Z"),
     )
+    _add_surface_receipts(connection, legacy_id)
     connection.commit()
     connection.close()
     os.chmod(journal, 0o600)
@@ -183,6 +210,100 @@ def test_legacy_journal_without_started_at_is_unreadable(tmp_path: Path):
     assert journal.exists()
 
 
+@pytest.mark.parametrize("column, value", (("operation_id", None), ("operator_ref", None)))
+def test_legacy_identifiers_must_remain_released_strings(
+    tmp_path: Path, column: str, value: object
+):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id, operator_ref, pre_epoch INTEGER, "
+        "target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    values = ["legacy-one", "user-1", 0, 1, "deleting", "2026-08-13T00:00:00Z", 1]
+    values[0 if column == "operation_id" else 1] = value
+    connection.execute("INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, ?)", values)
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=0)
+    assert journal.exists()
+
+
+def test_legacy_open_operation_requires_all_surface_receipts(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, pre_epoch INTEGER, "
+        "target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-one", "user-1", 0, 1, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.execute(
+        "CREATE TABLE clear_surface (operation_id TEXT, surface TEXT, relative_path TEXT, state TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO clear_surface VALUES (?, ?, ?, ?)",
+        ("legacy-one", "queue", "state/memory/memory.sqlite", "deleted"),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=0)
+    assert journal.exists()
+
+
+def test_legacy_terminal_operation_requires_consistent_surface_receipts(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, pre_epoch INTEGER, "
+        "target_epoch INTEGER, state TEXT, resolution TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+        ("legacy-one", "user-1", 0, 1, "completed", None, "2026-08-13T00:00:00Z"),
+    )
+    _add_surface_receipts(connection, "legacy-one", state="deleted")
+    connection.execute(
+        "UPDATE clear_surface SET state = 'pending' WHERE operation_id = ? AND surface = 'queue'",
+        ("legacy-one",),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=0)
+    assert journal.exists()
+
+
+def test_legacy_journal_bounds_rows_and_field_sizes(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, pre_epoch INTEGER, "
+        "target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-one", "x" * 5000, 0, 1, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=0)
+    assert journal.exists()
+
+
 def test_legacy_abort_resolution_migrates_to_a_fenced_failed_intent(tmp_path: Path):
     journal = tmp_path / "state/memory/clear-journal.sqlite"
     journal.parent.mkdir(parents=True)
@@ -196,6 +317,7 @@ def test_legacy_abort_resolution_migrates_to_a_fenced_failed_intent(tmp_path: Pa
         "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
         ("legacy-abort", "user-1", 2, 3, "recovery_needed", "abort", "2026-08-13T00:00:00Z"),
     )
+    _add_surface_receipts(connection, "legacy-abort")
     connection.commit()
     connection.close()
     os.chmod(journal, 0o600)
@@ -249,6 +371,7 @@ def test_legacy_open_journal_without_target_epoch_defers_until_store_epoch(tmp_p
         "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, 1)",
         (operation_id, "user-1", 2, "deleting", "2026-08-13T00:00:00Z"),
     )
+    _add_surface_receipts(connection, operation_id)
     connection.commit()
     connection.close()
     os.chmod(journal, 0o600)
@@ -369,6 +492,7 @@ def test_legacy_migration_requires_durable_journal_removal(tmp_path: Path, monke
         "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
         ("legacy-one", "user-1", 2, 3, "deleting", "2026-08-13T00:00:00Z"),
     )
+    _add_surface_receipts(connection, "legacy-one")
     connection.commit()
     connection.close()
     os.chmod(journal, 0o600)

@@ -20,6 +20,7 @@ from core.memory.clear_intent import (
     DEFAULT_CLEAR_SURFACES,
     LEGACY_ABORT_ERROR_CODE,
     cleanup_legacy_backup_storage,
+    inspect_legacy_backup_restore,
 )
 from core.memory.confined_filesystem import ConfinedFilesystemError, required_no_follow_flag
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
@@ -102,6 +103,7 @@ class MemoryMaintenance:
         self._initialization_error: Exception | None = None
         self._intent_error: Exception | None = None
         self._legacy_migration_deferred = False
+        self._legacy_restore_open = False
         self._closing = False
         try:
             required_no_follow_flag()
@@ -130,6 +132,7 @@ class MemoryMaintenance:
         )
         if not any(os.path.lexists(path) for path in legacy_paths):
             self._legacy_migration_deferred = False
+            self._legacy_restore_open = False
             return
         if store is None and os.path.lexists(
             self._intent.home / "state/memory/clear-journal.sqlite"
@@ -154,18 +157,35 @@ class MemoryMaintenance:
                 logger.warning("Legacy Memory cleanup lease could not be acquired", exc_info=True)
                 return
         try:
-            try:
-                failures = cleanup_legacy_backup_storage(self._intent.home)
+            backup_restore = inspect_legacy_backup_restore(self._intent.home)
+            if backup_restore == "open":
+                self._legacy_restore_open = True
+                self._legacy_migration_deferred = True
+                logger.warning(
+                    "Legacy Memory backup restore remains open; keeping Memory fenced"
+                )
+                return
+            self._legacy_restore_open = False
+            failures = cleanup_legacy_backup_storage(self._intent.home)
+            if failures:
+                self._legacy_migration_deferred = True
                 for relative in failures:
                     logger.warning("Legacy Memory cleanup could not remove %s", relative)
-            except Exception:
-                logger.warning("Legacy Memory backup cleanup could not complete", exc_info=True)
+                return
             current_epoch = store.ensure_meta().epoch if store is not None else None
             self._intent.migrate_legacy(current_epoch=current_epoch)
             self._legacy_migration_deferred = False
         except ClearIntentUnreadable as error:
-            self._intent_error = error
-            logger.warning("Memory Clear state is unreadable; keeping Memory fenced")
+            if os.path.lexists(
+                self._intent.home / "state/memory/backup-restore-journal.sqlite"
+            ):
+                self._legacy_migration_deferred = True
+                logger.warning(
+                    "Legacy Memory backup restore state is unreadable; keeping Memory fenced"
+                )
+            else:
+                self._intent_error = error
+                logger.warning("Memory Clear state is unreadable; keeping Memory fenced")
         except Exception as error:
             # The operation lease is held here, so a transient store read or
             # durable journal-removal failure can be retried by boot recovery.
@@ -203,7 +223,7 @@ class MemoryMaintenance:
         return self._initialization_error is not None or self._intent_error is not None
 
     def has_open_restore(self) -> bool:
-        return False
+        return self._legacy_restore_open
 
     def has_readable_intent(self) -> bool:
         """Return whether boot can safely replay a readable Clear marker."""
