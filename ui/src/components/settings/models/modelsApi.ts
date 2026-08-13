@@ -137,7 +137,7 @@ export type ModelsApi = {
   /** Start the contract-owned client installation transaction. */
   installRuntime(): Promise<RuntimeDependency>;
   startRuntime(): Promise<RuntimeDependency>;
-  startOAuth(vendor: string, channel: SupplyChannel): Promise<OAuthFlow>;
+  startOAuth(vendor: string, channel: SupplyChannel, clientNonce?: string): Promise<OAuthFlow>;
   getOAuthStatus(flowId: string): Promise<OAuthResult>;
   submitOAuth(flowId: string, value: string): Promise<OAuthResult>;
   cancelOAuth(flowId: string): Promise<void>;
@@ -414,10 +414,10 @@ const liveApi: ModelsApi = {
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
   installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
-  startOAuth: (vendor, channel) =>
+  startOAuth: (vendor, channel, clientNonce) =>
     call<{ flow?: OAuthFlow } & OAuthFlow>(
       '/api/models/oauth/start',
-      jsonInit('POST', { vendor, channel }),
+      jsonInit('POST', { vendor, channel, ...(clientNonce ? { client_nonce: clientNonce } : {}) }),
     ).then((r) => (r.flow ?? r) as OAuthFlow),
   getOAuthStatus: (flowId) => call<OAuthResultResponse>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then(oauthResult),
   submitOAuth: (flowId, value) => call<OAuthResultResponse>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then(oauthResult),
@@ -1090,7 +1090,15 @@ class MockStore {
     return delay(structuredClone(this.runtime));
   }
 
-  startOAuth(vendor: string, channel: SupplyChannel) {
+  startOAuth(vendor: string, channel: SupplyChannel, clientNonce?: string) {
+    if (clientNonce) {
+      const existing = [...this.flows.values()].find((entry) =>
+        entry.flow.client_nonce === clientNonce
+        && entry.flow.vendor === vendor
+        && entry.flow.channel === channel,
+      );
+      if (existing) return delay(structuredClone(existing.flow), 500);
+    }
     const isDevice = vendor === 'openai';
     const flow: OAuthFlow = {
       flow_id: rid('oaf'),
@@ -1100,6 +1108,7 @@ class MockStore {
       source_id: rid('src'),
       vendor,
       channel,
+      client_nonce: clientNonce ?? null,
       state: 'awaiting_action',
       presentation: isDevice
         ? {
@@ -1337,7 +1346,7 @@ const mockApi: ModelsApi = {
   getRuntimeStatus: () => mockStore.getRuntimeStatus(),
   installRuntime: () => mockStore.installRuntime(),
   startRuntime: () => mockStore.startRuntime(),
-  startOAuth: (vendor, channel) => mockStore.startOAuth(vendor, channel),
+  startOAuth: (vendor, channel, clientNonce) => mockStore.startOAuth(vendor, channel, clientNonce),
   getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),
   submitOAuth: (flowId, value) => mockStore.submitOAuth(flowId, value),
   cancelOAuth: (flowId) => mockStore.cancelOAuth(flowId),

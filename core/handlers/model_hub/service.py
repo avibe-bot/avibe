@@ -1058,10 +1058,20 @@ class ModelHubService:
                 ObservationOutcome.ADAPTER_ERROR: "modelHub.errors.observation_failed",
                 ObservationOutcome.TIMEOUT: "modelHub.errors.source_timeout",
             }
+            # An adapter error may carry authoritative reachability (for example,
+            # a reachable endpoint returning an unsupported response), or no
+            # reachability evidence at all after an unclassified adapter failure.
+            # Only the former justifies copy that says we connected.
+            detail = detail_by_outcome.get(observation.outcome)
+            if (
+                observation.outcome is ObservationOutcome.ADAPTER_ERROR
+                and observation.reachable is None
+            ):
+                detail = "modelHub.errors.adapter_error"
             raise ModelHubError(
                 "discovery_failed",
                 status=422,
-                detail=detail_by_outcome.get(observation.outcome),
+                detail=detail,
                 data={"observation": self._observation_payload(observation)},
             )
         return observation

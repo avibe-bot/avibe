@@ -292,6 +292,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [subscriptionVendor, setSubscriptionVendor] = React.useState<string | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const subscriptionCloseTimer = React.useRef<number | null>(null);
+  const sourceDetailHeadingRef = React.useRef<HTMLHeadingElement>(null);
+  const focusSourceDetailPendingRef = React.useRef(false);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
@@ -842,6 +844,9 @@ export const SettingsModelsPage: React.FC = () => {
       void refresh();
       return;
     }
+    // Keep the success panel readable until its existing handoff timer closes it;
+    // the effect below then moves focus into the committed source detail surface.
+    focusSourceDetailPendingRef.current = true;
     sourceEntityAuthority.landLatest(source);
     selectSource(source.id);
     void refresh();
@@ -851,6 +856,11 @@ export const SettingsModelsPage: React.FC = () => {
       setSubscriptionVendor(null);
     }, 1400);
   }, [refresh, selectSource, sourceEntityAuthority]);
+  React.useEffect(() => {
+    if (!focusSourceDetailPendingRef.current || subscriptionVendor !== null || !selectedSourceId || !selectedSource) return;
+    focusSourceDetailPendingRef.current = false;
+    window.requestAnimationFrame(() => sourceDetailHeadingRef.current?.focus());
+  }, [selectedSource, selectedSourceId, subscriptionVendor]);
   const closeSubscription = React.useCallback(() => {
     if (subscriptionCloseTimer.current !== null) {
       window.clearTimeout(subscriptionCloseTimer.current);
@@ -885,7 +895,7 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} trackMutation={trackSourceMutation(selectedSource.id)} />
+            ? <SourceDetailPanel source={selectedSource} headingRef={sourceDetailHeadingRef} trackMutation={trackSourceMutation(selectedSource.id)} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">

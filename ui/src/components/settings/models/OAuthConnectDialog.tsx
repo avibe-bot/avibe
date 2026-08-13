@@ -38,7 +38,7 @@ import {
 } from './asyncLifetime';
 import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
-import { oauthFailureKey, serverText, type OAuthJourney } from './serverCopy';
+import { oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
@@ -92,6 +92,8 @@ export const OAuthConnectDialog: React.FC<{
   const [channel, setChannel] = React.useState<SupplyChannel>('native_cli');
   const [phase, setPhase] = React.useState<ConnectPhase>('choose');
   const [nativeSlotTaken, setNativeSlotTaken] = React.useState(false);
+  const [startAttempt, setStartAttempt] = React.useState(0);
+  const [startFailureCode, setStartFailureCode] = React.useState<string | null>(null);
   // Which Agents took the new subscription in, frozen at commit (api.md). Same
   // note as the API-key dialog: connecting a credential is not the same as
   // putting it into service, and an Agent with no accepted match is absent.
@@ -127,6 +129,15 @@ export const OAuthConnectDialog: React.FC<{
   const onCloseRef = React.useRef(onClose);
   onCloseRef.current = onClose;
   const initializedOpenSubject = React.useRef<string | null>(null);
+  const clientNonce = React.useRef<string | null>(null);
+
+  const createClientNonce = React.useCallback(() => {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    if (uuid) return `ofn_${uuid.replaceAll('-', '').toLowerCase()}`;
+    const bytes = new Uint8Array(16);
+    globalThis.crypto?.getRandomValues?.(bytes);
+    return `ofn_${Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')}`;
+  }, []);
 
   const accent = vendor === 'openai' ? 'gold' : 'mint';
   // One derivation for 「which journey is this」, read by the start call, the
@@ -145,11 +156,17 @@ export const OAuthConnectDialog: React.FC<{
   React.useEffect(() => {
     if (!openSubject) {
       initializedOpenSubject.current = null;
+      clientNonce.current = null;
+      setStartAttempt(0);
+      setStartFailureCode(null);
       setPhase('choose');
       return;
     }
     if (initializedOpenSubject.current === openSubject) return;
     initializedOpenSubject.current = openSubject;
+    clientNonce.current = null;
+    setStartAttempt(0);
+    setStartFailureCode(null);
     if (isReauth) {
       setChannel(reauth?.supply_channel ?? 'native_cli');
       setPhase('flow');
@@ -401,7 +418,7 @@ export const OAuthConnectDialog: React.FC<{
         // existing source; a create opens a fresh one for the selected channel.
         const started = reauthId
           ? await modelsApi.reauthSource(reauthId)
-          : await modelsApi.startOAuth(vendor, channel);
+          : await modelsApi.startOAuth(vendor, channel, clientNonce.current ?? (clientNonce.current = createClientNonce()));
         if (cancelled) {
           // The dialog closed while this request was in flight, so the cleanup
           // below found no flow to cancel — the flow id exists nowhere but here.
@@ -472,8 +489,9 @@ export const OAuthConnectDialog: React.FC<{
         // position moves.
         const step = transition({
           kind: 'error',
-          errorKey: 'settings.models.oauth.error.start',
+          errorKey: isReauth ? 'settings.models.oauth.error.start' : oauthStartFailureKey(failure?.code),
         });
+        if (!isReauth) setStartFailureCode(failure?.code ?? 'start_failed');
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     })();
@@ -514,7 +532,7 @@ export const OAuthConnectDialog: React.FC<{
         reread: () => rowsBehindAreStale(),
       });
     };
-  }, [open, phase, vendor, channel, reauthId, t, showToast, isReauth, rowsBehindAreStale, resolvedAfterAttempt, journey]);
+  }, [open, phase, startAttempt, vendor, channel, reauthId, t, showToast, isReauth, rowsBehindAreStale, resolvedAfterAttempt, journey, createClientNonce]);
 
   // 1-second ticker so the paste-flow countdown updates.
   React.useEffect(() => {
@@ -573,6 +591,20 @@ export const OAuthConnectDialog: React.FC<{
     } finally {
       if (isCurrent()) setSubmitting(false);
     }
+  };
+
+  const retryStart = async () => {
+    if (startFailureCode === 'native_source_already_exists' && !isReauth) {
+      const latest = await modelsApi.listSources().catch(() => sources);
+      setNativeSlotTaken(nativeSubscriptionSlotTaken(vendor, latest));
+      setChannel(initialSubscriptionChannel(vendor, latest));
+      setStartFailureCode(null);
+      setPhase('choose');
+      return;
+    }
+    setStartFailureCode(null);
+    setStartAttempt((attempt) => attempt + 1);
+    setPhase('flow');
   };
 
   const { flow, errorKey } = view;
@@ -880,9 +912,16 @@ export const OAuthConnectDialog: React.FC<{
             ) : (
               <span />
             )}
-            <Button variant={active ? 'ghost' : 'outline'} size="sm" className="h-10 sm:h-9" onClick={onClose}>
-              {active ? t('common.cancel') : t('common.close')}
-            </Button>
+            <div className="flex items-center gap-2">
+              {failed && !isReauth && startFailureCode && (
+                <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void retryStart()}>
+                  {t('settings.models.addSub.retry')}
+                </Button>
+              )}
+              <Button variant={active ? 'ghost' : 'outline'} size="sm" className="h-10 sm:h-9" onClick={onClose}>
+                {active ? t('common.cancel') : t('common.close')}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

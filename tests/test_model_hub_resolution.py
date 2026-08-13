@@ -1669,6 +1669,38 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     }
 
 
+def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
+    adapter = FakeAdapter()
+    adapter.observation_error = RuntimeError("injected adapter failure")
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "custom",
+                    "display_name": "Unknown adapter failure",
+                    "key": "sk-test-unknown-adapter-error",
+                }
+            )
+        )
+
+    assert exc.value.code == "discovery_failed"
+    assert exc.value.detail == "modelHub.errors.adapter_error"
+    assert exc.value.data["observation"] == {
+        "contract_version": 5,
+        "outcome": "adapter_error",
+        "reachable": None,
+        "authenticated": "unknown",
+        "protocol": None,
+        "discovery": "not_attempted",
+        "models": [],
+    }
+    assert store.load().sources == []
+    assert adapter.revoked == ["cred_00000001"]
+
+
 def test_observation_terminal_legality_has_no_service_or_runtime_copy():
     from ast import AsyncFunctionDef, Attribute, Call, FunctionDef, Name, parse, walk
     from pathlib import Path

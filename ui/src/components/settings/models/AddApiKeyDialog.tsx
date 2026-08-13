@@ -140,9 +140,22 @@ export const AddApiKeyDialog: React.FC<{
         && failure.responseStatus >= 400
         && failure.responseStatus < 500
         && failure.responseStatus !== 409;
-      continuation.settle(seq, () => setPhase(definitiveClientFailure
-        ? { kind: 'persist_failure', messageKey: failureMessageKey(failure), protocolOrder }
-        : { kind: 'save_unconfirmed', protocolOrder }));
+      const verdict = failure?.observation ? classifyObservation(failure.observation) : null;
+      continuation.settle(seq, () => {
+        if (definitiveClientFailure && verdict && verdict.kind !== 'ready') {
+          if (verdict.kind === 'undetermined') {
+            setPhase({ kind: 'undetermined', origin: 'add', observation: verdict.observation, hint: null });
+          } else if (verdict.kind === 'inventory') {
+            setPhase({ kind: 'inventory', origin: 'add', observation: verdict.observation });
+          } else {
+            setPhase({ kind: 'failure', origin: 'add', cause: verdict.cause });
+          }
+          return;
+        }
+        setPhase(definitiveClientFailure
+          ? { kind: 'persist_failure', messageKey: failureMessageKey(failure), protocolOrder }
+          : { kind: 'save_unconfirmed', protocolOrder });
+      });
     }
   }, [continuation, createdDelivery, draft]);
 

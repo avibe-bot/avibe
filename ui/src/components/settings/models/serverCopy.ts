@@ -86,3 +86,9 @@ export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney)
       ? 'settings.models.oauth.error.finalizeReauth'
       : 'settings.models.oauth.error.finalize'
     : 'settings.models.oauth.error.generic';
+
+/** Start-route failures have not reached provider authorization yet. */
+export const oauthStartFailureKey = (code: string | undefined): string =>
+  code === 'native_source_already_exists'
+    ? 'settings.models.addSub.error.alreadyBound'
+    : 'settings.models.addSub.error.startFailed';

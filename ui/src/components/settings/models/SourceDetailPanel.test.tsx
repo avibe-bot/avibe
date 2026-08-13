@@ -99,6 +99,20 @@ afterEach(() => {
 });
 
 describe('SourceDetailPanel', () => {
+  it('exposes a stable, programmatically focusable heading for committed navigation', () => {
+    const headingRef = React.createRef<HTMLHeadingElement>();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceDetailPanel source={source} headingRef={headingRef} trackMutation={immediateTrack} />
+      </I18nextProvider>,
+    );
+
+    expect(headingRef.current).toBe(screen.getByRole('heading', { name: source.display_name }));
+    expect(headingRef.current?.tabIndex).toBe(-1);
+    headingRef.current?.focus();
+    expect(document.activeElement).toBe(headingRef.current);
+  });
+
   it('keeps the detail surface to inventory, entry kind, tiers, and refetch', () => {
     renderPanel();
     expect(screen.queryByText(/latency|延迟|enrollment|protocol|协议/i)).toBeNull();

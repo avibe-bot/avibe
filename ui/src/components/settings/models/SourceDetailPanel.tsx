@@ -199,7 +199,9 @@ const DraftTiers: React.FC<{
 export const SourceDetailPanel: React.FC<{
   source: Source;
   trackMutation: TrackSourceMutation;
-}> = ({ source, trackMutation }) => {
+  /** Stable focus target for callers that navigate into this detail surface. */
+  headingRef?: React.Ref<HTMLHeadingElement>;
+}> = ({ source, trackMutation, headingRef }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -392,7 +394,7 @@ export const SourceDetailPanel: React.FC<{
       <section className="model-hub-source-bar flex flex-col border border-border bg-surface sm:flex-row sm:items-center">
         <span className={cn('model-hub-source-tile flex shrink-0 items-center justify-center', ACCENT_TILE[accent])}><Icon className={cn('size-[18px]', ACCENT_ICON[accent])} /></span>
         <div className="min-w-0 flex-1">
-          <h2 className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
+          <h2 ref={headingRef} tabIndex={-1} className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
           {(state.key || source.last_discovered_at) && <p className={cn('mt-1 flex flex-wrap items-center gap-x-2 gap-y-1', state.textClass)}>
             {state.key && <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] rounded-full', state.dotClass)} />{t(state.key, state.values)}</span>}
             {source.last_discovered_at && <span className="model-hub-source-age text-muted">{t('settings.models.sourceDetail.status.listUpdated', { time: formatRelativeTime(source.last_discovered_at, t) })}</span>}

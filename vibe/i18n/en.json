@@ -796,6 +796,7 @@
       "source_unreachable": "Could not reach this address. Check the address and retry.",
       "authentication_failed": "Authentication failed. Check whether the API key is valid.",
       "observation_failed": "Connected, but the response did not prove a valid model interface.",
+      "adapter_error": "We could not confirm whether the service is reachable. Retry the connection.",
       "source_timeout": "The connection timed out. Check the network and retry.",
       "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",

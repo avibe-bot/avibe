@@ -346,4 +346,56 @@ describe('AddApiKeyDialog', () => {
     expect(await screen.findByText(i18n.t('settings.models.addKey.fail.auth'))).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
   });
+
+  it('re-enters the classified observation state when create rejects with inventory evidence', async () => {
+    const failure = new ApiCallError(
+      'discovery_failed',
+      'modelHub.errors.discovery_failed',
+      true,
+      [],
+      [],
+      [],
+      422,
+      observed({ discovery: 'failed', models: [] }),
+    );
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(failure);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    expect(await screen.findByText(/model list did not come back|没拿到它的型号清单/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Add anyway|仍要添加/i })).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
+  });
+
+  it('re-enters the classified observation state when create rejects with ambiguous evidence', async () => {
+    const failure = new ApiCallError(
+      'discovery_failed',
+      'modelHub.errors.discovery_failed',
+      true,
+      [],
+      [],
+      [],
+      422,
+      observed({
+        outcome: 'ambiguous',
+        reachable: true,
+        authenticated: 'authenticated',
+        protocol: null,
+        discovery: 'not_attempted',
+        models: [],
+      }),
+    );
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(failure);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    expect(await screen.findByText(/cannot tell which interface|无法判断是哪种接口/i)).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
+  });
 });
