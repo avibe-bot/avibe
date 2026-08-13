@@ -4871,6 +4871,12 @@ def _audit_snapshot_allows(context: Any, snapshot: dict[str, Any]) -> bool:
     return True
 
 
+def _audit_fast_path_allowed(context: Any) -> bool:
+    """Allow local Owner administration and validated remote Editor access."""
+
+    return context.is_instance_owner or (context.is_remote and context.has_role("editor"))
+
+
 def _audit_reference_names_for_row(
     conn: Connection,
     row: dict[str, Any],
@@ -4963,9 +4969,7 @@ def _audit_secret_name_allowed(
             and resource_access_service.can_use_resource_policy_snapshot(context, policy)
         )
         if not has_tombstone:
-            allowed = bool(
-                context.is_remote and context.has_role("editor")
-            )
+            allowed = bool(_audit_fast_path_allowed(context))
     access_by_name[name] = allowed
     return allowed
 
@@ -4981,7 +4985,7 @@ def _require_audit_row_access(
     tombstone_policies: dict[str, tuple[bool, Any]] | None = None,
 ) -> None:
     context = resolve_resource_access_context(user_context)
-    if context.is_remote and context.has_role("editor"):
+    if _audit_fast_path_allowed(context):
         return
 
     snapshot_present, snapshot = _audit_access_snapshot(row)
@@ -5026,7 +5030,7 @@ def list_audit(
     requested_limit = max(0, limit)
     if requested_limit == 0:
         return []
-    if context.is_remote and context.has_role("editor"):
+    if _audit_fast_path_allowed(context):
         query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
         if secret_name is not None:
             query = query.where(vault_audit.c.secret_name == secret_name)
