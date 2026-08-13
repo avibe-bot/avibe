@@ -94,7 +94,8 @@ scenarios:
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_duplicate_native_source_is_rejected_before_login_starts
   - id: AUTH-SETUP-109
     name: Hub re-auth requires acknowledgement and converges its repaired Source projection
-    status: covered
+    status: partial
+    missing_layer: service
     kind: negative_path
     layer: scenario
     backend: shared
@@ -241,7 +242,8 @@ scenarios:
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::ShowPageEmailAccessScenarioTests::test_exact_email_login_is_confined_to_its_signed_show_page
   - id: AUTH-SETUP-210
     name: Lost Model Hub OAuth start response converges on one provider flow
-    status: covered
+    status: partial
+    missing_layer: service
     kind: retry
     layer: scenario
     backend: shared
