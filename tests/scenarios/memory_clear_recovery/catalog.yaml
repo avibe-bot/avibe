@@ -31,8 +31,8 @@ scenarios:
     name: Failed marker is retried automatically on boot
     status: covered
     kind: recovery
-    layer: unit
-    test: tests/test_memory_maintenance.py::test_failed_clear_persists_failed_projection_and_boot_retries
+    layer: scenario
+    test: tests/test_memory_runtime.py::test_runtime_reconcile_completes_readable_clear_marker_on_boot
     actor: Memory runtime
     trigger: A clear primitive fails after the marker is durable
     given: Processing Record projects a failed clear marker and Memory remains fenced

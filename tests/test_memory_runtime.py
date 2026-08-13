@@ -2231,8 +2231,19 @@ async def test_runtime_reconcile_completes_readable_clear_marker_on_boot(
     maintenance = _maintenance(runtime)
     store = runtime._store
     assert store is not None
-    intent = ClearIntent.new(operator_ref="boot", pre_epoch=store.ensure_meta().epoch)
+    intent = ClearIntent.new(operator_ref="boot", pre_epoch=store.ensure_meta().epoch).failed(
+        "memory_clear_failed"
+    )
     ClearIntentStore(tmp_path).write(intent)
+
+    competing = MemoryOperationLease(tmp_path)
+    competing.acquire()
+    assert await runtime.reconcile(runtime._config) == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+    }
+    assert ClearIntentStore(tmp_path).load() is not None
+    competing.release()
 
     result = await runtime.reconcile(runtime._config)
 

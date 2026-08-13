@@ -952,7 +952,17 @@ class MemoryRuntime:
         """Reconcile while both controller and module lifecycle locks are held."""
 
         if self._maintenance is not None and self._maintenance.is_open():
-            recovered = await self._maintenance.recover_boot()
+            lease = MemoryOperationLease(self._effective_home)
+            try:
+                await run_blocking(lease.acquire)
+            except MemoryOperationBusy:
+                self.module.pause_claims()
+                self._runtime_error = "memory_operation_in_progress"
+                return {"ok": False, "error": self._runtime_error}
+            try:
+                recovered = await self._maintenance.recover_boot()
+            finally:
+                await run_blocking(lease.release)
             if not recovered:
                 self.module.pause_claims()
                 self._runtime_error = "memory_clear_failed"
