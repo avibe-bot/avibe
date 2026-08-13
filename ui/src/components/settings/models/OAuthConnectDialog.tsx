@@ -593,11 +593,12 @@ export const OAuthConnectDialog: React.FC<{
     }
   };
 
-  const retryStart = async () => {
+  const retryStart = () => {
     if (startFailureCode === 'native_source_already_exists' && !isReauth) {
-      const latest = await modelsApi.listSources().catch(() => sources);
-      setNativeSlotTaken(nativeSubscriptionSlotTaken(vendor, latest));
-      setChannel(initialSubscriptionChannel(vendor, latest));
+      // The start route checked the current store under its mutation lock, so
+      // this error is newer and more authoritative than the page snapshot.
+      setNativeSlotTaken(true);
+      setChannel('hub');
       setStartFailureCode(null);
       setPhase('choose');
       return;
@@ -914,7 +915,7 @@ export const OAuthConnectDialog: React.FC<{
             )}
             <div className="flex items-center gap-2">
               {failed && !isReauth && startFailureCode && (
-                <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void retryStart()}>
+                <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={retryStart}>
                   {t('settings.models.addSub.retry')}
                 </Button>
               )}
