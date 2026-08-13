@@ -2444,9 +2444,6 @@ def enforce_instance_role_capabilities():
         return None
     from vibe.authorization import (
         InstanceAuthorizationError,
-        REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
-        REMOTE_HTTP_LOCAL_ONLY,
-        has_temporary_unrestricted_org_access,
         http_authorization_policy,
         require_instance_role,
     )
@@ -2475,30 +2472,6 @@ def enforce_instance_role_capabilities():
     try:
         if context is None:
             raise InstanceAuthorizationError(minimum_role)
-        # The temporary Organization rollout admits active members. Other remote
-        # principals on API runtime routes fail the active-Organization admission
-        # check here, before role rank. Viewer-allowed reads already have
-        # origin/org admission and are not subject to this gate.
-        if (
-            context.is_remote
-            and minimum_role == "owner"
-            and request.path.startswith("/api/")
-            and not has_temporary_unrestricted_org_access(context)
-        ):
-            # Routes classified for the temporary rollout and existing
-            # trusted-local routes retain the remote-execution error contract.
-            # Ordinary remotely exposed runtime APIs instead fail the active
-            # Organization membership admission check here, before role rank.
-            # Resource policy write endpoints defer to the handler so non-members
-            # get not_found (no existence leak).
-            if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
-                if _project_resource_policy_write_path(request.path):
-                    return None
-                return _remote_execution_disabled_response()
-            if policy.remote_access != REMOTE_HTTP_LOCAL_ONLY:
-                if _project_resource_policy_write_path(request.path):
-                    return None
-                raise InstanceAuthorizationError(minimum_role)
         require_instance_role(context, minimum_role)
     except InstanceAuthorizationError:
         return jsonify(
@@ -2622,91 +2595,15 @@ def _remote_mutable_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
-    normalized_method = method.upper()
-    if normalized_method == "POST" and path == "/api/config":
-        return _remote_config_payload_is_allowed(payload)
-    if normalized_method == "POST" and path == "/api/sessions":
-        return _payload_has_only_fields(payload, {"project_id", "title"})
-    if normalized_method == "PATCH" and re.fullmatch(r"/api/sessions/[^/]+", path):
-        return _payload_has_only_fields(payload, {"title"})
-    if normalized_method == "PATCH" and re.fullmatch(r"/api/projects/[^/]+", path):
-        return _payload_has_only_fields(payload, {"display_name"})
-    return False
+    """Compatibility helper retained for callers; remote payloads are unrestricted."""
+
+    return True
 
 
 def _is_remote_local_execution_request(method: str, path: str, payload: Any = None) -> bool:
-    from vibe.authorization import (
-        REMOTE_HTTP_LOCAL_ONLY,
-        REMOTE_HTTP_PAYLOAD_FILTERED,
-        http_authorization_policy,
-    )
+    """Compatibility helper; the transitional local-only boundary is removed."""
 
-    remote_access = http_authorization_policy(
-        method,
-        path,
-    ).remote_access
-    if remote_access == REMOTE_HTTP_LOCAL_ONLY:
-        return True
-    if remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
-        return False
-    return not _remote_payload_is_allowed(method, path, payload)
-
-
-@app.before_request
-async def enforce_remote_local_execution_boundary():
-    """Keep unapproved local-machine capabilities on the trusted-local origin."""
-
-    try:
-        context = getattr(g, "authorization_context", None)
-    except (LookupError, RuntimeError):
-        context = None
-    if context is None or not context.is_remote:
-        return None
-    from vibe.authorization import (
-        REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
-        REMOTE_HTTP_LOCAL_ONLY,
-        REMOTE_HTTP_PAYLOAD_FILTERED,
-        has_temporary_unrestricted_org_access,
-        http_authorization_policy,
-    )
-
-    policy = getattr(g, "http_authorization_policy", None)
-    if policy is None:
-        policy = http_authorization_policy(
-            request.method,
-            request.path,
-        )
-    if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
-        if has_temporary_unrestricted_org_access(context):
-            if request.method == "POST" and request.path == "/api/config":
-                # Runtime configuration is temporarily writable for active
-                # Organization members, but remote access identity/tunnel
-                # settings remain control-plane owned. Drop that block before
-                # it reaches the generic config merge/save path.
-                payload = await request.load_json()
-                if isinstance(payload, dict):
-                    payload = dict(payload)
-                    payload.pop("remote_access", None)
-                g.remote_unrestricted_config_payload = payload
-            return None
-        # Org resource policy writes keep the local-only classification but the
-        # handler returns 404 for non-members (no existence leak). Defer to the
-        # handler so callers learn not_found instead of remote_execution_disabled.
-        if _project_resource_policy_write_path(request.path):
-            return None
-        return _remote_execution_disabled_response()
-    if policy.remote_access == REMOTE_HTTP_LOCAL_ONLY:
-        if _project_resource_policy_write_path(request.path):
-            return None
-        return _remote_execution_disabled_response()
-    if policy.remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
-        return None
-    payload = await request.load_json()
-    if _is_remote_local_execution_request(request.method, request.path, payload):
-        return _remote_execution_disabled_response()
-    if request.method == "POST" and request.path == "/api/config":
-        g.remote_mutable_config_payload = _remote_mutable_config_payload(payload)
-    return None
+    return False
 
 
 _PROJECT_RESOURCE_PATHS = (
@@ -5940,15 +5837,7 @@ async def config_post():
     from vibe import internal_client
     from vibe import remote_access
 
-    remote_mutable_payload = getattr(g, "remote_mutable_config_payload", None)
-    unrestricted_payload = getattr(g, "remote_unrestricted_config_payload", None)
-    payload = (
-        unrestricted_payload
-        if unrestricted_payload is not None
-        else remote_mutable_payload
-        if remote_mutable_payload is not None
-        else request.json or {}
-    )
+    payload = request.json or {}
     remote_access_runtime = None
     try:
         (

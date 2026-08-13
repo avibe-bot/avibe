@@ -57,9 +57,6 @@ _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset(
 )
 
 REMOTE_HTTP_ALLOWED = "allowed"
-REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER = "active_organization_member"
-REMOTE_HTTP_LOCAL_ONLY = "local_only"
-REMOTE_HTTP_PAYLOAD_FILTERED = "payload_filtered"
 
 
 @dataclass(frozen=True)
@@ -497,7 +494,7 @@ _EDITOR_HTTP_RULES = tuple(
     )
 )
 
-_REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
+'''_REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
         ("DELETE", r"^/api/sessions/[^/]+(?:/queue/[^/]+)?$"),
@@ -726,7 +723,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         (frozenset({"GET", "HEAD"}), r"^/api/memory/(?:status|profile)$"),
         (frozenset({"POST"}), r"^/api/memory/search$"),
     )
-)
+)'''
 
 
 def _http_rule_matches(
@@ -737,26 +734,6 @@ def _http_rule_matches(
     return any(rule_method == method and pattern.fullmatch(path) for rule_method, pattern in rules)
 
 
-def _owner_http_rule_matches(method: str, path: str) -> bool:
-    return any(
-        method in methods and pattern.fullmatch(path)
-        for methods, pattern in _REMOTE_OWNER_ALLOWED_HTTP_RULES
-    )
-
-
-def _temporary_unrestricted_org_rule_matches(method: str, path: str) -> bool:
-    return any(
-        method in methods and pattern.fullmatch(path)
-        for methods, pattern in _TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES
-    )
-
-
-def _temporary_organization_app_rule_matches(method: str, path: str) -> bool:
-    """Compatibility alias for the previous Apps-only policy matcher."""
-
-    return _temporary_unrestricted_org_rule_matches(method, path)
-
-
 def http_authorization_policy(
     method: str,
     path: str,
@@ -765,9 +742,9 @@ def http_authorization_policy(
 ) -> HttpAuthorizationPolicy:
     """Return role and remote-exposure policy for one HTTP request.
 
-    Explicit viewer/editor and owner-management routes keep their approved remote
-    behavior. Unknown API routes fail closed to trusted-local callers so adding a
-    new owner-only endpoint cannot silently expose local machine capabilities.
+    Remote requests use the same role and resource authorization as local requests.
+    The former trust-local/local-only transport boundary was transitional and is
+    intentionally removed; unknown API routes still default to owner role.
     """
 
     normalized_method = method.upper()
@@ -785,30 +762,13 @@ def http_authorization_policy(
             path,
         )
         minimum_role = "viewer"
-        remote_access = (
-            REMOTE_HTTP_ALLOWED
-            if is_read or is_safe_human_event
-            else REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER
-        )
-        return HttpAuthorizationPolicy(minimum_role, remote_access)
+        return HttpAuthorizationPolicy(minimum_role)
     if path == "/status":
-        return HttpAuthorizationPolicy(None, REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER)
+        return HttpAuthorizationPolicy(None)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
-    if _temporary_unrestricted_org_rule_matches(normalized_method, path):
-        # The matrix is an identity-independent route classification. The
-        # request boundary below admits it only after verifying the signed
-        # active-Organization claim; ordinary remote callers still receive
-        # ``remote_execution_disabled`` there. The optional keyword is retained
-        # for callers from the previous Apps-only rollout, but classification is
-        # deliberately context-independent.
-        minimum_role = (
-            "owner"
-            if re.fullmatch(r"^/api/projects/[^/]+/agents-md$", path)
-            else "viewer"
-        )
-        return HttpAuthorizationPolicy(minimum_role, REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER)
-
+    # Route exposure is no longer split into local-only and remote-only
+    # matrices. Every API reaches the role/resource checks below.
     minimum_role = "owner"
     if _http_rule_matches(normalized_method, path, _VIEWER_HTTP_MUTATION_RULES):
         # These mutations enforce Show Page ownership and Organization authority
@@ -825,22 +785,7 @@ def http_authorization_policy(
             ):
                 minimum_role = "viewer"
 
-    if _http_rule_matches(normalized_method, path, _REMOTE_LOCAL_ONLY_HTTP_RULES):
-        remote_access = REMOTE_HTTP_LOCAL_ONLY
-    elif _http_rule_matches(
-        normalized_method,
-        path,
-        _REMOTE_PAYLOAD_FILTERED_HTTP_RULES,
-    ):
-        remote_access = REMOTE_HTTP_PAYLOAD_FILTERED
-    elif minimum_role in {"viewer", "editor"} or _owner_http_rule_matches(
-        normalized_method,
-        path,
-    ):
-        remote_access = REMOTE_HTTP_ALLOWED
-    else:
-        remote_access = REMOTE_HTTP_LOCAL_ONLY
-    return HttpAuthorizationPolicy(minimum_role, remote_access)
+    return HttpAuthorizationPolicy(minimum_role)
 
 
 def required_instance_role(method: str, path: str) -> str | None:
