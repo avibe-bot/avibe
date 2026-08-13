@@ -1054,6 +1054,34 @@ def test_native_oauth_rejects_duplicate_source_before_adapter(tmp_path):
     assert adapter.oauth_start_calls == []
 
 
+def test_nonce_oauth_start_replays_committed_flow_before_native_slot_conflict(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    request = {
+        "vendor": "anthropic",
+        "channel": "native_cli",
+        "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+    }
+    first = asyncio.run(service.oauth_start(request))["flow"]
+    existing = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Claude subscription",
+        protocol="anthropic",
+        supply_channel="native_cli",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+    )
+    store.config.sources.append(existing)
+    _refresh_fixture_routes(store.config)
+
+    replayed = asyncio.run(service.oauth_start(request))["flow"]
+
+    assert replayed == first
+    assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
+
+
 def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):
     service, _store, adapter = _service(tmp_path)
 

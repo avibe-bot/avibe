@@ -3796,26 +3796,6 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=400) from None
         oauth_channel = cast(OAuthChannel, channel)
         self._ensure_config_writable()
-        if oauth_channel == "native_cli":
-            backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
-            if backend is not None:
-                existing = next(
-                    (
-                        source
-                        for source in self.store.load().sources
-                        if source.supply_channel == "native_cli"
-                        and source_eligible_for_backend(source, cast(BackendName, backend))
-                    ),
-                    None,
-                )
-                if existing is not None:
-                    raise ModelHubError(
-                        "native_source_already_exists",
-                        status=409,
-                        detail="modelHub.errors.native_subscription_slot_taken",
-                        data={"existing_source_id": existing.id},
-                    )
-
         nonce_key: tuple[str, str, OAuthChannel] | None = None
         if client_nonce is not None:
             try:
@@ -3836,6 +3816,35 @@ class ModelHubService:
                 if task is None:
                     raise ModelHubError("engine_down", status=503)
                 return await asyncio.shield(task)
+
+        if oauth_channel == "native_cli":
+            backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
+            if backend is not None:
+                existing = next(
+                    (
+                        source
+                        for source in self.store.load().sources
+                        if source.supply_channel == "native_cli"
+                        and source_eligible_for_backend(source, cast(BackendName, backend))
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    # This request owns a new nonce claim, so release it before
+                    # rejecting the occupied singleton. A committed/in-flight
+                    # nonce has already returned above and never reaches here.
+                    if client_nonce is not None:
+                        self.oauth_flows.release_nonce(
+                            client_nonce,
+                            vendor,
+                            oauth_channel,
+                        )
+                    raise ModelHubError(
+                        "native_source_already_exists",
+                        status=409,
+                        detail="modelHub.errors.native_subscription_slot_taken",
+                        data={"existing_source_id": existing.id},
+                    )
 
         async def start_and_remember() -> dict:
             pending_source_id = _source_id()
