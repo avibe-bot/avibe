@@ -289,8 +289,11 @@ export const SettingsModelsPage: React.FC = () => {
   const [installOpen, setInstallOpen] = React.useState(false);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
+  const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
   const [subscriptionVendor, setSubscriptionVendor] = React.useState<string | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const subscriptionPickerRefs = React.useRef<Partial<Record<'anthropic' | 'openai', HTMLButtonElement | null>>>({});
+  const subscriptionPickerHandoffRef = React.useRef(false);
   const subscriptionCloseTimer = React.useRef<number | null>(null);
   const sourceDetailHeadingRef = React.useRef<HTMLHeadingElement>(null);
   const focusSourceDetailPendingRef = React.useRef(false);
@@ -869,6 +872,21 @@ export const SettingsModelsPage: React.FC = () => {
     setSubscriptionVendor(null);
     window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
   }, []);
+  const closeSubscriptionPicker = React.useCallback(() => {
+    subscriptionPickerHandoffRef.current = false;
+    setSubscriptionPickerOpen(false);
+  }, []);
+  const focusSubscriptionPickerOption = React.useCallback((index: number) => {
+    const bounded = Math.max(0, Math.min(index, 1));
+    setSubscriptionPickerIndex(bounded);
+    const vendor = (['anthropic', 'openai'] as const)[bounded];
+    subscriptionPickerRefs.current[vendor]?.focus();
+  }, []);
+  const openSubscriptionPicker = React.useCallback(() => {
+    subscriptionPickerHandoffRef.current = false;
+    setSubscriptionPickerIndex(0);
+    setSubscriptionPickerOpen(true);
+  }, []);
   React.useEffect(() => () => {
     if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
   }, []);
@@ -903,7 +921,7 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'sources' ? <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
-                        <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={() => setSubscriptionPickerOpen(true)} subscriptionTriggerRef={subscriptionTriggerRef} />
+                        <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={openSubscriptionPicker} subscriptionTriggerRef={subscriptionTriggerRef} />
                         <div className="hidden lg:block" aria-hidden="true" />
                         <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
@@ -915,20 +933,51 @@ export const SettingsModelsPage: React.FC = () => {
                   </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
                 </div>}
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
-      <Dialog open={subscriptionPickerOpen} onOpenChange={setSubscriptionPickerOpen}>
-        <DialogContent className="max-w-[420px]">
+      <Dialog open={subscriptionPickerOpen} onOpenChange={(open) => open ? setSubscriptionPickerOpen(true) : closeSubscriptionPicker()}>
+        <DialogContent
+          className="max-w-[420px]"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            window.requestAnimationFrame(() => subscriptionPickerRefs.current[(['anthropic', 'openai'] as const)[subscriptionPickerIndex]]?.focus());
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (subscriptionPickerHandoffRef.current) {
+              subscriptionPickerHandoffRef.current = false;
+              return;
+            }
+            window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
+          }}
+        >
           <DialogHeader>
             <DialogTitle>{t('settings.models.subscriptionPicker.title')}</DialogTitle>
             <DialogDescription>{t('settings.models.subscriptionPicker.detail')}</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {(['anthropic', 'openai'] as const).map((vendor) => (
+          <div className="grid gap-2 sm:grid-cols-2" onKeyDown={(event) => {
+            if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+              event.preventDefault();
+              focusSubscriptionPickerOption(subscriptionPickerIndex + 1);
+            } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+              event.preventDefault();
+              focusSubscriptionPickerOption(subscriptionPickerIndex - 1);
+            } else if (event.key === 'Home') {
+              event.preventDefault();
+              focusSubscriptionPickerOption(0);
+            } else if (event.key === 'End') {
+              event.preventDefault();
+              focusSubscriptionPickerOption(1);
+            }
+          }}>
+            {(['anthropic', 'openai'] as const).map((vendor, index) => (
               <Button
                 key={vendor}
+                ref={(node) => { subscriptionPickerRefs.current[vendor] = node; }}
                 type="button"
                 variant="outline"
                 className="h-auto justify-start gap-3 px-3 py-3 text-left"
+                tabIndex={subscriptionPickerIndex === index ? 0 : -1}
                 onClick={() => {
+                  subscriptionPickerHandoffRef.current = true;
                   setSubscriptionPickerOpen(false);
                   setSubscriptionVendor(vendor);
                 }}

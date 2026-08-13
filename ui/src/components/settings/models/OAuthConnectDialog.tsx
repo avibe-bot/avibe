@@ -89,9 +89,16 @@ export const OAuthConnectDialog: React.FC<{
   const [view, setView] = React.useState<FlowView>(initialFlowView);
   const [code, setCode] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
-  const [channel, setChannel] = React.useState<SupplyChannel>('native_cli');
+  // Seed the chooser from the opening snapshot. Radix may autofocus a control
+  // before the passive open effect runs; deriving this here prevents an occupied
+  // native row from ever being the initially focused/selected option.
+  const [channel, setChannel] = React.useState<SupplyChannel>(() =>
+    reauth ? (reauth.supply_channel ?? 'native_cli') : initialSubscriptionChannel(vendor, sources),
+  );
   const [phase, setPhase] = React.useState<ConnectPhase>('choose');
-  const [nativeSlotTaken, setNativeSlotTaken] = React.useState(false);
+  const [nativeSlotTaken, setNativeSlotTaken] = React.useState(() =>
+    !reauth && nativeSubscriptionSlotTaken(vendor, sources),
+  );
   const [startAttempt, setStartAttempt] = React.useState(0);
   const [startFailureCode, setStartFailureCode] = React.useState<string | null>(null);
   // Which Agents took the new subscription in, frozen at commit (api.md). Same

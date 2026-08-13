@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +36,14 @@ const retainedSource: Source = {
   state: { status: 'standby', retry_at: null, detail_key: null },
   masked_credential: null,
   models: [],
+};
+
+const nativeSubscription: Source = {
+  ...retainedSource,
+  id: 'src_native_subscription',
+  kind: 'subscription',
+  supply_channel: 'native_cli',
+  display_name: 'Claude native login',
 };
 
 const takeoverAgent: AgentSupply = {
@@ -192,6 +200,58 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(screen.getByRole('button', { name: /Claude subscription|Claude 订阅/i }));
 
     expect((await screen.findByRole('dialog')).textContent).toMatch(/Add Claude subscription|添加 anthropic 订阅/i);
+  });
+
+  it('supports roving keyboard navigation in the subscription vendor picker', async () => {
+    renderPage([retainedSource]);
+
+    const user = userEvent.setup();
+    await screen.findByText('Retained source');
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await user.click(trigger);
+    const picker = await screen.findByRole('dialog');
+    const claude = within(picker).getByRole('button', { name: /Claude subscription|Claude 订阅/i });
+    const chatgpt = within(picker).getByRole('button', { name: /ChatGPT subscription|ChatGPT 订阅/i });
+
+    await waitFor(() => expect(document.activeElement).toBe(claude));
+    expect(claude.getAttribute('tabindex')).toBe('0');
+    expect(chatgpt.getAttribute('tabindex')).toBe('-1');
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(chatgpt);
+    await user.keyboard('{Home}');
+    expect(document.activeElement).toBe(claude);
+    await user.keyboard('{End}');
+    expect(document.activeElement).toBe(chatgpt);
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(claude);
+  });
+
+  it('restores the Add subscription trigger when the vendor picker is dismissed', async () => {
+    renderPage([retainedSource]);
+
+    const user = userEvent.setup();
+    await screen.findByText('Retained source');
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await user.click(trigger);
+    await screen.findByRole('dialog');
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it('opens an occupied native vendor with the gateway option selected', async () => {
+    renderPage([nativeSubscription]);
+
+    const user = userEvent.setup();
+    await screen.findByText('Claude native login');
+    await user.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    await user.click(await screen.findByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+
+    const native = await screen.findByRole('radio', { name: /Native|原生/i });
+    const hub = screen.getByRole('radio', { name: /Gateway|网关/i });
+    expect(native.getAttribute('aria-disabled')).toBe('true');
+    expect(hub.getAttribute('aria-checked')).toBe('true');
+    expect(document.activeElement).toBe(hub);
   });
 
   it('returns focus to Add subscription when the OAuth flow is cancelled', async () => {
