@@ -10,7 +10,7 @@ import pytest
 
 from core.dock_store import BUILTIN_DOCK_IDS, DockError
 from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
-from tests.ui_server_test_helpers import remote_peer, save_config
+from tests.test_ui_remote_access_auth import _remote_peer, _save_config
 from vibe import api, ui_server
 from vibe.ui_server import app
 
@@ -64,11 +64,10 @@ def _show(session_id: str) -> str:
 
 def test_dock_default_is_builtins_only(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     result = api.get_dock()
 
-    assert BUILTIN_DOCK_IDS == ("files", "terminal", "editor", "library")
     assert result["ok"] is True
     assert result["dock"]["order"] == list(BUILTIN_DOCK_IDS)
     assert result["dock"]["pins"] == []
@@ -76,7 +75,7 @@ def test_dock_default_is_builtins_only(monkeypatch, tmp_path):
 
 def test_pin_appends_and_captures_title(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_pin", title="Sales Dashboard")
     _make_show_page("ses_pin")
 
@@ -95,7 +94,7 @@ def test_pin_appends_and_captures_title(monkeypatch, tmp_path):
 
 def test_pin_without_session_title_stores_empty_snapshot(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_plain")  # IM-dispatch sessions persist title=None
     _make_show_page("ses_plain")
 
@@ -106,7 +105,7 @@ def test_pin_without_session_title_stores_empty_snapshot(monkeypatch, tmp_path):
 
 def test_pin_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_dup", title="Once")
     _make_show_page("ses_dup")
 
@@ -123,7 +122,7 @@ def test_pin_multiple_sessions_all_survive(monkeypatch, tmp_path):
     # earlier one (the read-modify-write is serialized under a lock so concurrent
     # pins can't lost-update).
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     for sid in ("ses_a", "ses_b", "ses_c"):
         _seed_session(sid, title=sid.upper())
         _make_show_page(sid)
@@ -139,7 +138,7 @@ def test_pin_rejects_when_install_budget_is_full(monkeypatch, tmp_path):
     # pins, else a pin can grow ``pins`` past what a read would keep and the
     # just-added page is silently dropped on the next load.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     monkeypatch.setattr("core.dock_store.MAX_PINNED_PAGES", 1)  # room for exactly one pin
     for sid in ("ses_full1", "ses_full2"):
         _seed_session(sid)
@@ -159,7 +158,7 @@ def test_load_dock_clamps_oversized_corrupt_pins(monkeypatch, tmp_path):
     from core.dock_store import DOCK_STATE_KEY
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     monkeypatch.setattr("core.dock_store.MAX_PINNED_PAGES", 1)  # room for exactly one pin
     set_state_meta(
         DOCK_STATE_KEY,
@@ -190,7 +189,7 @@ def test_reconcile_does_not_readd_undocked_builtin(monkeypatch, tmp_path):
     from core.dock_store import DOCK_STATE_KEY
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     set_state_meta(
         DOCK_STATE_KEY,
         {
@@ -213,7 +212,7 @@ def test_legacy_full_order_doc_still_valid(monkeypatch, tmp_path):
     from core.dock_store import DOCK_STATE_KEY
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     order = ["files", "terminal", "editor", "library", _show("ses_keep")]
     set_state_meta(
         DOCK_STATE_KEY,
@@ -229,7 +228,7 @@ def test_legacy_full_order_doc_still_valid(monkeypatch, tmp_path):
 
 def test_pin_unknown_show_page_is_404(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_nopage")  # session exists but has no Show Page
 
     with pytest.raises(DockError) as excinfo:
@@ -239,7 +238,7 @@ def test_pin_unknown_show_page_is_404(monkeypatch, tmp_path):
 
 def test_pin_malformed_session_id_raises_show_page_error(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     with pytest.raises(ShowPageError) as excinfo:
         api.pin_dock_show_page("bad id!")
@@ -248,7 +247,7 @@ def test_pin_malformed_session_id_raises_show_page_error(monkeypatch, tmp_path):
 
 def test_unpin_removes_and_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_u", title="Bye")
     _make_show_page("ses_u")
     api.pin_dock_show_page("ses_u")
@@ -267,7 +266,7 @@ def test_unpin_removes_and_is_idempotent(monkeypatch, tmp_path):
 
 def test_set_order_persists_valid_permutation(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_o", title="Ordered")
     _make_show_page("ses_o")
     api.pin_dock_show_page("ses_o")
@@ -284,7 +283,7 @@ def test_set_order_accepts_library_builtin(monkeypatch, tmp_path):
     # includes it is accepted and persists — the same reorder path #892 shipped,
     # now covering the 4th built-in.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_lib", title="Ordered")
     _make_show_page("ses_lib")
     api.pin_dock_show_page("ses_lib")
@@ -300,7 +299,7 @@ def test_set_order_rejects_unknown_id(monkeypatch, tmp_path):
     # Subset validation (§7.1c) still rejects an id that is not a real dock item,
     # so a stale client can't resurrect a pin removed by another tab.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     with pytest.raises(DockError) as excinfo:
         api.set_dock_order(["files", "terminal", "editor", "show:ghost"])
@@ -312,7 +311,7 @@ def test_set_order_accepts_proper_subset(monkeypatch, tmp_path):
     # built-in (undocking it) is accepted and persists — no longer rejected as a
     # non-set-equal order.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     dock = api.set_dock_order(["files", "terminal"])["dock"]  # editor + library undocked
     assert dock["order"] == ["files", "terminal"]
@@ -323,7 +322,7 @@ def test_set_order_accepts_empty_dock(monkeypatch, tmp_path):
     # Undocking everything (including all built-ins) is legal — the empty Dock is
     # a valid saved state (the popover shows the App Library hint client-side).
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     dock = api.set_dock_order([])["dock"]
     assert dock["order"] == []
@@ -336,7 +335,7 @@ def test_set_order_rejects_stale_known(monkeypatch, tmp_path):
     # silently undock that newer pin (which install docked by default). Subset
     # validation alone would have accepted the omission.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_new", title="New")
     _make_show_page("ses_new")
     api.pin_dock_show_page("ses_new")  # server now has show:ses_new installed + docked
@@ -354,7 +353,7 @@ def test_set_order_with_matching_known_allows_intentional_undock(monkeypatch, tm
     # INTENTIONAL undock (distinct from a stale omission) and is accepted — the
     # page stays installed.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_k", title="K")
     _make_show_page("ses_k")
     api.pin_dock_show_page("ses_k")
@@ -369,7 +368,7 @@ def test_undocked_builtin_persists_across_reload(monkeypatch, tmp_path):
     # An undocked built-in stays undocked across a reload — reconcile never
     # re-adds it (the whole point of built-ins being undockable now).
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     api.set_dock_order(["files", "terminal", "editor"])  # library undocked
     assert "library" not in api.get_dock()["dock"]["order"]
@@ -380,7 +379,7 @@ def test_installed_page_can_be_undocked_but_stays_installed(monkeypatch, tmp_pat
     # ``order``) while REMAINING installed (kept in ``pins``) — install and dock
     # are separate. Its ``show:`` id is absent from the order but the pin persists.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_keep", title="Keep")
     _make_show_page("ses_keep")
     api.pin_dock_show_page("ses_keep")  # installs + docks
@@ -397,7 +396,7 @@ def test_delete_pin_cascades_out_of_order(monkeypatch, tmp_path):
     # DELETE pins (uninstall) removes the page from BOTH pins and order, leaving
     # the other docked tiles intact.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_del", title="Del")
     _make_show_page("ses_del")
     api.pin_dock_show_page("ses_del")
@@ -411,7 +410,7 @@ def test_delete_pin_cascades_out_of_order(monkeypatch, tmp_path):
 
 def test_set_order_rejects_duplicates(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     with pytest.raises(DockError) as excinfo:
         api.set_dock_order(["files", "files", "terminal", "editor"])
@@ -420,7 +419,7 @@ def test_set_order_rejects_duplicates(monkeypatch, tmp_path):
 
 def test_set_order_rejects_non_list(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     with pytest.raises(DockError) as excinfo:
         api.set_dock_order("files,terminal,editor")
@@ -429,7 +428,7 @@ def test_set_order_rejects_non_list(monkeypatch, tmp_path):
 
 def test_dock_route_round_trip_via_client(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     response = app.test_client().get("/api/dock", base_url="http://127.0.0.1:5123")
 
@@ -444,12 +443,12 @@ def test_dock_route_blocked_for_remote_without_session(monkeypatch, tmp_path):
     remote request without a session gets the login-required API contract, never
     an OAuth side effect or an unauthenticated native response."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
 
     get_resp = app.test_client().get(
         "/api/dock",
         base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
+        environ_base=_remote_peer(),
         follow_redirects=False,
     )
     assert get_resp.status_code == 401
@@ -461,7 +460,7 @@ def test_dock_route_blocked_for_remote_without_session(monkeypatch, tmp_path):
     post_resp = app.test_client().post(
         "/api/dock/pins",
         base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
+        environ_base=_remote_peer(),
         json={"session_id": "ses_x"},
         follow_redirects=False,
     )

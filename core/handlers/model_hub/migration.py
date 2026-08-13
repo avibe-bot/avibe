@@ -16,6 +16,8 @@ from config.v2_config import (
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubSourceConfig,
+    ModelHubSourceStateConfig,
+    ModelHubSourceUsageConfig,
 )
 from core.handlers.model_hub.adapter import (
     ObservationDiscovery,
@@ -588,56 +590,44 @@ def scan_native_configs(
     ]
 
 
-def _validated_source(
+def _new_source(
     item: NativeMigrationItem,
     *,
     now: datetime,
     protocol: Literal["anthropic", "openai_responses", "openai_chat"],
     validate_base_url: Callable[[object], Optional[str]],
-    credential_ref: str | None = None,
-    masked_credential: str | None = None,
 ) -> ModelHubSourceConfig:
     keep_native = item.proposed_action == "keep_native"
     controlled = item.proposed_action == "controlled_import"
     discovered_at = now.isoformat()
     models = (
         [
-            {
-                "id": model_id,
-                "display_name": None,
-                "origin": "discovered",
-                "reasoning_efforts": [],
-                "discovered_at": discovered_at,
-            }
+            ModelHubModelConfig(
+                id=model_id,
+                provenance="discovered",
+                discovered_at=discovered_at,
+            )
             for model_id in _native_model_ids(item.backend)
         ]
         if keep_native
         else []
     )
-    payload: dict[str, object] = {
-        "id": item.source_id,
-        "created_at": discovered_at,
-        "last_discovered_at": discovered_at if models else None,
-        "kind": "subscription" if keep_native or controlled else "api_key",
-        "vendor": item.vendor,
-        "display_name": item.display_name,
-        "protocol": protocol,
-        "base_url": validate_base_url(item.base_url),
-        "supply_channel": "native_cli" if keep_native else "hub",
-        "billing": "monthly" if keep_native or controlled else "metered",
-        "state": {"status": "standby", "retry_at": None, "detail_key": None},
-        "usage": {
-            "cycle_used_pct": None,
-            "month_spend_cents": None,
-            "currency": None,
-            "projected_exhaust_at": None,
-        },
-        "models": models,
-        "credential_ref": credential_ref,
-        "account_label": item.account_label,
-        "masked_credential": masked_credential,
-    }
-    return ModelHubSourceConfig.from_payload(payload)
+    return ModelHubSourceConfig(
+        id=item.source_id,
+        created_at=discovered_at,
+        last_discovered_at=discovered_at if models else None,
+        kind="subscription" if keep_native or controlled else "api_key",
+        vendor=item.vendor,
+        display_name=item.display_name,
+        protocol=protocol,
+        base_url=validate_base_url(item.base_url),
+        supply_channel="native_cli" if keep_native else "hub",
+        billing="monthly" if keep_native or controlled else "metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        usage=ModelHubSourceUsageConfig(),
+        models=models,
+        account_label=item.account_label,
+    )
 
 
 def _migration_rollback_id(source_id: str, credential_ref: str) -> str:
@@ -709,81 +699,50 @@ async def apply_native_migration(
                         ],
                         observation.protocol,
                     )
+                source = _new_source(
+                    item,
+                    now=host.now(),
+                    protocol=protocol,
+                    validate_base_url=validate_base_url,
+                )
                 if item.proposed_action == "import":
                     assert item.secret is not None
                     assert observation is not None
                     credential_ref = await host._engine_call(
                         host.adapter.provision_credential(
                             item.vendor,
-                            protocol,
+                            source.protocol,
                             item.secret,
-                            validate_base_url(item.base_url),
+                            source.base_url,
                         )
                     )
-                    provisioned.append((item.source_id, credential_ref))
-                    try:
-                        source = _validated_source(
-                            item,
-                            now=host.now(),
-                            protocol=protocol,
-                            validate_base_url=validate_base_url,
-                            credential_ref=credential_ref,
-                            masked_credential=mask_credential(item.secret),
+                    provisioned.append((source.id, credential_ref))
+                    source.credential_ref = credential_ref
+                    source.masked_credential = mask_credential(item.secret)
+                    manual_models = [
+                        ModelHubModelConfig(
+                            id=model.id,
+                            display_name=model.display_name,
+                            provenance="manual",
                         )
-                        manual_models = [
-                            ModelHubModelConfig.from_payload(
-                                {
-                                    "id": model.id,
-                                    "display_name": model.display_name,
-                                    "origin": "manual",
-                                    "reasoning_efforts": [],
-                                    "discovered_at": None,
-                                }
-                            )
-                            for model in item.manual_models
-                        ]
-                        if observation.discovery is ObservationDiscovery.SUCCEEDED:
-                            host._apply_discovered_models(
-                                source,
-                                manual_models,
-                                list(observation.model_ids),
-                                allow_empty=True,
-                            )
-                        else:
-                            failed_payload = source.to_payload()
-                            failed_payload["models"] = [
-                                model.to_payload() for model in manual_models
-                            ]
-                            failed_payload["state"] = {
-                                "status": "error",
-                                "retry_at": None,
-                                "detail_key": "models.source.error.unclassified",
-                            }
-                            source = ModelHubSourceConfig.from_payload(
-                                failed_payload
-                            )
-                        source = ModelHubSourceConfig.from_payload(
-                            source.to_payload()
+                        for model in item.manual_models
+                    ]
+                    if observation.discovery is ObservationDiscovery.SUCCEEDED:
+                        host._apply_discovered_models(
+                            source,
+                            manual_models,
+                            list(observation.model_ids),
+                            allow_empty=True,
                         )
-                    except (TypeError, ValueError):
-                        raise MigrationConflictError from None
-                else:
-                    try:
-                        source = _validated_source(
-                            item,
-                            now=host.now(),
-                            protocol=protocol,
-                            validate_base_url=validate_base_url,
+                    else:
+                        source.models = manual_models
+                        source.state = ModelHubSourceStateConfig(
+                            status="error",
+                            detail_key="models.source.error.unclassified",
                         )
-                    except (TypeError, ValueError):
-                        raise MigrationConflictError from None
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
 
-            try:
-                updated = ModelHubConfig.from_payload(updated.to_payload())
-            except (TypeError, ValueError):
-                raise MigrationConflictError from None
             await host._commit_synced(previous, updated)
             persisted = True
             added_to = [

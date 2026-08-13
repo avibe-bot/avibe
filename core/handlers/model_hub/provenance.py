@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 import os
 import secrets
 import tempfile
@@ -12,9 +10,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Optional
-
-from config.v2_config import ModelHubConfig
+from typing import Literal, Optional
 
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
@@ -22,24 +18,15 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
-from vibe.i18n import t as i18n_t
 
 from .adapter import RawCallOutcome
 from .classification import ResolutionDecision, ResolutionReason
-from .events import (
-    EVENT_REASON_AUTHORITY,
-    RETIRED_PERSISTED_REASON_DEGRADATIONS,
-    SOURCE_DETAIL_EVENT_REASONS,
-    event_reason_label,
-)
-from .resolver import ModelHubTurnResolution, source_eligible_for_backend
 
 
 BackendName = Literal["claude", "codex", "opencode"]
 SupplyChannel = Literal["native_cli", "hub"]
 SupplyState = Literal["waiting", "interrupted"]
 ScopeKey = tuple[BackendName, str]
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,438 +43,6 @@ class AttemptIdentity:
         }
 
 
-@dataclass(frozen=True)
-class ExactHopBlocker:
-    source_id: str
-    model_id: str
-    reason: str
-
-    def payload(self) -> dict:
-        return {
-            "source_id": self.source_id,
-            "model_id": self.model_id,
-            "reason": self.reason,
-        }
-
-
-def exact_hop_blockers(
-    resolution: ModelHubTurnResolution,
-) -> tuple[ExactHopBlocker, ...]:
-    """Project every blocked persisted hop from the canonical live inspection."""
-
-    blockers = []
-    for inspection in resolution.inspected_hops:
-        if (
-            inspection.runnable
-            or inspection.source_id is None
-            or inspection.model_id is None
-        ):
-            continue
-        reason = inspection.reason
-        if (
-            inspection.source is not None
-            and EVENT_REASON_AUTHORITY.get(str(reason)) != "structural"
-        ):
-            if inspection.source.state.status == "cooldown":
-                reason = "cooldown"
-            elif inspection.source.state.detail_key is not None:
-                reason = SOURCE_DETAIL_EVENT_REASONS.get(
-                    inspection.source.state.detail_key,
-                    reason,
-                )
-        if reason is None:
-            continue
-        blockers.append(
-            ExactHopBlocker(
-                source_id=inspection.source_id,
-                model_id=inspection.model_id,
-                reason=reason,
-            )
-        )
-    return tuple(blockers)
-
-
-@dataclass(frozen=True)
-class TurnSupplyBlocker:
-    source: str
-    reason: str
-
-
-@dataclass(frozen=True)
-class TurnSupplyFacts:
-    backend: BackendName
-    model: str
-    supply_state: SupplyState
-    source: str = ""
-    retry_at: str = ""
-    blockers: tuple[TurnSupplyBlocker, ...] = ()
-
-
-@dataclass(frozen=True)
-class TurnOutcomeRenderingRule:
-    outcome: str
-    discriminator: str
-    copy_keys: tuple[tuple[str, str | None], ...]
-
-
-# This is the only executable projection of the authoritative section 4.5 matrix.
-TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
-    "turn.served": TurnOutcomeRenderingRule(
-        outcome="served",
-        discriminator="any",
-        copy_keys=(("default", None),),
-    ),
-    "turn.exhausted": TurnOutcomeRenderingRule(
-        outcome="exhausted",
-        discriminator="final_supply_state",
-        copy_keys=(
-            ("waiting", "modelHub.launch.waiting"),
-            ("waiting_without_retry", "modelHub.launch.waiting_without_retry"),
-            ("interrupted", "modelHub.launch.interrupted"),
-        ),
-    ),
-    "turn.request_nonfallback": TurnOutcomeRenderingRule(
-        outcome="failed_terminal",
-        discriminator="request_nonfallback",
-        copy_keys=(("default", "modelHub.launch.request_incompatible"),),
-    ),
-    "turn.engine_down": TurnOutcomeRenderingRule(
-        outcome="failed_terminal",
-        discriminator="engine_down",
-        copy_keys=(
-            ("default", "modelHub.errors.engine_down"),
-            ("stream_started", "modelHub.errors.engine_down_streamed"),
-        ),
-    ),
-    "turn.streamed_fallback": TurnOutcomeRenderingRule(
-        outcome="failed_terminal",
-        discriminator="streamed_fallback",
-        copy_keys=(
-            ("next_current", "modelHub.launch.retry"),
-            ("waiting", "modelHub.launch.waiting"),
-            ("interrupted", "modelHub.launch.interrupted"),
-            ("transition_unpersisted", "modelHub.errors.stream_interrupted"),
-        ),
-    ),
-    "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
-        outcome="no_candidate",
-        discriminator="route_unconfigured",
-        copy_keys=(("interrupted", "modelHub.launch.route_unconfigured"),),
-    ),
-    "turn.no_candidate.blocked": TurnOutcomeRenderingRule(
-        outcome="no_candidate",
-        discriminator="blocked_supply_state",
-        copy_keys=(
-            ("waiting", "modelHub.launch.waiting"),
-            ("waiting_without_retry", "modelHub.launch.waiting_without_retry"),
-            ("interrupted", "modelHub.launch.interrupted"),
-        ),
-    ),
-    "turn.canceled": TurnOutcomeRenderingRule(
-        outcome="canceled",
-        discriminator="fsm_canceled",
-        copy_keys=(("default", None),),
-    ),
-}
-
-
-@dataclass(frozen=True)
-class TurnOutcomeProjectionInput:
-    outcome: str
-    discriminator: str
-    supply_facts: TurnSupplyFacts | None = None
-    stream_started: bool = False
-    next_current_changed: bool = False
-    source_transition_persisted: bool | None = None
-
-
-class TurnOutcomeProductionError(ValueError):
-    """A terminal outcome is missing a fact required by the copy matrix."""
-
-
-def _turn_outcome_rule(
-    projection: TurnOutcomeProjectionInput,
-) -> TurnOutcomeRenderingRule:
-    matches = tuple(
-        rule
-        for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
-        if rule.outcome == projection.outcome
-        and rule.discriminator == projection.discriminator
-    )
-    if len(matches) != 1:
-        raise TurnOutcomeProductionError(
-            "Turn outcome does not match its rendering discriminator"
-        )
-    return matches[0]
-
-
-def _turn_outcome_variant(
-    projection: TurnOutcomeProjectionInput,
-    rule: TurnOutcomeRenderingRule,
-) -> str:
-    copy_keys = dict(rule.copy_keys)
-    if (
-        projection.source_transition_persisted is False
-        and "transition_unpersisted" in copy_keys
-    ):
-        return "transition_unpersisted"
-    if projection.next_current_changed and "next_current" in copy_keys:
-        return "next_current"
-    if projection.stream_started and "stream_started" in copy_keys:
-        return "stream_started"
-    if (
-        projection.supply_facts is not None
-        and projection.supply_facts.supply_state == "waiting"
-        and not projection.supply_facts.retry_at
-        and "waiting_without_retry" in copy_keys
-    ):
-        return "waiting_without_retry"
-    if (
-        projection.supply_facts is not None
-        and projection.supply_facts.supply_state in copy_keys
-    ):
-        return projection.supply_facts.supply_state
-    return "default"
-
-
-def produce_turn_outcome(
-    decision: str,
-    *,
-    config: ModelHubConfig | None = None,
-    resolution: ModelHubTurnResolution | None = None,
-    attempted_hop: tuple[str, str] | None = None,
-    stream_started: bool = False,
-    source_transition_persisted: bool | None = None,
-) -> TurnOutcomeProjectionInput:
-    """Produce complete terminal facts from one authoritative matrix row."""
-
-    rule = TURN_OUTCOME_RENDERING_AUTHORITY.get(decision)
-    if rule is None:
-        raise TurnOutcomeProductionError("Unknown turn-outcome matrix decision")
-    variants = {variant for variant, _key in rule.copy_keys}
-    if decision == "turn.streamed_fallback" and source_transition_persisted is None:
-        raise TurnOutcomeProductionError(
-            "Streamed fallback is missing its Source-transition persistence fact"
-        )
-    requires_exact_supply = bool(
-        variants & {"next_current", "waiting", "interrupted"}
-    ) and source_transition_persisted is not False
-    if requires_exact_supply and (config is None or resolution is None):
-        raise TurnOutcomeProductionError(
-            "Turn outcome production is missing its exact-chain inspection"
-        )
-
-    next_current_changed = False
-    supply_facts = None
-    if requires_exact_supply:
-        assert config is not None and resolution is not None
-        if "next_current" in variants:
-            if attempted_hop is None:
-                raise TurnOutcomeProductionError(
-                    "Turn outcome production is missing its attempted hop"
-                )
-            next_hop = (
-                resolution.candidate_hops[0]
-                if resolution.candidate_hops
-                else None
-            )
-            if next_hop is not None:
-                next_identity = (next_hop.source_id, next_hop.model_id)
-                if next_identity == attempted_hop:
-                    raise TurnOutcomeProductionError(
-                        "Settled streamed fallback left the attempted hop current"
-                    )
-                next_current_changed = True
-        if not next_current_changed:
-            recovered_after_exhaustion = (
-                decision in {"turn.exhausted", "turn.no_candidate.blocked"}
-                and resolution.supply_status in {"ok", "degraded"}
-                and bool(resolution.candidate_hops)
-            )
-            if recovered_after_exhaustion:
-                supply_facts = TurnSupplyFacts(
-                    backend=resolution.backend,
-                    model=resolution.requested_model or resolution.target_model,
-                    supply_state="waiting",
-                )
-            elif resolution.supply_status not in {"waiting", "interrupted"}:
-                raise TurnOutcomeProductionError(
-                    "Turn outcome production requires a terminal supply state"
-                )
-            else:
-                supply_facts = turn_supply_facts(config, resolution)
-
-    projection = TurnOutcomeProjectionInput(
-        outcome=rule.outcome,
-        discriminator=rule.discriminator,
-        supply_facts=supply_facts,
-        stream_started=stream_started,
-        next_current_changed=next_current_changed,
-        source_transition_persisted=source_transition_persisted,
-    )
-    if _turn_outcome_variant(projection, rule) not in dict(rule.copy_keys):
-        raise TurnOutcomeProductionError(
-            "Turn outcome production is missing its required rendering fact"
-        )
-    return projection
-
-
-REQUEST_NONFALLBACK_TURN_OUTCOME = produce_turn_outcome(
-    "turn.request_nonfallback"
-)
-ENGINE_DOWN_TURN_OUTCOME = produce_turn_outcome("turn.engine_down")
-
-
-@dataclass(frozen=True)
-class TurnOutcomeCopy:
-    key: str
-    params: Mapping[str, Any]
-
-
-def supply_interruption_reason(
-    config: ModelHubConfig,
-    resolution: ModelHubTurnResolution,
-) -> str:
-    """Return the exact-chain structural reason used by events and copy facts."""
-
-    structural_reason = resolution.structural_blocker_reason
-    if structural_reason in {
-        "route_unconfigured",
-        "source_missing",
-        "model_unsupported",
-        "native_cli_unavailable",
-    }:
-        return structural_reason
-    order = config.effective_source_order(resolution.backend)
-    sources_by_id = {source.id: source for source in config.sources}
-    enabled_sources = [
-        sources_by_id[source_id]
-        for source_id in order
-        if source_id in sources_by_id
-    ]
-    if not enabled_sources:
-        if config.sources and not any(
-            source_eligible_for_backend(source, resolution.backend)
-            for source in config.sources
-        ):
-            return "no_eligible_source"
-        return "no_enabled_source"
-    if not any(
-        source_eligible_for_backend(source, resolution.backend)
-        for source in enabled_sources
-    ):
-        return "no_eligible_source"
-    return "model_unsupported"
-
-
-def turn_supply_facts(
-    config: ModelHubConfig,
-    resolution: ModelHubTurnResolution,
-) -> TurnSupplyFacts:
-    """Project user-visible facts from one canonical exact-chain inspection."""
-
-    model = resolution.requested_model or resolution.target_model
-    supply_state: SupplyState = (
-        "waiting" if resolution.supply_status == "waiting" else "interrupted"
-    )
-    cooling = tuple(
-        source
-        for source in resolution.matching_sources
-        if source.state.status == "cooldown" and source.state.retry_at
-    )
-    blockers: list[TurnSupplyBlocker] = []
-    for inspection in resolution.inspected_hops:
-        if inspection.runnable:
-            continue
-        source = inspection.source
-        reason = inspection.reason
-        if reason not in EVENT_REASON_AUTHORITY and source is not None:
-            reason = SOURCE_DETAIL_EVENT_REASONS.get(
-                source.state.detail_key or "",
-                reason,
-            )
-        if reason not in EVENT_REASON_AUTHORITY:
-            continue
-        blockers.append(
-            TurnSupplyBlocker(
-                source=(
-                    source.display_name
-                    if source is not None
-                    else str(inspection.source_id or "")
-                ),
-                reason=reason,
-            )
-        )
-    if supply_state == "interrupted" and not blockers:
-        blockers.append(
-            TurnSupplyBlocker(
-                source="",
-                reason=supply_interruption_reason(config, resolution),
-            )
-        )
-    return TurnSupplyFacts(
-        backend=resolution.backend,
-        model=model,
-        supply_state=supply_state,
-        source=", ".join(source.display_name for source in cooling),
-        retry_at=min(
-            (source.state.retry_at or "" for source in cooling),
-            default="",
-        ),
-        blockers=tuple(blockers),
-    )
-
-
-def project_turn_outcome_copy(
-    projection: TurnOutcomeProjectionInput,
-) -> TurnOutcomeCopy | None:
-    """Project copy from the recorded outcome and its sole matrix discriminator."""
-
-    rule = _turn_outcome_rule(projection)
-    copy_keys = dict(rule.copy_keys)
-    variant = _turn_outcome_variant(projection, rule)
-    if variant not in copy_keys:
-        raise TurnOutcomeProductionError(
-            "Turn outcome bypassed production without its required rendering fact"
-        )
-    key = copy_keys[variant]
-    if key is None:
-        return None
-    facts = projection.supply_facts
-    return TurnOutcomeCopy(
-        key=key,
-        params={
-            "model": facts.model if facts is not None else "",
-            "backend": facts.backend if facts is not None else "",
-            "source": facts.source if facts is not None else "",
-            "retry_at": facts.retry_at if facts is not None else "",
-            "blockers": facts.blockers if facts is not None else (),
-        },
-    )
-
-
-def render_turn_outcome_copy(
-    projection: TurnOutcomeProjectionInput,
-    language: str,
-) -> str | None:
-    copy = project_turn_outcome_copy(projection)
-    if copy is None:
-        return None
-    params = dict(copy.params)
-    blockers = params.get("blockers", ())
-    if isinstance(blockers, tuple):
-        rendered = []
-        for blocker in blockers:
-            if not isinstance(blocker, TurnSupplyBlocker):
-                continue
-            label = event_reason_label(blocker.reason, language)
-            rendered.append(
-                f"{blocker.source}: {label}" if blocker.source else label
-            )
-        params["blockers"] = ", ".join(rendered)
-    return i18n_t(copy.key, language, **params)
-
-
 @dataclass
 class TurnTrace:
     turn_id: str
@@ -499,11 +54,9 @@ class TurnTrace:
     terminal_error: Optional[dict] = None
     pending_attempt: Optional[AttemptIdentity] = None
     model_supply_state: Optional[SupplyState] = None
-    blockers: list[dict] = field(default_factory=list)
     gateway_source_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
     ambiguous: bool = False
-    terminal_outcome: TurnOutcomeProjectionInput | None = None
 
 
 @dataclass
@@ -532,15 +85,11 @@ class GatewayTurnTerminalizer:
             token=token,
         )
         self._stream_started = False
-        self._attempt_started = False
-        self._downstream_canceled = False
 
     def __enter__(self) -> "GatewayTurnTerminalizer":
         return self
 
-    def __exit__(self, exc_type, _exc, _traceback) -> None:
-        if self._downstream_canceled or exc_type is asyncio.CancelledError:
-            return
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
         self._registry._terminalize_gateway_exit(
             self.turn_id,
             stream_started=self._stream_started,
@@ -577,23 +126,10 @@ class GatewayTurnTerminalizer:
             force=True,
         )
 
-    def engine_down(self) -> None:
-        self._registry._terminalize_gateway_exit(
-            self.turn_id,
-            reason="engine_down",
-            stream_started=self._stream_started,
-            force=True,
-        )
-
-    def mark_no_candidate(
-        self,
-        supply_state: SupplyState,
-        blockers: Iterable[ExactHopBlocker] = (),
-    ) -> None:
+    def mark_no_candidate(self, supply_state: SupplyState) -> None:
         self._registry.mark_gateway_no_candidate(
             self.turn_id,
             supply_state,
-            blockers,
         )
 
     def begin_attempt(
@@ -604,7 +140,6 @@ class GatewayTurnTerminalizer:
         channel: SupplyChannel,
         via_mapping: bool,
     ) -> None:
-        self._attempt_started = True
         self._registry.begin_attempt(
             self.turn_id,
             source_id=source_id,
@@ -619,7 +154,6 @@ class GatewayTurnTerminalizer:
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
     ) -> None:
-        self._attempt_started = True
         self._registry.finish_attempt(
             self.turn_id,
             outcome=outcome,
@@ -628,22 +162,6 @@ class GatewayTurnTerminalizer:
 
     def mark_stream_started(self) -> None:
         self._stream_started = True
-
-    def record_turn_outcome(
-        self,
-        turn_outcome: TurnOutcomeProjectionInput | None,
-    ) -> None:
-        """Keep the settlement projection attached to the correlated turn event."""
-
-        if self.turn_id is not None:
-            self._registry.record_turn_outcome(self.turn_id, turn_outcome)
-
-    def mark_downstream_canceled(self) -> None:
-        """Clear a prepared-only attempt before the outer stopped settlement."""
-
-        if not self._attempt_started:
-            self._registry.clear_prepared_attempt(self.turn_id)
-        self._downstream_canceled = True
 
 
 def _utc_now_iso() -> str:
@@ -654,33 +172,11 @@ def _terminal_reason(decision: ResolutionDecision) -> str:
     code = decision.error_code or ""
     if code == "stream_interrupted":
         return "stream_interrupted"
-    if code in {"request_incompatible", "upstream_request_invalid"}:
+    if code == "upstream_request_invalid":
         return "invalid_parameter"
     if code == "tool_incompatible":
         return "tool_incompatible"
     return "protocol_error"
-
-
-def _degrade_persisted_provenance(record: dict) -> dict:
-    degraded = dict(record)
-    attempts = degraded.get("failed_attempts")
-    if not isinstance(attempts, list):
-        return degraded
-    degraded_attempts = []
-    for attempt in attempts:
-        if not isinstance(attempt, dict):
-            degraded_attempts.append(attempt)
-            continue
-        degraded_attempt = dict(attempt)
-        reason = degraded_attempt.get("reason")
-        if isinstance(reason, str):
-            degraded_attempt["reason"] = RETIRED_PERSISTED_REASON_DEGRADATIONS.get(
-                reason,
-                reason,
-            )
-        degraded_attempts.append(degraded_attempt)
-    degraded["failed_attempts"] = degraded_attempts
-    return degraded
 
 
 class BoundedProvenanceStore:
@@ -701,7 +197,7 @@ class BoundedProvenanceStore:
             return []
         if not isinstance(payload, list):
             return []
-        return [_degrade_persisted_provenance(item) for item in payload if isinstance(item, dict)]
+        return [item for item in payload if isinstance(item, dict)]
 
     def _read(self) -> list[dict]:
         return self._read_path(self.path)
@@ -987,26 +483,11 @@ class TurnCorrelationRegistry:
             )
             return turn_id
 
-    def clear_prepared_attempt(self, turn_id: Optional[str]) -> None:
-        """Remove the launch identity when cancellation precedes invocation."""
-
-        if turn_id is None:
-            return
-        with self._lock:
-            trace = self._traces.get(turn_id)
-            if trace is not None and trace.pending_attempt is not None:
-                if trace.pending_attempt.channel == "hub":
-                    trace.pending_attempt = None
-
     def _terminalize_gateway_exit(
         self,
         turn_id: Optional[str],
         *,
-        reason: Literal[
-            "invalid_parameter",
-            "protocol_error",
-            "engine_down",
-        ] = "protocol_error",
+        reason: Literal["invalid_parameter", "protocol_error"] = "protocol_error",
         stream_started: bool,
         force: bool = False,
     ) -> None:
@@ -1025,19 +506,6 @@ class TurnCorrelationRegistry:
                     and bool(trace.failed_attempts)
                 )
             ):
-                return
-            if reason == "engine_down":
-                trace.pending_attempt = None
-                trace.served = None
-                trace.model_supply_state = None
-                trace.blockers = []
-                trace.terminal_error = {
-                    "source_id": None,
-                    "configured_model_id": None,
-                    "channel": None,
-                    "reason": reason,
-                    "stream_started": stream_started,
-                }
                 return
             identity = trace.pending_attempt
             if identity is None and (
@@ -1101,7 +569,6 @@ class TurnCorrelationRegistry:
         turn_id: Optional[str],
         requested_model_id: str,
         supply_state: SupplyState,
-        blockers: Iterable[ExactHopBlocker] = (),
     ) -> None:
         token = self.credentials(backend, process_scope, turn_id)
         normalized_turn_id = str(turn_id or "").strip()
@@ -1121,13 +588,11 @@ class TurnCorrelationRegistry:
                 ),
             )
             trace.model_supply_state = supply_state
-            trace.blockers = [blocker.payload() for blocker in blockers]
 
     def mark_gateway_no_candidate(
         self,
         turn_id: Optional[str],
         supply_state: SupplyState,
-        blockers: Iterable[ExactHopBlocker] = (),
     ) -> None:
         if turn_id is None:
             return
@@ -1138,19 +603,6 @@ class TurnCorrelationRegistry:
                 trace.served = None
                 trace.terminal_error = None
                 trace.model_supply_state = supply_state
-                trace.blockers = [blocker.payload() for blocker in blockers]
-
-    def record_turn_outcome(
-        self,
-        turn_id: Optional[str],
-        turn_outcome: TurnOutcomeProjectionInput | None,
-    ) -> None:
-        if turn_id is None:
-            return
-        with self._lock:
-            trace = self._traces.get(turn_id)
-            if trace is not None:
-                trace.terminal_outcome = turn_outcome
 
     def begin_attempt(
         self,
@@ -1235,14 +687,6 @@ class TurnCorrelationRegistry:
     ) -> None:
         if turn_id is None:
             return
-        if decision.error_code == "engine_down":
-            self._terminalize_gateway_exit(
-                turn_id,
-                reason="engine_down",
-                stream_started=outcome.stream_started,
-                force=True,
-            )
-            return
         with self._lock:
             trace = self._traces.get(turn_id)
             if trace is None or trace.pending_attempt is None:
@@ -1287,15 +731,7 @@ class TurnCorrelationRegistry:
             terminal_error = trace.terminal_error
             canceled_attempt = None
             supply_state = None
-            terminal_history_committed = (
-                (
-                    trace.terminal_outcome is not None
-                    and trace.terminal_outcome.outcome != "canceled"
-                )
-                or trace.terminal_error is not None
-                or trace.served is not None
-            )
-            if settled_by == SETTLED_BY_STOPPED and not terminal_history_committed:
+            if settled_by == SETTLED_BY_STOPPED:
                 outcome = "canceled"
                 canceled_attempt = (
                     trace.pending_attempt.payload()
@@ -1304,25 +740,6 @@ class TurnCorrelationRegistry:
                 )
                 served = None
                 terminal_error = None
-            elif settled_by == SETTLED_BY_STOPPED:
-                logger.info(
-                    "Ignored stopped settlement after terminal Model Hub history was committed",
-                    extra={"turn_id": normalized_turn_id},
-                )
-                if trace.model_supply_state is not None:
-                    outcome = "no_candidate"
-                    served = None
-                    terminal_error = None
-                    supply_state = trace.model_supply_state
-                elif terminal_error is not None:
-                    outcome = "failed_terminal"
-                    served = None
-                elif served is not None:
-                    outcome = "served"
-                elif trace.failed_attempts:
-                    outcome = "exhausted"
-                else:
-                    return
             elif trace.model_supply_state is not None:
                 outcome = "no_candidate"
                 served = None
@@ -1380,10 +797,6 @@ class TurnCorrelationRegistry:
                     "terminal_error": terminal_error,
                     "canceled_attempt": canceled_attempt,
                     "model_supply_state": supply_state,
-                    "blockers": (
-                        list(trace.blockers)
-                        if outcome == "no_candidate"
-                        else []
-                    ),
+                    "blockers": [],
                 }
             )

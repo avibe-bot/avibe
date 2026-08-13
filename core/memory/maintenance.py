@@ -316,9 +316,10 @@ class MemoryMaintenance:
         if observation is None:
             observation = await self.observe(operator_ref=operator_ref)
         try:
-            meta, history = await asyncio.gather(
+            meta, history, manual_required = await asyncio.gather(
                 asyncio.to_thread(self._store.get_meta),
                 asyncio.to_thread(self._store.has_provider_data_history),
+                asyncio.to_thread(self._store.has_manual_required_fence),
             )
         except Exception:
             return MaintenanceResult(
@@ -339,7 +340,11 @@ class MemoryMaintenance:
         changed = latest != observation
         return MaintenanceResult(
             data_exists=bool(history or (meta is not None and meta.last_success_at)),
-            can_clear=not changed and latest.can_clear,
+            can_clear=(
+                not changed
+                and latest.can_clear
+                and not manual_required
+            ),
             clear_recovery=latest.clear_recovery,
             error=(
                 "memory_store_unavailable"
@@ -452,11 +457,18 @@ class MemoryMaintenance:
             try:
                 try:
                     await self._runtime.pause_claims()
+                    manual_required = await self._run_maintenance_io(
+                        self._store.has_manual_required_fence
+                    )
                 except BaseException as error:
                     self._runtime.leave_maintenance()
                     self._runtime.resume_claims()
                     if isinstance(error, asyncio.CancelledError):
                         raise
+                    return self._blocked(operator_ref=operator_ref)
+                if manual_required:
+                    self._runtime.leave_maintenance()
+                    self._runtime.resume_claims()
                     return self._blocked(operator_ref=operator_ref)
                 try:
                     meta = await self._run_maintenance_io(self._store.ensure_meta)

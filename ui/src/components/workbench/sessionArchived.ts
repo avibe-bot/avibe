@@ -130,14 +130,9 @@ export const transcriptSelectionActions = (
  *  a page it cannot leave and that archive already forced offline. Answering
  *  ``false`` here puts it back on the transcript. ChatPage derives this rather
  *  than resetting ``showPageMode`` from an effect, so the fallback lands in the
- *  same render that flips ``readOnly``. A definitive page-access denial follows
- *  the same rule: the already-rendered private frame must disappear in the render
- *  that observes the denial, before the state-reset effect persists Chat mode. */
-export const isShowPageActive = (
-  readOnly: boolean,
-  showPageMode: boolean,
-  accessDenied = false,
-): boolean => showPageMode && !readOnly && !accessDenied;
+ *  same render that flips ``readOnly``. */
+export const isShowPageActive = (readOnly: boolean, showPageMode: boolean): boolean =>
+  showPageMode && !readOnly;
 
 /** Which Show Page controls the chat header offers.
  *

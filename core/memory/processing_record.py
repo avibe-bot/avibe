@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal, TypeVar
+from typing import Literal, TypeVar
 
 from core.memory.everos import ProviderHealthSnapshot
 from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
@@ -24,12 +24,12 @@ from core.memory.types import MemoryFailureLogEntry
 SourceStatus = Literal["available", "partial", "stale", "unknown", "unavailable"]
 
 # One composite read performs an opaque operator lookup, then reads both
-# maintenance journals, then fans out over provider health, five local source
+# maintenance journals, then fans out over provider health, four local source
 # surfaces, and maintenance metadata plus a freshness recheck. This is the
 # controller work bound; the transport retains an additional fixed margin.
 PROCESSING_RECORD_SQLITE_BOUND_SECONDS = PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
 PROCESSING_RECORD_JOURNAL_SURFACES = 2
-PROCESSING_RECORD_SOURCE_SURFACES = 5
+PROCESSING_RECORD_SOURCE_SURFACES = 4
 PROCESSING_RECORD_TRANSPORT_MARGIN_SECONDS = 5.0
 PROCESSING_RECORD_WORK_TIMEOUT_SECONDS = (
     PROCESSING_RECORD_SQLITE_BOUND_SECONDS
@@ -99,18 +99,11 @@ class MaintenanceProjection:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderCheckProjection:
-    source: SourceObservation
-    items: tuple[dict[str, Any], ...]
-
-
-@dataclass(frozen=True, slots=True)
 class ProcessingRecordSummary:
     runtime: RuntimeHealthProjection
     sources: ProcessingSourceObservations
     anomalies: AnomalyProjection
     maintenance: MaintenanceProjection
-    provider_checks: ProviderCheckProjection
     status: Literal["ok"] = "ok"
 
 
@@ -127,7 +120,6 @@ class MemoryProcessingRecordPort:
     ]
     recorder_health: Callable[[], Mapping[str, str | None]]
     observe_sources: Callable[[str | None], Awaitable[ProcessingSourceObservations]]
-    provider_checks: Callable[[str | None], Awaitable[ProviderCheckProjection]]
     maintenance: Callable[
         [str | None, MaintenanceObservation],
         Awaitable[MaintenanceResult],
@@ -263,12 +255,11 @@ class MemoryProcessingRecord:
             operator_ref,
             deadline,
         )
-        runtime_result, sources, anomalies, maintenance, provider_checks = await asyncio.gather(
+        runtime_result, sources, anomalies, maintenance = await asyncio.gather(
             self._read_runtime(observation.block_reason, deadline),
             self._read_sources(observation.block_reason, deadline),
             self._read_durable_anomalies(observation.block_reason, deadline),
             self._read_maintenance(operator_ref, observation, deadline),
-            self._read_provider_checks(observation.block_reason, deadline),
         )
         runtime, recorder_anomaly = runtime_result
         return ProcessingRecordSummary(
@@ -276,27 +267,7 @@ class MemoryProcessingRecord:
             sources=sources,
             anomalies=self._merge_recorder_anomaly(anomalies, recorder_anomaly),
             maintenance=maintenance,
-            provider_checks=provider_checks,
         )
-
-    async def _read_provider_checks(
-        self,
-        maintenance_reason: str | None,
-        deadline: float,
-    ) -> ProviderCheckProjection:
-        try:
-            return await _await_before(
-                deadline,
-                lambda: self._runtime.provider_checks(maintenance_reason),
-            )
-        except Exception:
-            return ProviderCheckProjection(
-                source=SourceObservation(
-                    "unavailable",
-                    reason="memory_store_unavailable",
-                ),
-                items=(),
-            )
 
     async def _read_runtime(
         self,

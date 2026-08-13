@@ -924,7 +924,7 @@ def test_main_stops_after_bounded_initial_pr_network_retries() -> None:
     ):
         rc = module.main()
 
-    assert rc == 75
+    assert rc == 1
     assert fetch.call_count == 3
     assert "failed after 3 attempts" in stderr.getvalue()
 
@@ -1069,25 +1069,6 @@ def test_main_retries_transient_authenticated_login_failure() -> None:
     assert rc == 0
     assert lookup.call_count == 2
     assert [call.args[0] for call in sleep.call_args_list] == [1.0]
-
-
-def test_main_stops_after_bounded_viewer_lookup_retries_with_retryable_exit_code() -> None:
-    module = _load_module()
-    stderr = io.StringIO()
-
-    with (
-        patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", side_effect=TimeoutError("temporary viewer timeout")) as lookup,
-        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll before viewer login")),
-        patch.object(module.time, "sleep", return_value=None),
-        patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153"]),
-        patch("sys.stderr", stderr),
-    ):
-        rc = module.main()
-
-    assert rc == 75
-    assert lookup.call_count == 3
-    assert "GitHub viewer lookup failed" in stderr.getvalue()
 
 
 def test_render_activity_actionable_only_drops_bot_trigger_comment_but_advances_cursor() -> None:

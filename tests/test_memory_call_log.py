@@ -21,7 +21,6 @@ from core.memory.everos_insight.recorder import (
     initialize_call_log,
     maintain_call_log,
     normalize_provider_call,
-    record_preflight_call,
 )
 
 
@@ -44,30 +43,6 @@ def _private_db_path(tmp_path: Path) -> Path:
     directory = tmp_path / "call-log"
     directory.mkdir(mode=0o700)
     return directory / "call-log.db"
-
-
-def test_preflight_recorder_creates_private_call_log_directory(tmp_path: Path) -> None:
-    db_path = tmp_path / "memory" / "call-log" / "call-log.db"
-    db_path.parent.parent.mkdir(mode=0o700)
-
-    record_preflight_call(
-        db_path,
-        started_at_ms=1_700_000_000_000,
-        duration_ms=125,
-        kind="embedding",
-        model="embed",
-        request={"model": "embed", "input": "OK"},
-        response={"data": [{"embedding": [0.1]}]},
-        status="ok",
-    )
-
-    assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
-    with sqlite3.connect(db_path) as conn:
-        assert conn.execute(
-            "SELECT started_at_ms, duration_ms, stage FROM provider_call"
-        ).fetchall() == [
-            (1_700_000_000_000, 125, "processing_preflight")
-        ]
 
 
 def test_normalize_provider_call_scrubs_every_serialized_column() -> None:

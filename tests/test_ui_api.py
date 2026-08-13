@@ -1511,7 +1511,7 @@ def test_detect_cli_sorts_prerelease_numerically_in_nvm(monkeypatch, tmp_path, o
     assert result["path"] == str(rc10)
 
 
-def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path, only_tmp_binaries):
+def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path):
     npm_path = tmp_path / "tools" / "npm"
     npm_path.parent.mkdir(parents=True, exist_ok=True)
     npm_path.write_text("#!/bin/sh\n")
@@ -2714,7 +2714,6 @@ def test_telegram_auth_test_returns_response(monkeypatch):
         return {"id": 1, "username": "vibe_remote_bot"}
 
     monkeypatch.setattr(api, "_telegram_get_me", fake_get_me)
-    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda proxy_url: proxy_url)
 
     result = api.telegram_auth_test("123456:test-token")
 
@@ -2730,7 +2729,6 @@ def test_telegram_auth_test_uses_stored_token_when_request_omits_secret(monkeypa
 
     monkeypatch.setattr(api, "_telegram_get_me", fake_get_me)
     monkeypatch.setattr(api, "_stored_platform_secret", lambda platform, field: "123456:stored-token")
-    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda proxy_url: proxy_url)
 
     result = api.telegram_auth_test("")
 
@@ -2891,7 +2889,7 @@ def test_vibe_agent_api_localizes_archive_refusal(tmp_path, monkeypatch):
 
 def test_vibe_agent_api_localizes_invalid_reference_metadata_on_rename(monkeypatch):
     class RefusingStore:
-        def rename(self, _name, _new_name, *, user_context=None):
+        def rename(self, _name, _new_name):
             raise api.AgentReferenceRewriteError()
 
         def close(self):

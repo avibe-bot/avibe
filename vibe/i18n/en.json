@@ -16,8 +16,7 @@
     "event": {
       "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
       "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
-      "idConflict": "This Show event ID is already bound to different event contents.",
-      "unsupportedEventType": "Show Page writes require a supported human event or mark resolution type."
+      "idConflict": "This Show event ID is already bound to different event contents."
     }
   },
   "harness": {
@@ -262,7 +261,6 @@
     },
     "sessionArchived": "This session is archived and can no longer be changed.",
     "sessionArchiveUnavailable": "This session cannot be archived while the Avibe controller is unavailable. Please try again shortly.",
-    "projectAccessDenied": "You do not have permission to create a session in this project.",
     "workbenchAttachment": {
       "session_not_found": "This session is no longer available.",
       "file_required": "Choose a file to upload.",
@@ -794,7 +792,6 @@
       "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "engine_down": "The local model gateway is unavailable.",
-      "engine_down_streamed": "The local model gateway is unavailable. This turn's output may be incomplete.",
       "migration_item_conflict": "This migration item conflicts with the current model gateway state.",
       "stream_interrupted": "The upstream stream was interrupted.",
       "upstream_protocol_error": "The upstream response did not match the expected protocol.",
@@ -822,6 +819,7 @@
         "credential_revoked": "credential revoked",
         "balance_exhausted": "balance exhausted",
         "account_banned": "account unavailable",
+        "permission_denied": "request permission denied",
         "unclassified_error": "unclassified source error",
         "no_enabled_source": "no source is enabled",
         "no_eligible_source": "no source is eligible",
@@ -834,10 +832,12 @@
     "launch": {
       "retry": "The next turn has already switched routes. Retry directly.",
       "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
-      "waiting_without_retry": "The route for model {model} has recovered. Retry directly.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
+      "native_cli_unavailable": "CLI login is not available in this process",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
-      "request_incompatible": "This request is incompatible; switching Sources will not help."
+      "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
+      "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
+      "model_unsupported": "No source supports model {model}. Open Models to configure one."
     }
   },
   "remote_access": {

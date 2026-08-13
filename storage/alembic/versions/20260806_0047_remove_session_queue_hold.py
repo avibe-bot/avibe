@@ -1,7 +1,7 @@
 """remove the Session queue hold policy
 
 Revision ID: 20260806_0047
-Revises: 20260804_0047
+Revises: 20260804_0046
 Create Date: 2026-08-06
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260806_0047"
-down_revision = "20260804_0047"
+down_revision = "20260804_0046"
 branch_labels = None
 depends_on = None
 

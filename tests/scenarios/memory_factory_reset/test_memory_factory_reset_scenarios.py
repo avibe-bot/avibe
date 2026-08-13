@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -237,40 +236,6 @@ async def test_memory_factory_004_capture_queued_for_reset_cannot_use_fresh_runt
     assert result.reason == "memory_operation_in_progress"
     assert old_module.calls == 0
     assert fresh_module.calls == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="requires an O_PATH inode anchor")
-async def test_memory_factory_005_retry_deletes_owned_inaccessible_child_home(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MEMORY-FACTORY-005: retry hardens and deletes a real inaccessible tree."""
-    _create_roots(tmp_path)
-    local = tmp_path / "memory" / ".child-home" / ".local"
-    (local / "share").mkdir(mode=0o700, parents=True)
-    (local / "share" / "cache.db").write_bytes(b"memory")
-    local.chmod(0o000)
-    old = _Runtime(tmp_path)
-    controller = _controller(old)
-    controller.config.memory = replace(
-        controller.config.memory,
-        recovery_intent="factory_reset",
-    )
-    fresh = _FreshRuntime(tmp_path)
-    monkeypatch.setattr(
-        "core.memory.runtime.create_memory_runtime",
-        lambda *args, **kwargs: fresh,
-    )
-
-    result = await controller._factory_reset_memory_once()
-
-    assert result["ok"] is True
-    assert result["data_deleted"] is True
-    assert result["data_remaining"] is False
-    assert controller.config.memory.recovery_intent is None
-    assert not (tmp_path / "memory").exists()
-    assert not (tmp_path / "state" / "memory").exists()
 
 
 @pytest.mark.asyncio

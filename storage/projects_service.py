@@ -16,19 +16,13 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
 from storage.agent_session_rows import reserve_write_lock
-from storage import project_access_service
 from storage.models import agents, scope_settings, scopes
-from vibe.authorization import (
-    AuthorizationContext,
-    has_temporary_unrestricted_runtime_access,
-    require_instance_role,
-)
 
 
 PROJECT_PLATFORM = "avibe"
@@ -199,29 +193,6 @@ def _project_dict(row: Any) -> dict[str, Any]:
     }
 
 
-def _project_for_context(
-    conn: Connection,
-    context: AuthorizationContext,
-    project: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Return the Project fields and capabilities safe for this caller."""
-
-    payload = dict(project)
-    payload["capabilities"] = {
-        "can_chat": project_access_service.can_chat_project(
-            conn,
-            context,
-            str(project.get("id") or ""),
-        )
-    }
-    if context.is_remote and not has_temporary_unrestricted_runtime_access(context):
-        # Remote identities outside the temporary active-Organization rollout
-        # remain unable to inspect the host's workdir and local metadata.
-        payload["folder_path"] = ""
-        payload["metadata"] = {}
-    return payload
-
-
 def _write_scope_settings(conn: Connection, scope_id: str, values: dict[str, Any], now: str) -> None:
     """Apply a partial ``scope_settings`` update, inserting the row if missing.
 
@@ -248,12 +219,7 @@ def _write_scope_settings(conn: Connection, scope_id: str, values: dict[str, Any
         conn.execute(update(scope_settings).where(scope_settings.c.scope_id == scope_id).values(**values))
 
 
-def list_projects(
-    conn: Connection,
-    *,
-    include_archived: bool = False,
-    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+def list_projects(conn: Connection, *, include_archived: bool = False) -> list[dict[str, Any]]:
     """Return all avibe projects sorted by recency, optionally including archived ones."""
 
     query = (
@@ -272,53 +238,18 @@ def list_projects(
         if not include_archived and not enabled:
             continue
         out.append(_project_dict(row))
-    context = require_instance_role(authorization_context, "viewer")
-    return [
-        _project_for_context(conn, context, project)
-        for project in project_access_service.filter_accessible_projects(conn, context, out)
-    ]
+    return out
 
 
-def get_project(
-    conn: Connection,
-    project_id: str,
-    *,
-    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    context = require_instance_role(authorization_context, "viewer")
-    if not project_access_service.can_read_project(conn, context, project_id):
-        raise LookupError(f"Project not found: {project_id}")
+def get_project(conn: Connection, project_id: str) -> dict[str, Any]:
     scope_id = _make_scope_id(project_id)
-    return _project_for_context(conn, context, _project_payload(conn, scope_id))
-
-
-def get_project_workdir(
-    conn: Connection,
-    project_id: str,
-    *,
-    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
-) -> str:
-    """Return the authorized Project workdir for internal runtime execution.
-
-    Remote Project payloads deliberately redact host paths. Runtime services
-    such as Skills and the project instruction editor still need the real cwd
-    after authorization, so keep that internal lookup separate from the HTTP
-    response projection instead of weakening ``get_project`` redaction.
-    """
-
-    context = require_instance_role(authorization_context, "viewer")
-    if not project_access_service.can_read_project(conn, context, project_id):
-        raise LookupError(f"Project not found: {project_id}")
-    project = _project_payload(conn, _make_scope_id(project_id))
-    return str(project.get("folder_path") or "")
+    return _project_payload(conn, scope_id)
 
 
 def create_project(
     conn: Connection,
     folder_path: str,
     display_name: Optional[str] = None,
-    *,
-    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create an avibe project, or reuse the existing one for this folder.
 
@@ -331,7 +262,6 @@ def create_project(
     never clobbers a name the user set earlier; renaming stays explicit.
     """
 
-    context = require_instance_role(authorization_context, "owner")
     folder = _resolve_folder(folder_path)
     now = _utc_now_iso()
 
@@ -350,7 +280,7 @@ def create_project(
             .where(scopes.c.id == scope_id)
             .values(last_seen_at=now, updated_at=now)
         )
-        return _project_for_context(conn, context, _project_payload(conn, scope_id))
+        return _project_payload(conn, scope_id)
 
     project_id = _new_project_id()
     scope_id = _make_scope_id(project_id)
@@ -390,7 +320,7 @@ def create_project(
             updated_at=now,
         )
     )
-    return _project_for_context(conn, context, _project_payload(conn, scope_id))
+    return _project_payload(conn, scope_id)
 
 
 def update_project(
@@ -405,7 +335,6 @@ def update_project(
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
-    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Update a project's name, folder, and/or default Agent route.
 
@@ -415,7 +344,6 @@ def update_project(
     by sending ``None``s. Empty strings normalize to ``None`` so an empty pick
     clears too.
     """
-    context = require_instance_role(authorization_context, "owner")
     reserve_write_lock(conn)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
@@ -500,16 +428,10 @@ def update_project(
     if settings_values:
         _write_scope_settings(conn, scope_id, settings_values, now)
 
-    return _project_for_context(conn, context, _project_payload(conn, scope_id))
+    return _project_payload(conn, scope_id)
 
 
-def archive_project(
-    conn: Connection,
-    project_id: str,
-    *,
-    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    context = require_instance_role(authorization_context, "owner")
+def archive_project(conn: Connection, project_id: str) -> dict[str, Any]:
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:
@@ -545,7 +467,7 @@ def archive_project(
         .where(scopes.c.id == scope_id)
         .values(updated_at=now)
     )
-    return _project_for_context(conn, context, _project_payload(conn, scope_id))
+    return _project_payload(conn, scope_id)
 
 
 def _project_payload(conn: Connection, scope_id: str) -> dict[str, Any]:

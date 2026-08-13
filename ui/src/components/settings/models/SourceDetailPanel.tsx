@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
-import { GuardGapList } from './GuardGapList';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
@@ -52,6 +51,26 @@ const confirmGuardPlan = (guard: Pick<GuardedAction, 'hops' | 'gaps'>): GuardCon
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
   | { kind: 'gone'; sources: Source[]; snapshot: number };
+
+export const GuardGapList: React.FC<{ gaps: SupplyGap[] }> = ({ gaps }) => {
+  const { t, i18n } = useTranslation();
+  if (gaps.length === 0) return null;
+  return (
+    <>
+      <div className="model-hub-guard-label"><p>{t('settings.models.guard.gap.label')}</p><span>{t('settings.models.gateway.modelCount', { count: gaps.length })}</span></div>
+      <div className="model-hub-guard-list">
+        {gaps.map((gap) => (
+          <div key={`${gap.backend}:${gap.model_id}`} className="model-hub-guard-hop">
+            <span className="min-w-0 flex-1">
+              <strong>{t('settings.models.guard.gap.subject', { backend: t(`settings.models.backends.${gap.backend}`, { defaultValue: gap.backend }), menuModel: gap.model_id })}</strong>
+              {gap.agents.length > 0 && <span>{t('settings.models.guard.gap.agents', { agents: gap.agents.join(i18n.language.startsWith('zh') ? '、' : ', ') })}</span>}
+            </span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+};
 
 const enteredHost = (source: Source): string | null => {
   if (!source.base_url || !isCustomEndpoint(source)) return null;

@@ -23,7 +23,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_sessions import ActivePollInfo
-from core.native_dispatch_phase import mark_prewrite_user_stop
 from core.processing_indicator import STOPPED_REACTION_EMOJI, ProcessingIndicatorService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
@@ -228,31 +227,6 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
         self.assertEqual(agent._user_stopped_sessions, set())
 
-    async def test_prestart_cancellation_releases_overlay_and_stamps_stop_receipt(self):
-        agent = _agent()
-        request = _request()
-        reservation = object()
-        server = SimpleNamespace(
-            release_model_hub_overlay_reservation=AsyncMock()
-        )
-        agent._remove_ack_reaction = AsyncMock()
-        mark_prewrite_user_stop(request.context)
-
-        await agent._finish_prestart_cancellation(
-            request,
-            server,
-            reservation,
-        )
-
-        server.release_model_hub_overlay_reservation.assert_awaited_once_with(
-            reservation
-        )
-        agent._remove_ack_reaction.assert_awaited_once_with(
-            request,
-            terminal_emoji=STOPPED_REACTION_EMOJI,
-        )
-        self.assertEqual(agent._user_stopped_sessions, set())
-
     async def test_restored_poll_cancellation_stamps_its_retained_request(self):
         entered = asyncio.Event()
         cleanups: list[tuple[object, object]] = []
@@ -331,14 +305,12 @@ class OpenCodeStopReceiptTests(unittest.TestCase):
 
     def test_cancellation_branch_reads_the_intent(self):
         source = inspect.getsource(OpenCodeAgent._process_message)
-        cleanup = inspect.getsource(OpenCodeAgent._finish_prestart_cancellation)
-        claim = inspect.getsource(OpenCodeAgent._claim_user_stop_receipt)
+        _, _, after = source.partition("except asyncio.CancelledError:")
+        branch = after.partition("raise")[0]
 
-        self.assertIn("_finish_prestart_cancellation", source)
-        self.assertIn("_claim_user_stop_receipt", cleanup)
-        self.assertIn("consume_user_stop_intent", claim)
-        self.assertIn("prewrite_user_stop_requested", claim)
-        self.assertIn("STOPPED_REACTION_EMOJI", cleanup)
+        self.assertTrue(branch, "_process_message no longer handles cancellation")
+        self.assertIn("consume_user_stop_intent", branch)
+        self.assertIn("STOPPED_REACTION_EMOJI", branch)
 
     def test_restored_cancellation_branch_reads_the_intent(self):
         source = inspect.getsource(OpenCodePollLoop.run_restored_poll_loop)

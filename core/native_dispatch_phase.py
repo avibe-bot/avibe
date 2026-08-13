@@ -9,15 +9,14 @@ DISPATCH_PHASE_KEY = "agent_dispatch_phase"
 DISPATCH_EVIDENCE_KEY = "agent_dispatch_evidence"
 DISPATCH_PHASE_PREWRITE = "prewrite"
 DISPATCH_PHASE_ATTEMPTING = "attempting"
-DISPATCH_PREWRITE_USER_STOP_KEY = "prewrite_user_stop"
 
 
 def set_dispatch_phase(
     context: Any,
     phase: str,
     *,
-    evidence: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    evidence: dict[str, str] | None = None,
+) -> dict[str, str]:
     payload = dict(getattr(context, "platform_specific", None) or {})
     current = payload.get(DISPATCH_EVIDENCE_KEY)
     if evidence is None:
@@ -42,29 +41,6 @@ def backend_dispatch_attempted(context: Any) -> Optional[bool]:
     if phase == DISPATCH_PHASE_ATTEMPTING:
         return True
     return None
-
-
-def mark_prewrite_user_stop(context: Any) -> None:
-    """Publish user-Stop intent to the adapter before canceling its task."""
-
-    payload = dict(getattr(context, "platform_specific", None) or {})
-    evidence = payload.get(DISPATCH_EVIDENCE_KEY)
-    if not isinstance(evidence, dict):
-        evidence = {}
-        payload[DISPATCH_EVIDENCE_KEY] = evidence
-    context.platform_specific = payload
-    evidence[DISPATCH_PREWRITE_USER_STOP_KEY] = True
-
-
-def prewrite_user_stop_requested(context: Any) -> bool:
-    """Return whether the shared Turn owner canceled this prewrite task for Stop."""
-
-    payload = getattr(context, "platform_specific", None) or {}
-    evidence = payload.get(DISPATCH_EVIDENCE_KEY)
-    return bool(
-        isinstance(evidence, dict)
-        and evidence.get(DISPATCH_PREWRITE_USER_STOP_KEY) is True
-    )
 
 
 def mark_backend_dispatch_attempted(context: Any) -> None:

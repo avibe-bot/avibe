@@ -92,8 +92,6 @@ def test_public_surface_is_stable():
         # session (D5 rung (5)'s home): archive is terminal, and archiving that row
         # would silently swallow every later caller-less failure notice.
         "ReservedSessionError",
-        # Stable authorization denial translated by API callers:
-        "ProjectAccessDeniedError",
     }
     assert set(sessions_service.__all__) == expected | {"SESSION_ARCHIVED_I18N_KEY"}
     for name in expected:

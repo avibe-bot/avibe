@@ -38,7 +38,7 @@ const ModelRow: React.FC<{
   modelId: string;
   sources: Source[];
   read: ModelChainRead | undefined;
-  onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
+  onOpenRoute: (agent: AgentSupply, modelId: string) => void;
 }> = ({ agent, modelId, sources, read, onOpenRoute }) => {
   const { t } = useTranslation();
   const current = currentLink(read);
@@ -58,9 +58,7 @@ const ModelRow: React.FC<{
   return (
     <button
       type="button"
-      data-route-backend={agent.backend}
-      data-route-model={modelId}
-      onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)}
+      onClick={() => onOpenRoute(agent, modelId)}
       aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
       className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-lg border border-border px-3 text-left"
     >
@@ -84,7 +82,7 @@ const AgentModelCard: React.FC<{
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
-  onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
+  onOpenRoute: (agent: AgentSupply, modelId: string) => void;
   onProbeSettled: (agent: AgentSupply) => void;
 }> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, onConnectHub, onSwitchDirect, onOpenOrder, onOpenRoute, onProbeSettled }) => {
   const { t } = useTranslation();
@@ -130,11 +128,7 @@ const AgentModelCard: React.FC<{
         : 'bg-muted';
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-background" data-agent-backend={agent.backend}>
-      <div
-        tabIndex={-1}
-        data-agent-group-head={agent.backend}
-        className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:h-[66px] sm:py-0"
-      >
+      <div className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:h-[66px] sm:py-0">
         <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
           <div className="flex min-w-0 items-center gap-[9px]">
             <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-[15px]', ACCENT_ICON[accent])} /></span>
@@ -168,7 +162,7 @@ export const AgentCard: React.FC<{
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
-  onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
+  onOpenRoute: (agent: AgentSupply, modelId: string) => void;
   onProbeSettled: (agent: AgentSupply) => void;
   connectingBackend: string | null;
 }> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => <div className="flex flex-col gap-4">{agents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;

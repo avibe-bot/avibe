@@ -988,10 +988,3 @@ def test_socket_verifier_accepts_umask_created_owner_only_mode(socket_path) -> N
     os.chmod(socket_path, 0o700)
 
     assert internal_client._verified_socket_path(socket_path) == socket_path
-
-
-def test_socket_verifier_skips_posix_mode_check_on_windows(monkeypatch, socket_path) -> None:
-    os.chmod(socket_path, 0o644)
-    monkeypatch.setattr(internal_client, "_CHECK_POSIX_SOCKET_MODE", False)
-
-    assert internal_client._verified_socket_path(socket_path) == socket_path

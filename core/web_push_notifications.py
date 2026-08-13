@@ -13,7 +13,6 @@ from sqlalchemy import and_, or_, select
 from storage import messages_service, web_push_service
 from storage.models import agent_sessions, messages
 from vibe.message_types import spec_for, types_with
-from vibe.authorization import AuthorizationContext, context_from_session_payload
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,6 @@ _UNREAD_GATED_TYPES = set(types_with("unread"))
 WEB_PUSH_NOTIFICATION_DELAY_SECONDS = 3.0
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
-WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
 
 
 def _is_notifiable_message(message_type: Any, metadata: Any = None) -> bool:
@@ -82,9 +80,10 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
     url = f"/chat/{session_id}" if session_id else "/harness"
     tag = f"session:{session_id}" if session_id else "harness:failure"
 
-    # ``badge_count`` is computed per subscription owner at send time, not from
-    # this one session's unread count. That keeps it current after the debounce
-    # delay and aligned with the recipient's Project-filtered Inbox.
+    # ``badge_count`` is the app-icon badge number, which is a single global
+    # value — not this one session's unread count. It is computed at send time
+    # (see ``_send_to_enabled_subscriptions``) so it reflects the real total
+    # after the debounce delay and matches the in-app Inbox badge.
     payload = {
         "title": inbox_row.get("title") or inbox_row.get("project_name") or "avibe",
         "body": (message.get("text") or inbox_row.get("preview_text") or "").strip()[:240],
@@ -128,84 +127,8 @@ def _metadata_user_keys(metadata: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(keys))
 
 
-def web_push_authorization_context_record(
-    user_key: str,
-    context: AuthorizationContext | None,
-) -> dict[str, Any] | None:
-    """Serialize the trusted remote claims needed to recheck Project access."""
-
-    if (
-        not user_key.startswith("remote:")
-        or context is None
-        or not context.is_remote
-        or not context.subject
-        or context.claims_issued_at is None
-        or user_key != f"remote:{context.subject}"
-    ):
-        return None
-    record: dict[str, Any] = {
-        "user_key": user_key,
-        "sub": context.subject,
-        "vibe_instance_role": context.instance_role,
-        "vibe_instance_access_source": context.instance_access_source,
-        "vibe_group_ids": sorted(context.group_ids),
-        "claims_issued_at": context.claims_issued_at,
-    }
-    optional_claims = {
-        "email": context.email,
-        "vibe_instance_id": context.instance_id,
-        "vibe_organization_id": context.organization_id,
-        "vibe_organization_member_id": context.organization_member_id,
-        "vibe_organization_role": context.organization_role,
-        "vibe_membership_version": context.membership_version,
-        "vibe_instance_authorization_revision": context.authorization_revision,
-    }
-    record.update({key: value for key, value in optional_claims.items() if value is not None})
-    return record
-
-
-def _metadata_authorization_contexts(metadata: dict[str, Any]) -> dict[str, AuthorizationContext]:
-    from vibe import remote_access
-
-    raw_contexts = metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
-    if not isinstance(raw_contexts, list):
-        return {}
-    try:
-        from core.services import settings as settings_service
-
-        config = settings_service.load_config()
-    except FileNotFoundError:
-        config = None
-    except Exception:
-        logger.debug("web push: could not load authorization revision config", exc_info=True)
-        return {}
-    contexts: dict[str, AuthorizationContext] = {}
-    for raw_context in raw_contexts:
-        if not isinstance(raw_context, dict):
-            continue
-        user_key = raw_context.get("user_key")
-        if not isinstance(user_key, str) or not user_key.startswith("remote:"):
-            continue
-        if remote_access.session_needs_authorization_refresh(raw_context):
-            continue
-        if config is not None:
-            if not remote_access.session_authorization_is_current(config, raw_context):
-                continue
-        elif raw_context.get("vibe_instance_authorization_revision") is not None:
-            # A signed revision cannot be validated without the paired-device
-            # configuration and fresh local watermark.
-            continue
-        context = context_from_session_payload(raw_context)
-        if context.subject and user_key == f"remote:{context.subject}" and context.can_read_instance:
-            contexts[user_key] = context
-    return contexts
-
-
-def _web_push_owner_metadata_for_message(
-    conn: Any,
-    message_id: str | None,
-) -> tuple[str | None, dict[str, Any]]:
-    """Resolve trusted browser-owner metadata for a Workbench agent message.
+def _web_push_user_keys_for_message(conn: Any, message_id: str | None) -> list[str]:
+    """Resolve trusted browser owners for a Workbench agent message.
 
     New sessions do not write a Web Push owner field: that made future behavior
     depend on session creation time. For upgraded rows, still honor the legacy
@@ -214,7 +137,7 @@ def _web_push_owner_metadata_for_message(
     """
 
     if not message_id:
-        return None, {}
+        return []
     agent_row = conn.execute(
         select(
             messages.c.session_id,
@@ -232,7 +155,7 @@ def _web_push_owner_metadata_for_message(
         agent_row[3],
         _parse_metadata(agent_row[4]),
     ):
-        return None, {}
+        return []
     session_id, transcript_at, row_id = agent_row[0], agent_row[1], agent_row[2]
 
     user_order = messages_service.transcript_order_value(messages)
@@ -260,108 +183,19 @@ def _web_push_owner_metadata_for_message(
     ).all()
     for user_row in user_rows:
         try:
-            metadata = json.loads(user_row[0] or "{}") or {}
+            user_keys = _metadata_user_keys(json.loads(user_row[0] or "{}") or {})
         except (TypeError, ValueError):
             continue
-        if isinstance(metadata, dict) and _metadata_user_keys(metadata):
-            return str(session_id), metadata
+        if user_keys:
+            return user_keys
 
     session_metadata = conn.execute(
         select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)
     ).scalar_one_or_none()
     try:
-        metadata = json.loads(session_metadata or "{}") or {}
+        return _metadata_user_keys(json.loads(session_metadata or "{}") or {})
     except (TypeError, ValueError):
-        return str(session_id), {}
-    return str(session_id), metadata if isinstance(metadata, dict) else {}
-
-
-def _web_push_user_keys_for_message(conn: Any, message_id: str | None) -> list[str]:
-    """Resolve trusted browser owners for a Workbench agent message."""
-
-    _session_id, metadata = _web_push_owner_metadata_for_message(conn, message_id)
-    return _metadata_user_keys(metadata)
-
-
-def _filter_project_authorized_user_keys(
-    conn: Any,
-    *,
-    session_id: str | None,
-    metadata: dict[str, Any],
-    user_keys: list[str],
-) -> list[str]:
-    """Recheck delayed remote deliveries against the current Project policy."""
-
-    if not user_keys:
-        return user_keys
-
-    contexts = _metadata_authorization_contexts(metadata)
-    user_keys = [
-        user_key
-        for user_key in user_keys
-        if user_key == "local" or user_key in contexts
-    ]
-    if not session_id or not user_keys:
-        return user_keys
-    from storage import project_access_service
-
-    scope_id = conn.execute(
-        select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id).limit(1)
-    ).scalar_one_or_none()
-    project_id = project_access_service.project_id_from_scope_id(scope_id)
-    if project_id is None:
-        return user_keys
-    policy = project_access_service.get_project_policy(conn, project_id)
-    if project_access_service.is_active_project(conn, project_id) and (
-        policy is None or policy.get("mode") != "restricted"
-    ):
-        return user_keys
-
-    authorized: list[str] = []
-    for user_key in user_keys:
-        if user_key == "local":
-            authorized.append(user_key)
-            continue
-        context = contexts.get(user_key)
-        if context is not None and project_access_service.role_allows(
-            project_access_service.get_effective_session_role(conn, context, session_id),
-            "viewer",
-        ):
-            authorized.append(user_key)
-    return authorized
-
-
-def _badge_count_for_user_key(
-    conn: Any,
-    *,
-    user_key: str,
-    contexts: dict[str, AuthorizationContext],
-) -> int:
-    """Return the unread count visible to one Push subscription owner."""
-
-    if user_key == "local":
-        return messages_service.total_unread(conn, platform="avibe")
-    context = contexts.get(user_key)
-    if context is None:
-        # Legacy remote messages predate persisted authorization claims. Keep
-        # delivering eligible content, but never attach a machine-global count.
-        return 0
-    from vibe.authorization import has_temporary_unrestricted_runtime_access
-
-    if context.is_instance_owner or has_temporary_unrestricted_runtime_access(context):
-        return messages_service.total_unread(conn, platform="avibe")
-
-    from storage import project_access_service
-
-    scope_ids = [
-        project_access_service.project_scope_id(project_id)
-        for project_id in project_access_service.accessible_project_ids(conn, context)
-    ]
-    return messages_service.total_unread(
-        conn,
-        platform="avibe",
-        scope_ids=scope_ids,
-    )
+        return []
 
 
 def _remote_access_enabled() -> bool:
@@ -390,31 +224,16 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
             if not _message_still_unread(conn, payload.get("message_id")):
                 logger.debug("web push: skip notification for message already read or missing")
                 return
-            session_id, owner_metadata = _web_push_owner_metadata_for_message(
-                conn,
-                payload.get("message_id"),
-            )
-            user_keys = _filter_project_authorized_user_keys(
-                conn,
-                session_id=session_id,
-                metadata=owner_metadata,
-                user_keys=_metadata_user_keys(owner_metadata),
-            )
+            # The app-icon badge is one global number; compute the live total now
+            # (post-debounce) so it matches the in-app Inbox badge on open.
+            payload["badge_count"] = messages_service.total_unread(conn, platform="avibe")
+            user_keys = _web_push_user_keys_for_message(conn, payload.get("message_id"))
             if not user_keys and not _remote_access_enabled():
                 user_keys = ["local"] if web_push_service.has_enabled_user_key(conn, user_key="local") else []
             if not user_keys:
                 logger.debug("web push: skip notification without a unique subscription owner")
                 return
-            contexts = _metadata_authorization_contexts(owner_metadata)
-            badge_counts = {
-                user_key: _badge_count_for_user_key(
-                    conn,
-                    user_key=user_key,
-                    contexts=contexts,
-                )
-                for user_key in user_keys
-            }
-            deliveries = []
+            subscriptions = []
             seen_endpoints: set[str] = set()
             for user_key in user_keys:
                 for subscription in web_push_service.list_enabled(conn, user_key=user_key):
@@ -422,13 +241,10 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     if not isinstance(endpoint, str) or endpoint in seen_endpoints:
                         continue
                     seen_endpoints.add(endpoint)
-                    deliveries.append((subscription, badge_counts[user_key]))
-        for subscription, badge_count in deliveries:
+                    subscriptions.append(subscription)
+        for subscription in subscriptions:
             try:
-                send_web_push(
-                    subscription=subscription,
-                    payload={**payload, "badge_count": badge_count},
-                )
+                send_web_push(subscription=subscription, payload=payload)
                 with engine.begin() as conn:
                     web_push_service.mark_send_success(conn, endpoint=subscription["endpoint"])
             except Exception as exc:

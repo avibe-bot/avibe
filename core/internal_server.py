@@ -60,7 +60,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 _SOCKET_MODE = 0o600
 _SOCKET_UMASK_MODE = 0o700
-_CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 _UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
     value
     for value in (
@@ -108,9 +107,6 @@ def _create_controller_loop_server(config: Any) -> Any:
     import uvicorn
 
     class _ControllerLoopServer(uvicorn.Server):
-        # Uvicorn >= 0.29 wraps serve() in capture_signals(); older supported
-        # versions call install_signal_handlers() instead. The controller owns
-        # this process and its event loop, so both hooks must remain inert.
         def capture_signals(self):
             return contextlib.nullcontext()
 
@@ -1086,23 +1082,6 @@ def create_app(
             logger.exception("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
 
-    @app.post("/internal/memory/preflight")
-    async def _memory_preflight(request: Request) -> Any:
-        if _verified_memory_ui_user_key(request) is None:
-            return JSONResponse(status_code=403, content={"ok": False, "error": "memory_access_denied"})
-        payload = await _safe_json(request)
-        try:
-            from config.v2_config import memory_config_from_payload
-            from core.memory.runtime import MemoryRuntime
-            config = memory_config_from_payload(payload.get("memory", payload) if isinstance(payload, dict) else {})
-            runtime = _memory_runtime()
-            if runtime is None:
-                return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_missing"})
-            return JSONResponse(status_code=200, content=await runtime.preflight(config))
-        except Exception:
-            logger.exception("internal memory preflight failed")
-            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_rebuild_failed"})
-
     def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
         from core.memory.http_headers import CALLER_SESSION_HEADER
 
@@ -1852,8 +1831,6 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
     uvicorn's path chmod while keeping the endpoint local-only.
     """
 
-    # Bind and report the canonical path so platform aliases (for example
-    # macOS ``/var`` -> ``/private/var``) do not produce a mismatched endpoint.
     target = (socket_path or default_socket_path()).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     _remove_stale_owned_socket(target)
@@ -1923,10 +1900,9 @@ def _verify_owned_socket(target: Path, *, allow_umask_mode: bool = False) -> Non
         raise OSError("internal dispatch socket is unsafe")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise OSError("internal dispatch socket owner mismatch")
-    if _CHECK_POSIX_SOCKET_MODE:
-        allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
-        if stat.S_IMODE(info.st_mode) not in allowed_modes:
-            raise OSError("internal dispatch socket mode mismatch")
+    allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
+    if stat.S_IMODE(info.st_mode) not in allowed_modes:
+        raise OSError("internal dispatch socket mode mismatch")
 
 
 def _write_internal_server_status(

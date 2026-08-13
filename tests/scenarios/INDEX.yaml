@@ -8,17 +8,6 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
-  - id: memory_clear_recovery
-    name: Journaled Memory Clear recovery
-    status: active
-    catalog: tests/scenarios/memory_clear_recovery/catalog.yaml
-    observations: tests/scenarios/memory_clear_recovery/observations.yaml
-    scenario_tests:
-      - tests/test_memory_maintenance.py
-    unit_or_contract_tests:
-      - tests/test_memory_store.py
-      - tests/test_memory_clear_journal.py
-      - tests/test_memory_clear_snapshot_storage.py
   - id: memory_rebuild_recovery
     name: Confirmed Memory embedding rebuild recovery
     status: active
@@ -54,26 +43,18 @@ capabilities:
     unit_or_contract_tests:
       - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: model_hub
-    name: Model Hub configured routes and turn outcomes
+    name: Model Hub source resolution and supply configuration
     status: active
     catalog: tests/scenarios/model_hub/catalog.yaml
     observations: tests/scenarios/model_hub/observations.yaml
     scenario_tests:
-      - tests/scenarios/model_hub/test_model_hub_catalog.py
-      - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
-      - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
-      - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
-    harness:
-      - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
       - tests/test_model_hub_api.py
       - tests/test_model_hub_config.py
       - tests/test_model_hub_resolution.py
-      - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
-      - tests/test_opencode_server.py
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active
@@ -114,7 +95,6 @@ capabilities:
       - tests/test_claude_agent_sessions.py
     unit_or_contract_tests:
       - tests/test_agent_auth_service.py
-      - tests/test_cloud_management.py
   - id: message_delivery
     name: scheduled result delivery
     status: active

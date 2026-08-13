@@ -823,8 +823,8 @@ state exit; held intent never bypasses the evidence column.
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry` while `retry_at` is still ahead, `upstream.state.unavailableDue` once it has passed `[derived]`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock — and the two keys are that same fact said in copy: the clock running out changes the sentence and not the state |
 | §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned`, `upstream.repair.reauthorize`, `upstream.repair.replaceKey`, `upstream.repair.topUp`, `upstream.repair.contactVendor`, `upstream.repair.contactProvider` | A later payload reports the source in a different state → that state, whatever it says `[contract]`. The payload carries the source's current status and no history, so on a first load that already reads `needs_action` there is no prior state to go back to; and the recovery has a resulting status of its own that the authority writes — a usable refresh clears the blocker and lands `standby` `[contract]` — so remembering one here could only contradict it. Frame 12 registers the card-level repair: OAuth expiry → Reauthorizing; a revoked API key → Key entry; balance exhaustion or account ban on a known subscription vendor → the §1.4 static top-up or support destination, then Vendor recovery observation; the same two causes on an `api_key` Source → the non-linked service-provider fallback. None borrows another cause's action |
 | §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `sourceDetail.status.error`, `upstream.state.supplyStopped`; Hub `sourceDetail.action.refetch`, native `upstream.repair.reauthorize` | The source leaves `error` → whichever state the payload reports. Frame 12 reuses its blocked-card geometry rather than inventing another card: card → 06; Hub 重新拉取 → §1.6 Refetching; an unclassified `native_cli` login failure 重新授权 → §1.11 Reauth confirmation |
-| §1.1 | Group waiting | `supply_status: waiting`: no member is runnable and every blocker is either Source cooldown or process-available live connection backoff `[contract]` | F5 — no request of this state's can fail, and no elapsed time resolves it either | `gateway.group.status.waiting` — 供给暂不可用 / Supply unavailable for now | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the next payload's reading and never the elapsed time. F5 says this state issues nothing, not that waiting is the cure |
-| §1.1 | Group interrupted — CLI unavailable | `supply_status` reads `interrupted` and the blocker is the native CLI that backend depends on being unreachable **in this process**, at any source health `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it remains distinct from the self-healing `waiting` umbrella |
+| §1.1 | Group waiting | `supply_status: waiting`: no member is runnable and every blocker is either Source cooldown or process-available live connection backoff `[contract]` | F5 — no request of this state's can fail, and no elapsed time resolves it either | `gateway.group.status.waiting` — umbrella copy pending K6 | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the next payload's reading and never the elapsed time. F5 says this state issues nothing, not that waiting is the cure |
+| §1.1 | Group interrupted — CLI unavailable | `supply_status` reads `interrupted` and the blocker is the native CLI that backend depends on being unreachable **in this process**, at any source health `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it remains distinct from the pending-K6 self-healing `waiting` umbrella |
 | §1.1 | Group interrupted — a source needs action | `supply_status` reads `interrupted`, no member is runnable, and at least one blocker is a source in `needs_action` or `error` `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The source leaves `needs_action` / `error` → Ready, or whichever rollup the chain then reads. Frame 12 owns the credential repair controls; 06 keeps 重新拉取 for a source whose stored credential still works `[contract]` |
 | §1.1 | Group interrupted — empty chain | `supply_status` reads `interrupted` because the capability chain for the pinned model has no members at all `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | A source is placed into that model's chain → Ready. Distinct from *Nothing pinned*, where there is no chain to be empty |
 | §1.1 | Group interrupted — a hop's source is gone | `supply_status` reads `interrupted`, no member is runnable, and at least one hop names a source that no longer exists `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The payload stops reporting the blocker → Ready, or whichever rollup the chain then reads. Adding the source again produces a different source and does not re-satisfy the stored hop, so the exit is §1.2's explicit remove/change of that exact stale pair |
@@ -1421,7 +1421,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.group.mode.gateway` | 网关 | Gateway |
 | `gateway.group.status.ok` `[contract]` | 正常 | Healthy |
 | `gateway.group.status.degraded` `[contract]` | 降级 | Degraded |
-| `gateway.group.status.waiting` `[contract]` | 供给暂不可用 | Supply unavailable for now |
+| `gateway.group.status.waiting` `[contract]` | **pending K6: umbrella copy for cooldown + live backoff** | **pending K6: umbrella copy for cooldown + live backoff** |
 | `gateway.group.status.interrupted` `[contract]` | 无可用来源 | No source is available |
 | `gateway.group.status.noSelection` `[derived]` | 未选型号 | No model selected |
 | `gateway.group.takenOver` | 接管中 | Taken over |
@@ -1458,15 +1458,18 @@ switched on but not finished configuring. So `mode` decides the first word every
 | `direct` | not read — Direct arbitrates nothing, so it rolls nothing up | 直连 | `gateway.group.subtitle.direct` + `gateway.group.mode.direct` |
 | `hub` | `ok` | 网关 · 正常 | `gateway.group.subtitle.gateway` + `gateway.group.status.ok` |
 | `hub` | `degraded` | 网关 · 降级 | `gateway.group.subtitle.gateway` + `gateway.group.status.degraded` |
-| `hub` | `waiting` | 网关 · 供给暂不可用 | `gateway.group.subtitle.gateway` + `gateway.group.status.waiting` |
+| `hub` | `waiting` | 网关 · **pending K6 umbrella copy** | `gateway.group.subtitle.gateway` + `gateway.group.status.waiting` |
 | `hub` | `interrupted` | 网关 · 无可用来源 | `gateway.group.subtitle.gateway` + `gateway.group.status.interrupted` |
 | `hub` | `null` | 网关 · 未选型号 | `gateway.group.subtitle.gateway` + `gateway.group.status.noSelection` |
 
-**All four `[contract]` words are transcribed** `[contract]`.
+**Three `[contract]` words are transcribed; `waiting` is a pending K6 anchor** `[contract]`.
 正常 / 降级 / 无可用来源 remain `model-hub.md` §4.5's verbatim labels. The frozen
-`waiting` label uses one umbrella statement for both Source cooldown and live
-connection-backoff chains, while per-Source rows retain their distinct causes. It states
-only present availability and promises neither a recovery time nor a recovery outcome.
+`waiting` label is deliberately not mirrored here: its authority now includes pure live
+connection-backoff chains, while its old wording asserted that every Source was in
+cooldown. K6 owns the already-ruled umbrella replacement, which must be true for both
+cooldown and live backoff while per-Source rows retain their distinct causes. This file
+keeps the stable key and pending-K6 anchor until that authority lands; it does not create
+a second enum or guess the final locale text.
 
 `gateway.supply.none` is not a fifth word, because it is not the same grain `[derived]`.
 The four above are the backend rollup rendered into the group head's status line, which
@@ -5537,10 +5540,11 @@ is cyan there.
 **D-21 — The state-text layer and the wire layer are separate vocabularies, and a colour
 means different things in each.** Wires: cyan = 原生, mint = 网关供给, violet =
 接管, `#FFFFFF26` = 已启用 · 当前未被使用, gold = 供给已暂停. State text:
-mint = 使用中 / 正常, gold = 降级 / 暂不可用 / 冷却 / 供给暂不可用, rose = 需处理 /
+mint = 使用中 / 正常, gold = 降级 / 暂不可用 / 冷却 / the pending-K6 `waiting`
+umbrella, rose = 需处理 /
 异常 / 无可用来源, muted = 备用 / 未选型号, cyan = 原生 provenance only, violet-tint
 `#7C5BFFCC` = a takeover hop label. The group-status vocabulary (§1.1) is assigned here
-in full — 正常 mint, 降级 gold, 供给暂不可用 gold, 无可用来源 rose,
+in full — 正常 mint, 降级 gold, `waiting`'s pending-K6 umbrella gold, 无可用来源 rose,
 未选型号 muted — and
 the split worth stating is §4.5's: a wait that heals itself takes the same gold as every
 other wait, one that does not takes rose, and the fifth is not a fault at all, because
@@ -5552,7 +5556,7 @@ are not the same claim. §1.0's ink table is the single place both are written d
 
 **D-22 — A group head's status line is `<mode> · <status>` on the gateway and the mode
 word alone in Direct, and the two words are read from two different fields.** 网关 · 正常,
-网关 · 降级, 网关 · 供给暂不可用, 网关 · 无可用来源,
+网关 · 降级, 网关 · the pending-K6 `waiting` umbrella, 网关 · 无可用来源,
 网关 · 未选型号 — and bare 直连, because a
 direct backend arbitrates nothing and so has no supply whose health could be reported.
 §1.0's C-6 is the total mapping, `supply_status` `null` included, and no other surface

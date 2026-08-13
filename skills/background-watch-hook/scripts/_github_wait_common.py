@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import http.client
 import json
 import math
 import os
@@ -127,13 +126,6 @@ def _classify_github_exception(
     if isinstance(err, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
         reason = str(getattr(err, "reason", err))
         return GitHubTransientError(f"GitHub network failure: {reason}")
-    # `http.client` raises `HTTPException`, not `OSError`, when the transport
-    # breaks mid-body: a large PR truncated by the peer surfaces as
-    # `IncompleteRead`. It is a network failure like any other, and classifying it
-    # terminal killed managed waits on a connection glitch they should have
-    # simply re-polled through.
-    if isinstance(err, http.client.HTTPException):
-        return GitHubTransientError(f"GitHub network failure: {type(err).__name__}: {err}")
     return GitHubTerminalError(
         f"Unexpected GitHub request failure ({type(err).__name__}): {err}"
     )

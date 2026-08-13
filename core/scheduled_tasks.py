@@ -1617,16 +1617,7 @@ class ScheduledTaskStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
-        user_context: Any = None,
     ) -> ScheduledTask:
-        from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import (
-            ensure_local_harness_definition_write,
-            metadata_with_resource_user_context,
-        )
-
-        ensure_local_harness_definition_write(user_context)
-        ensure_agent_name_access(agent_name, user_context=user_context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -1642,7 +1633,7 @@ class ScheduledTaskStore:
             cron=cron,
             run_at=run_at,
             timezone=timezone_name,
-            metadata=metadata_with_resource_user_context(metadata, user_context),
+            metadata=dict(metadata or {}),
             shell_command=shell_command,
             command=command,
             timeout_seconds=timeout_seconds,
@@ -1725,16 +1716,7 @@ class ScheduledTaskStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
-        user_context: Any = None,
     ) -> ScheduledTask:
-        from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import (
-            ensure_local_harness_definition_write,
-            metadata_with_resource_user_context,
-        )
-
-        ensure_local_harness_definition_write(user_context)
-        ensure_agent_name_access(agent_name, user_context=user_context)
         task = self._tasks[task_id]
         # Captured before the first mutation: this is the state the CALLER read
         # (``vibe task update`` resolved Agents and Sessions from this very object),
@@ -1769,10 +1751,8 @@ class ScheduledTaskStore:
             task.shell_command = shell_command
             task.command = command
             task.timeout_seconds = timeout_seconds
-        task.metadata = metadata_with_resource_user_context(
-            metadata if metadata is not None else task.metadata,
-            user_context,
-        )
+        if metadata is not None:
+            task.metadata = dict(metadata)
         task.updated_at = _utc_now_iso()
         if not self._write_task(
             task,
@@ -2088,20 +2068,6 @@ class ScheduledTaskStore:
             expected_schedule_generation=expected_schedule_generation,
             expected_terminal_run_id=expected_terminal_run_id,
         )
-
-    def suspend_task(self, task_id: str, *, error: str) -> bool:
-        """Atomically disable a definition before an unsafe execution boundary."""
-
-        self.maybe_reload()
-        task = self._tasks.get(task_id)
-        if task is None:
-            return False
-        expect = self._read_state(task)
-        task.enabled = False
-        task.last_run_at = _utc_now_iso()
-        task.last_error = error
-        task.updated_at = _utc_now_iso()
-        return self._write_task(task, expect)
 
 
 class TaskExecutionStore:
@@ -8222,16 +8188,6 @@ class ScheduledTaskService:
         #: which is what stops the same failure being reported twice.
         escalation_run_id: Optional[str] = None
         try:
-            from storage.resource_access_service import (
-                REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-                metadata_allows_temporary_unrestricted_runtime,
-            )
-
-            if (
-                request.request_type not in {"task_run", "scheduled"}
-                and not metadata_allows_temporary_unrestricted_runtime(request.metadata)
-            ):
-                raise PermissionError(REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE)
             if request.request_type in {"task_run", "scheduled"}:
                 # A scheduled one-shot is retired in the same SQLite transaction
                 # that created this Run. Only that transaction stamps the Run as
@@ -8289,7 +8245,6 @@ class ScheduledTaskService:
             }:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
-                user_context = self._resource_user_context(request.metadata)
                 if request.session_policy == "create_per_run":
                     session_id = self._reserve_runtime_session(
                         agent_name=request.agent_name,
@@ -8297,7 +8252,6 @@ class ScheduledTaskService:
                         deliver_key=request.deliver_key,
                         metadata=request.metadata,
                         workdir=request.metadata.get("session_workdir") if isinstance(request.metadata, dict) else None,
-                        user_context=user_context,
                     )
                     session_key = ""
                 elif not (request.session_id or request.session_key):
@@ -8326,7 +8280,6 @@ class ScheduledTaskService:
                     # case where the request itself knows which part a person wrote, so
                     # its metadata must reach ``_build_context``.
                     metadata=request.metadata if isinstance(request.metadata, dict) else None,
-                    user_context=user_context,
                     _capture_dispatch_result=True,
                     **({"agent_id": request.agent_id} if request.agent_id else {}),
                 )
@@ -8938,32 +8891,12 @@ class ScheduledTaskService:
         agent_id: Optional[str] = None,
         schedule_generation: Optional[dict[str, str]] = None,
     ) -> TaskExecutionResult:
-        from storage.resource_access_service import (
-            REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-            metadata_allows_temporary_unrestricted_runtime,
-        )
-
         error: Optional[str] = None
         complete_on_return = True
         reconcile_delivery_on_return = False
         failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
-        if not metadata_allows_temporary_unrestricted_runtime(task.metadata):
-            error = REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE
-            if not self.store.suspend_task(task.id, error=error):
-                logger.warning(
-                    "Remote-origin scheduled task %s changed before it could be suspended",
-                    task.id,
-                )
-            self.reconcile_jobs()
-            return TaskExecutionResult(
-                error=error,
-                session_key=session_key,
-                session_id=session_id,
-                failure_code=REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-            )
-        user_context = self._resource_user_context(task.metadata)
         binding_change: Optional[SessionBindingChange] = None
         # HFR-276: an earlier fire of THIS definition may have reserved a replacement
         # session it could not give back. The id is recorded on the definition, so the
@@ -8991,7 +8924,6 @@ class ScheduledTaskService:
                     deliver_key=task.deliver_key,
                     metadata=task.metadata,
                     workdir=task.cwd,
-                    user_context=user_context,
                 )
                 session_key = ""
             dispatch_result = await self._execute_request(
@@ -9004,8 +8936,6 @@ class ScheduledTaskService:
                 task_id=task.id,
                 trigger_kind="scheduled",
                 agent_name=task.agent_name,
-                metadata=task.metadata,
-                user_context=user_context,
                 _capture_dispatch_result=True,
                 **({"agent_id": agent_id} if agent_id else {}),
             )
@@ -9042,8 +8972,6 @@ class ScheduledTaskService:
                         task_id=task.id,
                         trigger_kind="scheduled",
                         agent_name=task.agent_name,
-                        metadata=task.metadata,
-                        user_context=user_context,
                         _capture_dispatch_result=True,
                         **(
                             {"agent_id": agent_id}
@@ -9996,7 +9924,6 @@ class ScheduledTaskService:
                     deliver_key=task.deliver_key,
                     metadata=task.metadata,
                     definition_id=task.id,
-                    user_context=self._resource_user_context(task.metadata),
                     **overrides,
                 )
             except AgentUnavailableError as exc:
@@ -10238,7 +10165,6 @@ class ScheduledTaskService:
         model: Any = _UNSET,
         reasoning_effort: Any = _UNSET,
         definition_id: Optional[str] = None,
-        user_context: Any = None,
     ) -> str:
         """Reserve a background session for a run.
 
@@ -10302,12 +10228,6 @@ class ScheduledTaskService:
                 agent = agent_store.require_reference(resolved_agent_name)
             else:
                 agent = agent_store.get_default_agent()
-            if agent is not None and user_context is not None:
-                agent = agent_store.require_accessible(
-                    agent.name,
-                    user_context=user_context,
-                    enabled_only=True,
-                )
         finally:
             agent_store.close()
         if agent is None:
@@ -10715,15 +10635,9 @@ class ScheduledTaskService:
         agent_name: Optional[str] = None,
         agent_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
-        user_context: Any = None,
         _capture_dispatch_result: bool = False,
     ) -> Optional[str] | TaskDispatchResult:
         target_info = resolve_session_id_target(session_id) if session_id else None
-        self._require_execution_agent_access(
-            agent_name=agent_name,
-            target_info=target_info,
-            user_context=user_context,
-        )
         target = target_info.session_key if target_info else parse_session_key(session_key or "")
         delivery_target = self._resolve_delivery_target(
             session_target=target,
@@ -10785,45 +10699,6 @@ class ScheduledTaskService:
         )
         result = TaskDispatchResult(error=error)
         return result if _capture_dispatch_result else result.error
-
-    @staticmethod
-    def _resource_user_context(metadata: Optional[dict[str, Any]]) -> Any:
-        from storage.resource_access_service import resource_user_context_from_metadata
-
-        return resource_user_context_from_metadata(metadata)
-
-    @staticmethod
-    def _require_execution_agent_access(
-        *,
-        agent_name: Optional[str],
-        target_info: Optional[ResolvedSessionIdTarget],
-        user_context: Any,
-    ) -> None:
-        if user_context is None:
-            return
-
-        from core.vibe_agents import VibeAgentAccessError, VibeAgentStore, ensure_agent_selection_access
-
-        selected_name = str(agent_name or "").strip() or None
-        selected_id = None
-        if selected_name is None and target_info is not None:
-            selected_name = str(target_info.agent_name or "").strip() or None
-            selected_id = str(target_info.agent_id or "").strip() or None
-        if selected_name is None and selected_id is None:
-            raise VibeAgentAccessError("Agent access is not permitted.")
-
-        store = VibeAgentStore()
-        try:
-            with store.engine.connect() as connection:
-                ensure_agent_selection_access(
-                    connection,
-                    agent_name=selected_name,
-                    agent_id=selected_id,
-                    user_context=user_context,
-                    missing_is_error=True,
-                )
-        finally:
-            store.close()
 
     async def _build_context(
         self,

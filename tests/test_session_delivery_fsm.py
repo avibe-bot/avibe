@@ -16,7 +16,6 @@ from core.services.dispatch import TurnDispatchOutcome
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_ATTEMPTING,
     DISPATCH_PHASE_PREWRITE,
-    prewrite_user_stop_requested,
     set_dispatch_phase,
 )
 from core.run_settlement import (
@@ -36,7 +35,6 @@ from core.session_turns import (
     SOURCE_SCHEDULED,
     TURN_LIFECYCLE_ADMISSION_KEY,
     DeliveryRequest,
-    DeliveryResult,
     SessionTurnManager,
     Turn,
     _scheduled_merge_key,
@@ -608,44 +606,6 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
         accepted[0]["submitted_at"]
     )
     assert stored["delivered_at"] == accepted[0]["materialized_at"]
-
-
-def test_memory_fifo_segment_merges_only_one_user(managers) -> None:
-    manager, _other, engine, _engine_b, starts = managers
-    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
-    queued = [
-        asyncio.run(
-            manager.deliver(
-                DeliveryRequest(
-                    session_id="ses_fsm",
-                    priority="p3",
-                    content=text,
-                    metadata={
-                        "_memory_user_id": user_id,
-                        "_memory_ordinary_text": True,
-                    },
-                ),
-                context=_context(),
-            )
-        )
-        for text, user_id in (
-            ("alice one", "remote:alice"),
-            ("alice two", "remote:alice"),
-            ("bob one", "remote:bob"),
-        )
-    ]
-
-    assert asyncio.run(manager.terminalize_turn(active_turn_id))
-    queued_starts = [(turn_id, text) for turn_id, text in starts if turn_id != active_turn_id]
-    assert len(queued_starts) == 1
-    alice_turn_id, dispatch_text = queued_starts[0]
-    assert dispatch_text == "alice one\nalice two"
-
-    first, second, third = [_row(engine, str(item.delivery_id)) for item in queued]
-    assert first["turn_id"] == alice_turn_id
-    assert second["turn_id"] == alice_turn_id
-    assert third["turn_id"] is None
-    assert third["state"] == "queued"
 
 
 def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None:
@@ -3275,152 +3235,6 @@ def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(mana
             await asyncio.gather(holder, return_exceptions=True)
 
     asyncio.run(run())
-
-
-def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch) -> None:
-    """MESSAGE-DELIVERY-022: Stop retires a definitively unwritten input."""
-
-    manager, _other, engine, _engine_b, _starts = managers
-    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
-    manager.controller.emit_agent_message = AsyncMock()
-    settle_calls: list[tuple[list[str], str]] = []
-
-    def settle_runs(run_ids, *, settled_by):
-        settle_calls.append((run_ids, settled_by))
-
-    manager.controller.scheduled_task_service = SimpleNamespace(
-        settle_agent_runs_without_result=settle_runs,
-    )
-    dispatch_entered = asyncio.Event()
-    stop_intent_seen: list[bool] = []
-
-    async def blocked_prewrite_dispatch(_controller, dispatch_context, *_args, **_kwargs):
-        dispatch_evidence = set_dispatch_phase(
-            dispatch_context,
-            DISPATCH_PHASE_PREWRITE,
-        )
-        dispatch_entered.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            stop_intent_seen.append(
-                prewrite_user_stop_requested(dispatch_context)
-            )
-            # OpenCode absorbs cancellation after cleaning up its inner request
-            # task, so lock that adapter behavior into the shared Stop contract.
-            return TurnDispatchOutcome(
-                error=None,
-                settled_by=None,
-                backend_dispatch_attempted=False,
-            )
-
-    monkeypatch.setattr(
-        "core.session_turns.dispatch_turn_with_outcome",
-        blocked_prewrite_dispatch,
-    )
-
-    async def run() -> tuple[dict, str, str]:
-        context = _context()
-        admitted = await manager.deliver(
-            DeliveryRequest(
-                session_id="ses_fsm",
-                priority="p3",
-                content="stop before native write",
-            ),
-            context=context,
-        )
-        assert admitted.turn_id and admitted.delivery_id
-        await asyncio.wait_for(dispatch_entered.wait(), timeout=1.0)
-        manager.in_flight["ses_fsm"].context.platform_specific[
-            "task_execution_id"
-        ] = "run-stop-prewrite"
-        stopped = await manager.cancel("ses_fsm")
-        return stopped, str(admitted.turn_id), str(admitted.delivery_id)
-
-    stopped, turn_id, delivery_id = asyncio.run(run())
-
-    assert stopped == {
-        "ok": True,
-        "session_id": "ses_fsm",
-        "status": "stale_released",
-        "reason": "prewrite_canceled",
-    }
-    assert "ses_fsm" not in manager.in_flight
-    manager.controller.command_handler.handle_stop.assert_not_awaited()
-    manager.controller.emit_agent_message.assert_not_awaited()
-    assert stop_intent_seen == [True]
-    assert settle_calls == [(["run-stop-prewrite"], SETTLED_BY_STOPPED)]
-    with engine.connect() as conn:
-        turn = delivery_store.get_turn(conn, turn_id)
-    assert turn is not None
-    assert turn["state"] == "terminal"
-    assert turn["terminal_outcome"] == "not_written"
-    assert turn["settled_by"] == SETTLED_BY_STOPPED
-    retired = _row(engine, delivery_id)
-    assert retired["state"] == "retired"
-    history = json.loads(retired["delivery_history_json"])["events"]
-    assert history[-1]["outcome"] == "canceled"
-
-
-def test_prewrite_replacement_returns_the_successor_delivery_state(
-    managers,
-    monkeypatch,
-) -> None:
-    """A prewrite P0 replacement reports the state of its own successor."""
-
-    manager, _other, engine, _engine_b, _starts = managers
-    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
-    manager.controller.emit_agent_message = AsyncMock()
-    dispatch_entered = asyncio.Event()
-
-    async def blocked_prewrite_dispatch(_controller, dispatch_context, *_args, **_kwargs):
-        set_dispatch_phase(dispatch_context, DISPATCH_PHASE_PREWRITE)
-        dispatch_entered.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            return TurnDispatchOutcome(
-                error=None,
-                settled_by=None,
-                backend_dispatch_attempted=False,
-            )
-
-    monkeypatch.setattr(
-        "core.session_turns.dispatch_turn_with_outcome",
-        blocked_prewrite_dispatch,
-    )
-
-    async def run() -> DeliveryResult:
-        admitted = await manager.deliver(
-            DeliveryRequest(
-                session_id="ses_fsm",
-                priority="p3",
-                content="replace before native write",
-            ),
-            context=_context(),
-        )
-        assert admitted.turn_id
-        await asyncio.wait_for(dispatch_entered.wait(), timeout=1.0)
-        manager._start_persisted_turn = AsyncMock(return_value=True)
-        return await manager.deliver(
-            DeliveryRequest(
-                session_id="ses_fsm",
-                priority="p0",
-                content="replacement",
-            ),
-            context=_context(),
-        )
-
-    replacement = asyncio.run(run())
-
-    assert replacement.delivery_id is not None
-    assert replacement.state == "claimed"
-    assert replacement.admission == "started"
-    with engine.connect() as conn:
-        row = delivery_store.get_delivery(conn, replacement.delivery_id)
-    assert row is not None
-    assert row["state"] == replacement.state
-    assert row["turn_id"] == replacement.turn_id
 
 
 def test_empty_p0_terminal_race_still_resumes_the_queued_head(

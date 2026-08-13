@@ -77,9 +77,11 @@
               "credential_revoked",
               "balance_exhausted",
               "account_banned",
+              "permission_denied",
               "unclassified_error"
             ],
-            "description": "The attempt-failure partition of ResolutionEvent.reason. The mirror registry enforces totality."
+            "description": "The attempt-failure partition of ResolutionEvent.reason. permission_denied records a request-scoped denial and does not imply source-global state. The mirror registry enforces totality.",
+            "$comment": "permission_denied is request-scoped and distinct from Source-global credential_revoked. The failed attempt remains useful turn evidence even though no Source state is mutated."
           }
         }
       }
@@ -416,6 +418,31 @@
         "configured_model_id": "gpt-5.3-codex",
         "channel": "native_cli"
       },
+      "model_supply_state": null,
+      "blockers": []
+    },
+    {
+      "contract_version": 5,
+      "turn_id": "turn_01k9x6db",
+      "ts": "2026-07-30T05:55:00Z",
+      "agent": "claude",
+      "requested_model_id": "claude-opus-4-6",
+      "outcome": "served",
+      "failed_attempts": [
+        {
+          "source_id": "src_primary01",
+          "configured_model_id": "claude-opus-4-6",
+          "channel": "hub",
+          "reason": "permission_denied"
+        }
+      ],
+      "served": {
+        "source_id": "src_backup001",
+        "configured_model_id": "claude-opus-4-6",
+        "channel": "hub"
+      },
+      "terminal_error": null,
+      "canceled_attempt": null,
       "model_supply_state": null,
       "blockers": []
     }

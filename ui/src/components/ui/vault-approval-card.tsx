@@ -10,8 +10,6 @@ import {
   type VaultSignedOperationContext,
   type VaultSourceSelector,
 } from '@/context/ApiContext';
-import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
-import { canManageVaultSecrets } from '@/lib/remoteAuth';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { SigningAddressList } from './signing-address-list';
@@ -116,7 +114,6 @@ export const VaultApprovalCard: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const vault = useProtectedVault();
-  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
 
   // The request is passed in already hydrated by the UI-audience inbox list
   // (`getVaultRequests`, #708), so `card.secret_unlock_material` /
@@ -360,11 +357,7 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const canApprove = canManageVaultSecrets({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
-  const approveDisabled = busy || !canApprove || (!isSign && !option);
+  const approveDisabled = busy || (!isSign && !option);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -570,7 +563,7 @@ export const VaultApprovalCard: React.FC<{
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
-          <Button type="button" variant="outline" onClick={deny} disabled={busy || !canApprove}>
+          <Button type="button" variant="outline" onClick={deny} disabled={busy}>
             {t('vaults.approval.deny')}
           </Button>
           <Button type="button" onClick={isSign ? approveSign : approveAccess} disabled={approveDisabled}>

@@ -12,8 +12,7 @@ import i18n from '@/i18n';
 import { createPendingWrites } from './asyncLifetime';
 import { modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
-import { GuardGapList } from './GuardGapList';
-import { SourceDetailPanel } from './SourceDetailPanel';
+import { GuardGapList, SourceDetailPanel } from './SourceDetailPanel';
 import type { Source } from './types';
 
 const source: Source = {

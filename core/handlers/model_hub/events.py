@@ -32,6 +32,7 @@ EventSeverity = Literal["info", "action_required"]
 ReasonClass = Literal[
     "self_healing",
     "non_self_healing",
+    "request_scoped",
     "structural",
     "transition",
 ]
@@ -49,6 +50,7 @@ EVENT_REASON_AUTHORITY: dict[str, ReasonClass] = {
     "credential_revoked": "non_self_healing",
     "balance_exhausted": "non_self_healing",
     "account_banned": "non_self_healing",
+    "permission_denied": "request_scoped",
     "unclassified_error": "non_self_healing",
     "no_enabled_source": "structural",
     "no_eligible_source": "structural",
@@ -57,35 +59,6 @@ EVENT_REASON_AUTHORITY: dict[str, ReasonClass] = {
     "model_unsupported": "structural",
     "native_cli_unavailable": "structural",
 }
-
-SOURCE_DETAIL_EVENT_REASONS = {
-    "models.source.cooldown.quota_exhausted": "quota_exhausted",
-    "models.source.cooldown.rate_limited": "rate_limited",
-    "models.source.cooldown.server_error": "server_error",
-    "models.source.cooldown.network": "network",
-    "models.source.cooldown.timeout": "network",
-    "models.source.needs_action.oauth_expired": "credential_expired",
-    "models.source.needs_action.credential_revoked": "credential_revoked",
-    "models.source.needs_action.balance_exhausted": "balance_exhausted",
-    "models.source.needs_action.account_banned": "account_banned",
-    "models.source.error.unclassified": "unclassified_error",
-}
-
-# Released v5 records are normalized only at their persistence read boundary.
-RETIRED_PERSISTED_REASON_DEGRADATIONS = {
-    "permission_denied": "unclassified_error",
-}
-
-
-def degrade_persisted_event(event: dict) -> dict:
-    degraded = dict(event)
-    reason = degraded.get("reason")
-    if isinstance(reason, str):
-        degraded["reason"] = RETIRED_PERSISTED_REASON_DEGRADATIONS.get(
-            reason,
-            reason,
-        )
-    return degraded
 
 
 def event_reason_label(reason: str, language: str) -> str:
@@ -190,6 +163,8 @@ def build_resolution_event(
             raise ValueError("Invalid supply_interrupted event")
     elif reason_class == "structural":
         raise ValueError("Structural reasons require supply_interrupted")
+    if reason_class == "request_scoped" and kind != "switch":
+        raise ValueError("Request-scoped reasons require a switch event")
     if kind == "needs_action" and (
         from_source is None
         or to_source is not None
@@ -281,11 +256,7 @@ class BoundedEventLog:
             return []
         if not isinstance(payload, list):
             return []
-        return [
-            degrade_persisted_event(item)
-            for item in payload
-            if isinstance(item, dict) and not contains_credential_material(item)
-        ]
+        return [item for item in payload if isinstance(item, dict) and not contains_credential_material(item)]
 
     def _write(self, payload: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

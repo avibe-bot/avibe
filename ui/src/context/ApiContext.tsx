@@ -2,21 +2,11 @@ import React, { createContext, useContext, useEffect, useMemo, useRef } from 're
 import { useTranslation } from 'react-i18next';
 import { requestMemoryRuntimeRepair } from '../lib/memoryRepair';
 import { useToast } from './ToastContext';
-import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
-import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
+import { apiFetch } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
-import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
-import type { ShowPageLinkInfo } from '../lib/showPageLinks';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
-import {
-  classifyShowPageAccessProbe,
-  type ShowPageAccess,
-  type ShowPageAccessProbe,
-  type ShowPageAuthorizedEmails,
-  type ShowPageVisibilityResult,
-} from '../lib/showPageAccess';
 import {
   WorkbenchEventReconnectLoop,
   type WorkbenchEventConnectionState,
@@ -31,9 +21,6 @@ import {
   type SessionDraftServerState,
   type SessionDraftWrite,
 } from '../lib/sessionDraftPersistence';
-
-export type { InstanceCapabilities, SessionInfo };
-export type { ShowPageAccess };
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -506,13 +493,6 @@ export type ApiContextType = {
   toggleAdmin: (userId: string, isAdmin: boolean, platform?: string) => Promise<any>;
   removeUser: (userId: string, platform?: string) => Promise<any>;
   getShowPages: () => Promise<any>;
-  getShowPageAccess: (sessionId: string) => Promise<ShowPageAccess>;
-  probeShowPageAccess: (sessionId: string) => Promise<ShowPageAccessProbe>;
-  getShowPageAuthorizedEmails: (sessionId: string) => Promise<ShowPageAuthorizedEmails>;
-  replaceShowPageAuthorizedEmails: (
-    sessionId: string,
-    emails: string[],
-  ) => Promise<ShowPageAuthorizedEmails>;
   getWebPushStatus: (payload?: WebPushStatusPayload) => Promise<WebPushStatus>;
   getWebPushVapidPublicKey: () => Promise<{ ok: boolean; public_key: string }>;
   subscribeWebPush: (
@@ -523,10 +503,7 @@ export type ApiContextType = {
   ) => Promise<WebPushSubscriptionResult>;
   unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
-  setShowPageVisibility: <Payload extends ShowPageLinkInfo = ShowPageLinkInfo>(
-    sessionId: string,
-    visibility: string,
-  ) => Promise<ShowPageVisibilityResult<Payload>>;
+  setShowPageVisibility: (sessionId: string, visibility: string) => Promise<any>;
   /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. */
   ensureShowPage: (sessionId: string) => Promise<any>;
   rotateShowPageShare: (sessionId: string) => Promise<any>;
@@ -742,7 +719,7 @@ export type ApiContextType = {
     opts?: { limit?: number; includeArchived?: boolean },
   ) => Promise<MessageSearchResult>;
   sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string }) => Promise<WorkbenchMessage>;
-  markSessionRead: (sessionId: string, untilMessageId?: string, opts?: { handleError?: boolean }) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session?: Record<string, number> }>;
+  markSessionRead: (sessionId: string, untilMessageId?: string) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session: Record<string, number> }>;
   cancelSession: (
     sessionId: string,
   ) => Promise<{
@@ -774,8 +751,6 @@ export type ApiContextType = {
     includeArchived?: boolean;
     cache?: boolean;
   }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
-  getVibeAgentOnboarding: () => Promise<VibeAgentOnboardingResult>;
-  onboardVibeAgents: () => Promise<VibeAgentOnboardingResult>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
@@ -896,9 +871,6 @@ export type WorkbenchProject = {
   archived: boolean;
   default_agent?: ProjectDefaultAgent | null;
   metadata?: Record<string, unknown>;
-  capabilities: {
-    can_chat: boolean;
-  };
 };
 
 export type ProjectSessionsPage = {
@@ -997,40 +969,6 @@ export type VibeAgentFull = VibeAgentBrief & {
   system_prompt: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
-};
-
-export type VibeAgentOnboardingItem = {
-  id: string;
-  name: string;
-  backend: string;
-  source: string;
-  enabled: boolean;
-  status: 'not_onboarded' | 'private' | 'published' | 'managed_elsewhere';
-  access_level: 'private' | 'scope' | 'public' | null;
-  group_ids: string[];
-  policy_revision: number | null;
-  applied_acl_revision: number | null;
-};
-
-export type VibeAgentOnboardingResult = {
-  ok: boolean;
-  available: boolean;
-  organization_id: string | null;
-  console_url?: string;
-  agents: VibeAgentOnboardingItem[];
-  counts: {
-    total: number;
-    system: number;
-    custom: number;
-    not_onboarded: number;
-    private: number;
-    published: number;
-    conflicts: number;
-  };
-  created?: number;
-  unchanged?: number;
-  conflicts?: number;
-  sync?: { ok?: boolean; error?: string };
 };
 
 export type VibeAgentCreatePayload = {
@@ -1154,11 +1092,6 @@ export type WorkbenchEventHandlers = {
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
-  onAuthorizationChanged?: (data: {
-    project_ids?: string[];
-    resource_kinds?: string[];
-    instance_authorization_revision?: number;
-  }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
   // ``visibility`` (contract A6): the backend carries the session's current
   // foreground/background on visibility/scope changes so the Inbox can drop /
@@ -1333,7 +1266,6 @@ export type SessionRuntimeState = {
 
 export type WorkbenchSessionBootstrap = {
   session: WorkbenchSession;
-  capabilities: { can_chat: boolean };
   agents: VibeAgentBrief[];
   default_agent_name: string | null;
   config: any | null;
@@ -1760,6 +1692,13 @@ export type RunningAgentsResult =
   | { ok: true; agents: RunningAgent[]; counts: RunningAgentCounts; unreachable?: false }
   | { ok: false; unreachable: true; agents: RunningAgent[]; counts: Partial<RunningAgentCounts> };
 
+export type SessionInfo =
+  | { remote: false }
+  | { remote: true; authenticated: false }
+  // sub is the stable OIDC subject; prefer it over email for per-account scoping (email can
+  // be absent or shared across subjects).
+  | { remote: true; authenticated: true; email: string; sub?: string };
+
 export type LogEntry = {
   timestamp: string;
   level: string;
@@ -1874,18 +1813,7 @@ export type MemorySettingsPatch = {
   confirm_rebuild?: boolean;
 };
 
-export type MemoryFailureDiagnostic = {
-  side?: 'embedding' | 'llm';
-  http_status?: number | null;
-  provider_error_code?: string | null;
-  message?: string;
-};
-export type MemoryFailure = {
-  status: 'failed';
-  error: string;
-  diagnostic?: MemoryFailureDiagnostic;
-  rebuild_required?: boolean;
-};
+export type MemoryFailure = { status: 'failed'; error: string };
 
 export type MemorySettingsResult =
   | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })
@@ -1969,10 +1897,6 @@ export type MemoryProcessingRecordSummary = {
     data_exists: boolean;
     can_clear: boolean;
     clear_recovery: MemoryClearRecovery | null;
-  };
-  provider_checks?: {
-    source: MemoryLogSourceStatus;
-    items: MemoryProviderCall[];
   };
 };
 
@@ -2135,7 +2059,7 @@ export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: fa
 
 export type MemoryRuntimeRebuildResult =
   | { ok: true; result?: string; state?: string }
-  | { ok: false; error?: string; result?: string; diagnostic?: MemoryFailureDiagnostic };
+  | { ok: false; error?: string; result?: string };
 
 export type MemoryRuntimeRepairResult =
   | {
@@ -2494,36 +2418,6 @@ export class ApiError extends Error {
   }
 }
 
-async function requestShowPageAuthorizedEmails(
-  sessionId: string,
-  init?: RequestInit,
-): Promise<ShowPageAuthorizedEmails> {
-  const path = `/api/show-pages/${encodeURIComponent(sessionId)}/authorized-emails`;
-  const response = await apiFetch(path, init);
-  const payload: unknown = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const fallback = `Request failed: ${path} (${response.status})`;
-    const parsed = selectApiErrorFields(payload, fallback);
-    throw new ApiError(
-      parsed?.fallback ?? fallback,
-      response.status,
-      parsed?.code ?? null,
-    );
-  }
-  if (
-    !payload
-    || typeof payload !== 'object'
-    || (payload as Partial<ShowPageAuthorizedEmails>).ok !== true
-    || !Array.isArray((payload as Partial<ShowPageAuthorizedEmails>).emails)
-    || (payload as Partial<ShowPageAuthorizedEmails>).emails?.some(
-      (email) => typeof email !== 'string',
-    )
-  ) {
-    throw new ApiError('Invalid Show Page email access response.', 502, null);
-  }
-  return payload as ShowPageAuthorizedEmails;
-}
-
 const ApiContext = createContext<ApiContextType | undefined>(undefined);
 const CONFIG_CACHE_TTL_MS = 30_000;
 
@@ -2768,19 +2662,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
       }
     });
-    source.addEventListener('authorization.changed', (e: MessageEvent) => {
-      const envelope = parseWorkbenchEnvelope<{
-        project_ids?: string[];
-        resource_kinds?: string[];
-        instance_authorization_revision?: number;
-      }>(e.data);
-      if (!envelope) return;
-      clearReadCacheMatching(isAuthorizationSensitiveReadPath);
-      dispatchToWorkbenchHandlers((handlers) => {
-        handlers.onAny?.(envelope);
-        handlers.onAuthorizationChanged?.(envelope.data);
-      });
-    });
     source.addEventListener('message.new', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<WorkbenchMessage>(e.data);
       if (!envelope) return;
@@ -2923,12 +2804,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
       closeActiveWorkbenchEventSource();
-      // EventSource does not expose a failed response's status or JSON body.
-      // Probe through apiFetch, then inspect the successful /api/session form;
-      // both 401s and the 200 refresh payload enter the shared login recovery.
-      void apiFetch('/api/session', { cache: 'no-store' })
-        .then(recoverRemoteAuthFromSessionProbe)
-        .catch(() => undefined);
       setWorkbenchEventConnectionState('reconnecting');
       dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
@@ -3214,30 +3089,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     removeUser: (userId, platform) =>
       deleteJson(platform ? `/api/users/${encodeURIComponent(userId)}?platform=${encodeURIComponent(platform)}` : `/api/users/${encodeURIComponent(userId)}`),
     getShowPages: () => getJson('/api/show-pages'),
-    getShowPageAccess: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
-    probeShowPageAccess: async (sessionId) => {
-      try {
-        const response = await apiFetch(`/api/show-pages/${encodeURIComponent(sessionId)}/access`);
-        let payload: unknown;
-        try {
-          payload = await response.json();
-        } catch {
-          return { status: 'error', access: null };
-        }
-        return classifyShowPageAccessProbe(response.status, payload);
-      } catch {
-        return { status: 'error', access: null };
-      }
-    },
-    getShowPageAuthorizedEmails: (sessionId) => requestShowPageAuthorizedEmails(sessionId),
-    replaceShowPageAuthorizedEmails: (sessionId, emails) => requestShowPageAuthorizedEmails(
-      sessionId,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ emails }),
-      },
-    ),
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),
@@ -3588,11 +3439,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     sendSessionMessage: (sessionId, payload) =>
       postJson(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload),
-    markSessionRead: (sessionId, untilMessageId, opts) =>
+    markSessionRead: (sessionId, untilMessageId) =>
       postJson(
         `/api/sessions/${encodeURIComponent(sessionId)}/mark-read`,
         untilMessageId ? { until_message_id: untilMessageId } : {},
-        opts,
       ),
     cancelSession: async (sessionId) => {
       const { res, payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
@@ -3697,8 +3547,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = qs ? `/api/agents?${qs}` : '/api/agents';
       return params?.cache === false ? getJson(path) : getCachedJson(path, 5_000);
     },
-    getVibeAgentOnboarding: () => getJson('/api/agent-onboarding'),
-    onboardVibeAgents: () => postJson('/api/agent-onboarding', {}),
     getVibeAgent: (name) => getCachedJson(`/api/agents/${encodeURIComponent(name)}`, 5_000),
     createVibeAgent: (payload) => postJson('/api/agents', payload),
     updateVibeAgent: async (name, payload) => {
@@ -3966,7 +3814,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
     saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
-    getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
+    getAuthSession: () => getJson('/api/session'),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [sessionDraftPersistence, showToast, t]);

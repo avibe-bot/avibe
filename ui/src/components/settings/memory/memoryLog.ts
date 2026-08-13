@@ -40,7 +40,6 @@ const ENUM_LABEL_KEYS = {
     embedding: 'embedding',
   },
   callStage: {
-    processing_preflight: 'processingPreflight',
     boundary: 'boundary',
     strategy: 'strategy',
     cascade: 'cascade',

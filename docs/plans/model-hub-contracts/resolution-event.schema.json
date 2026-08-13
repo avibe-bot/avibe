@@ -50,6 +50,7 @@
         "credential_revoked",
         "balance_exhausted",
         "account_banned",
+        "permission_denied",
         "unclassified_error",
         "no_enabled_source",
         "no_eligible_source",
@@ -58,7 +59,8 @@
         "model_unsupported",
         "native_cli_unavailable"
       ],
-      "description": "Adapter classification. The five non-self-healing source causes map bijectively to Source.state.detail_key: credential_expired→models.source.needs_action.oauth_expired; credential_revoked→models.source.needs_action.credential_revoked; balance_exhausted→models.source.needs_action.balance_exhausted; account_banned→models.source.needs_action.account_banned; unclassified_error→models.source.error.unclassified. The machine-readable mirror registry enforces the attempt-failure relation."
+      "description": "Adapter classification. The five non-self-healing source causes map bijectively to Source.state.detail_key: credential_expired→models.source.needs_action.oauth_expired; credential_revoked→models.source.needs_action.credential_revoked; balance_exhausted→models.source.needs_action.balance_exhausted; account_banned→models.source.needs_action.account_banned; unclassified_error→models.source.error.unclassified. permission_denied is request-scoped and has no Source-state mirror. The machine-readable mirror registry enforces the attempt-failure relation.",
+      "$comment": "permission_denied preserves a request-scoped denial while redacting arbitrary upstream bodies; it does not claim Source-global credential state."
     },
     "billing_note": {
       "enum": [null, "entered_metered", "left_metered"]
@@ -118,6 +120,17 @@
       "then": {
         "required": ["kind"],
         "properties": { "kind": { "const": "supply_interrupted" } }
+      }
+    },
+    {
+      "$comment": "Request-scoped permission_denied can explain only a successful fallback switch. It cannot create Source-global cooldown, recovery, skip, or needs_action state.",
+      "if": {
+        "properties": { "reason": { "const": "permission_denied" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "required": ["kind"],
+        "properties": { "kind": { "const": "switch" } }
       }
     },
     {
@@ -309,6 +322,20 @@
       "severity": "action_required",
       "human_zh": "Relay 余额不足，需要处理",
       "human_en": "Relay balance is exhausted and needs attention"
+    },
+    {
+      "id": "evt_20260730c",
+      "ts": "2026-07-30T05:55:00Z",
+      "agent": "claude",
+      "kind": "switch",
+      "model_id": "claude-opus-4-6",
+      "from_source": "src_primary01",
+      "to_source": "src_backup001",
+      "reason": "permission_denied",
+      "billing_note": null,
+      "severity": "info",
+      "human_zh": "Primary：请求权限被拒绝 -> 已切到 Backup",
+      "human_en": "Primary: request permission denied -> switched to Backup"
     }
   ]
 }

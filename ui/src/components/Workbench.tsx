@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Activity, Bot, FolderPlus, Sparkles } from 'lucide-react';
 
 import { useNewSession } from '../lib/useNewSession';
@@ -8,11 +8,6 @@ import { NewProjectDialog } from './workbench/NewProjectDialog';
 import { Composer } from './workbench/Composer';
 import { ProjectPicker } from './workbench/ProjectPicker';
 import { AgentRoutePicker } from './workbench/AgentRoutePicker';
-import {
-  canUseRuntimeSurfaces,
-  useInstanceAuthorization,
-} from '../context/InstanceAuthorizationContext';
-import { canCreateLocalProject } from '../lib/sessionInfo';
 
 // Mirrors design.pen DnkGJ "Workbench" canvas: a centered hero panel +
 // suggestion chips with the shared chat Composer below it. The Composer is
@@ -24,15 +19,7 @@ import { canCreateLocalProject } from '../lib/sessionInfo';
 export const Workbench: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const {
-    capabilities,
-    remote,
-    hasTemporaryUnrestrictedOrgAccess,
-  } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
-  const canCreateProject = canUseRuntime || canCreateLocalProject(capabilities);
   const ns = useNewSession({
-    active: capabilities.can_chat || canUseRuntime,
     loadErrorText: t('newSession.loadError'),
     createFailedText: t('newSession.createFailed'),
   });
@@ -55,18 +42,10 @@ export const Workbench: React.FC = () => {
 
   // Quick chips under the hero — three of the most common first moves.
   const suggestions = [
-    ...(canCreateProject
-      ? [{ key: 'newProject', icon: FolderPlus, onClick: () => setNewProjectOpen(true) }]
-      : []),
-    ...(capabilities.can_manage_agents || canUseRuntime
-      ? [{ key: 'openAgents', icon: Bot, onClick: () => navigate('/agents') }]
-      : []),
-    ...(capabilities.can_manage_instance || canUseRuntime
-      ? [{ key: 'openHarness', icon: Activity, onClick: () => navigate('/harness') }]
-      : []),
-  ];
-
-  if (!capabilities.can_chat && !canUseRuntime) return <Navigate to="/projects" replace />;
+    { key: 'newProject', icon: FolderPlus, onClick: () => setNewProjectOpen(true) },
+    { key: 'openAgents', icon: Bot, onClick: () => navigate('/agents') },
+    { key: 'openHarness', icon: Activity, onClick: () => navigate('/harness') },
+  ] as const;
 
   return (
     // Desktop centers the hero + Composer as a group (min-h + justify-center). On
@@ -143,7 +122,7 @@ export const Workbench: React.FC = () => {
         )}
       </div>
 
-      {newProjectOpen && canCreateProject && (
+      {newProjectOpen && (
         <NewProjectDialog
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project) => {

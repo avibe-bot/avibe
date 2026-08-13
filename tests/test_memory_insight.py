@@ -338,36 +338,6 @@ def _insert_call(paths: MemoryInsightPaths, call_id: str, **values: object) -> N
         )
 
 
-def test_installation_preflight_calls_exclude_conversation_linked_rows(
-    insight_paths: MemoryInsightPaths,
-) -> None:
-    _insert_call(
-        insight_paths,
-        "preflight-safe",
-        stage="processing_preflight",
-        started_at_ms=1_722_816_005_000,
-        duration_ms=237,
-        status="error",
-        error="provider_request_timed_out",
-        request_json=_json({"model": "model", "input": "OK"}),
-        response_json=None,
-    )
-    _insert_call(
-        insight_paths,
-        "preflight-linked",
-        stage="processing_preflight",
-        memcell_id="mc-private",
-    )
-    _insert_call(insight_paths, "normal-unlinked", stage="boundary")
-
-    calls = MemoryInsightReader(insight_paths).installation_preflight_calls()
-
-    assert [call["id"] for call in calls] == ["preflight-safe"]
-    assert calls[0]["stage"] == "processing_preflight"
-    assert calls[0]["duration_ms"] == 237
-    assert calls[0]["error"] == "provider_request_timed_out"
-
-
 def test_list_is_owner_scoped_and_omits_malformed_or_multi_owner(
     insight_paths: MemoryInsightPaths,
 ) -> None:

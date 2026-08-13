@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Literal, Mapping, Optional, Protocol, cast
 
 from sqlalchemy import func, select
 
@@ -54,13 +53,7 @@ from .adapter import (
     make_source_observation,
     validate_source_observation,
 )
-from .classification import (
-    ResolutionDecision,
-    classify_outcome,
-    source_settlement_allowed,
-    source_settlement_rule,
-    terminal_outcome_category,
-)
+from .classification import ResolutionDecision, classify_outcome
 from .events import (
     BoundedEventLog,
     EventAgent,
@@ -84,14 +77,7 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
-from .provenance import (
-    BoundedProvenanceStore,
-    ENGINE_DOWN_TURN_OUTCOME,
-    ExactHopBlocker,
-    TurnOutcomeProjectionInput,
-    exact_hop_blockers,
-    produce_turn_outcome,
-)
+from .provenance import BoundedProvenanceStore
 from .request import ModelHubRequest
 from .resolver import (
     BackendName,
@@ -109,13 +95,6 @@ from .revocations import CredentialRevocationJournal
 CONTRACT_VERSION = 5
 AGENT_CHAIN_CONTRACT_VERSION = 5
 PROBE_RESULT_CONTRACT_VERSION = 5
-# Settlement generations are minted per attempt start and live only in this
-# runtime's ledger, which restarts with the process. Every generation this
-# runtime mints is therefore strictly greater than this pre-attempt value, and
-# an attempt that started before the ledger existed settles as this value: older
-# than any attempt this runtime can start, yet still able to settle a Source that
-# this runtime has not attempted again.
-PRE_ATTEMPT_SETTLEMENT_GENERATION = 0
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -137,8 +116,6 @@ class ModelHubError(Exception):
         detail: Optional[str] = None,
         supply_state: Optional[Literal["waiting", "interrupted"]] = None,
         data: Optional[Mapping[str, Any]] = None,
-        blockers: Iterable[ExactHopBlocker] = (),
-        turn_outcome: TurnOutcomeProjectionInput | None = None,
     ):
         detail_key = detail or f"modelHub.errors.{code}"
         super().__init__(detail_key)
@@ -147,8 +124,6 @@ class ModelHubError(Exception):
         self.detail = detail_key
         self.supply_state = supply_state
         self.data = dict(data or {})
-        self.blockers = tuple(blockers)
-        self.turn_outcome = turn_outcome
 
 
 class EngineUnavailableError(RuntimeError):
@@ -260,26 +235,11 @@ class UnavailableEngineAdapter:
 
 @dataclass(frozen=True)
 class ResolvedInvocation:
-    backend: BackendName
-    requested_model_id: str
     source_id: str
-    source_label: str
     model_id: str
     handle: Optional[InvokeHandle]
     outcome: Optional[RawCallOutcome]
     supply_channel: Literal["native_cli", "hub"] = "hub"
-    credential_ref: Optional[str] = None
-    settlement_generation: Optional[int] = None
-
-
-@dataclass(frozen=True)
-class HandleSettlement:
-    outcome: RawCallOutcome | None
-    decision: ResolutionDecision | None
-    turn_outcome: TurnOutcomeProjectionInput | None
-
-
-HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
 
 
 AttemptObserver = Callable[
@@ -293,19 +253,6 @@ AttemptObserver = Callable[
     ],
     None,
 ]
-
-
-def _same_json_value(left: object, right: object) -> bool:
-    try:
-        options = {
-            "allow_nan": False,
-            "ensure_ascii": False,
-            "separators": (",", ":"),
-            "sort_keys": True,
-        }
-        return json.dumps(left, **options) == json.dumps(right, **options)
-    except (TypeError, ValueError):
-        return False
 
 
 def _utc_now() -> datetime:
@@ -478,10 +425,8 @@ def _oauth_payload(
     *,
     channel: str,
     intent: Literal["create", "reauth"] = "create",
-    client_nonce: str | None = None,
-    expires_at_iso: str | None = None,
 ) -> dict:
-    payload = {
+    return {
         "flow_id": flow.flow_id,
         "intent": intent,
         "source_id": flow.source_id,
@@ -495,15 +440,8 @@ def _oauth_payload(
             "instructions_key": flow.instructions_key,
         },
         "error_key": flow.error_key,
-        "expires_at": (
-            expires_at_iso
-            if client_nonce is not None
-            else flow.expires_at_iso
-        ),
+        "expires_at": flow.expires_at_iso,
     }
-    if client_nonce is not None:
-        payload["client_nonce"] = client_nonce
-    return payload
 
 
 def _runtime_payload(status: EngineStatus) -> dict:
@@ -553,10 +491,7 @@ class ModelHubService:
             paths.get_state_dir() / "model_hub_turn_provenance.json"
         )
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
-        self.oauth_flows = oauth_flows or OAuthFlowRegistry(
-            paths.get_state_dir() / "model_hub_oauth_flows.json",
-            now=now,
-        )
+        self.oauth_flows = oauth_flows or OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json")
         self.revocations = revocations or CredentialRevocationJournal(
             paths.get_state_dir() / "model_hub_pending_revocations.json"
         )
@@ -569,11 +504,6 @@ class ModelHubService:
             lambda _backend, _source: True
         )
         self._mutation_lock = asyncio.Lock()
-        self._oauth_start_tasks: dict[
-            tuple[str, str, OAuthChannel], asyncio.Task[dict]
-        ] = {}
-        self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
-        self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
         self._engine_preparation_failed = False
 
@@ -705,13 +635,6 @@ class ModelHubService:
             logger.warning("Skipped Model Hub runtime-state persistence during config recovery")
             return False
         return True
-
-    def _reserve_settlement_generation(self, source_id: str) -> int:
-        self._next_settlement_generation += 1
-        self._latest_source_attempt_generation[source_id] = (
-            self._next_settlement_generation
-        )
-        return self._next_settlement_generation
 
     def _ensure_config_writable(self) -> None:
         ensure_writable = getattr(self.store, "ensure_writable", None)
@@ -865,73 +788,6 @@ class ModelHubService:
             self._oauth_adapter(channel).oauth_status(flow_id),
             flow_id=flow_id,
         )
-
-    @staticmethod
-    def _cancelled_oauth_flow(
-        flow_id: str,
-        binding: OAuthFlowBinding,
-    ) -> OAuthFlowState:
-        if binding.source_id is None or binding.vendor is None:
-            raise ModelHubError("flow_not_found", status=404)
-        return OAuthFlowState(
-            flow_id=flow_id,
-            source_id=binding.source_id,
-            vendor=binding.vendor,
-            state="cancelled",
-            auth_url=None,
-            device_code=None,
-            expects="none",
-            instructions_key=None,
-            error_key=None,
-            expires_at_iso=binding.expires_at_iso,
-            credential_ref=None,
-            channel=binding.channel,
-        )
-
-    @staticmethod
-    def _flow_payload(
-        flow: OAuthFlowState,
-        binding: OAuthFlowBinding,
-    ) -> dict:
-        return _oauth_payload(
-            flow,
-            channel=binding.channel,
-            intent=binding.intent,
-            client_nonce=binding.client_nonce,
-            expires_at_iso=binding.expires_at_iso,
-        )
-
-    async def _replay_nonce_flow(self, flow_id: str) -> dict:
-        binding = self._oauth_binding(flow_id)
-        if binding.terminal_state == "cancelled":
-            flow = self._cancelled_oauth_flow(flow_id, binding)
-        else:
-            flow = await self._oauth_status(flow_id, binding.channel)
-            self._raise_if_flow_expired(flow_id, flow)
-            flow, repair_result = await self._materialize_completed_oauth(
-                flow_id,
-                binding,
-                flow,
-            )
-            if repair_result is not None:
-                return {
-                    "flow": self._flow_payload(flow, binding),
-                    **repair_result,
-                }
-        return self._oauth_result(flow_id, flow)
-
-    async def _discard_started_oauth_flow(
-        self,
-        flow: OAuthFlowState,
-        channel: OAuthChannel,
-    ) -> None:
-        if channel == "hub":
-            await self._discard_unbound_hub_flow(flow)
-            return
-        try:
-            await self.native_oauth_adapter.cancel_oauth(flow.flow_id)
-        except Exception:
-            pass
 
     async def _discover(self, source: ModelHubSourceConfig) -> list[str]:
         if not source.credential_ref:
@@ -1896,6 +1752,7 @@ class ModelHubService:
                     binding.channel,
                     binding.source_id,
                     binding.vendor,
+                    experimental_consent=binding.experimental_consent,
                     intent="reauth",
                     recovered=binding.recovered,
                 )
@@ -2077,6 +1934,7 @@ class ModelHubService:
             "credential_ref",
             "account_label",
             "masked_credential",
+            "experimental_consent_at",
             "state",
             "usage",
             "created_at",
@@ -2801,8 +2659,7 @@ class ModelHubService:
             or not isinstance(model_id, str)
             or not model_id.strip()
             or not isinstance(payload, dict)
-            or set(payload)
-            - {"hops", "force", "would_remove_hops", "would_interrupt"}
+            or set(payload) - {"hops", "force"}
             or "hops" not in payload
             or ("force" in payload and not isinstance(payload["force"], bool))
         ):
@@ -2831,20 +2688,16 @@ class ModelHubService:
                     model.id == hop.model_id for model in source.models
                 ):
                     raise ModelHubError("mapping_target_unavailable", status=409)
-            new_pairs = {
-                (item.source_id, item.model_id)
-                for item in route.hops
-            }
             removed_hops = [
                 {
                     "backend": backend,
                     "menu_model": model_id,
                     "source_id": hop.source_id,
                     "model_id": hop.model_id,
-                    "position": position,
                 }
-                for position, hop in enumerate(old_route.hops, start=1)
-                if (hop.source_id, hop.model_id) not in new_pairs
+                for hop in old_route.hops
+                if (hop.source_id, hop.model_id)
+                not in {(item.source_id, item.model_id) for item in route.hops}
             ]
             agent.routes[model_id] = route
             interrupted = self._introduced_interruptions(
@@ -2856,18 +2709,7 @@ class ModelHubService:
                     else frozenset()
                 ),
             )
-            confirmed = (
-                payload.get("force") is True
-                and _same_json_value(
-                    payload.get("would_remove_hops"),
-                    removed_hops,
-                )
-                and _same_json_value(
-                    payload.get("would_interrupt"),
-                    interrupted,
-                )
-            )
-            if interrupted and not confirmed:
+            if interrupted and payload.get("force") is not True:
                 raise ModelHubError(
                     "source_last_supplier",
                     status=409,
@@ -3317,11 +3159,18 @@ class ModelHubService:
     ) -> tuple[str, Optional[EventReason]]:
         if decision.action == "surface":
             return "models.source.error.unclassified", None
+        if decision.reason == "permission_denied":
+            return "models.source.error.unclassified", None
         if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
             return "models.source.cooldown.network", "network"
         if outcome.kind == RawOutcomeKind.TIMEOUT:
             return "models.source.cooldown.timeout", "network"
-        if decision.reason in {
+        text = " ".join(
+            value
+            for value in (outcome.error_code, outcome.redacted_message)
+            if isinstance(value, str)
+        ).lower()
+        if outcome.http_status == 401 and decision.reason in {
             "credential_expired",
             "credential_revoked",
         }:
@@ -3330,9 +3179,11 @@ class ModelHubService:
                 "credential_revoked": "models.source.needs_action.credential_revoked",
             }[decision.reason]
             return detail_key, cast(EventReason, decision.reason)
-        if decision.reason == "balance_exhausted":
+        if outcome.http_status == 402 or "balance" in text:
             return "models.source.needs_action.balance_exhausted", "balance_exhausted"
-        if decision.reason == "account_banned":
+        if outcome.http_status == 403 and any(
+            marker in text for marker in ("ban", "suspend", "disabled account")
+        ):
             return "models.source.needs_action.account_banned", "account_banned"
         if outcome.http_status == 403:
             return "models.source.needs_action.credential_revoked", "credential_revoked"
@@ -3345,44 +3196,42 @@ class ModelHubService:
             )
         return "models.source.error.unclassified", "unclassified_error"
 
-    def _write_source_blocker_locked(
+    async def _set_source_blocker(
         self,
-        config: ModelHubConfig,
-        source: ModelHubSourceConfig,
+        source_id: str,
         *,
         backend: BackendName,
         model_id: str,
         detail_key: str,
         reason: EventReason,
-        emit_event: bool = True,
-    ) -> bool:
-        status: Literal["error", "needs_action"] = (
-            "error"
-            if reason == "unclassified_error"
-            else "needs_action"
-        )
-        unchanged = (
-            source.state.status == status
-            and source.state.detail_key == detail_key
-        )
-        if unchanged:
-            return False
-        source.state = ModelHubSourceStateConfig(
-            status=status,
-            detail_key=detail_key,
-        )
-        persisted = self._save_runtime_config(config)
-        if persisted and emit_event:
-            self._record_event(
-                agent=cast(EventAgent, backend),
-                kind="needs_action",
-                model_id=model_id,
-                reason=reason,
-                from_source=source.id,
-                from_label=source.display_name,
-                now=self.now(),
+    ) -> None:
+        async with self._mutation_lock:
+            config = self.store.load()
+            source = self._source(config, source_id)
+            status: Literal["error", "needs_action"] = (
+                "error"
+                if reason == "unclassified_error"
+                else "needs_action"
             )
-        return persisted
+            unchanged = (
+                source.state.status == status
+                and source.state.detail_key == detail_key
+            )
+            source.state = ModelHubSourceStateConfig(
+                status=status,
+                detail_key=detail_key,
+            )
+            persisted = self._save_runtime_config(config)
+            if persisted and not unchanged:
+                self._record_event(
+                    agent=cast(EventAgent, backend),
+                    kind="needs_action",
+                    model_id=model_id,
+                    reason=reason,
+                    from_source=source.id,
+                    from_label=source.display_name,
+                    now=self.now(),
+                )
 
     async def probe_agent(self, backend: str, model_id: object = None) -> dict:
         if backend not in MODEL_HUB_BACKENDS:
@@ -3446,7 +3295,6 @@ class ModelHubService:
 
         await self._prepare_engine_for_demand()
         started_at = time.monotonic()
-        settlement_generation = self._reserve_settlement_generation(source.id)
         handle = await self._engine_call(
             self.adapter.invoke(
                 source.id,
@@ -3487,14 +3335,26 @@ class ModelHubService:
                 "models.source.cooldown.timeout",
             }:
                 latency_ms = None
-            if event_reason is not None:
-                await self._settle_fallback_source(
+            if event_reason in {
+                "quota_exhausted",
+                "rate_limited",
+                "server_error",
+                "network",
+            }:
+                await self._cooldown(
                     source,
                     decision,
+                    agent=cast(EventAgent, backend),
+                    model_id=chain_payload["model_id"],
+                    detail_key=error_key,
+                )
+            elif event_reason is not None:
+                await self._set_source_blocker(
+                    source.id,
                     backend=cast(BackendName, backend),
                     model_id=chain_payload["model_id"],
                     detail_key=error_key,
-                    settlement_generation=settlement_generation,
+                    reason=event_reason,
                 )
         return {
             "contract_version": PROBE_RESULT_CONTRACT_VERSION,
@@ -3600,7 +3460,10 @@ class ModelHubService:
         if (
             not isinstance(payload, dict)
             or set(payload) - {"acknowledge_irreversible"}
-            or payload.get("acknowledge_irreversible") is not True
+            or (
+                "acknowledge_irreversible" in payload
+                and payload.get("acknowledge_irreversible") is not True
+            )
         ):
             raise ModelHubError("reauth_confirmation_required", status=409)
 
@@ -3609,6 +3472,11 @@ class ModelHubService:
             source = self._source(config, source_id)
             if source.kind != "subscription":
                 raise ModelHubError("discovery_failed")
+            if (
+                source.supply_channel == "native_cli"
+                and payload.get("acknowledge_irreversible") is not True
+            ):
+                raise ModelHubError("reauth_confirmation_required", status=409)
 
             replace_pending_flow_id: str | None = None
             pending = self.oauth_flows.pending_reauth(source.id)
@@ -3709,6 +3577,7 @@ class ModelHubService:
                     channel,
                     source.id,
                     source.vendor,
+                    experimental_consent=False,
                     intent="reauth",
                     recovered=recovered,
                     replace_flow_id=replace_pending_flow_id,
@@ -3733,19 +3602,7 @@ class ModelHubService:
     async def oauth_start(self, payload: dict) -> dict:
         vendor = payload.get("vendor") if isinstance(payload, dict) else None
         channel = payload.get("channel") if isinstance(payload, dict) else None
-        client_nonce = (
-            payload.get("client_nonce") if isinstance(payload, dict) else None
-        )
-        if (
-            not isinstance(payload, dict)
-            or not isinstance(vendor, str)
-            or channel not in {"native_cli", "hub"}
-            or set(payload) - {"vendor", "channel", "client_nonce"}
-            or (
-                "client_nonce" in payload
-                and not isinstance(client_nonce, str)
-            )
-        ):
+        if not isinstance(vendor, str) or channel not in {"native_cli", "hub"}:
             raise ModelHubError("flow_not_found", status=400)
         try:
             vendor = normalize_model_hub_vendor_id(vendor)
@@ -3771,102 +3628,36 @@ class ModelHubService:
                         status=409,
                         data={"existing_source_id": existing.id},
                     )
-
-        nonce_key: tuple[str, str, OAuthChannel] | None = None
-        if client_nonce is not None:
-            try:
-                nonce_claim = self.oauth_flows.claim_nonce(
-                    client_nonce,
-                    vendor,
-                    oauth_channel,
-                )
-            except ValueError:
-                raise ModelHubError("flow_not_found", status=400) from None
-            nonce_key = (client_nonce, vendor, oauth_channel)
-            if not nonce_claim.owner:
-                if nonce_claim.status == "committed":
-                    if nonce_claim.flow_id is None:
-                        raise ModelHubError("flow_not_found", status=404)
-                    return await self._replay_nonce_flow(nonce_claim.flow_id)
-                task = self._oauth_start_tasks.get(nonce_key)
-                if task is None:
-                    raise ModelHubError("engine_down", status=503)
-                return await asyncio.shield(task)
-
-        async def start_and_remember() -> dict:
-            pending_source_id = _source_id()
-            flow: OAuthFlowState | None = None
-            flow_cleanup_done = False
-            try:
-                flow = await self._oauth_call(
-                    self._oauth_adapter(oauth_channel).start_oauth(
-                        pending_source_id,
-                        vendor,
-                    )
-                )
-                if flow.source_id != pending_source_id or flow.vendor != vendor:
-                    await self._discard_started_oauth_flow(flow, oauth_channel)
-                    flow_cleanup_done = True
-                    raise ModelHubError("flow_not_found", status=502)
-                if client_nonce is not None and flow.expires_at_iso is None:
-                    await self._discard_started_oauth_flow(flow, oauth_channel)
-                    flow_cleanup_done = True
-                    raise ModelHubError("flow_not_found", status=502)
-                self.oauth_flows.remember(
-                    flow.flow_id,
-                    oauth_channel,
-                    pending_source_id,
-                    vendor,
-                    client_nonce=client_nonce,
-                    expires_at_iso=(
-                        flow.expires_at_iso if client_nonce is not None else None
-                    ),
-                )
-            except BaseException as error:
-                try:
-                    if flow is not None and not flow_cleanup_done:
-                        await self._discard_started_oauth_flow(
-                            flow,
-                            oauth_channel,
-                        )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    if not isinstance(error, asyncio.CancelledError):
-                        raise ModelHubError("engine_down", status=503) from None
-                finally:
-                    if client_nonce is not None:
-                        try:
-                            self.oauth_flows.release_nonce(
-                                client_nonce,
-                                vendor,
-                                oauth_channel,
-                            )
-                        except (OSError, ValueError):
-                            pass
-                raise
-            binding = self._oauth_binding(flow.flow_id)
-            return {"flow": self._flow_payload(flow, binding)}
-
-        if nonce_key is None:
-            return await start_and_remember()
-        task = asyncio.create_task(start_and_remember())
-        self._oauth_start_tasks[nonce_key] = task
-
-        def forget_settled_start(completed: asyncio.Task[dict]) -> None:
-            if self._oauth_start_tasks.get(nonce_key) is completed:
-                self._oauth_start_tasks.pop(nonce_key, None)
-
-        task.add_done_callback(forget_settled_start)
-        return await task
+        pending_source_id = _source_id()
+        flow = await self._oauth_call(
+            self._oauth_adapter(oauth_channel).start_oauth(pending_source_id, vendor)
+        )
+        if flow.source_id != pending_source_id or flow.vendor != vendor:
+            raise ModelHubError("flow_not_found", status=502)
+        self.oauth_flows.remember(
+            flow.flow_id,
+            oauth_channel,
+            pending_source_id,
+            vendor,
+            experimental_consent=False,
+        )
+        return {"flow": _oauth_payload(flow, channel=channel)}
 
     def _oauth_result(
         self,
         flow_id: str,
         flow: OAuthFlowState,
+        *,
+        channel: OAuthChannel,
     ) -> dict:
         binding = self._oauth_binding(flow_id)
-        result = {"flow": self._flow_payload(flow, binding)}
+        result = {
+            "flow": _oauth_payload(
+                flow,
+                channel=channel,
+                intent=binding.intent,
+            )
+        }
         if flow.state != "success":
             return result
         source = self._completed_oauth_source(binding)
@@ -3886,14 +3677,13 @@ class ModelHubService:
 
     async def oauth_status(self, flow_id: str) -> dict:
         binding = self._oauth_binding(flow_id)
-        if binding.terminal_state == "cancelled":
-            return self._oauth_result(
-                flow_id,
-                self._cancelled_oauth_flow(flow_id, binding),
-            )
         completed = self._completed_oauth_flow(flow_id, binding)
         if completed is not None:
-            return self._oauth_result(flow_id, completed)
+            return self._oauth_result(
+                flow_id,
+                completed,
+                channel=binding.channel,
+            )
         flow = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, flow)
         flow, repair_result = await self._materialize_completed_oauth(
@@ -3903,10 +3693,14 @@ class ModelHubService:
         )
         if repair_result is not None:
             return {
-                "flow": self._flow_payload(flow, binding),
+                "flow": _oauth_payload(
+                    flow,
+                    channel=binding.channel,
+                    intent="reauth",
+                ),
                 **repair_result,
             }
-        return self._oauth_result(flow_id, flow)
+        return self._oauth_result(flow_id, flow, channel=binding.channel)
 
     async def oauth_submit(self, payload: dict) -> dict:
         flow_id = payload.get("flow_id") if isinstance(payload, dict) else None
@@ -3915,14 +3709,13 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=404)
         self._ensure_config_writable()
         binding = self._oauth_binding(flow_id)
-        if binding.terminal_state == "cancelled":
-            return self._oauth_result(
-                flow_id,
-                self._cancelled_oauth_flow(flow_id, binding),
-            )
         completed = self._completed_oauth_flow(flow_id, binding)
         if completed is not None:
-            return self._oauth_result(flow_id, completed)
+            return self._oauth_result(
+                flow_id,
+                completed,
+                channel=binding.channel,
+            )
         current = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, current)
         flow = await self._oauth_call(
@@ -3936,10 +3729,14 @@ class ModelHubService:
         )
         if repair_result is not None:
             return {
-                "flow": self._flow_payload(flow, binding),
+                "flow": _oauth_payload(
+                    flow,
+                    channel=binding.channel,
+                    intent="reauth",
+                ),
                 **repair_result,
             }
-        return self._oauth_result(flow_id, flow)
+        return self._oauth_result(flow_id, flow, channel=binding.channel)
 
     async def oauth_cancel(self, flow_id: object) -> None:
         if not isinstance(flow_id, str):
@@ -3947,8 +3744,6 @@ class ModelHubService:
         terminal: tuple[OAuthFlowBinding, OAuthFlowState] | None = None
         async with self._mutation_lock:
             binding = self._oauth_binding(flow_id)
-            if binding.terminal_state == "cancelled":
-                return
             completed = self._completed_oauth_flow(flow_id, binding)
             if completed is not None:
                 return
@@ -3980,10 +3775,7 @@ class ModelHubService:
                     else:
                         self.oauth_flows.forget(flow_id)
                 else:
-                    if binding.client_nonce is not None:
-                        self.oauth_flows.retain_cancelled(flow_id)
-                    else:
-                        self.oauth_flows.forget(flow_id)
+                    self.oauth_flows.forget(flow_id)
         if terminal is not None:
             binding, flow = terminal
             await self._materialize_completed_oauth(
@@ -3994,10 +3786,7 @@ class ModelHubService:
             if flow.state != "success":
                 async with self._mutation_lock:
                     try:
-                        if binding.client_nonce is not None:
-                            self.oauth_flows.retain_cancelled(flow_id)
-                        else:
-                            self.oauth_flows.forget(flow_id)
+                        self.oauth_flows.forget(flow_id)
                     except OSError:
                         raise ModelHubError("engine_down", status=503) from None
 
@@ -4080,296 +3869,38 @@ class ModelHubService:
                             now=self.now(),
                         )
 
-    def _write_cooldown_locked(
+    async def _cooldown(
         self,
-        config: ModelHubConfig,
         source: ModelHubSourceConfig,
         decision: ResolutionDecision,
         *,
         agent: EventAgent,
         model_id: str,
         detail_key: Optional[str] = None,
-        emit_event: bool = True,
-    ) -> bool:
-        retry_at = self.now() + timedelta(seconds=decision.cooldown_seconds)
-        if (
-            source.state.status == "cooldown"
-            and source.state.retry_at is not None
-            and _parse_datetime(source.state.retry_at) >= retry_at
-        ):
-            return False
-        already_cooling = source.state.status == "cooldown"
-        source.state = ModelHubSourceStateConfig(
-            status="cooldown",
-            retry_at=retry_at.isoformat(),
-            detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
-        )
-        persisted = self._save_runtime_config(config)
-        if persisted and not already_cooling and emit_event:
-            self._record_event(
-                agent=agent,
-                kind="cooldown",
-                model_id=model_id,
-                reason=cast(EventReason, decision.reason),
-                from_source=source.id,
-                from_label=source.display_name,
-                now=self.now(),
-            )
-        return persisted
-
-    async def _settle_fallback_source(
-        self,
-        source: ModelHubSourceConfig,
-        decision: ResolutionDecision,
-        *,
-        backend: BackendName,
-        model_id: str,
-        emit_event: bool = True,
-        detail_key: Optional[str] = None,
-        settlement_generation: Optional[int] = None,
-    ) -> tuple[EventReason, bool]:
-        """Persist one fallback-class Source result before the turn settles."""
-
-        if decision.reason is None:
-            raise AssertionError("fallback-class outcome must retain its Source reason")
-        event_reason = cast(EventReason, decision.reason)
-        settlement_rule = source_settlement_rule(event_reason)
-        if not settlement_rule.may_write_health:
-            return event_reason, False
-        # Generations are minted at attempt start and nowhere else. A settlement
-        # that carries none cannot prove it is not superseded, so it does not
-        # write Source health; minting one here would let any stale attempt
-        # certify itself as the newest. History, the terminal outcome, and the
-        # projection are produced by the caller and stay unaffected.
-        if settlement_generation is None:
-            return event_reason, False
-        generation = settlement_generation
+    ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
             try:
                 current = self._source(config, source.id)
             except ModelHubError:
-                return event_reason, False
-            latest_generation = self._latest_source_attempt_generation.get(
-                current.id,
-                generation,
+                return
+            already_cooling = current.state.status == "cooldown"
+            current.state = ModelHubSourceStateConfig(
+                status="cooldown",
+                retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
+                detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
             )
-            if generation < latest_generation:
-                return event_reason, False
-            if not source_settlement_allowed(current.state.status, event_reason):
-                return event_reason, False
-            if settlement_rule.status == "cooldown":
-                persisted = self._write_cooldown_locked(
-                    config,
-                    current,
-                    decision,
-                    agent=cast(EventAgent, backend),
+            persisted = self._save_runtime_config(config)
+            if persisted and not already_cooling:
+                self._record_event(
+                    agent=agent,
+                    kind="cooldown",
                     model_id=model_id,
-                    detail_key=detail_key,
-                    emit_event=emit_event,
+                    reason=cast(EventReason, decision.reason),
+                    from_source=current.id,
+                    from_label=current.display_name,
+                    now=self.now(),
                 )
-            else:
-                blocker_detail_key = detail_key or {
-                    "credential_expired": "models.source.needs_action.oauth_expired",
-                    "credential_revoked": "models.source.needs_action.credential_revoked",
-                    "balance_exhausted": "models.source.needs_action.balance_exhausted",
-                    "account_banned": "models.source.needs_action.account_banned",
-                    "unclassified_error": "models.source.error.unclassified",
-                }[event_reason]
-                persisted = self._write_source_blocker_locked(
-                    config,
-                    current,
-                    backend=backend,
-                    model_id=model_id,
-                    detail_key=blocker_detail_key,
-                    reason=event_reason,
-                    emit_event=emit_event,
-                )
-        return event_reason, persisted
-
-    def _inspect_terminal_chain(
-        self,
-        *,
-        backend: BackendName,
-        model_id: str,
-    ) -> tuple[ModelHubConfig, ModelHubTurnResolution]:
-        """Inspect the complete persisted chain used by the next turn."""
-
-        config = self.store.load()
-        resolution = resolve_model_hub_turn(
-            config,
-            backend,
-            model_id,
-            now=self.now(),
-            unavailable_source_ids=self._unavailable_native_sources(
-                config,
-                backend,
-            ),
-        )
-        return config, resolution
-
-    def _produce_attempt_terminal_outcome(
-        self,
-        *,
-        backend: BackendName,
-        model_id: str,
-        source_id: str,
-        source_model_id: str,
-        outcome: RawCallOutcome,
-        decision: ResolutionDecision,
-        source_transition_persisted: bool | None = None,
-    ) -> TurnOutcomeProjectionInput | None:
-        """Produce the sole complete terminal projection after attempt settlement."""
-
-        if (
-            outcome.stream_started
-            and decision.reason is None
-            and decision.error_code == "stream_interrupted"
-        ):
-            # A refresh-capable credential remains usable for a later turn,
-            # while replay after output is still forbidden for this turn.
-            return None
-        category = terminal_outcome_category(outcome, decision)
-        if category == "served":
-            return produce_turn_outcome("turn.served")
-        if category == "request_nonfallback":
-            return produce_turn_outcome("turn.request_nonfallback")
-        if category == "upstream_protocol":
-            # The Gateway's existing protocol-error copy is the positive row;
-            # a request-incompatible projection would misclassify the failure.
-            return None
-        if category == "engine_down":
-            return produce_turn_outcome(
-                "turn.engine_down",
-                stream_started=outcome.stream_started,
-            )
-        if (
-            category == "fallback_source"
-            and outcome.stream_started
-            and decision.reason == "network"
-            and not source_settlement_rule(decision.reason).may_write_health
-        ):
-            # G-34 owns the future projection for a truncated stream whose
-            # transport failure leaves the same hop current.
-            return None
-        if category != "fallback_source":
-            raise AssertionError("attempt terminal producer received a non-failure")
-
-        config, resolution = self._inspect_terminal_chain(
-            backend=backend,
-            model_id=model_id,
-        )
-        return produce_turn_outcome(
-            "turn.streamed_fallback",
-            config=config,
-            resolution=resolution,
-            attempted_hop=(source_id, source_model_id),
-            source_transition_persisted=source_transition_persisted,
-        )
-
-    @staticmethod
-    def _produce_no_candidate_terminal_outcome(
-        *,
-        config: ModelHubConfig,
-        resolution: ModelHubTurnResolution,
-    ) -> TurnOutcomeProjectionInput:
-        return produce_turn_outcome(
-            (
-                "turn.no_candidate.unconfigured"
-                if resolution.route_unconfigured
-                else "turn.no_candidate.blocked"
-            ),
-            config=config,
-            resolution=resolution,
-        )
-
-    @staticmethod
-    def _produce_exhausted_terminal_outcome(
-        *,
-        config: ModelHubConfig,
-        resolution: ModelHubTurnResolution,
-    ) -> TurnOutcomeProjectionInput:
-        return produce_turn_outcome(
-            "turn.exhausted",
-            config=config,
-            resolution=resolution,
-        )
-
-    async def settle_handle_outcome(
-        self,
-        resolved: ResolvedInvocation | None,
-        outcome: RawCallOutcome | None,
-        *,
-        termination_origin: HandleTerminationOrigin,
-        record_attempt: Callable[[RawCallOutcome, ResolutionDecision], None],
-    ) -> HandleSettlement:
-        """Settle every consumed hub handle before its terminal facts are exposed."""
-
-        if termination_origin == "downstream_cancel" and outcome is None:
-            return HandleSettlement(
-                outcome=outcome,
-                decision=None,
-                turn_outcome=produce_turn_outcome("turn.canceled"),
-            )
-        if termination_origin == "downstream_cancel":
-            # The gateway selects this origin only after closing the producer.
-            # A committed outcome at that barrier owns history over cancellation.
-            termination_origin = "upstream_terminal"
-        if termination_origin != "upstream_terminal":
-            raise AssertionError("unknown handle termination origin")
-        if resolved is None or resolved.supply_channel != "hub":
-            raise AssertionError("post-handle settlement requires a hub stream")
-        if outcome is None:
-            raise AssertionError("upstream handle termination requires an outcome")
-        decision = await self._classify_credential_outcome(
-            resolved.credential_ref,
-            outcome,
-        )
-        record_attempt(outcome, decision)
-        if decision.action == "return":
-            return HandleSettlement(
-                outcome=outcome,
-                decision=decision,
-                turn_outcome=self._produce_attempt_terminal_outcome(
-                    backend=resolved.backend,
-                    model_id=resolved.requested_model_id,
-                    source_id=resolved.source_id,
-                    source_model_id=resolved.model_id,
-                    outcome=outcome,
-                    decision=decision,
-                ),
-            )
-        if decision.action != "surface":
-            raise AssertionError("consumed streams cannot retry or fall through")
-        source_transition_persisted: bool | None = None
-        if decision.reason is not None:
-            source_transition_persisted = False
-            config = self.store.load()
-            source = next(
-                (item for item in config.sources if item.id == resolved.source_id),
-                None,
-            )
-            if source is not None:
-                _reason, source_transition_persisted = await self._settle_fallback_source(
-                    source,
-                    decision,
-                    backend=resolved.backend,
-                    model_id=resolved.requested_model_id,
-                    settlement_generation=resolved.settlement_generation,
-                )
-        return HandleSettlement(
-            outcome=outcome,
-            decision=decision,
-            turn_outcome=self._produce_attempt_terminal_outcome(
-                backend=resolved.backend,
-                model_id=resolved.requested_model_id,
-                source_id=resolved.source_id,
-                source_model_id=resolved.model_id,
-                outcome=outcome,
-                decision=decision,
-                source_transition_persisted=source_transition_persisted,
-            ),
-        )
 
     def _emit_switch(
         self,
@@ -4424,42 +3955,14 @@ class ModelHubService:
         decision = classify_outcome(outcome)
         if decision.action != "refresh":
             return decision
-        return await self._classify_credential_outcome(
-            source.credential_ref,
-            outcome,
-            decision=decision,
-        )
-
-    async def _classify_credential_outcome(
-        self,
-        credential_ref: Optional[str],
-        outcome: RawCallOutcome,
-        *,
-        decision: Optional[ResolutionDecision] = None,
-    ) -> ResolutionDecision:
-        """Resolve one credential failure using its exact refresh capability."""
-
-        decision = decision or classify_outcome(outcome)
-        if decision.action != "refresh":
-            return decision
+        credential_ref = source.credential_ref
         if not credential_ref:
             raise ModelHubError("engine_down", status=503)
         refreshable = await self._engine_call(
             self.adapter.credential_supports_refresh(credential_ref)
         )
         if refreshable:
-            if outcome.stream_started:
-                return ResolutionDecision(
-                    "surface",
-                    error_code="stream_interrupted",
-                )
             return decision
-        if outcome.stream_started:
-            return ResolutionDecision(
-                "surface",
-                reason="credential_revoked",
-                error_code="stream_interrupted",
-            )
         return ResolutionDecision("fallback", reason="credential_revoked")
 
     @staticmethod
@@ -4562,25 +4065,15 @@ class ModelHubService:
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
         if not candidate_hops:
-            projection_config, projection_resolution = config, resolution
-            if supply_channel is not None:
-                projection_config, projection_resolution = self._inspect_terminal_chain(
-                    backend=cast(BackendName, backend),
-                    model_id=model_id,
-                )
-            turn_outcome = self._produce_no_candidate_terminal_outcome(
-                config=projection_config,
-                resolution=projection_resolution,
+            supply_state = (
+                "waiting"
+                if resolution.supply_status == "waiting"
+                else "interrupted"
             )
-            facts = turn_outcome.supply_facts
-            if facts is None:
-                raise AssertionError("no-candidate outcome must carry supply facts")
             raise ModelHubError(
                 "mapping_target_unavailable",
                 status=409,
-                supply_state=facts.supply_state,
-                blockers=exact_hop_blockers(projection_resolution),
-                turn_outcome=turn_outcome,
+                supply_state=supply_state,
             )
 
         failed_source: Optional[ModelHubSourceConfig] = None
@@ -4607,18 +4100,14 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(
-                    backend=cast(BackendName, backend),
-                    requested_model_id=model_id,
-                    source_id=source.id,
-                    source_label=source.display_name,
-                    model_id=target_model,
-                    handle=None,
-                    outcome=None,
+                    source.id,
+                    target_model,
+                    None,
+                    None,
                     supply_channel="native_cli",
                 )
             await self._prepare_engine_for_demand(already_synced=engine_prepared)
             engine_prepared = True
-            settlement_generation = self._reserve_settlement_generation(source.id)
             if attempt_observer is not None:
                 attempt_observer(
                     source.id,
@@ -4643,17 +4132,7 @@ class ModelHubService:
                     failed_reason=failed_reason,
                     source=source,
                 )
-                return ResolvedInvocation(
-                    backend=cast(BackendName, backend),
-                    requested_model_id=model_id,
-                    source_id=source.id,
-                    source_label=source.display_name,
-                    model_id=target_model,
-                    handle=handle,
-                    outcome=None,
-                    credential_ref=source.credential_ref,
-                    settlement_generation=settlement_generation,
-                )
+                return ResolvedInvocation(source.id, target_model, handle, None)
             decision = await self._classify_source_outcome(source, outcome)
             if decision.action == "refresh":
                 # The engine refreshes its credential internally; L2 retries the
@@ -4673,17 +4152,7 @@ class ModelHubService:
                         failed_reason=failed_reason,
                         source=source,
                     )
-                    return ResolvedInvocation(
-                        backend=cast(BackendName, backend),
-                        requested_model_id=model_id,
-                        source_id=source.id,
-                        source_label=source.display_name,
-                        model_id=target_model,
-                        handle=handle,
-                        outcome=None,
-                        credential_ref=source.credential_ref,
-                        settlement_generation=settlement_generation,
-                    )
+                    return ResolvedInvocation(source.id, target_model, handle, None)
                 decision = classify_outcome(outcome, refresh_attempted=True)
             if attempt_observer is not None:
                 attempt_observer(
@@ -4702,80 +4171,52 @@ class ModelHubService:
                     failed_reason=failed_reason,
                     source=source,
                 )
-                return ResolvedInvocation(
-                    backend=cast(BackendName, backend),
-                    requested_model_id=model_id,
-                    source_id=source.id,
-                    source_label=source.display_name,
-                    model_id=target_model,
-                    handle=handle,
-                    outcome=outcome,
-                    credential_ref=source.credential_ref,
-                    settlement_generation=settlement_generation,
-                )
+                return ResolvedInvocation(source.id, target_model, handle, outcome)
             if decision.action == "surface":
-                source_transition_persisted: bool | None = None
-                if outcome.stream_started and decision.reason is not None:
-                    source_transition_persisted = False
-                    _reason, source_transition_persisted = await self._settle_fallback_source(
-                        source,
-                        decision,
-                        backend=cast(BackendName, backend),
-                        model_id=model_id,
-                        settlement_generation=settlement_generation,
-                    )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
-                    status=decision.downstream_status or (
+                    status=(
                         outcome.http_status
                         if outcome.http_status is not None and 400 <= outcome.http_status <= 599
                         else 502
                     ),
-                    turn_outcome=self._produce_attempt_terminal_outcome(
-                        backend=cast(BackendName, backend),
-                        model_id=model_id,
-                        source_id=source.id,
-                        source_model_id=target_model,
-                        outcome=outcome,
-                        decision=decision,
-                        source_transition_persisted=source_transition_persisted,
-                    ),
                 )
             if decision.action == "fallback":
-                event_reason, _persisted = await self._settle_fallback_source(
-                    source,
-                    decision,
-                    backend=cast(BackendName, backend),
-                    model_id=model_id,
-                    settlement_generation=settlement_generation,
-                )
-                globally_blocked_source_ids.add(source.id)
+                event_reason = cast(EventReason, decision.reason)
+                if event_reason in {
+                    "quota_exhausted",
+                    "rate_limited",
+                    "server_error",
+                    "network",
+                }:
+                    await self._cooldown(
+                        source,
+                        decision,
+                        agent=event_agent,
+                        model_id=model_id,
+                    )
+                elif event_reason != "permission_denied":
+                    detail_key = {
+                        "credential_expired": "models.source.needs_action.oauth_expired",
+                        "credential_revoked": "models.source.needs_action.credential_revoked",
+                        "balance_exhausted": "models.source.needs_action.balance_exhausted",
+                        "account_banned": "models.source.needs_action.account_banned",
+                        "unclassified_error": "models.source.error.unclassified",
+                    }[event_reason]
+                    await self._set_source_blocker(
+                        source.id,
+                        backend=cast(BackendName, backend),
+                        model_id=model_id,
+                        detail_key=detail_key,
+                        reason=event_reason,
+                    )
+                if event_reason != "permission_denied":
+                    globally_blocked_source_ids.add(source.id)
                 failed_source = source
                 failed_reason = event_reason
                 continue
-            raise ModelHubError(
-                decision.error_code or "engine_down",
-                status=502,
-                turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
-            )
-        final_config, final_resolution = self._inspect_terminal_chain(
-            backend=cast(BackendName, backend),
-            model_id=model_id,
-        )
-        turn_outcome = self._produce_exhausted_terminal_outcome(
-            config=final_config,
-            resolution=final_resolution,
-        )
-        final_facts = turn_outcome.supply_facts
-        if final_facts is None:
-            raise AssertionError("exhausted outcome must carry supply facts")
-        raise ModelHubError(
-            "mapping_target_unavailable",
-            status=503,
-            supply_state=final_facts.supply_state,
-            blockers=exact_hop_blockers(final_resolution),
-            turn_outcome=turn_outcome,
-        )
+            raise ModelHubError(decision.error_code or "engine_down", status=502)
+        raise ModelHubError("engine_down", status=503)
 
 
 def create_default_service(

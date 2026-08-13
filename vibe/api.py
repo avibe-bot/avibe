@@ -81,11 +81,9 @@ from core.vibe_agents import (
     AgentArchiveError,
     AgentNameValidationError,
     AgentReferenceRewriteError,
-    VibeAgentAccessError,
     VibeAgentStore,
     iter_global_agent_files,
     parse_agent_file,
-    resolve_resource_access_context,
     validate_agent_backend,
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
@@ -1264,10 +1262,11 @@ def client_config_payload(config: V2Config) -> dict:
     ``config_to_payload`` has to emit ``memory`` because the UI save path uses
     the same projection as its deep-merge base, and an omitted block resets the
     stored one (the ``agents.avault`` comment above records the same hazard).
-    A response is the opposite case: Memory settings have their own
-    ``/api/memory/*`` routes and lifecycle, so returning them from the generic
-    config endpoint would duplicate that contract and mix independently loaded
-    state into every settings response.
+    A response is the opposite case: Memory settings — enablement, both
+    processing endpoint URLs and model names, and API-key-presence flags — are
+    reachable only through the direct-loopback-only ``/api/memory/*`` routes,
+    so returning them from a generic endpoint would hand them to any
+    authenticated remote caller over the tunnel.
 
     Every endpoint that returns the generic config must project through this
     function, so a new one inherits the exclusion instead of having to repeat
@@ -1285,42 +1284,6 @@ def client_config_payload(config: V2Config) -> dict:
     return payload
 
 
-_REMOTE_CONFIG_UI_FIELDS = (
-    "instance_name",
-    "default_instance_name",
-    "chat_message_font_size",
-    "show_agent_activity",
-    "show_tool_calls",
-)
-
-
-def remote_config_payload(config: V2Config) -> dict:
-    """Return the fallback projection for remote identities without rollout access.
-
-    Active Organization members use the full runtime projection with the
-    pairing/tunnel block removed. Keep this allowlist for every other remote
-    identity so a future caller cannot inherit host paths or runtime settings.
-    """
-
-    payload = client_config_payload(config)
-    ui_payload = payload.get("ui")
-    return {
-        "mode": payload.get("mode"),
-        "version": payload.get("version"),
-        "setup_state": payload.get("setup_state"),
-        "language": payload.get("language"),
-        "ack_mode": payload.get("ack_mode"),
-        "show_duration": payload.get("show_duration"),
-        "include_time_info": payload.get("include_time_info"),
-        "include_user_info": payload.get("include_user_info"),
-        "reply_enhancements": payload.get("reply_enhancements"),
-        "agent_progress_style": payload.get("agent_progress_style"),
-        "ui": {
-            key: ui_payload[key]
-            for key in _REMOTE_CONFIG_UI_FIELDS
-            if isinstance(ui_payload, dict) and key in ui_payload
-        },
-    }
 def _merge_legacy_discord_guild_scope_fields(
     merged_payload: dict,
     request_payload: dict,
@@ -1369,7 +1332,7 @@ def _apply_session_meta(payloads: list[dict]) -> list[dict]:
     return payloads
 
 
-def list_show_pages(*, user_context: Any = None) -> dict:
+def list_show_pages() -> dict:
     """All Show Pages, newest-first, each enriched with the session title.
 
     Reuses ``ShowPageStore.list_page`` (already ordered by ``updated_at`` desc)
@@ -1382,7 +1345,7 @@ def list_show_pages(*, user_context: Any = None) -> dict:
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        result = store.list_page(page_request=None, user_context=user_context)
+        result = store.list_page(page_request=None)
         pages = [show_page_payload(page, config=config) for page in result.items]
     finally:
         store.close()
@@ -1396,74 +1359,25 @@ def list_show_pages(*, user_context: Any = None) -> dict:
     }
 
 
-def _show_page_mutation_response(
-    store,
-    page,
-    *,
-    config: V2Config,
-    additional_payload: dict | None = None,
-    user_context: Any = None,
-) -> dict:
-    """Return mutation details only when the caller can use the page."""
-    from storage import resource_access_service
-
-    context = resource_access_service.resolve_resource_access_context(user_context)
-    with store.engine.connect() as connection:
-        can_use = resource_access_service.can_use_resource(
-            context,
-            "show_page",
-            page.session_id,
-            connection=connection,
-        )
-    if not can_use:
-        # Audience managers may revoke an anonymous link without page-use
-        # access. Do not return page paths, URLs, share IDs, or session metadata.
-        return {
-            "ok": True,
-            "public_link_enabled": page.visibility == "public",
-        }
-    from core.show_pages import show_page_payload
-
-    payload = show_page_payload(page, config=config)
-    return {
-        "ok": True,
-        **(additional_payload or {}),
-        **_apply_session_meta([payload])[0],
-    }
-
-
-def set_show_page_visibility(
-    session_id: str,
-    visibility: str,
-    *,
-    user_context: Any = None,
-) -> dict:
+def set_show_page_visibility(session_id: str, visibility: str) -> dict:
     """Switch a Show Page between private / public / offline.
 
     Raises ``ShowPageError`` (a ``ValueError``) for invalid input, which the
     route layer maps to a 4xx response.
     """
-    from core.show_pages import ShowPageStore
+    from core.show_pages import ShowPageStore, show_page_payload
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated = store.update_visibility(
-            session_id,
-            visibility,
-            user_context=user_context,
-        )
-        return _show_page_mutation_response(
-            store,
-            updated,
-            config=config,
-            user_context=user_context,
-        )
+        updated = store.update_visibility(session_id, visibility)
+        payload = show_page_payload(updated, config=config)
     finally:
         store.close()
+    return {"ok": True, **_apply_session_meta([payload])[0]}
 
 
-def ensure_show_page(session_id: str, *, user_context: Any = None) -> dict:
+def ensure_show_page(session_id: str) -> dict:
     """Create the session's Show Page if it doesn't exist yet; report which.
 
     ``existed`` tells the caller whether the page was already initialized, so the
@@ -1479,235 +1393,48 @@ def ensure_show_page(session_id: str, *, user_context: Any = None) -> dict:
         # whether IT created the row (so the UI only prompts the agent on a real
         # first creation, not a concurrent ensure). Raises ShowPageError for an
         # archived session — the route maps it to a 4xx.
-        page, created = store.ensure_active(session_id, user_context=user_context)
+        page, created = store.ensure_active(session_id)
         payload = show_page_payload(page, config=config)
     finally:
         store.close()
     return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
-def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
-    """Return the applied authenticated audience and sharing authority."""
-
-    from core.show_pages import ShowPageError, ShowPageStore
-    from storage import resource_access_service
-
-    context = resource_access_service.resolve_resource_access_context(user_context)
-    store = ShowPageStore()
-    try:
-        page = store.get(session_id)
-        if page is None:
-            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
-        with store.engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            can_use = resource_access_service.can_use_resource(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            can_manage = resource_access_service.can_manage_show_page_access(
-                context,
-                page.session_id,
-                connection=connection,
-            )
-            can_publish_public = resource_access_service.can_control_resource_sharing(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            if not (can_use or can_manage):
-                raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
-    finally:
-        store.close()
-
-    organization_id = policy.get("organization_id") if policy else None
-    instance_id = context.instance_id
-    if context.is_trusted_local and organization_id and not instance_id:
-        instance_id = V2Config.load().remote_access.vibe_cloud.instance_id or None
-    return {
-        "ok": True,
-        "mode": "organization" if organization_id else "personal",
-        "instance_id": instance_id,
-        "organization_id": organization_id,
-        "access_level": policy.get("access_level", "private") if policy else "private",
-        "group_ids": list(policy.get("group_ids") or []) if policy else [],
-        "policy_revision": policy.get("policy_revision") if policy else None,
-        "last_applied_control_plane_revision": (
-            policy.get("last_applied_control_plane_revision") if policy else None
-        ),
-        "can_use": can_use,
-        "can_manage": can_manage,
-        "can_publish_public": can_publish_public,
-        "public_link_enabled": page.visibility == "public",
-    }
-
-
-def _require_show_page_email_access_owner(
-    session_id: str,
-    *,
-    user_context: Any = None,
-) -> None:
-    from core.show_pages import ShowPageError, ShowPageStore
-    from storage import resource_access_service
-
-    context = resource_access_service.resolve_resource_access_context(user_context)
-    store = ShowPageStore()
-    try:
-        page = store.get(session_id)
-        if page is None:
-            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
-        with store.engine.connect() as connection:
-            if not resource_access_service.can_control_resource_sharing(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            ):
-                raise ShowPageError(
-                    "Show Page access is not permitted.",
-                    code="resource_access_forbidden",
-                )
-    finally:
-        store.close()
-
-
-def _show_page_email_access_error(exc: Exception):
-    from core.show_pages import ShowPageError
-    from vibe import remote_access
-
-    known_codes = {
-        "invalid_email",
-        "too_many_entries",
-        "show_page_email_access_not_configured",
-        "show_page_email_access_invalid_response",
-    }
-    transient_code = "show_page_email_access_transient"
-    if isinstance(exc, ShowPageError):
-        return exc
-    if isinstance(exc, remote_access.BackendRequestError):
-        raw_code = str(exc.payload.get("error") or "")
-        code = raw_code if raw_code in known_codes else (
-            transient_code if exc.status >= 500 else "show_page_email_access_unavailable"
-        )
-    else:
-        raw_code = str(exc)
-        code = transient_code if raw_code in {
-            "resource_acl_device_unavailable",
-            "show_page_email_access_invalid_response",
-        } else raw_code or "show_page_email_access_unavailable"
-        if code not in known_codes and code != transient_code:
-            code = "show_page_email_access_unavailable"
-    return ShowPageError(code, code=code)
-
-
-def get_show_page_authorized_emails(
-    session_id: str,
-    *,
-    user_context: Any = None,
-) -> dict:
-    """Return exact email grants for one owner-managed Show Page."""
-
-    from vibe import remote_access
-
-    _require_show_page_email_access_owner(session_id, user_context=user_context)
-    try:
-        result = remote_access.get_show_page_authorized_emails(session_id)
-    except Exception as exc:
-        raise _show_page_email_access_error(exc) from exc
-    return {"ok": True, "emails": result["emails"]}
-
-
-def replace_show_page_authorized_emails(
-    session_id: str,
-    emails: list[str],
-    *,
-    user_context: Any = None,
-) -> dict:
-    """Replace one Show Page's exact email grants through paired-device auth."""
-
-    from vibe import remote_access
-
-    _require_show_page_email_access_owner(session_id, user_context=user_context)
-    normalized = sorted({str(email).strip().lower() for email in emails if str(email).strip()})
-    try:
-        result = remote_access.replace_show_page_authorized_emails(session_id, normalized)
-    except Exception as exc:
-        raise _show_page_email_access_error(exc) from exc
-    return {
-        "ok": True,
-        "emails": result["emails"],
-        "changed": result["changed"],
-    }
-
-
-def rotate_show_page_share(session_id: str, *, user_context: Any = None) -> dict:
+def rotate_show_page_share(session_id: str) -> dict:
     """Revoke the current public link and issue a new one (public pages only)."""
-    from core.show_pages import ShowPageStore
+    from core.show_pages import ShowPageStore, show_page_payload
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated, previous_share_id = store.rotate_share(
-            session_id,
-            user_context=user_context,
-        )
-        return _show_page_mutation_response(
-            store,
-            updated,
-            config=config,
-            additional_payload={"previous_share_id": previous_share_id},
-            user_context=user_context,
-        )
+        updated, previous_share_id = store.rotate_share(session_id)
+        payload = show_page_payload(updated, config=config)
     finally:
         store.close()
+    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
-def set_show_page_share_id(
-    session_id: str,
-    share_id: str,
-    *,
-    user_context: Any = None,
-) -> dict:
+def set_show_page_share_id(session_id: str, share_id: str) -> dict:
     """Set a custom public link suffix (public pages only).
 
     Like ``rotate_show_page_share`` but with a caller-chosen value; setting it
     revokes the previous public URL. Raises ``ShowPageError`` for an invalid /
     taken suffix or a non-public page, which the route layer maps to a 4xx/409.
     """
-    from core.show_pages import ShowPageStore
+    from core.show_pages import ShowPageStore, show_page_payload
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated, previous_share_id = store.set_share_id(
-            session_id,
-            share_id,
-            user_context=user_context,
-        )
-        return _show_page_mutation_response(
-            store,
-            updated,
-            config=config,
-            additional_payload={"previous_share_id": previous_share_id},
-            user_context=user_context,
-        )
+        updated, previous_share_id = store.set_share_id(session_id, share_id)
+        payload = show_page_payload(updated, config=config)
     finally:
         store.close()
+    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
 def upload_show_page_icon(
-    session_id: str,
-    data: bytes,
-    *,
-    filename: str | None,
-    content_type: str | None,
-    user_context: Any = None,
+    session_id: str, data: bytes, *, filename: str | None, content_type: str | None
 ) -> dict:
     """Write an uploaded image as the page's workspace-root favicon; return the
     refreshed page payload so the Web UI merges it like any other show-page mutation
@@ -1724,7 +1451,9 @@ def upload_show_page_icon(
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        page = store.require_management(session_id, user_context=user_context)
+        page = store.get(session_id)
+        if page is None:
+            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
         if store.is_archived(session_id):
             # Archiving leaves the page offline and terminal; the other mutators guard it
             # with session_archived, so a direct icon upload must not slip past that.
@@ -1739,14 +1468,14 @@ def upload_show_page_icon(
     return {"ok": True, **_apply_session_meta([payload])[0]}
 
 
-def get_dock(*, user_context: Any = None) -> dict:
+def get_dock() -> dict:
     """The workbench Dock document — resident-tile order + pinned Show Pages."""
     from core.dock_store import load_dock
 
-    return {"ok": True, "dock": load_dock(user_context=user_context)}
+    return {"ok": True, "dock": load_dock()}
 
 
-def pin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
+def pin_dock_show_page(session_id: str) -> dict:
     """Pin a session's Show Page to the Dock (idempotent).
 
     Raises ``ShowPageError`` (malformed id → 400) or ``DockError`` (no Show Page
@@ -1754,29 +1483,24 @@ def pin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """
     from core.dock_store import pin_show_page
 
-    return {"ok": True, "dock": pin_show_page(session_id, user_context=user_context)}
+    return {"ok": True, "dock": pin_show_page(session_id)}
 
 
-def unpin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
+def unpin_dock_show_page(session_id: str) -> dict:
     """Unpin a Show Page from the Dock (idempotent; leaves the page untouched)."""
     from core.dock_store import unpin_show_page
 
-    return {"ok": True, "dock": unpin_show_page(session_id, user_context=user_context)}
+    return {"ok": True, "dock": unpin_show_page(session_id)}
 
 
-def set_dock_order(
-    order: list,
-    known: list | None = None,
-    *,
-    user_context: Any = None,
-) -> dict:
+def set_dock_order(order: list, known: list | None = None) -> dict:
     """Persist a new resident-tile (docked-subset) order. ``known`` is the
     client's optimistic-concurrency baseline id set; when it no longer matches the
     server's, the write is rejected as stale so a stale tab can't silently undock a
     newer pin. Raises ``DockError`` for an invalid/stale order, mapped to a 400."""
     from core.dock_store import set_dock_order as _set_dock_order
 
-    return {"ok": True, "dock": _set_dock_order(order, known=known, user_context=user_context)}
+    return {"ok": True, "dock": _set_dock_order(order, known=known)}
 
 
 def get_workbench_prefs() -> dict:
@@ -1804,10 +1528,10 @@ def set_workbench_prefs(*, background_work_banner_enabled: Optional[bool] = None
     }
 
 
-def _vibe_agent_payload(agent, *, brief: bool = False, remote_safe: bool = False) -> dict:
+def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
     payload = agent.to_dict()
-    if brief or remote_safe:
-        projected = {
+    if brief:
+        return {
             "id": payload["id"],
             "name": payload["name"],
             "display_name": payload["display_name"],
@@ -1821,15 +1545,6 @@ def _vibe_agent_payload(agent, *, brief: bool = False, remote_safe: bool = False
             "source": payload["source"],
             "updated_at": payload["updated_at"],
         }
-        if remote_safe:
-            projected.update(
-                {
-                    "system_prompt": payload["system_prompt"],
-                    "metadata": {},
-                    "created_at": payload["created_at"],
-                }
-            )
-        return projected
     return payload
 
 
@@ -1847,26 +1562,18 @@ def get_vibe_agents(
     backend: Optional[str] = None,
     include_disabled: bool = False,
     include_archived: bool = False,
-    user_context: Any = None,
 ) -> dict:
     _ensure_builtin_default_agents()
-    user_context = resolve_resource_access_context(user_context)
     store = VibeAgentStore()
     try:
         normalized_backend = validate_agent_backend(backend) if backend else None
         agents = store.list_agents(
             include_disabled=include_disabled,
             include_archived=include_archived,
-            user_context=user_context,
         )
         if normalized_backend:
             agents = [agent for agent in agents if agent.backend == normalized_backend]
         default_agent = store.get_default_agent()
-        if default_agent is not None:
-            try:
-                default_agent = store.require_accessible(default_agent.name, user_context=user_context)
-            except VibeAgentAccessError:
-                default_agent = None
         return {
             "ok": True,
             "agents": [_vibe_agent_payload(agent, brief=True) for agent in agents],
@@ -1876,126 +1583,21 @@ def get_vibe_agents(
         store.close()
 
 
-def _organization_resource_console_url(config: V2Config, organization_id: str) -> str:
-    backend_url = str(config.remote_access.vibe_cloud.backend_url or "https://avibe.bot").rstrip("/")
-    organization = urllib.parse.quote(organization_id, safe="")
-    return f"{backend_url}/app/organizations/{organization}/resources"
-
-
-def _agent_onboarding_resource_descriptors(
-    organization_id: str,
-    inventory: list[dict],
-) -> list[dict]:
-    """Enrich the full ACL snapshot with safe Agent names for first publication."""
-
-    from vibe import remote_access
-
-    display_names: dict[str, str] = {}
-    for agent in inventory:
-        resource_id = str(agent.get("id") or "")
-        try:
-            display_names[resource_id] = remote_access._safe_resource_acl_identifier(
-                agent.get("name"),
-                limit=240,
-            )
-        except ValueError:
-            display_names[resource_id] = resource_id
-
-    # A resource-index update is a full snapshot. Preserve non-Agent resources
-    # while enriching newly onboarded Agent rows with their safe names.
-    descriptors = remote_access._local_policy_resource_descriptors(organization_id)
-    for descriptor in descriptors:
-        if descriptor.get("resource_kind") != "agent":
-            continue
-        display_name = display_names.get(str(descriptor.get("resource_id") or ""))
-        if display_name:
-            descriptor["display_name"] = display_name
-    return descriptors
-
-
-def get_vibe_agent_onboarding(*, user_context: Any = None) -> dict:
-    """Return the safe owner inventory for Organization Agent onboarding."""
-
-    config = V2Config.load()
-    _ensure_builtin_default_agents(config)
+def get_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
-        result = store.organization_onboarding_inventory(
-            user_context=resolve_resource_access_context(user_context),
-        )
-    finally:
-        store.close()
-    result["ok"] = True
-    if result.get("available") and result.get("organization_id"):
-        result["console_url"] = _organization_resource_console_url(
-            config,
-            str(result["organization_id"]),
-        )
-    return result
-
-
-def onboard_vibe_agents(*, user_context: Any = None) -> dict:
-    """Register all existing Agents privately, then publish the safe index."""
-
-    from vibe import remote_access
-
-    config = V2Config.load()
-    _ensure_builtin_default_agents(config)
-    context = resolve_resource_access_context(user_context)
-    store = VibeAgentStore()
-    try:
-        result = store.onboard_organization_agents(user_context=context)
-    finally:
-        store.close()
-
-    organization_id = str(result["organization_id"])
-    resources = _agent_onboarding_resource_descriptors(
-        organization_id,
-        list(result.get("agents") or []),
-    )
-    result.update(
-        {
-            "ok": True,
-            "console_url": _organization_resource_console_url(config, organization_id),
-            "sync": remote_access.sync_resource_acl_once(
-                config,
-                organization_id=organization_id,
-                resources=resources,
-            ),
-        }
-    )
-    return result
-
-
-def get_vibe_agent(name: str, *, user_context: Any = None) -> dict:
-    user_context = resolve_resource_access_context(user_context)
-    from vibe.authorization import has_temporary_unrestricted_runtime_access
-
-    store = VibeAgentStore()
-    try:
-        agent = store.require_accessible(name, user_context=user_context)
+        agent = store.require(name)
         default_agent = store.get_default_agent()
-        if default_agent is not None:
-            try:
-                default_agent = store.require_accessible(default_agent.name, user_context=user_context)
-            except VibeAgentAccessError:
-                default_agent = None
         return {
             "ok": True,
-            "agent": _vibe_agent_payload(
-                agent,
-                remote_safe=(
-                    user_context.is_remote
-                    and not has_temporary_unrestricted_runtime_access(user_context)
-                ),
-            ),
+            "agent": _vibe_agent_payload(agent),
             "default_agent_name": default_agent.name if default_agent else None,
         }
     finally:
         store.close()
 
 
-def create_vibe_agent(payload: dict, *, user_context: Any = None) -> dict:
+def create_vibe_agent(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
     metadata = payload.get("metadata") or payload.get("metadata_json") or {}
@@ -2013,7 +1615,6 @@ def create_vibe_agent(payload: dict, *, user_context: Any = None) -> dict:
                 system_prompt=payload.get("system_prompt"),
                 metadata=metadata,
                 enabled=_parse_agent_enabled_field(payload, default=True),
-                user_context=resolve_resource_access_context(user_context),
             )
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
@@ -2022,7 +1623,7 @@ def create_vibe_agent(payload: dict, *, user_context: Any = None) -> dict:
         store.close()
 
 
-def update_vibe_agent(name: str, payload: dict, *, user_context: Any = None) -> dict:
+def update_vibe_agent(name: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
     if "backend" in payload:
@@ -2068,13 +1669,8 @@ def update_vibe_agent(name: str, payload: dict, *, user_context: Any = None) -> 
 
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context(user_context)
         try:
-            agent = (
-                store.rename(name, new_name, user_context=context)
-                if renaming
-                else store.update(name, user_context=context, **kwargs)
-            )
+            agent = store.rename(name, new_name) if renaming else store.update(name, **kwargs)
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
         except AgentArchivedEditError as exc:
@@ -2128,13 +1724,11 @@ def _agent_reference_rewrite_error(exc: AgentReferenceRewriteError) -> dict:
     }
 
 
-def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
+def remove_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context(user_context)
-        store.require_manageable(name, user_context=context)
         try:
-            archived = store.archive(name, user_context=context)
+            archived = store.archive(name)
         except AgentArchiveError as exc:
             try:
                 lang = V2Config.load().language
@@ -2164,14 +1758,11 @@ def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
         store.close()
 
 
-def set_default_vibe_agent(name: str, *, user_context: Any = None) -> dict:
+def set_default_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context(user_context)
-        agent = store.require_manageable(name, user_context=context)
-        if not agent.enabled:
-            raise ValueError(f"agent '{agent.name}' is disabled")
-        store.set_default_agent_name(name, user_context=context)
+        store.set_default_agent_name(name)
+        agent = store.require(name)
         return {"ok": True, "default_agent_name": agent.name, "agent": _vibe_agent_payload(agent, brief=True)}
     finally:
         store.close()
@@ -2189,12 +1780,6 @@ class VaultApiError(ValueError):
         super().__init__(message)
         self.code = code
         self.status = status
-
-
-def _vault_secret_access_forbidden(exc: Exception) -> VaultApiError:
-    """Translate the storage-layer Vault ACL denial into the REST contract."""
-
-    return VaultApiError(str(exc), code="resource_access_forbidden", status=403)
 
 
 def _publish_vaults_updated(
@@ -2680,8 +2265,6 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
@@ -2840,8 +2423,6 @@ def create_vault_agent_binding(payload: dict) -> dict:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
@@ -2963,8 +2544,6 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
             signed_context = _signed_operation_context(context, key)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
         raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
     return {"ok": True, "context": signed_context, "envelope": envelope_payload}
@@ -3188,10 +2767,6 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
         signer_kind = str(signer_kind)
     provision_request_id = str(payload.get("provision_request_id") or "") or None
     atomic_protected_establishment = establishing_vmk and protection == "protected"
-    try:
-        user_context = vault_service.require_secret_create_access()
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     engine = _vault_engine()
     try:
         # Establishment defers preflight to create_secret's write-serialized
@@ -3259,7 +2834,6 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
                 authz_factor_registration=authz_factor_registration if isinstance(authz_factor_registration, dict) else None,
                 authz_factor_origin=origin,
                 provision_request_id=provision_request_id,
-                user_context=user_context,
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
@@ -3285,8 +2859,6 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
         raise VaultApiError(str(exc), code="protected_authz_setup_required", status=409) from exc
     except vault_service.InvalidProtectedAuthzError as exc:
         raise VaultApiError(str(exc), code="invalid_protected_authz", status=409) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     _publish_vaults_updated(
@@ -3324,8 +2896,6 @@ def update_vault_secret(name: str, payload: dict) -> dict:
             meta = vault_service.update_secret_metadata(conn, secret_name, release_scopes=release_scopes, **kwargs)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
     release_vault_agent_scopes(release_scopes, reason="update_vault_secret")
@@ -3345,8 +2915,6 @@ def delete_vault_secret(name: str) -> dict:
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     release_vault_agent_scopes(release_scopes, reason="delete_vault_secret")
     _publish_vaults_updated(scope="secret", secret_name=name)
     return {"ok": True, "removed": True, "name": name}
@@ -3357,12 +2925,7 @@ def get_vault_audit(*, secret_name: Optional[str] = None, limit: int = 100) -> d
 
     engine = _vault_engine()
     with engine.connect() as conn:
-        events = vault_service.list_audit(
-            conn,
-            secret_name=secret_name,
-            limit=limit,
-            user_context=resolve_resource_access_context(),
-        )
+        events = vault_service.list_audit(conn, secret_name=secret_name, limit=limit)
     return {"ok": True, "events": events}
 
 
@@ -3384,15 +2947,8 @@ def get_vault_provision_request_by_name(name: str) -> dict:
     if not vault_crypto.is_valid_secret_name(requested_name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
-    try:
-        with engine.begin() as conn:
-            request, ambiguous = vault_service.resolve_pending_provision_request_by_name(
-                conn,
-                requested_name,
-                user_context=resolve_resource_access_context(),
-            )
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
+    with engine.begin() as conn:
+        request, ambiguous = vault_service.resolve_pending_provision_request_by_name(conn, requested_name)
     return {"ok": True, "request": request, "ambiguous": ambiguous}
 
 
@@ -3403,15 +2959,8 @@ def get_vault_provision_request(request_id: str) -> dict:
     if not requested_id:
         raise VaultApiError("request_id is required", code="missing_request_id")
     engine = _vault_engine()
-    try:
-        with engine.begin() as conn:
-            request = vault_service.get_pending_provision_request(
-                conn,
-                requested_id,
-                user_context=resolve_resource_access_context(),
-            )
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
+    with engine.begin() as conn:
+        request = vault_service.get_pending_provision_request(conn, requested_id)
     return {"ok": True, "request": request}
 
 
@@ -3480,8 +3029,6 @@ def get_vault_request(request_id: str, *, audience: str | None = None) -> dict:
             result = _vault_request_result(conn, request)
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     payload = {"ok": True, "request": request}
     if result is not None:
         payload["result"] = result
@@ -3570,8 +3117,6 @@ def request_vault_access(payload: dict) -> dict:
     except vault_service.SecretNotFoundError as exc:
         missing_name = name or str(exc)
         raise VaultApiError(f"secret '{missing_name}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
@@ -3631,8 +3176,6 @@ def request_vault_sign(payload: dict) -> dict:
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
@@ -3666,8 +3209,6 @@ def deny_vault_request(request_id: str, payload: dict | None = None) -> dict:
             )
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     _publish_vaults_updated(
@@ -3684,12 +3225,7 @@ def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[s
 
     engine = _vault_engine()
     with engine.begin() as conn:
-        grants = vault_service.list_grants(
-            conn,
-            status=status,
-            session_id=session_id,
-            user_context=resolve_resource_access_context(),
-        )
+        grants = vault_service.list_grants(conn, status=status, session_id=session_id)
     return {"ok": True, "grants": grants}
 
 
@@ -4093,7 +3629,6 @@ def create_vault_grant(payload: dict) -> dict:
             grantable_members = vault_service.request_grantable_member_metas(conn, request_id)
         except (
             vault_service.SecretNotFoundError,
-            vault_service.VaultSecretAccessError,
             vault_service.RequestNotFoundError,
             vault_service.InvalidRequestError,
             vault_service.InvalidGrantError,
@@ -4102,8 +3637,6 @@ def create_vault_grant(payload: dict) -> dict:
             grantable_members = []
     if isinstance(preflight_error, vault_service.SecretNotFoundError):
         raise VaultApiError(f"secret '{preflight_error}' not found", code="secret_not_found", status=404) from preflight_error
-    if isinstance(preflight_error, vault_service.VaultSecretAccessError):
-        raise _vault_secret_access_forbidden(preflight_error) from preflight_error
     if isinstance(preflight_error, vault_service.RequestNotFoundError):
         raise VaultApiError(f"request '{preflight_error}' not found", code="request_not_found", status=404) from preflight_error
     if isinstance(preflight_error, vault_service.InvalidRequestError):
@@ -4172,8 +3705,6 @@ def create_vault_grant(payload: dict) -> dict:
             )
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
     except vault_service.RequestNotFoundError as exc:
@@ -4607,18 +4138,12 @@ def revoke_vault_grant(grant_id: str) -> dict:
         with engine.begin() as conn:
             grant_row = conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == grant_id)).mappings().first()
             grant_rows = [dict(grant_row)] if grant_row is not None else []
-            grant = vault_service.revoke_grant(
-                conn,
-                grant_id,
-                user_context=resolve_resource_access_context(),
-            )
+            grant = vault_service.revoke_grant(conn, grant_id)
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.GrantNotFoundError as exc:
         raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
     except vault_service.GrantNotActiveError as exc:
         raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     release_vault_agent_scopes(release_scopes, reason=f"revoke_vault_grant:{grant_id}")
     _publish_vaults_updated(
         scope="grant",
@@ -4743,8 +4268,6 @@ def vault_sign(payload: dict) -> dict:
                     key_envelope = vault_service.get_key_envelope(conn, name)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
@@ -4843,13 +4366,11 @@ def store_vault_pubkey_pin(payload: dict) -> dict:
             meta = vault_service.store_pubkey_pin(conn, name, pin)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.VaultSecretAccessError as exc:
-        raise _vault_secret_access_forbidden(exc) from exc
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or name)
     return {"ok": True, "secret": meta}
 
 
-def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
+def import_vibe_agents(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Import payload must be an object")
     candidates = []
@@ -4890,10 +4411,7 @@ def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
 
     store = VibeAgentStore()
     try:
-        result = store.import_candidates(
-            candidates,
-            user_context=resolve_resource_access_context(user_context),
-        )
+        result = store.import_candidates(candidates)
         return {
             "ok": True,
             "imported": [_vibe_agent_payload(agent, brief=True) for agent in result.imported],
@@ -4903,16 +4421,13 @@ def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
         store.close()
 
 
-def get_settings(platform: Optional[str] = None, *, user_context: Any = None) -> dict:
+def get_settings(platform: Optional[str] = None) -> dict:
     store = SettingsStore.get_instance()
     target_platform = platform or _current_platform()
     if target_platform == "discord":
         _migrate_discord_guild_scope_from_config(store)
     payload = _settings_to_payload(store, platform=target_platform)
-    payload["agent_catalog"] = get_vibe_agents(
-        include_archived=True,
-        user_context=user_context,
-    )
+    payload["agent_catalog"] = get_vibe_agents(include_archived=True)
     return payload
 
 
@@ -12215,43 +11730,15 @@ async def _skills_guarded(call):
 
 
 async def list_skills(
-    *,
-    scope: str = "all",
-    project_dir: Optional[str] = None,
-    project_id: Optional[str] = None,
-    backends: Optional[List[str]] = None,
-    user_context: Any = None,
+    *, scope: str = "all", project_dir: Optional[str] = None, backends: Optional[List[str]] = None
 ) -> dict:
-    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
-        lambda askill, svc: svc.list_skills(
-            askill,
-            scope=scope,
-            project_dir=project_dir,
-            project_id=project_id,
-            backends=backends,
-            user_context=context,
-        )
+        lambda askill, svc: svc.list_skills(askill, scope=scope, project_dir=project_dir, backends=backends)
     )
 
 
-async def preview_skill_source(
-    source: str,
-    *,
-    project_dir: Optional[str] = None,
-    project_id: Optional[str] = None,
-    user_context: Any = None,
-) -> dict:
-    context = resolve_resource_access_context() if user_context is None else user_context
-    return await _skills_guarded(
-        lambda askill, svc: svc.preview_source(
-            askill,
-            source,
-            project_dir=project_dir,
-            project_id=project_id,
-            user_context=context,
-        )
-    )
+async def preview_skill_source(source: str, *, project_dir: Optional[str] = None) -> dict:
+    return await _skills_guarded(lambda askill, svc: svc.preview_source(askill, source, project_dir=project_dir))
 
 
 async def add_skill(
@@ -12259,107 +11746,46 @@ async def add_skill(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
-    project_id: Optional[str] = None,
     backends: Optional[List[str]] = None,
     all_skills: bool = False,
     skill: Optional[str] = None,
     copy: bool = False,
-    user_context: Any = None,
 ) -> dict:
-    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
         lambda askill, svc: svc.add_skill(
             askill,
             source,
             scope=scope,
             project_dir=project_dir,
-            project_id=project_id,
             backends=backends,
             all_skills=all_skills,
             skill=skill,
             copy=copy,
-            user_context=context,
         )
     )
 
 
 async def remove_skill(
-    name: str,
-    *,
-    scope: str = "project",
-    project_dir: Optional[str] = None,
-    project_id: Optional[str] = None,
-    backends: Optional[List[str]] = None,
-    user_context: Any = None,
+    name: str, *, scope: str = "project", project_dir: Optional[str] = None, backends: Optional[List[str]] = None
 ) -> dict:
-    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
-        lambda askill, svc: svc.remove_skill(
-            askill,
-            name,
-            scope=scope,
-            project_dir=project_dir,
-            project_id=project_id,
-            backends=backends,
-            user_context=context,
-        )
+        lambda askill, svc: svc.remove_skill(askill, name, scope=scope, project_dir=project_dir, backends=backends)
     )
 
 
-async def find_skills(query: str = "", *, user_context: Any = None) -> dict:
-    context = resolve_resource_access_context() if user_context is None else user_context
-    return await _skills_guarded(
-        lambda askill, svc: svc.find_skills(askill, query, user_context=context)
-    )
+async def find_skills(query: str = "") -> dict:
+    return await _skills_guarded(lambda askill, svc: svc.find_skills(askill, query))
 
 
-async def check_skills(
-    *,
-    scope: str = "project",
-    project_dir: Optional[str] = None,
-    project_id: Optional[str] = None,
-    user_context: Any = None,
-) -> dict:
-    context = resolve_resource_access_context() if user_context is None else user_context
-    return await _skills_guarded(
-        lambda askill, svc: svc.check(
-            askill,
-            scope=scope,
-            project_dir=project_dir,
-            project_id=project_id,
-            user_context=context,
-        )
-    )
+async def check_skills(*, scope: str = "project", project_dir: Optional[str] = None) -> dict:
+    return await _skills_guarded(lambda askill, svc: svc.check(askill, scope=scope, project_dir=project_dir))
 
 
-async def update_skill(
-    name: str,
-    *,
-    scope: str = "project",
-    project_dir: Optional[str] = None,
-    project_id: Optional[str] = None,
-    user_context: Any = None,
-) -> dict:
-    context = resolve_resource_access_context() if user_context is None else user_context
-    return await _skills_guarded(
-        lambda askill, svc: svc.update(
-            askill,
-            name,
-            scope=scope,
-            project_dir=project_dir,
-            project_id=project_id,
-            user_context=context,
-        )
-    )
+async def update_skill(name: str, *, scope: str = "project", project_dir: Optional[str] = None) -> dict:
+    return await _skills_guarded(lambda askill, svc: svc.update(askill, name, scope=scope, project_dir=project_dir))
 
 
-async def upload_skill_zip(
-    payload: dict,
-    *,
-    project_dir: Optional[str] = None,
-    project_id: Optional[str] = None,
-    user_context: Any = None,
-) -> dict:
+async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) -> dict:
     """Decode a base64 .zip, unpack it to a temp dir, and preview its skills.
 
     The UI then calls add_skill with ``source`` = the returned ``dir``. The
@@ -12373,11 +11799,6 @@ async def upload_skill_zip(
     import tempfile
     import time
     import zipfile
-
-    from vibe.authorization import require_instance_role
-
-    context = resolve_resource_access_context() if user_context is None else user_context
-    require_instance_role(context, "owner")
 
     max_b64 = 24 * 1024 * 1024  # ~18 MB archive — skills are tiny; cap the body.
     max_uncompressed = 64 * 1024 * 1024
@@ -12439,15 +11860,7 @@ async def upload_skill_zip(
         shutil.rmtree(workdir, ignore_errors=True)
         return {"ok": False, "error": {"code": "bad_zip", "message": f"could not extract archive: {exc}"}}
 
-    preview = await _skills_guarded(
-        lambda askill, svc: svc.preview_source(
-            askill,
-            unpack,
-            project_dir=project_dir,
-            project_id=project_id,
-            user_context=context,
-        )
-    )
+    preview = await _skills_guarded(lambda askill, svc: svc.preview_source(askill, unpack, project_dir=project_dir))
     if preview.get("ok"):
         preview["dir"] = unpack
     else:

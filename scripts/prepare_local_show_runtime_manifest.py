@@ -8,10 +8,6 @@ from pathlib import Path
 from show_runtime_manifest_asset import prepare_manifest
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = REPOSITORY_ROOT / "vibe" / "show_runtime_manifest.json"
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Prepare a verified Show Runtime manifest for a local Avibe wheel build."
@@ -23,7 +19,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
+        default=Path("vibe/show_runtime_manifest.json"),
         help="Manifest destination used by the Avibe wheel build.",
     )
     args = parser.parse_args()

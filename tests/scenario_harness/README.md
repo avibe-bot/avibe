@@ -19,10 +19,6 @@ Current contents:
   Result/scheduled-delivery harness built on top of the generic layer
 - `memory_repair.py`
   Public-ASGI Memory Repair harness with a hermetic internal runtime boundary
-- `model_hub.py`
-  Config, adapter, persistence, and exact-route fixtures for Model Hub scenarios
-- `model_hub_native_oauth.py`
-  Native OAuth flow harness for Model Hub subscription scenarios
 
 Recommended layering:
 

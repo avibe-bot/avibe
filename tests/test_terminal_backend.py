@@ -34,7 +34,7 @@ from core.terminal_service import (
     _tmux_socket_name,
     sanitize_session_id,
 )
-from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
+from tests.ui_server_test_helpers import csrf_headers
 from vibe import remote_access
 from vibe import ui_server
 from vibe.ui_server import app
@@ -1428,39 +1428,6 @@ def test_terminal_websocket_unsupported_accepts_before_policy_close(monkeypatch)
     assert websocket.calls == [("accept", None), ("close", 1008)]
 
 
-def test_remote_terminal_websocket_closes_at_authorization_refresh(monkeypatch):
-    from vibe import remote_access
-
-    class BlockingTerminalService:
-        def start_reaper(self) -> None:
-            pass
-
-        async def handle_websocket(self, websocket, session_id, *, initial_cwd=None):
-            await asyncio.Event().wait()
-
-    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
-    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
-    monkeypatch.setattr(ui_server, "_terminal_origin_allowed", lambda websocket: True)
-    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
-    monkeypatch.setattr(
-        ui_server,
-        "_remote_access_websocket_session_claims",
-        lambda websocket, config: {"sub": "remote-owner", "claims_issued_at": 1},
-    )
-    monkeypatch.setattr(remote_access, "session_authorization_refresh_deadline", lambda payload: 0)
-    monkeypatch.setattr(ui_server, "get_terminal_service", lambda: BlockingTerminalService())
-    websocket = _RecordingWebSocket()
-    websocket.client = None
-    websocket.query_params = {}
-
-    asyncio.run(ui_server.terminal_websocket(websocket, "test"))
-
-    assert websocket.calls == [
-        ("accept", None),
-        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
-    ]
-
-
 def test_terminal_websocket_rejects_forwarded_request(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1644,36 +1611,25 @@ def test_terminal_delete_rejects_forwarded_origin_proxy_without_terminating(monk
     assert terminated == []
 
 
-def test_remote_org_terminal_delete_is_subject_scoped(monkeypatch, tmp_path):
+def test_terminal_delete_scopes_remote_subject_and_rejects_cross_subject(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
     config = _save_remote_config(tmp_path)
     user_one_effective = ui_server._terminal_effective_session_id("shared-session", "user-1")
-    user_two_effective = ui_server._terminal_effective_session_id("shared-session", "user-2")
     terminated: list[str] = []
 
     class _FakeService:
         async def terminate(self, session_id: str) -> bool:
             terminated.append(session_id)
-            return session_id == user_two_effective
+            return session_id == user_one_effective
 
     monkeypatch.setattr(ui_server, "get_terminal_service", lambda: _FakeService())
 
     user_two_client = app.test_client()
     user_two_client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_session_cookie(
-            config,
-            "user-2@example.com",
-            "user-2",
-            role="viewer",
-            access_source="organization_group",
-            organization_id="org-1",
-            organization_member_id="member-user-2",
-            organization_role="member",
-            group_ids=[],
-        ),
+        remote_access.make_session_cookie(config, "user-2@example.com", "user-2"),
         domain="alex.avibe.bot",
     )
     headers = csrf_headers(user_two_client, "https://alex.avibe.bot")
@@ -1690,13 +1646,13 @@ def test_remote_org_terminal_delete_is_subject_scoped(monkeypatch, tmp_path):
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
 
-    assert response.status_code == 204
+    assert response.status_code == 404
     assert malicious_response.status_code == 404
-    assert malicious_response.get_json()["error"] == "terminal_session_not_found"
     assert terminated == [
-        user_two_effective,
+        ui_server._terminal_effective_session_id("shared-session", "user-2"),
         ui_server._terminal_effective_session_id(user_one_effective, "user-2"),
     ]
+    assert user_one_effective not in terminated
 
 
 def test_terminal_service_ignores_invalid_limit_env(monkeypatch):

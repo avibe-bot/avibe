@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import os
 import sqlite3
 import stat
-import sys
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -18,19 +15,7 @@ from typing import Sequence
 
 _DIRECTORY_ORDER_INSERT_BATCH_SIZE = 256
 _DIRECTORY_DESCRIPTOR_CACHE_SIZE = 48
-_LINUX_OPENAT2_SYSCALL = 437
-_RESOLVE_NO_XDEV = 0x01
-_RESOLVE_NO_SYMLINKS = 0x04
-_RESOLVE_BENEATH = 0x08
 PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
-
-
-class _LinuxOpenHow(ctypes.Structure):
-    _fields_ = [
-        ("flags", ctypes.c_uint64),
-        ("mode", ctypes.c_uint64),
-        ("resolve", ctypes.c_uint64),
-    ]
 
 
 class ConfinedFilesystemError(RuntimeError):
@@ -717,7 +702,6 @@ class _DirectoryDescriptorCache:
 
     def __init__(self, root_fd: int) -> None:
         self._root_fd = root_fd
-        self._root_device = os.fstat(root_fd).st_dev
         self._descriptors: OrderedDict[int, tuple[_RelativeNode, int]] = OrderedDict()
 
     def __enter__(self) -> _DirectoryDescriptorCache:
@@ -745,16 +729,12 @@ class _DirectoryDescriptorCache:
         try:
             for component_node in reversed(trail):
                 try:
-                    next_descriptor = _open_directory_without_mount_crossing(
-                        current,
+                    next_descriptor = os.open(
                         component_node.name,
                         strict_directory_open_flags(),
+                        dir_fd=current,
                     )
                 except OSError as error:
-                    if error.errno == errno.EXDEV:
-                        raise ConfinedFilesystemError(
-                            "confined removal parent crosses a filesystem boundary"
-                        ) from error
                     raise ConfinedFilesystemError(
                         "confined removal parent cannot be opened safely"
                     ) from error
@@ -762,7 +742,6 @@ class _DirectoryDescriptorCache:
                 current = next_descriptor
                 info = os.fstat(current)
                 _require_private_directory(info, "confined removal parent")
-                _require_device(info, self._root_device, "confined removal parent")
                 self._remember(component_node, current)
             return current
         except BaseException:
@@ -795,7 +774,6 @@ def remove_confined_path(
     try:
         current = os.open(home, strict_directory_open_flags())
         anchored.append(current)
-        root_device = os.fstat(current).st_dev
         # ``paths.ensure_data_dirs`` historically created the home with the
         # process umask (commonly 0755). We own the descriptor and pin it with
         # O_NOFOLLOW, so harden that app-created mode in place before traversing
@@ -803,25 +781,16 @@ def remove_confined_path(
         _harden_private_directory_fd(current, "confinement root", sync=False)
         for component in relative.parts[:-1]:
             try:
-                next_descriptor = _open_directory_without_mount_crossing(
-                    current,
+                next_descriptor = os.open(
                     component,
                     strict_directory_open_flags(),
+                    dir_fd=current,
                 )
             except FileNotFoundError:
                 _fsync_anchored_deletion(anchored)
                 return
-            except OSError as error:
-                if error.errno == errno.EXDEV:
-                    raise ConfinedFilesystemError(
-                        "confined directory crosses a filesystem boundary"
-                    ) from error
-                raise ConfinedFilesystemError(
-                    "confined directory cannot be opened safely"
-                ) from error
             current = next_descriptor
             anchored.append(current)
-            _require_device(os.fstat(current), root_device, "confined directory")
             _harden_private_directory_fd(current, "confined directory", sync=False)
         remove_anchored_entry(current, relative.parts[-1], progress=progress)
         _fsync_anchored_deletion(anchored)
@@ -874,7 +843,6 @@ def _remove_entry_at(
     expected_identity: tuple[int, int] | None = None,
     progress: ConfinedRemovalProgress | None = None,
 ) -> None:
-    root_device = os.fstat(parent_fd).st_dev
     try:
         initial = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -891,8 +859,6 @@ def _remove_entry_at(
         return
     if not stat.S_ISDIR(initial.st_mode):
         raise ConfinedFilesystemError("confined removal refuses special files")
-    _require_device(initial, root_device, "confined removal directory")
-    root_identity = expected_identity or (initial.st_dev, initial.st_ino)
 
     root_node = _RelativeNode(None, name)
     stack: list[_RemovalFrame | _RelativeNode] = [root_node]
@@ -916,7 +882,8 @@ def _remove_entry_at(
                         continue
                     if (
                         item is root_node
-                        and (before.st_dev, before.st_ino) != root_identity
+                        and expected_identity is not None
+                        and (before.st_dev, before.st_ino) != expected_identity
                     ):
                         raise ConfinedFilesystemError(
                             "confined entry changed during removal"
@@ -930,19 +897,27 @@ def _remove_entry_at(
                         raise ConfinedFilesystemError(
                             "confined removal refuses special files"
                         )
-                    _require_directory(before, "confined removal directory")
-                    _require_device(
-                        before,
-                        root_device,
-                        "confined removal directory",
-                    )
-                    child_fd = _open_removal_directory(
-                        node_parent_fd,
+                    if item is root_node and expected_identity is not None:
+                        _require_directory(before, "confined removal directory")
+                    else:
+                        _require_private_directory(
+                            before,
+                            "confined removal directory",
+                        )
+                    child_fd = os.open(
                         item.name,
-                        before,
-                        root_device,
+                        strict_directory_open_flags(),
+                        dir_fd=node_parent_fd,
                     )
                     try:
+                        opened = os.fstat(child_fd)
+                        if (opened.st_dev, opened.st_ino) != (
+                            before.st_dev,
+                            before.st_ino,
+                        ):
+                            raise ConfinedFilesystemError(
+                                "confined directory changed during removal"
+                            )
                         _harden_private_directory_fd(
                             child_fd,
                             "confined removal directory",
@@ -986,168 +961,6 @@ def _remove_entry_at(
                     progress.record()
             finally:
                 os.close(node_parent_fd)
-
-
-def _open_removal_directory(
-    parent_fd: int,
-    name: str,
-    before: os.stat_result,
-    root_device: int,
-) -> int:
-    try:
-        descriptor = _open_directory_without_mount_crossing(
-            parent_fd,
-            name,
-            strict_directory_open_flags(),
-        )
-    except OSError as error:
-        if error.errno == errno.EXDEV:
-            raise ConfinedFilesystemError(
-                "confined removal directory crosses a filesystem boundary"
-            ) from error
-        if (
-            error.errno not in {errno.EACCES, errno.EPERM}
-            or stat.S_IMODE(before.st_mode) == 0o700
-        ):
-            raise ConfinedFilesystemError(
-                "confined removal directory cannot be opened safely"
-            ) from error
-        _harden_inaccessible_removal_directory(
-            parent_fd,
-            name,
-            before,
-            root_device,
-        )
-        try:
-            descriptor = _open_directory_without_mount_crossing(
-                parent_fd,
-                name,
-                strict_directory_open_flags(),
-            )
-        except OSError as retry_error:
-            if retry_error.errno == errno.EXDEV:
-                raise ConfinedFilesystemError(
-                    "confined removal directory crosses a filesystem boundary"
-                ) from retry_error
-            raise ConfinedFilesystemError(
-                "confined removal directory cannot be opened safely"
-            ) from retry_error
-    opened = os.fstat(descriptor)
-    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-        os.close(descriptor)
-        raise ConfinedFilesystemError("confined directory changed during removal")
-    try:
-        _require_directory(opened, "confined removal directory")
-        _require_device(opened, root_device, "confined removal directory")
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor
-
-
-def _open_directory_without_mount_crossing(
-    parent_fd: int,
-    name: str,
-    flags: int,
-) -> int:
-    if sys.platform != "linux":
-        return os.open(name, flags, dir_fd=parent_fd)
-
-    how = _LinuxOpenHow(
-        flags=flags,
-        mode=0,
-        resolve=_RESOLVE_NO_XDEV | _RESOLVE_NO_SYMLINKS | _RESOLVE_BENEATH,
-    )
-    libc = ctypes.CDLL(None, use_errno=True)
-    descriptor = libc.syscall(
-        ctypes.c_long(_LINUX_OPENAT2_SYSCALL),
-        ctypes.c_int(parent_fd),
-        ctypes.c_char_p(os.fsencode(name)),
-        ctypes.byref(how),
-        ctypes.c_size_t(ctypes.sizeof(how)),
-    )
-    if descriptor < 0:
-        error_number = ctypes.get_errno()
-        raise OSError(error_number, os.strerror(error_number), name)
-    return int(descriptor)
-
-
-def _harden_inaccessible_removal_directory(
-    parent_fd: int,
-    name: str,
-    before: os.stat_result,
-    root_device: int,
-) -> None:
-    path_descriptor_flag = getattr(os, "O_PATH", 0)
-    if not path_descriptor_flag:
-        raise ConfinedFilesystemError(
-            "confined removal directory cannot be opened safely"
-        )
-
-    # O_PATH pins even a mode-000 directory; procfs then applies chmod to that
-    # inode instead of resolving the possibly swapped parent entry.
-    try:
-        anchor = _open_directory_without_mount_crossing(
-            parent_fd,
-            name,
-            path_descriptor_flag
-            | required_no_follow_flag()
-            | int(getattr(os, "O_DIRECTORY", 0))
-            | int(getattr(os, "O_CLOEXEC", 0)),
-        )
-    except OSError as error:
-        if error.errno == errno.EXDEV:
-            raise ConfinedFilesystemError(
-                "confined removal directory crosses a filesystem boundary"
-            ) from error
-        raise ConfinedFilesystemError(
-            "confined removal directory cannot be anchored safely"
-        ) from error
-    try:
-        anchored = os.fstat(anchor)
-        _require_removal_directory_identity(anchored, before, root_device)
-        try:
-            os.chmod(f"/proc/self/fd/{anchor}", 0o700)
-        except (NotImplementedError, OSError, ValueError) as error:
-            raise ConfinedFilesystemError(
-                "confined removal directory cannot be hardened safely"
-            ) from error
-        _require_removal_directory_identity(
-            os.fstat(anchor),
-            before,
-            root_device,
-            require_private=True,
-        )
-    finally:
-        os.close(anchor)
-
-    try:
-        hardened = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError as error:
-        raise ConfinedFilesystemError(
-            "confined directory changed during removal"
-        ) from error
-    _require_removal_directory_identity(
-        hardened,
-        before,
-        root_device,
-        require_private=True,
-    )
-
-
-def _require_removal_directory_identity(
-    info: os.stat_result,
-    before: os.stat_result,
-    root_device: int,
-    *,
-    require_private: bool = False,
-) -> None:
-    _require_directory(info, "confined removal directory")
-    _require_device(info, root_device, "confined removal directory")
-    if (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
-        raise ConfinedFilesystemError("confined directory changed during removal")
-    if require_private:
-        _require_exact_private_directory(info, "confined removal directory")
 
 
 def _relative_to_home(path: Path, home: Path) -> Path:
@@ -1195,11 +1008,6 @@ def _require_directory(info: os.stat_result, label: str) -> None:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise ConfinedFilesystemError(f"{label} is not a safe directory")
     _require_owned(info, label)
-
-
-def _require_device(info: os.stat_result, device: int, label: str) -> None:
-    if info.st_dev != device:
-        raise ConfinedFilesystemError(f"{label} crosses a filesystem boundary")
 
 
 def _require_private_directory(info: os.stat_result, label: str) -> None:

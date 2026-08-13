@@ -182,19 +182,6 @@ describe('latest async authority', () => {
     expect(await codexRun).toBe('landed');
     expect(landed).toEqual(['codex:still active']);
   });
-
-  it('invalidates one pending generation before a write echo takes ownership', async () => {
-    const pending = deferred<string>();
-    const landed: string[] = [];
-    const authority = createLatestAsyncAuthorityByKey<string, string>((key, value) => landed.push(`${key}:${value}`));
-
-    const read = authority.run('claude', () => pending.promise);
-    authority.invalidate('claude');
-    pending.resolve('pre-commit chain');
-
-    expect(await read).toBe('stale');
-    expect(landed).toEqual([]);
-  });
 });
 
 describe('latest Source entity authority', () => {

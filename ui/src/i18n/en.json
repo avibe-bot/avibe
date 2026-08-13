@@ -116,7 +116,6 @@
   },
   "nav": {
     "dashboard": "Dashboard",
-    "organization": "Organization",
     "appLibrary": "App Library",
     "channels": "Groups",
     "users": "Direct Messages",
@@ -668,15 +667,9 @@
           "direct": "Direct"
         },
         "backend": {
-          "claude": {
-            "detail": "Uses its own Claude login"
-          },
-          "codex": {
-            "detail": "Uses its own ChatGPT login"
-          },
-          "opencode": {
-            "detail": "Uses its own model configuration"
-          }
+          "claude": { "detail": "Uses its own Claude login" },
+          "codex": { "detail": "Uses its own ChatGPT login" },
+          "opencode": { "detail": "Uses its own model configuration" }
         },
         "action": {
           "switchToGateway": "Switch to gateway"
@@ -794,7 +787,7 @@
           "status": {
             "ok": "Healthy",
             "degraded": "Degraded",
-            "waiting": "Supply unavailable for now",
+            "waiting": "All sources are cooling down",
             "interrupted": "No source is available",
             "noSelection": "No model selected"
           },
@@ -998,34 +991,12 @@
         "runtimeAction": "Resolve"
       },
       "routeDialog": {
-        "title": "{{menuModel}} · Route chain",
+        "title": "{{model}} · Route chain",
         "open": "Open {{model}} route chain",
         "label": "Route chain for this model",
-        "section": "Route chain for this model",
         "removeHop": "Remove hop",
         "addHop": "Add a hop",
-        "add": { "source": "Source", "model": "Model", "confirm": "Add", "none": "No source/model pair is available to add" },
-        "sourceMissing": "Source missing",
-        "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Remove it before saving.",
-        "reorder": {
-          "label": "Reorder by Source order",
-          "grabbed": "Hop {{position}} grabbed. Use arrow keys to move.",
-          "position": "Moved to hop {{position}}.",
-          "dropped": "Dropped at hop {{position}}.",
-          "cancelled": "Reorder cancelled. Restored to hop {{position}}.",
-          "sorted": "Reordered by Source order.",
-          "unchanged": "The route chain already matches Source order."
-        },
-        "grip": "Reorder this hop",
-        "loading": "Loading route chain…",
-        "cancel": "Cancel",
-        "save": "Save",
-        "saving": "Saving route chain…",
-        "refreshing": "Route chain saved. Refreshing the model surface…",
-        "fail": { "read": "The route chain could not be read", "save": "The route chain was not saved", "unconfirmed": "The save outcome is not confirmed", "reconcileRead": "The current model surface could not be read" },
-        "retry": "Retry",
-        "empty": "This route chain is empty. Add a hop, or leave it unconfigured.",
-        "impact": { "title": "The route chain was saved", "detail": "These are the items this save actually removed or interrupted.", "refreshFail": "The route chain was saved, but the model surface could not be refreshed.", "done": "Done" },
+        "reseed": "Reorder by source order",
         "hint": "This chain is stored configuration. Later source-order changes do not change it."
       },
       "recent": {
@@ -1276,9 +1247,7 @@
           "removed_other": "This fetch removed {{count}} models: {{models}}",
           "unchangedOnly": "Nothing changed in this fetch"
         },
-        "row": {
-          "remove": "Remove"
-        },
+        "row": { "remove": "Remove" },
         "fail": {
           "refetch": "The fetch did not come back. The list below is the last one this page actually read",
           "tier": "The tier was not saved",
@@ -1292,10 +1261,7 @@
           "entry": "Entry",
           "tiers": "Reasoning tiers"
         },
-        "entry": {
-          "auto": "Auto-fetched",
-          "manual": "Added manually"
-        },
+        "entry": { "auto": "Auto-fetched", "manual": "Added manually" },
         "tiers": {
           "empty": "No tiers set",
           "addFirst": "+ Add tier",
@@ -1303,9 +1269,7 @@
           "inputHint": "Enter to add · any text",
           "remove": "Remove {{tier}}"
         },
-        "addRow": {
-          "hint": "Use this when a model is not discoverable, or when you only want one of them"
-        },
+        "addRow": { "hint": "Use this when a model is not discoverable, or when you only want one of them" },
         "empty": "This source returned no models. Add one by hand, or refetch.",
         "emptyNeverFetched": "This source's model list has never come back. Deal with the status above, fetch again, or add a model by hand.",
         "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is identified when the source is added and fixed there — it is neither shown on this page nor editable."
@@ -1314,9 +1278,7 @@
         "label": "Hops that will be removed",
         "count_one": "{{count}} hop",
         "count_other": "{{count}} hops",
-        "hop": {
-          "position": "Order #{{n}}"
-        },
+        "hop": { "position": "Order #{{n}}" },
         "hint": {
           "safe": "These models still have another source available.",
           "interrupt": "Some models will be left with no usable source."
@@ -1329,18 +1291,15 @@
         "cancel": "Cancel",
         "title": {
           "refetch": "Refetch models from {{source}}",
-          "removeModel": "Remove {{model}} from {{source}}",
-          "saveRoute": "Save the route chain for {{menuModel}}"
+          "removeModel": "Remove {{model}} from {{source}}"
         },
         "subtitle": {
           "refetch": "This refetch drops models from this source's inventory.",
-          "removeModel": "This model disappears from this source's inventory.",
-          "saveRoute": "This save leaves a configured model with no usable source"
+          "removeModel": "This model disappears from this source's inventory."
         },
         "confirm": {
           "refetch": "Refetch anyway",
-          "removeModel": "Remove anyway",
-          "saveRoute": "Save anyway"
+          "removeModel": "Remove anyway"
         }
       },
       "repair": {
@@ -1547,7 +1506,6 @@
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",
     "remote_access_session_secret_missing": "Remote access is misconfigured (missing session secret). Re-pair this device to restore access.",
     "remote_access_unknown": "The operation did not finish. Refresh the status and try again; if it still fails, check the remote access runtime logs.",
-    "show_page_email_access_transient": "Email access is temporarily unavailable. Try again.",
     "invalid_pairing_key": "This pairing key is invalid or expired. Create a new key at avibe.bot, then paste it here.",
     "missing_pairing_key": "Paste the pairing key first.",
     "invalid_pairing_backend_url": "The Avibe Cloud URL must be a valid HTTPS address.",
@@ -1601,14 +1559,7 @@
     "memory_rebuild_root_busy": "Another process is using the Memory root. Wait and retry the rebuild.",
     "memory_operation_in_progress": "A Memory operation is already in progress. Wait for it to finish.",
     "memory_factory_reset_failed": "Reinitializing Memory could not finish. Memory data may be partially deleted; retry from Settings → Dependencies.",
-    "memory_embedding_rebuild_required": "Changing the embedding endpoint or model rebuilds the Memory index. Confirm to continue.",
-    "memory_embedding_unavailable": "The embedding provider is unavailable",
-    "memory_llm_unavailable": "The LLM provider is unavailable",
-    "provider_request_timed_out": "The provider request timed out.",
-    "provider_response_too_large": "The provider response exceeded the safety limit.",
-    "provider_unavailable": "The provider is unavailable.",
-    "provider_error": "The provider rejected the request.",
-    "endpoint_not_configured": "The provider endpoint is not configured."
+    "memory_embedding_rebuild_required": "Changing the embedding endpoint or model rebuilds the Memory index. Confirm to continue."
   },
   "apps": {
     "title": "Apps",
@@ -3436,63 +3387,11 @@
       "shareTitle": "Share this Show Page",
       "copyLink": "Copy link",
       "nativeShare": "Share…",
-      "rotateLink": "Replace public link",
       "access": "Access",
       "visibilityPublic": "Public",
       "visibilityPrivate": "Private",
       "publicDesc": "Anyone with the link can view",
       "privateDesc": "Only you can view",
-      "workspaceAccess": "Workspace access",
-      "workspaceAccessDesc": "Who can open this page after signing in.",
-      "workspaceLevels": {
-        "private": "Private",
-        "public": "Organization",
-        "scope": "Selected groups"
-      },
-      "workspaceHelp": {
-        "private": "Only the Show Page owner can open it through this access rule.",
-        "public": "All active Organization members may open it, subject to their Avibe and Project access.",
-        "scope": "Only active members of the selected groups may open it, subject to their Avibe and Project access."
-      },
-      "selectedGroups": "Selected groups",
-      "archivedGroup": "Archived",
-      "groupRequired": "Select at least one group.",
-      "applyWorkspaceAccess": "Apply",
-      "loadingWorkspaceAccess": "Loading Organization access…",
-      "workspaceReadOnly": "Only the Show Page owner or an Organization manager can change this audience.",
-      "organizationSignIn": "Sign in",
-      "organizationSignInAgain": "Sign in again",
-      "organizationSignInDesc": "Sign in to avibe.bot to change the Organization audience.",
-      "organizationUnavailable": "This Avibe is not connected to avibe.bot Organization management.",
-      "organizationSubjectMismatch": "The signed-in avibe.bot account does not match this Avibe session.",
-      "workspaceErrors": {
-        "conflict": "This audience changed elsewhere. Reload the latest version.",
-        "unreachable": "Organization access is temporarily unavailable.",
-        "error": "Organization access could not be loaded."
-      },
-      "workspaceSync": {
-        "pending": "This audience change is waiting to be applied on this Avibe.",
-        "offline": "This Avibe is offline. The audience change will apply after it reconnects.",
-        "error": "This Avibe could not apply the audience change."
-      },
-      "emailAccess": "Specific emails",
-      "emailAccessDesc": "These signed-in email addresses can open only this Show Page.",
-      "emailPlaceholder": "name@example.com",
-      "addEmail": "Add email",
-      "removeEmail": "Remove {{email}}",
-      "emailInvalid": "Enter a valid email address.",
-      "emailAccessEmpty": "No additional email addresses have access.",
-      "emailAccessLimit": "Up to 64 email addresses",
-      "applyEmailAccess": "Apply",
-      "loadingEmailAccess": "Loading email access…",
-      "emailAccessUnavailable": "Email access requires an Avibe Cloud connection.",
-      "emailAccessError": "Email access could not be loaded.",
-      "accessLoadError": "Access details could not be loaded. Sharing changes are disabled.",
-      "publicLink": "Public link",
-      "publicLinkOnDesc": "Anyone with the link can open this page without signing in.",
-      "publicLinkOffDesc": "Anonymous access is off. Signed-in access is controlled above.",
-      "publicLinkOwnerOnly": "Only the Show Page owner can replace, customize, or re-enable this link.",
-      "publicLinkOffline": "Public links cannot be changed while this Show Page is offline.",
       "customLink": "Custom link",
       "offlineNote": "This Show Page is offline and can't be shared right now.",
       "publicUnavailable": "Connect Avibe Cloud to get a public link others can open.",
@@ -4143,14 +4042,6 @@
         "helpLabel": "About data sources",
         "description": "One source being temporarily unavailable doesn't mean Memory is broken."
       },
-      "providerChecks": {
-        "title": "Provider checks",
-        "help": "These installation-level checks validate the configured language and embedding providers. They are not attached to any conversation.",
-        "helpLabel": "About provider checks",
-        "description": "Recent checks made while validating Memory settings or a rebuild.",
-        "empty": "No provider checks recorded.",
-        "unavailable": "Provider checks are temporarily unavailable."
-      },
       "anomalies": {
         "title": "Issue log",
         "help": "Problems that came up during processing are recorded here. Check each entry's state: Dead, Rejected, and Manual review required entries won't recover automatically.",
@@ -4302,7 +4193,6 @@
         "embedding": "Embedding model"
       },
       "callStage": {
-        "processingPreflight": "Provider check",
         "boundary": "Request preparation",
         "strategy": "Strategy",
         "cascade": "Building memories",
@@ -4442,342 +4332,6 @@
       "profile": "Profile",
       "episode": "Episode",
       "fact": "Fact"
-    }
-  },
-  "organization": {
-    "nav": {
-      "overview": "Overview",
-      "instances": "Avibes",
-      "members": "Members",
-      "groups": "Groups",
-      "resources": "Resources"
-    },
-    "actions": {
-      "backToControlPanel": "Control Panel",
-      "openRemoteAccess": "Open Remote Access",
-      "signIn": "Sign in with Avibe Cloud",
-      "signInAgain": "Sign in with the same account",
-      "signOut": "Sign Out",
-      "reload": "Review latest",
-      "saving": "Saving...",
-      "saveChanges": "Save changes",
-      "sendInvite": "Send invite",
-      "inviteMember": "Invite member",
-      "editMember": "Edit member",
-      "removeMember": "Remove member",
-      "resendInvite": "Resend invite",
-      "exportCsv": "Export CSV",
-      "newGroup": "New group",
-      "editGroup": "Edit group",
-      "archiveGroup": "Archive group",
-      "restoreGroup": "Restore group",
-      "manageMembers": "Manage members",
-      "saveMembers": "Save members",
-      "addAccess": "Add access",
-      "editAccess": "Edit access",
-      "removeAccess": "Remove access",
-      "addBinding": "Add binding",
-      "removeBinding": "Remove binding",
-      "manage": "Manage"
-    },
-    "roles": {
-      "owner": "Owner",
-      "admin": "Admin",
-      "member": "Member"
-    },
-    "status": {
-      "active": "Active",
-      "invited": "Invited",
-      "removed": "Removed"
-    },
-    "sync": {
-      "none": "No managed policies",
-      "in_sync": "In sync",
-      "applying": "Applying",
-      "offline": "Offline",
-      "error": "Error",
-      "deleted": "Deleted"
-    },
-    "sidebar": {
-      "section": "Organization",
-      "organizationCount": "{{count}} organizations",
-      "switchOrganization": "Switch Organization",
-      "cloudConnected": "Avibe Cloud connected",
-      "sessionRemaining": "{{minutes}}m",
-      "openMenu": "Open Organization menu"
-    },
-    "states": {
-      "loadingTitle": "Loading Organization",
-      "loadingBody": "Fetching the latest Organization data from Avibe Cloud.",
-      "notConnectedTitle": "Avibe Cloud is not connected",
-      "notConnectedBody": "Connect this Avibe to Avibe Cloud before opening Organization management.",
-      "signInTitle": "Sign in required",
-      "signInBody": "Sign in to Avibe Cloud to establish a short-lived Organization management session.",
-      "reauthorizingTitle": "Reauthorizing",
-      "reauthorizingBody": "Restoring your Organization management session with the same Cloud account.",
-      "mismatchTitle": "Cloud account does not match",
-      "mismatchBody": "The Avibe session and Cloud account belong to different users. Sign in again with the same account used for this Avibe session.",
-      "unreachableTitle": "Avibe Cloud is unreachable",
-      "unreachableBody": "Organization data could not be reached. Your local Avibe remains available.",
-      "revokedTitle": "Organization access was revoked",
-      "revokedBody": "This management session is no longer valid. Sign in again to confirm your current access.",
-      "emptyTitle": "No Organizations available",
-      "emptyBody": "The signed-in Cloud account is not an active member of an Organization.",
-      "unavailableTitle": "This Organization page is unavailable",
-      "unavailableBody": "Your current Organization or Avibe access does not allow this page.",
-      "errorTitle": "Unable to complete the request",
-      "conflictTitle": "This policy changed elsewhere",
-      "conflictBody": "Your draft was not saved. Review it, then reload the latest version before making changes again."
-    },
-    "errors": {
-      "generic": "Avibe could not complete this Organization request.",
-      "forbidden": "Your current Organization role does not allow this action.",
-      "organization_not_found": "This Organization is unavailable.",
-      "organization_member_not_found": "This member is no longer available.",
-      "organization_group_not_found": "This group is no longer available.",
-      "organization_group_archived": "Archived groups cannot be added to a new policy.",
-      "instance_not_found": "This Avibe is unavailable.",
-      "project_not_found": "This Project is unavailable.",
-      "resource_not_found": "This resource is unavailable.",
-      "member_email_taken": "That email already belongs to this Organization.",
-      "group_name_taken": "A group with that name already exists.",
-      "organization_member_not_active_in_organization": "One of the selected initial members is no longer active in this Organization. Refresh the member list and try again.",
-      "invalid_organization_group_name": "The group name is invalid. Use 1-120 characters.",
-      "invalid_organization_group_color": "The group color is invalid. Choose a color from the list.",
-      "invalid_request": "The request parameters are invalid. Check the form and try again.",
-      "too_many_entries": "This policy has too many entries.",
-      "invalid_project_access_intent": "Choose a valid Project access rule.",
-      "invalid_project_access_principal": "One Project access principal is invalid.",
-      "invalid_project_access_role": "One Project access role is invalid.",
-      "invalid_resource_acl_intent": "Choose a valid Resource audience.",
-      "invalid_email": "Enter a valid email address.",
-      "invalid_domain": "Enter a valid email domain.",
-      "duplicate_instance_access_principal": "Each Avibe access principal can appear only once.",
-      "duplicate_project_access_principal": "Each Project principal can appear only once.",
-      "owner_entry_locked": "The Avibe owner's implicit access cannot be changed.",
-      "resource_sync_conflict": "This policy changed elsewhere. Review the latest version before saving.",
-      "organization_member_conflict": "This member changed elsewhere. Review the latest version before trying again.",
-      "organization_group_conflict": "This group changed elsewhere. Review the latest version before trying again."
-    },
-    "fields": {
-      "name": "Name",
-      "description": "Description",
-      "color": "Color",
-      "email": "Email",
-      "role": "Role",
-      "groups": "Groups",
-      "member": "Member",
-      "status": "Status",
-      "principalType": "Principal type",
-      "principal": "Principal"
-    },
-    "colors": {
-      "mint": "Mint",
-      "cyan": "Cyan",
-      "blue": "Blue",
-      "violet": "Violet",
-      "rose": "Rose",
-      "gold": "Gold"
-    },
-    "principals": {
-      "organization_group": "Group",
-      "email": "Email",
-      "email_domain": "Email domain"
-    },
-    "breadcrumb": {
-      "overview": "Organization / Overview",
-      "members": "Organization / Members",
-      "groups": "Organization / Groups",
-      "groupDetail": "Organization / Groups / {{name}}",
-      "instances": "Organization / Avibes",
-      "resources": "Organization / Resources"
-    },
-    "overview": {
-      "description": "Manage membership, access, and policy health for this Organization.",
-      "memberDescription": "Your Organization membership and the Avibes available to you.",
-      "memberBreakdown": "{{invited}} invited · {{removed}} removed",
-      "groupBreakdown": "{{archived}} archived",
-      "projects": "Projects",
-      "projectCountUnavailable": "Count unavailable",
-      "policySync": "Policy sync",
-      "needsAttention": "Needs attention",
-      "instanceNeedsAttention": "{{name}} has policy changes that need attention.",
-      "projectSyncNeedsAttention": "{{name}} has Project policies that need attention.",
-      "resourceSyncNeedsAttention": "{{name}} has Resource policies that need attention.",
-      "noAttention": "All visible managed policies are healthy.",
-      "pendingInvites": "Pending invites",
-      "pendingInvitesBody": "{{count}} invitation(s) are waiting to be accepted.",
-      "viewAllInstances": "View all Avibes",
-      "memberSafeTitle": "Member view",
-      "memberSafeBody": "You can see your own membership and the Avibes available to you. Member directories and Resource policy composition are visible only to Organization managers."
-    },
-    "members": {
-      "description": "Invite members, assign Organization roles, and manage group membership.",
-      "memberDescription": "View your Organization role and group membership.",
-      "filterLabel": "Filter members",
-      "filterAll": "All",
-      "active": "Active",
-      "invited": "Invited",
-      "removed": "Removed",
-      "admins": "Admins",
-      "searchPlaceholder": "Search members...",
-      "emptyTitle": "No members found",
-      "emptyBody": "No members match the current view.",
-      "inviteTitle": "Invite a member",
-      "inviteBody": "Send an Organization invitation and optionally assign initial groups.",
-      "editTitle": "Edit member",
-      "editBody": "Changes to role and complete group membership share one revision.",
-      "emailPlaceholder": "name@example.com",
-      "downgradeTitle": "Downgrade this admin?",
-      "downgradeBody": "{{email}} will lose Organization management access. Their membership and group assignments will remain unchanged.",
-      "downgradeConfirm": "Downgrade to member",
-      "removeTitle": "Remove this member?",
-      "removeBody": "{{email}} will lose Organization membership and any access derived from it."
-    },
-    "groups": {
-      "description": "Build reusable Organization audiences and inspect every policy that references them.",
-      "memberDescription": "View Organization groups and your own group membership.",
-      "active": "Active",
-      "archived": "Archived",
-      "filterLabel": "Filter groups",
-      "searchPlaceholder": "Search groups...",
-      "emptyTitle": "No groups found",
-      "emptyBody": "No groups match the current view.",
-      "noDescription": "No description",
-      "yourGroup": "Your group",
-      "createTitle": "Create group",
-      "createBody": "Create an Organization group and optionally add initial members.",
-      "editTitle": "Edit group",
-      "editBody": "Update the group's display details.",
-      "initialMembers": "Initial members",
-      "manageMembersTitle": "Manage group members",
-      "manageMembersBody": "Replace the complete member list for {{name}}.",
-      "referencedBy": "Referenced by",
-      "moreReferences": "+{{count}} more",
-      "archiveTitle": "Archive this group?",
-      "archiveBody": "{{name}} is referenced by {{count}} active policy item(s).",
-      "archiveImpactTitle": "Archive impact",
-      "archiveImpactBody": "Existing references remain visible but stop granting access. The archived group cannot be selected for new policies."
-    },
-    "instances": {
-      "description": "Organization-bound Avibes you can see. Manage access and Project policy without changing pairing or hostnames.",
-      "searchPlaceholder": "Search Avibes...",
-      "emptyTitle": "No Avibes found",
-      "emptyBody": "No Organization-bound Avibes are available in this view.",
-      "you": "You",
-      "organizationOwner": "Avibe owner",
-      "ownerProtected": "Owner identity protected",
-      "youAreOwner": "you are the Avibe owner",
-      "paired": "Paired",
-      "notPaired": "Not paired",
-      "accessCount": "{{count}} access entries",
-      "accessTab": "Access",
-      "projectsTab": "Projects",
-      "tabsLabel": "Avibe management views",
-      "columns": {
-        "instance": "Avibe",
-        "owner": "Owner",
-        "address": "Public address",
-        "status": "Status",
-        "access": "Access",
-        "sync": "Sync"
-      },
-      "status": {
-        "pending": "Pending",
-        "active": "Online",
-        "disabled": "Disabled",
-        "deleted": "Deleted"
-      }
-    },
-    "access": {
-      "viewer": "Viewer",
-      "editor": "Editor",
-      "ownerTitle": "{{owner}} · Avibe owner",
-      "ownerBody": "Implicit owner-equivalent access. It cannot be edited or removed as an entry.",
-      "emptyTitle": "No explicit access entries",
-      "emptyBody": "Only the implicit Avibe owner currently has access.",
-      "addTitle": "Add Avibe access",
-      "editTitle": "Edit Avibe access",
-      "dialogBody": "Grant a group, individual email, or email domain Viewer or Editor access.",
-      "emailPlaceholder": "person@example.com",
-      "domainPlaceholder": "example.com",
-      "narrowTitle": "Narrow this access entry?",
-      "narrowBody": "The previous principal or Editor capability will stop applying after this change.",
-      "removeTitle": "Remove this access entry?",
-      "removeBody": "{{principal}} will lose access granted by this entry.",
-      "columns": {
-        "principal": "Principal",
-        "type": "Type",
-        "role": "Role"
-      }
-    },
-    "projects": {
-      "searchPlaceholder": "Search Projects...",
-      "safeDescriptorNotice": "Safe descriptors only. Local Project paths are never displayed or sent. Project access can only narrow the Avibe role.",
-      "emptyTitle": "No Projects found",
-      "emptyBody": "This Avibe has not published any active managed Project descriptors.",
-      "accessRule": "Access rule",
-      "bindings": "Restricted bindings",
-      "bindingRequired": "Restricted access requires at least one binding.",
-      "usesAvibeRole": "Uses Avibe role",
-      "ownerOnlyAudience": "Avibe owner only",
-      "bindingCount": "{{count}} binding(s)",
-      "dialogTitle": "Manage {{name}} access",
-      "dialogBody": "Organization management authority lets you change this policy; it does not grant you permission to use the Project.",
-      "narrowTitle": "Narrow this Project's access?",
-      "narrowBody": "This change removes an existing audience, downgrades Editor access, or switches to a more restrictive rule.",
-      "modes": {
-        "inherit": "Inherit",
-        "restricted": "Restricted",
-        "owner_only": "Owner-only"
-      },
-      "modeHelp": {
-        "inherit": "Use each principal's effective Avibe role.",
-        "restricted": "Allow one or more explicit groups, emails, or domains. This rule can only narrow the Avibe role.",
-        "owner_only": "Only the canonical owner of this Avibe can use this Project. Organization managers can manage the policy but do not gain use access."
-      },
-      "columns": {
-        "project": "Project",
-        "rule": "Access rule",
-        "bindings": "Bindings",
-        "sync": "Sync"
-      }
-    },
-    "resources": {
-      "description": "Manage which Organization audience may use each resource. Resource use never grants permission to edit, delete, or re-share it.",
-      "tabsLabel": "Resource kinds",
-      "accessLevel": "Audience",
-      "selectGroups": "Selected groups",
-      "groupRequired": "Select at least one group.",
-      "dialogTitle": "Manage {{name}} audience",
-      "dialogBody": "Choose Private, the whole Organization, or selected Organization groups.",
-      "narrowTitle": "Narrow this resource audience?",
-      "narrowBody": "Some people who can use this resource now will lose access after this change.",
-      "emptyTitle": "No resources found",
-      "emptyBody": "No active {{kind}} descriptors are available.",
-      "everyActiveMember": "Every active member",
-      "ownerOnly": "Resource owner only",
-      "kinds": {
-        "agent": "Agents",
-        "vault_secret": "Vault secrets",
-        "skill": "Skills",
-        "show_page": "Show Pages"
-      },
-      "levels": {
-        "private": "Private",
-        "public": "Organization",
-        "scope": "Selected groups"
-      },
-      "levelHelp": {
-        "private": "Only the resource owner can use it through this Organization ACL.",
-        "public": "Every active member of this Organization may use it, subject to all other access layers.",
-        "scope": "Only active members of the selected groups may use it, subject to all other access layers."
-      },
-      "columns": {
-        "access": "Access",
-        "audience": "Audience",
-        "sync": "Sync"
-      }
     }
   }
 }

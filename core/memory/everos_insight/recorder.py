@@ -11,7 +11,6 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
-from uuid import uuid4
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -571,42 +570,6 @@ def initialize_call_log(db_path: Path) -> None:
     db_path = Path(db_path)
     with _database_connection(db_path) as conn:
         _initialize_schema(conn)
-
-
-def record_preflight_call(
-    db_path: Path,
-    *,
-    started_at_ms: int,
-    duration_ms: int,
-    kind: ProviderKind,
-    model: str | None,
-    request: dict,
-    response: dict | None,
-    status: str,
-    error: str | None = None,
-    provider_base_urls: Sequence[str] = (),
-    exact_redaction_values: Sequence[str] = (),
-) -> None:
-    """Record a parent-side bounded preflight call with its distinct stage."""
-    call = ProviderCallInput(
-        id=uuid4().hex,
-        started_at_ms=started_at_ms,
-        duration_ms=duration_ms,
-        kind=kind,
-        stage="processing_preflight",
-        status=status,
-        request=request,
-        response=response,
-        model=model,
-        error=error,
-    )
-    row = normalize_provider_call(call, provider_base_urls=provider_base_urls, exact_redaction_values=exact_redaction_values)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    _validate_directory_chain(db_path.parent)
-    os.chmod(db_path.parent, 0o700)
-    with _database_connection(db_path) as conn:
-        _initialize_schema(conn)
-        _write_batch(conn, [row], lambda: False)
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:

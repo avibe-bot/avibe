@@ -620,16 +620,7 @@ class ManagedWatchStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
-        user_context: Any = None,
     ) -> ManagedWatch:
-        from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import (
-            ensure_local_harness_definition_write,
-            metadata_with_resource_user_context,
-        )
-
-        ensure_local_harness_definition_write(user_context)
-        ensure_agent_name_access(agent_name, user_context=user_context)
         watch = ManagedWatch(
             id=uuid4().hex[:12],
             name=name,
@@ -649,7 +640,7 @@ class ManagedWatchStore:
             retry_delay_seconds=retry_delay_seconds,
             post_to=post_to,
             deliver_key=deliver_key,
-            metadata=metadata_with_resource_user_context(metadata, user_context),
+            metadata=dict(metadata or {}),
         )
         watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY] = watch.created_at
         return self.upsert_watch(
@@ -729,16 +720,7 @@ class ManagedWatchStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
-        user_context: Any = None,
     ) -> ManagedWatch:
-        from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import (
-            ensure_local_harness_definition_write,
-            metadata_with_resource_user_context,
-        )
-
-        ensure_local_harness_definition_write(user_context)
-        ensure_agent_name_access(agent_name, user_context=user_context)
         watch = self._watches[watch_id]
         # Captured before the first mutation: the state ``vibe watch update`` read and
         # resolved its payload from.
@@ -773,10 +755,8 @@ class ManagedWatchStore:
         watch.retry_delay_seconds = retry_delay_seconds
         watch.post_to = post_to
         watch.deliver_key = deliver_key
-        watch.metadata = metadata_with_resource_user_context(
-            metadata if metadata is not None else watch.metadata,
-            user_context,
-        )
+        if metadata is not None:
+            watch.metadata = dict(metadata)
         if waiter_lifecycle_changed:
             watch.metadata = dict(watch.metadata)
             watch.metadata.pop(RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
@@ -2080,11 +2060,6 @@ class ManagedWatchService:
         await asyncio.sleep(delay)
 
     async def _run_watch(self, watch_id: str) -> None:
-        from storage.resource_access_service import (
-            REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-            metadata_allows_temporary_unrestricted_runtime,
-        )
-
         lifetime_started: float | None = None
         self._watch_started_at[watch_id] = _utc_now_iso()
         self._runtime_state_dirty = True
@@ -2103,19 +2078,6 @@ class ManagedWatchService:
                 return
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
-                return
-            if not metadata_allows_temporary_unrestricted_runtime(watch.metadata):
-                self._watch_store_call(
-                    watch.id,
-                    "suspend_remote_origin",
-                    lambda: self.store.mark_cycle_result(
-                        watch.id,
-                        exit_code=None,
-                        error=REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-                        disable=True,
-                    ),
-                    guarded=True,
-                )
                 return
             if lifetime_started is None:
                 lifetime_started = _lifetime_started_monotonic(watch)

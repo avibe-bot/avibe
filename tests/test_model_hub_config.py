@@ -762,23 +762,50 @@ def test_model_hub_authority_closure_is_generated_from_live_files():
     assert result["ok"], result["findings"]
 
 
-def test_permission_denial_contract_has_no_fallback_member():
-    retired_reason = "permission_denied"
+def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
     event_schema = _schema("resolution-event.schema.json")
+    event_validator = Draft7Validator(event_schema)
+    permission_event = next(
+        example
+        for example in event_schema["examples"]
+        if example["reason"] == "permission_denied"
+    )
+    event_validator.validate(permission_event)
+
+    invalid_cooldown = {
+        **permission_event,
+        "kind": "cooldown",
+        "to_source": None,
+    }
+    with pytest.raises(ValidationError):
+        event_validator.validate(invalid_cooldown)
+
     provenance_schema = _schema("turn-provenance.schema.json")
-    assert retired_reason not in event_schema["properties"]["reason"]["enum"]
-    assert retired_reason not in (
-        provenance_schema["properties"]["failed_attempts"]["items"]["properties"]["reason"]["enum"]
+    assert provenance_schema["properties"]["contract_version"]["const"] == 5
+    permission_record = next(
+        example
+        for example in provenance_schema["examples"]
+        if any(
+            attempt["reason"] == "permission_denied"
+            for attempt in example["failed_attempts"]
+        )
     )
-    assert all(
-        event.get("reason") != retired_reason
-        for event in event_schema["examples"]
+    Draft7Validator(provenance_schema).validate(permission_record)
+
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
     )
-    assert all(
-        attempt.get("reason") != retired_reason
-        for record in provenance_schema["examples"]
-        for attempt in record["failed_attempts"]
-    )
+    schemas = _mirror_schemas(registry)
+    failed_reasons = _json_pointer(
+        schemas["turn-provenance.schema.json"],
+        "/properties/failed_attempts/items/properties/reason",
+    )["enum"]
+    failed_reasons.remove("permission_denied")
+    with pytest.raises(AssertionError):
+        _validate_mirror_entry(
+            next(entry for entry in registry["entries"] if entry["id"] == "M3"),
+            schemas,
+        )
 
 
 def test_oauth_nonce_explicit_cancel_totality_is_closed():
@@ -2574,6 +2601,10 @@ def test_source_optional_fields_reject_schema_invalid_values():
 
     invalid = json.loads(json.dumps(source))
     invalid["usage"]["currency"] = 1
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["experimental_consent_at"] = 1
     invalid_sources.append(invalid)
 
     invalid = json.loads(json.dumps(source))

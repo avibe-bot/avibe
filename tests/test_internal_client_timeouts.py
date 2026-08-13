@@ -96,7 +96,7 @@ def test_processing_record_client_covers_identity_journals_and_parallel_sources(
         + initial_journal_observation_bound
         + max(
             PROVIDER_READ_TIMEOUT_SECONDS,
-                5 * sqlite_bound,
+            4 * sqlite_bound,
             metadata_and_fresh_observation_bound,
         )
     )

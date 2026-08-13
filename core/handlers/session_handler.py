@@ -595,10 +595,7 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude subagent SDK client for %s because avibe system prompt changed",
                 composite_key,
             )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-            )
+            await self.cleanup_session(composite_key)
             return None
         caller_env = self._caller_env_for_context(context)
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
@@ -763,10 +760,11 @@ class SessionHandler(BaseHandler):
 
         SESSION-STABLE ONLY, and that is not a shortcut. This env is baked into a Claude
         SDK client at spawn and is also the value compared to decide whether a cached
-        client may be reused, so ordinary IM author/message fields are dropped. A trusted
-        remote Workbench ACL snapshot is retained: changing remote identity or revision
-        must recreate the client rather than let one user's resource authority leak into
-        another user's turn. ``CallerContext.session_stable`` documents both cases.
+        client may be reused, so a field that changes per turn would respawn the Agent on
+        every message, and a field that changes per author would attribute one
+        participant's definition to another. ``CallerContext.session_stable`` documents
+        both, and what a Claude-created definition therefore keeps: the conversation, not
+        the author or the individual message.
         """
 
         return caller_env_for_platform_payload(

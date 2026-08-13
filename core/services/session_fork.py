@@ -12,15 +12,10 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from config import paths
-from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
-from vibe.authorization import (
-    AuthorizationContext,
-    has_temporary_unrestricted_runtime_access,
-    require_instance_role,
-)
+from core.backend_failure import is_backend_failure_notification
 from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
 from vibe.message_types import spec_for, types_with
@@ -160,7 +155,6 @@ def reserve_forked_session(
     native_turn_started: bool = False,
     db_path: Optional[Path] = None,
     title_lang: str = "en",
-    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> SessionForkResult:
     """Copy an existing Agent Session row into a new pending fork target.
 
@@ -170,8 +164,6 @@ def reserve_forked_session(
     id stays empty until the backend adapter successfully forks the native
     session.
     """
-
-    context = require_instance_role(authorization_context, "editor")
 
     from sqlalchemy import select
 
@@ -191,21 +183,6 @@ def reserve_forked_session(
     try:
         with engine.begin() as conn:
             reserve_write_lock(conn)
-            if not (
-                context.is_instance_owner
-                or has_temporary_unrestricted_runtime_access(context)
-            ):
-                from storage import project_access_service
-
-                if not project_access_service.role_allows(
-                    project_access_service.get_effective_session_role(
-                        conn,
-                        context,
-                        source_session_id,
-                    ),
-                    "editor",
-                ):
-                    raise SessionForkError("source_not_found")
             row = conn.execute(
                 select(agent_sessions).where(agent_sessions.c.id == str(source_session_id)).limit(1)
             ).mappings().first()

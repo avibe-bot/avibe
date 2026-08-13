@@ -38,8 +38,6 @@ MemoryErrorCode = Literal[
     "memory_clear_failed",
     "memory_embedding_rebuild_required",
     "memory_rebuild_failed",
-    "memory_embedding_unavailable",
-    "memory_llm_unavailable",
     "memory_rebuild_root_busy",
     "memory_factory_reset_failed",
     "memory_repair_failed",
@@ -71,8 +69,6 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
         "memory_clear_failed",
         "memory_embedding_rebuild_required",
         "memory_rebuild_failed",
-        "memory_embedding_unavailable",
-        "memory_llm_unavailable",
         "memory_rebuild_root_busy",
         "memory_factory_reset_failed",
         "memory_repair_failed",
@@ -85,22 +81,6 @@ def is_memory_error_code(value: object) -> bool:
     """Return whether *value* is a closed Memory error code."""
 
     return isinstance(value, str) and value in CLOSED_MEMORY_ERROR_CODES
-
-
-@dataclass(frozen=True)
-class MemoryPreflightDiagnostic:
-    side: Literal["embedding", "llm"]
-    http_status: int | None = None
-    provider_error_code: str | None = None
-    message: str = "provider unavailable"
-
-    def payload(self) -> dict[str, object]:
-        return {
-            "side": self.side,
-            "http_status": self.http_status,
-            "provider_error_code": self.provider_error_code,
-            "message": self.message[:512],
-        }
 
 
 @dataclass(frozen=True)

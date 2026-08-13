@@ -1,16 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { deriveAppRows, filterShowPages, partitionByDock, type FilterablePage } from './appLibrary';
-import { APP_LIST } from './registry';
 
 const BUILTINS = ['files', 'terminal', 'editor', 'library'];
 const pin = (id: string) => ({ session_id: id });
 
 describe('deriveAppRows (installed set)', () => {
-  it('receives the complete built-in registry regardless of access capabilities', () => {
-    expect(APP_LIST.map((app) => app.id)).toEqual(BUILTINS);
-  });
-
   it('lists every built-in then every installed page, resolving kinds', () => {
     const rows = deriveAppRows(BUILTINS, [pin('s1'), pin('s2')], ['files', 'show:s1']);
     expect(rows.map((r) => r.dockId)).toEqual(['files', 'terminal', 'editor', 'library', 'show:s1', 'show:s2']);

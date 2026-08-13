@@ -17,16 +17,10 @@ from config import paths
 from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import (
+    EVENT_REASON_AUTHORITY,
     EventAgent,
     EventReason,
-)
-from core.handlers.model_hub.provenance import (
-    ENGINE_DOWN_TURN_OUTCOME,
-    TurnOutcomeProjectionInput,
-    exact_hop_blockers,
-    produce_turn_outcome,
-    render_turn_outcome_copy,
-    supply_interruption_reason,
+    event_reason_label,
 )
 from core.handlers.model_hub.resolver import (
     BackendName,
@@ -35,14 +29,10 @@ from core.handlers.model_hub.resolver import (
     source_after_cooldown_recovery,
     source_eligible_for_backend,
 )
-from core.handlers.model_hub.service import (
-    PRE_ATTEMPT_SETTLEMENT_GENERATION,
-    ModelHubError,
-    ModelHubService,
-    create_default_service,
-)
+from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from vibe.i18n import t as i18n_t
 
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
@@ -63,6 +53,20 @@ _NETWORK_ERROR_RE = re.compile(
     r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
     re.IGNORECASE,
 )
+_SOURCE_DETAIL_EVENT_REASONS = {
+    "models.source.cooldown.quota_exhausted": "quota_exhausted",
+    "models.source.cooldown.rate_limited": "rate_limited",
+    "models.source.cooldown.server_error": "server_error",
+    "models.source.cooldown.network": "network",
+    "models.source.cooldown.timeout": "network",
+    "models.source.needs_action.oauth_expired": "credential_expired",
+    "models.source.needs_action.credential_revoked": "credential_revoked",
+    "models.source.needs_action.balance_exhausted": "balance_exhausted",
+    "models.source.needs_action.account_banned": "account_banned",
+    "models.source.error.unclassified": "unclassified_error",
+}
+
+
 @dataclass(frozen=True)
 class ModelHubLaunch:
     backend: BackendName
@@ -73,7 +77,6 @@ class ModelHubLaunch:
     source_id: Optional[str] = None
     gateway_base_url: Optional[str] = None
     gateway_token: Optional[str] = None
-    settlement_generation: Optional[int] = field(default=None, repr=False)
 
     @property
     def fingerprint(self) -> str:
@@ -136,10 +139,6 @@ def persisted_launch_identity(launch: ModelHubLaunch | None) -> dict[str, str] |
 
     if launch is None or launch.channel == "direct" or not launch.source_id:
         return None
-    # The attempt's settlement generation is deliberately not persisted: it
-    # indexes the minting runtime's in-memory ledger and means nothing to the
-    # runtime that restores this identity. ``bind_persisted_launch`` supplies the
-    # only generation that is true across runtimes.
     return {
         "backend": launch.backend,
         "channel": launch.channel,
@@ -171,11 +170,6 @@ def bind_persisted_launch(context: Any, payload: object) -> ModelHubLaunch | Non
         target_model=target_model,
         runtime_model=target_model,
         source_id=source_id,
-        # Restoring an identity means the attempt outlived the runtime that
-        # started it, so every attempt this runtime starts is newer. The
-        # pre-attempt generation states exactly that: a later attempt on this
-        # Source rejects this settlement, and an untouched Source still accepts it.
-        settlement_generation=PRE_ATTEMPT_SETTLEMENT_GENERATION,
     )
     bind_launch(context, launch)
     return launch
@@ -252,23 +246,50 @@ def _localized_launch_error(
     requested_model: str,
     error: ModelHubError,
 ) -> ModelHubError:
-    if error.turn_outcome is None:
+    failure = error.data
+    if not isinstance(failure, dict):
         return error
     language = str(
         getattr(getattr(controller, "config", None), "language", "en")
         or "en"
     )
-    detail = render_turn_outcome_copy(error.turn_outcome, language)
-    if detail is None:
-        return error
+    key = str(failure.get("copy_key") or "interrupted")
+    raw_blockers = failure.get("blockers")
+    if isinstance(raw_blockers, list):
+        rendered_blockers = []
+        for blocker in raw_blockers:
+            if not isinstance(blocker, Mapping):
+                continue
+            source = str(blocker.get("source") or "")
+            detail_key = str(blocker.get("detail_key") or "")
+            blocker_reason = str(blocker.get("reason") or "")
+            if blocker_reason in EVENT_REASON_AUTHORITY:
+                detail = event_reason_label(blocker_reason, language)
+            else:
+                reason = _SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
+                detail = (
+                    event_reason_label(reason, language)
+                    if reason is not None
+                    else str(blocker.get("status") or "")
+                )
+            rendered_blockers.append(f"{source}: {detail}")
+        blockers = ", ".join(rendered_blockers)
+    else:
+        blockers = str(raw_blockers or "")
     return ModelHubError(
         error.code,
         status=error.status,
-        detail=detail,
+        detail=i18n_t(
+            f"modelHub.launch.{key}",
+            language,
+            model=failure.get("model") or requested_model,
+            backend=backend,
+            source=failure.get("source") or "",
+            retry_at=failure.get("retry_at") or "",
+            blockers=blockers,
+        ),
         supply_state=error.supply_state,
         data=error.data,
-        blockers=error.blockers,
-        turn_outcome=error.turn_outcome,
     )
 
 
@@ -508,11 +529,7 @@ class ModelHubRuntimeRouter:
             prefix = getattr(record, "prefix", None)
             if isinstance(prefix, str) and prefix:
                 return prefix
-        raise ModelHubError(
-            "engine_down",
-            status=503,
-            turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
-        )
+        raise ModelHubError("engine_down", status=503)
 
     async def _gateway_credentials(
         self,
@@ -538,11 +555,7 @@ class ModelHubRuntimeRouter:
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
         if status.listen_port is None:
-            raise ModelHubError(
-                "engine_down",
-                status=503,
-                turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
-            )
+            raise ModelHubError("engine_down", status=503)
         token = await self.service._engine_call(self.service.adapter.gateway_token())
         return f"http://{status.listen_host}:{status.listen_port}", token
 
@@ -666,31 +679,104 @@ class ModelHubRuntimeRouter:
             now=self.service.now(),
         )
 
+    @staticmethod
+    def _supply_interruption_reason(
+        config: ModelHubConfig,
+        resolution: ModelHubTurnResolution,
+    ) -> EventReason:
+        structural_reason = resolution.structural_blocker_reason
+        if structural_reason in {
+            "route_unconfigured",
+            "source_missing",
+            "model_unsupported",
+            "native_cli_unavailable",
+        }:
+            return cast(EventReason, structural_reason)
+        order = config.effective_source_order(resolution.backend)
+        sources_by_id = {source.id: source for source in config.sources}
+        enabled_sources = [
+            sources_by_id[source_id]
+            for source_id in order
+            if source_id in sources_by_id
+        ]
+        if not enabled_sources:
+            if config.sources and not any(
+                source_eligible_for_backend(source, resolution.backend)
+                for source in config.sources
+            ):
+                return "no_eligible_source"
+            return "no_enabled_source"
+        if not any(
+            source_eligible_for_backend(source, resolution.backend)
+            for source in enabled_sources
+        ):
+            return "no_eligible_source"
+        return "model_unsupported"
+
+    @staticmethod
+    def _launch_failure(
+        config: ModelHubConfig,
+        resolution: ModelHubTurnResolution,
+    ) -> dict[str, Any]:
+        model = resolution.requested_model or resolution.target_model
+        if resolution.route_reason == "route_unconfigured":
+            return {
+                "copy_key": "route_unconfigured",
+                "model": model,
+            }
+        if resolution.supply_status == "waiting":
+            cooling = [
+                source
+                for source in resolution.matching_sources
+                if source.state.status == "cooldown" and source.state.retry_at
+            ]
+            recovery = min(
+                (source.state.retry_at or "" for source in cooling),
+                default="",
+            )
+            return {
+                "copy_key": "waiting",
+                "model": model,
+                "source": ", ".join(source.display_name for source in cooling),
+                "retry_at": recovery,
+            }
+        if resolution.matching_sources:
+            blockers = [
+                {
+                    "source": inspection.source.display_name,
+                    "status": inspection.source.state.status,
+                    "detail_key": inspection.source.state.detail_key,
+                    "reason": inspection.reason,
+                }
+                for inspection in resolution.inspected_hops
+                if inspection.source is not None
+            ]
+            return {
+                "copy_key": "interrupted",
+                "model": model,
+                "blockers": blockers,
+            }
+        reason = ModelHubRuntimeRouter._supply_interruption_reason(config, resolution)
+        return {
+            "copy_key": reason,
+            "model": model,
+        }
+
     def _no_candidate_error(
         self,
         *,
         backend: BackendName,
         requested_model: str,
+        config: ModelHubConfig,
+        resolution: ModelHubTurnResolution,
         process_scope: Optional[str],
         turn_id: Optional[str],
     ) -> ModelHubError:
-        projection_config, projection_resolution = self.service._inspect_terminal_chain(
-            backend=backend,
-            model_id=requested_model,
+        supply_state = (
+            "waiting"
+            if resolution.supply_status == "waiting"
+            else "interrupted"
         )
-        turn_outcome = produce_turn_outcome(
-            (
-                "turn.no_candidate.unconfigured"
-                if projection_resolution.route_unconfigured
-                else "turn.no_candidate.blocked"
-            ),
-            config=projection_config,
-            resolution=projection_resolution,
-        )
-        facts = turn_outcome.supply_facts
-        if facts is None:
-            raise AssertionError("no-candidate outcome must carry supply facts")
-        supply_state = facts.supply_state
         normalized_scope = (
             str(process_scope or "").strip()
             or f"{backend}:untracked"
@@ -702,16 +788,12 @@ class ModelHubRuntimeRouter:
                 turn_id=turn_id,
                 requested_model_id=requested_model,
                 supply_state=supply_state,
-                blockers=exact_hop_blockers(projection_resolution),
             )
         if (
-            not projection_resolution.matching_sources
-            or projection_resolution.structural_blocker_reason is not None
+            not resolution.matching_sources
+            or resolution.structural_blocker_reason is not None
         ):
-            reason = cast(
-                EventReason,
-                supply_interruption_reason(projection_config, projection_resolution),
-            )
+            reason = self._supply_interruption_reason(config, resolution)
             supply_key = (backend, requested_model)
             current_state = ("interrupted", reason)
             if self._last_supply_state.get(supply_key) != current_state:
@@ -727,8 +809,10 @@ class ModelHubRuntimeRouter:
             "mapping_target_unavailable",
             status=409,
             supply_state=supply_state,
-            blockers=exact_hop_blockers(projection_resolution),
-            turn_outcome=turn_outcome,
+            data=self._launch_failure(
+                config,
+                resolution,
+            ),
         )
 
     def settle_turn(
@@ -790,6 +874,8 @@ class ModelHubRuntimeRouter:
             raise self._no_candidate_error(
                 backend=backend,
                 requested_model=requested_model,
+                config=config,
+                resolution=resolution,
                 process_scope=process_scope,
                 turn_id=turn_id,
             )
@@ -811,9 +897,6 @@ class ModelHubRuntimeRouter:
                 target_model=target_model,
                 runtime_model=target_model,
                 source_id=source.id,
-                settlement_generation=self.service._reserve_settlement_generation(
-                    source.id
-                ),
             )
             if self.turn_gateway is not None:
                 self.turn_gateway.correlation.begin_native_attempt(
@@ -875,6 +958,8 @@ class ModelHubRuntimeRouter:
                 raise self._no_candidate_error(
                     backend="opencode",
                     requested_model=requested_model,
+                    config=config,
+                    resolution=resolution,
                     process_scope="opencode:shared-server",
                     turn_id=None,
                 )
@@ -937,15 +1022,14 @@ class ModelHubRuntimeRouter:
         source = next((item for item in config.sources if item.id == launch.source_id), None)
         if source is None:
             return False
-        _reason, persisted = await self.service._settle_fallback_source(
+        await self.service._cooldown(
             source,
             decision,
-            backend=launch.backend,
+            agent=cast(EventAgent, launch.backend),
             model_id=launch.requested_model,
-            settlement_generation=launch.settlement_generation,
         )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
-        return persisted
+        return True
 
     async def prepare_opencode_overlay(self) -> OpenCodeOverlay | None:
         config = self.service.store.load()

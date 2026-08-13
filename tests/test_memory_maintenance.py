@@ -19,7 +19,6 @@ from config.v2_config import MemoryConfig
 from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.clear_journal import MemoryClearJournal
 from core.memory.clear_snapshot_storage import MemoryClearSnapshotStorage
-from core.memory.everos import FakeMemoryProvider
 from core.memory.process import SidecarOwnership
 from core.memory.maintenance import (
     ClearRecoveryResult,
@@ -30,12 +29,7 @@ from core.memory.maintenance import (
 from core.memory.runtime import MemoryRuntime
 from core.memory.snapshot import MemorySnapshotManager
 from core.memory.store import AmbiguousAdd, MemoryStore
-from core.memory.types import (
-    CaptureAccepted,
-    CaptureAttachment,
-    CaptureRequest,
-    CaptureSkipped,
-)
+from core.memory.types import CaptureAccepted, CaptureRequest, CaptureSkipped
 
 
 PRINCIPAL = "u-11111111111111111111111111111111"
@@ -556,92 +550,159 @@ async def test_clear_converges_for_provider_tree_deeper_than_recursion_limit(
     await memory_runtime_factory.close(runtime)
 
 
-async def test_clear_discards_manual_required_fence_and_allows_new_delivery(
+async def test_clear_refuses_manual_required_fence_without_mutating_evidence(
     monkeypatch,
     tmp_path: Path,
     memory_runtime_factory,
 ) -> None:
-    """MEMORY-CLEAR-201: Clear settles an unknown add without replaying it."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = memory_runtime_factory(MemoryConfig(enabled=True), effective_home=tmp_path)
-    provider_timeout = asyncio.Event()
+    worker = runtime.module._worker
 
-    async def time_out_add(_capture) -> None:
-        await provider_timeout.wait()
+    class RetainedProcess:
+        running = True
 
-    provider = FakeMemoryProvider(add_hook=time_out_add)
-    runtime.module.replace_provider(provider)
-    runtime.module._worker.coordinator._add_timeout_seconds = 0.001
-    source_root = tmp_path / "attachments" / "avibe"
-    source_root.mkdir(parents=True, mode=0o700)
-    source_root.chmod(0o700)
-    attachment_path = source_root / "evidence.txt"
-    attachment_path.write_bytes(b"retained ambiguous attachment")
-    attachment_path.chmod(0o600)
-    first = CaptureRequest(
-        source_message_id="timed-out-add",
-        session_id="session",
-        principal_id=PRINCIPAL,
-        project_id=PROJECT,
-        provenance="user_input",
-        text="ambiguous payload",
-        occurred_at_ms=1,
-        attachments=(
-            CaptureAttachment(
-                kind="doc",
-                name=attachment_path.name,
-                uri=attachment_path.as_uri(),
-                ext="txt",
-            ),
-        ),
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    process = RetainedProcess()
+    runtime._process = process
+    _enqueue(runtime, "manual-clear-source")
+    claimed = runtime._store.claim_due(
+        lease_owner="manual-clear-worker",
+        now="2026-01-01T00:00:00.000Z",
     )
-    assert await runtime.module.capture(first) == CaptureAccepted()
-    assert await runtime.module.drain() == 1
-
-    ambiguous = runtime._store.list_queue_rows()
-    assert len(ambiguous) == 1
-    assert ambiguous[0].state == "manual_required"
-    assert ambiguous[0].payload_text == "ambiguous payload"
-    assert ambiguous[0].attachment_bundle_id is not None
-    attachment_bundle_id = ambiguous[0].attachment_bundle_id
-    assert runtime._store.has_manual_required_fence() is True
-    session = runtime._store.get_session_flush_state(ambiguous[0].provider_session_ref)
-    assert session is not None and session.state == "manual_required"
+    assert claimed is not None
     assert (await runtime.maintenance_payload())["can_clear"] is True
 
-    async def resume_without_sidecar() -> None:
-        runtime.module.resume_claims()
+    surface_payloads = {
+        tmp_path / "memory/everos-root/sentinel.json": b'{"provider":"keep"}',
+        tmp_path / "memory/call-log/call-log.db": b"call-log-must-remain",
+        tmp_path / "memory/attachments/bundles/a/00.txt": b"attachment-must-remain",
+    }
+    for path, payload in surface_payloads.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
 
-    _replace_runtime_port(runtime, resume=resume_without_sidecar)
+    def settlement_evidence() -> list[tuple]:
+        with sqlite3.connect(runtime._store.path) as connection:
+            return connection.execute(
+                """
+                SELECT provider_session_ref, epoch, generation, operation_kind,
+                       operation_token, observation, request_id, error_code
+                FROM memory_flush_settlements
+                ORDER BY rowid
+                """
+            ).fetchall()
+
+    journal = _maintenance(runtime)._clear_journal
+    manager = _maintenance(runtime)._snapshot_manager
+    assert journal is not None
+    assert manager is not None
+    with sqlite3.connect(journal.database_path) as connection:
+        before_journal_operations = connection.execute(
+            "SELECT COUNT(*) FROM clear_operation"
+        ).fetchone()[0]
+
+    evidence: dict[str, object] = {}
+    events: list[str] = []
+
+    async def settle_while_quiescing(**_kwargs) -> bool:
+        worker.pause_claims()
+        events.append("quiesce")
+        settled = runtime._store.settle(
+            claimed,
+            AmbiguousAdd(add_request_id="manual-clear-request"),
+            lease_owner="manual-clear-worker",
+            now=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        )
+        assert settled.state == "manual_required"
+        evidence["meta"] = runtime._store.ensure_meta()
+        evidence["queue"] = runtime._store.list_queue_rows()
+        evidence["session"] = runtime._store.get_session_flush_state(
+            claimed.provider_session_ref
+        )
+        evidence["settlements"] = settlement_evidence()
+        return True
+
+    original_has_manual_required_fence = runtime._store.has_manual_required_fence
+
+    def observed_manual_required_fence() -> bool:
+        events.append("manual-check")
+        return original_has_manual_required_fence()
+
+    resume_calls = 0
+    original_resume_claims = worker.resume_claims
+
+    def counted_resume_claims() -> None:
+        nonlocal resume_calls
+        resume_calls += 1
+        events.append("resume")
+        original_resume_claims()
+
+    stop_worker_calls = 0
+    original_stop_worker = runtime._stop_worker
+
+    async def observed_stop_worker() -> None:
+        nonlocal stop_worker_calls
+        stop_worker_calls += 1
+
+    start_calls: list[str] = []
+    original_start = journal.start
+
+    def observed_start(**kwargs):
+        start_calls.append("start")
+        return original_start(**kwargs)
+
+    monkeypatch.setattr(worker, "pause_and_wait", settle_while_quiescing)
+    monkeypatch.setattr(
+        runtime._store,
+        "has_manual_required_fence",
+        observed_manual_required_fence,
+    )
+    monkeypatch.setattr(worker, "resume_claims", counted_resume_claims)
+    monkeypatch.setattr(runtime, "_stop_worker", observed_stop_worker)
+    monkeypatch.setattr(journal, "start", observed_start)
+
     result = await _clear(runtime, operator_ref="user:owner")
 
-    assert result["status"] == "completed"
-    assert runtime._store.list_queue_rows() == ()
-    assert runtime._store.has_manual_required_fence() is False
-    assert not (
-        tmp_path / "memory" / "attachments" / "bundles" / attachment_bundle_id
-    ).exists()
-    assert attachment_path.read_bytes() == b"retained ambiguous attachment"
-
-    provider.add_hook = None
-    second = CaptureRequest(
-        source_message_id="after-clear",
-        session_id="session",
-        principal_id=PRINCIPAL,
-        project_id=PROJECT,
-        provenance="user_input",
-        text="deliver after clear",
-        occurred_at_ms=2,
-    )
-    assert await runtime.module.capture(second) == CaptureAccepted()
-    assert await runtime.module.drain() == 1
-    delivered = runtime._store.list_queue_rows()
-    assert len(delivered) == 1 and delivered[0].state == "delivered"
-    assert delivered[0].provider_session_ref.epoch == result["epoch"]
-    assert [capture.text for capture in provider.captures] == [
-        "ambiguous payload",
-        "deliver after clear",
-    ]
+    assert result == {
+        "status": "failed",
+        "error": "memory_clear_failed",
+        "recovery": None,
+    }
+    assert events == ["quiesce", "manual-check", "resume"]
+    assert resume_calls == 1
+    assert stop_worker_calls == 0
+    assert runtime.module._worker is worker
+    assert worker._claims_paused is False
+    assert runtime._process is process
+    assert process.stop_calls == 0
+    assert start_calls == []
+    queue = evidence["queue"]
+    session = evidence["session"]
+    settlements = evidence["settlements"]
+    assert isinstance(queue, tuple) and queue[0].state == "manual_required"
+    assert session is not None and session.state == "manual_required"
+    assert isinstance(settlements, list) and settlements[0][5] == "manual_required"
+    assert runtime._store.ensure_meta() == evidence["meta"]
+    assert runtime._store.list_queue_rows() == queue
+    assert runtime._store.get_session_flush_state(claimed.provider_session_ref) == session
+    assert settlement_evidence() == settlements
+    with sqlite3.connect(journal.database_path) as connection:
+        after_journal_operations = connection.execute(
+            "SELECT COUNT(*) FROM clear_operation"
+        ).fetchone()[0]
+    assert after_journal_operations == before_journal_operations == 0
+    assert journal.get_open_operation() is None
+    assert not manager.snapshot_root.exists()
+    for path, payload in surface_payloads.items():
+        assert path.read_bytes() == payload
+    assert (await runtime.maintenance_payload())["can_clear"] is False
+    monkeypatch.setattr(runtime, "_stop_worker", original_stop_worker)
     await memory_runtime_factory.close(runtime)
 
 

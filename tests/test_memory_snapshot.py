@@ -821,11 +821,6 @@ def test_streaming_manifest_accepts_extended_unicode_path_record(tmp_path: Path)
         assert entries.entry(relative_path) is not None
 
 
-# The >256KB path record forces roughly 1046 directory levels, and snapshot
-# verification is currently quadratic in tree depth, so this one test costs about
-# 162 seconds of CPU and exceeds the unit shards' per-file cap. Issue #1380 owns
-# the verification speed-up that lets this move back into the unit shards.
-@pytest.mark.integration
 def test_snapshot_accepts_path_record_beyond_256k_and_clear_gc(
     tmp_path: Path,
 ) -> None:

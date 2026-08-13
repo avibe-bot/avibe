@@ -6,10 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.handlers.model_hub.service import (
-    PRE_ATTEMPT_SETTLEMENT_GENERATION,
-    ModelHubError,
-)
+from core.handlers.model_hub.service import ModelHubError
 from modules.agents.model_hub import (
     ModelHubLaunch,
     build_claude_hub_env,
@@ -39,7 +36,7 @@ def hub_launch(**overrides) -> ModelHubLaunch:
 
 
 def test_persisted_launch_identity_keeps_exact_route_target_without_mapping_flag():
-    launch = hub_launch(settlement_generation=17)
+    launch = hub_launch()
     assert persisted_launch_identity(launch) == {
         "backend": "claude",
         "channel": "hub",
@@ -49,60 +46,15 @@ def test_persisted_launch_identity_keeps_exact_route_target_without_mapping_flag
     assert "via_mapping" not in persisted_launch_identity(launch)
 
 
-def test_context_binding_restores_the_pre_attempt_settlement_generation():
+def test_context_binding_restores_only_concrete_source_launch():
     context = SimpleNamespace()
-    launch = hub_launch(settlement_generation=17)
+    launch = hub_launch()
     bind_launch(context, launch)
     assert launch_for_context(context) == launch
     restored = bind_persisted_launch(context, persisted_launch_identity(launch))
     assert restored is not None
     assert restored.target_model == "concrete-upstream-id"
     assert restored.requested_model == "concrete-upstream-id"
-    # The minting runtime's generation indexes a ledger this runtime no longer
-    # has, so the restored attempt settles as older than anything this runtime
-    # can start rather than inheriting a number it cannot compare.
-    assert restored.settlement_generation == PRE_ATTEMPT_SETTLEMENT_GENERATION
-    assert restored.settlement_generation < 1
-
-
-@pytest.mark.parametrize(
-    "released_payload",
-    [
-        pytest.param(
-            {
-                "backend": "opencode",
-                "channel": "native_cli",
-                "source_id": "src_released01",
-                "target_model": "released-model",
-            },
-            id="released_shape",
-        ),
-        pytest.param(
-            {
-                "backend": "opencode",
-                "channel": "native_cli",
-                "source_id": "src_released01",
-                "target_model": "released-model",
-                "settlement_generation": 4096,
-                "unknown_future_key": "ignored",
-            },
-            id="shape_carrying_a_foreign_generation",
-        ),
-    ],
-)
-def test_persisted_launch_identity_loads_released_shapes_without_certifying_freshness(
-    released_payload,
-):
-    # Persisted-shape discipline: an on-disk identity from any release loads
-    # cleanly, and no value inside it can make a restored attempt look newer
-    # than the attempts this runtime started.
-    context = SimpleNamespace()
-    restored = bind_persisted_launch(context, json.loads(json.dumps(released_payload)))
-
-    assert restored is not None
-    assert restored.source_id == "src_released01"
-    assert restored.settlement_generation == PRE_ATTEMPT_SETTLEMENT_GENERATION
-    assert launch_for_context(context) == restored
 
 
 def test_direct_launch_does_not_inject_provider_credentials():

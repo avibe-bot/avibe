@@ -1,11 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import type { VibeAgentBrief, WorkbenchProject } from '../context/ApiContext';
-import {
-  createLatestAgentProjectionLoader,
-  isProjectDefaultAgentAvailable,
-  projectDefaultAgentRoute,
-} from './useNewSession';
+import { isProjectDefaultAgentAvailable, projectDefaultAgentRoute } from './useNewSession';
 
 const project = (agentName: string): WorkbenchProject =>
   ({
@@ -72,75 +68,5 @@ describe('projectDefaultAgentRoute', () => {
       model: 'claude-opus-5',
       reasoning_effort: 'high',
     });
-  });
-});
-
-const deferred = <T,>() => {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-};
-
-type AgentProjection = {
-  ok: boolean;
-  agents: VibeAgentBrief[];
-  default_agent_name: string | null;
-};
-
-describe('createLatestAgentProjectionLoader', () => {
-  it('ignores a pre-revocation response that completes after the refreshed projection', async () => {
-    const stale = deferred<AgentProjection>();
-    const refreshed = deferred<AgentProjection>();
-    const fetchAgents = vi
-      .fn()
-      .mockImplementationOnce(() => stale.promise)
-      .mockImplementationOnce(() => refreshed.promise);
-    const applyProjection = vi.fn();
-    const setProjectionLoaded = vi.fn();
-    const loader = createLatestAgentProjectionLoader(fetchAgents, applyProjection, setProjectionLoaded);
-
-    const initialLoad = loader.load();
-    const authorizationRefresh = loader.load();
-    expect(setProjectionLoaded.mock.calls).toEqual([[false], [false]]);
-    const authorizedProjection = {
-      ok: true,
-      agents: [agent({ id: 'still-authorized', name: 'still-authorized' })],
-      default_agent_name: 'still-authorized',
-    };
-    refreshed.resolve(authorizedProjection);
-    await authorizationRefresh;
-
-    stale.resolve({
-      ok: true,
-      agents: [agent({ id: 'revoked', name: 'revoked' })],
-      default_agent_name: 'revoked',
-    });
-    await initialLoad;
-
-    expect(applyProjection).toHaveBeenCalledTimes(1);
-    expect(applyProjection).toHaveBeenCalledWith(authorizedProjection);
-    expect(setProjectionLoaded.mock.calls).toEqual([[false], [false], [true]]);
-  });
-
-  it('marks a failed latest projection resolved without applying stale data', async () => {
-    const failed = deferred<AgentProjection>();
-    const applyProjection = vi.fn();
-    const setProjectionLoaded = vi.fn();
-    const loader = createLatestAgentProjectionLoader(
-      () => failed.promise,
-      applyProjection,
-      setProjectionLoaded,
-    );
-
-    const load = loader.load();
-    failed.reject(new Error('network failed'));
-    await load;
-
-    expect(applyProjection).toHaveBeenCalledWith(null);
-    expect(setProjectionLoaded.mock.calls).toEqual([[false], [true]]);
   });
 });

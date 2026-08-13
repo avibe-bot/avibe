@@ -5,11 +5,8 @@ import {
   Bot,
   ChevronDown,
   ChevronRight,
-  ExternalLink,
   FileText,
   Funnel,
-  Lock,
-  LockKeyhole,
   Loader2,
   Maximize2,
   Pencil,
@@ -17,7 +14,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  ShieldCheck,
   Star,
   Trash2,
   Upload,
@@ -27,16 +23,7 @@ import {
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
-import type {
-  VibeAgentBrief,
-  VibeAgentFull,
-  VibeAgentOnboardingResult,
-  VibeAgentUpdatePayload,
-} from '../../context/ApiContext';
-import {
-  canUseRuntimeSurfaces,
-  useInstanceAuthorization,
-} from '../../context/InstanceAuthorizationContext';
+import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
 import { AgentGraphTab } from './AgentGraphTab';
 import { useToast } from '../../context/ToastContext';
 import { NewAgentDialog } from './NewAgentDialog';
@@ -53,7 +40,6 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
-import { canEditAgentDefinitions } from '../../lib/remoteAuth';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
@@ -82,12 +68,6 @@ export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const {
-    capabilities,
-    remote,
-    hasTemporaryUnrestrictedOrgAccess,
-  } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
   // General navigation (sidebar / nav / capability tabs) resumes the tab the user
   // left the page on; a fresh browser opens Definitions. A contextual caller that
   // needs a specific tab passes ``?tab=`` and wins over the memory — the tab it
@@ -120,31 +100,9 @@ export const AgentsPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [backendFilter, setBackendFilter] = useState<Backend | 'all'>('all');
   const [importing, setImporting] = useState<Backend | null>(null);
-  const [onboardingInventory, setOnboardingInventory] = useState<VibeAgentOnboardingResult | null>(null);
-  const [onboardingExpanded, setOnboardingExpanded] = useState(false);
-  const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
-  const visibleTabs = remote && !canUseRuntime ? (['definitions'] as const) : AGENTS_TAB_ORDER;
-  const activeTab = remote && !canUseRuntime ? 'definitions' : agentsTab;
-  const canEditAgents = canEditAgentDefinitions({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
-
-  const refreshOnboarding = useCallback(async () => {
-    if (!capabilities.can_manage_agents && !canUseRuntime) {
-      setOnboardingInventory(null);
-      return;
-    }
-    try {
-      const result = await api.getVibeAgentOnboarding();
-      setOnboardingInventory(result.available ? result : null);
-    } catch {
-      setOnboardingInventory(null);
-    }
-  }, [api, capabilities.can_manage_agents, canUseRuntime]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -170,10 +128,6 @@ export const AgentsPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    void refreshOnboarding();
-  }, [refreshOnboarding]);
-
   // Auto-select the default agent on first load so the detail panel has
   // something to show — eliminates the empty "select an agent" state
   // that confused users on first visit.
@@ -192,10 +146,6 @@ export const AgentsPage: React.FC = () => {
   }, [selected]);
 
   const fetchRunningActiveCount = useCallback(async () => {
-    if (remote && !canUseRuntime) {
-      setRunningActiveCount(null);
-      return;
-    }
     try {
       const result = await api.getRunningAgents();
       if (result.ok && result.counts) {
@@ -210,7 +160,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setRunningActiveCount(null);
     }
-  }, [api, canUseRuntime, remote]);
+  }, [api]);
 
   // Keep the badge fresh on every tab (including 运行) so it never depends on
   // the graph view's filters.
@@ -219,10 +169,6 @@ export const AgentsPage: React.FC = () => {
   }, [fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (remote && !canUseRuntime) {
-      setEventBridgeConnected(false);
-      return;
-    }
     return api.connectWorkbenchEvents({
       onConnected: (data) => {
         if (data.source === 'controller') {
@@ -239,12 +185,10 @@ export const AgentsPage: React.FC = () => {
       onTurnStart: () => fetchRunningActiveCount(),
       onTurnEnd: () => fetchRunningActiveCount(),
       onSessionStatus: () => fetchRunningActiveCount(),
-      onAuthorizationChanged: () => void refresh(),
     });
-  }, [api, canUseRuntime, fetchRunningActiveCount, refresh, remote]);
+  }, [api, fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (remote && !canUseRuntime) return;
     // Reconcile the badge even while SSE is connected: process death / orphan /
     // reap is a sampled snapshot with no run/session SSE event, so a slow
     // liveness poll keeps the count fresh (30s connected, 8s disconnected),
@@ -294,7 +238,7 @@ export const AgentsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [canUseRuntime, eventBridgeConnected, fetchRunningActiveCount, remote]);
+  }, [eventBridgeConnected, fetchRunningActiveCount]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
@@ -339,14 +283,13 @@ export const AgentsPage: React.FC = () => {
 
   const onCreated = (agent: VibeAgentFull) => {
     refresh().then(() => setSelected(agent));
-    void refreshOnboarding();
   };
 
 
-  const updateField = async (patch: VibeAgentUpdatePayload) => {
+  const updateField = async (patch: Partial<VibeAgentFull>) => {
     if (!selected) return;
     try {
-      const result = await api.updateVibeAgent(selected.name, patch);
+      const result = await api.updateVibeAgent(selected.name, patch as any);
       if (result.ok) {
         setSelected(result.agent);
         refresh();
@@ -370,7 +313,6 @@ export const AgentsPage: React.FC = () => {
   // and the new one is missing. Refresh and re-select the renamed agent.
   const onRenamed = (newName: string) => {
     refresh().then(() => selectAgent(newName));
-    void refreshOnboarding();
   };
 
   const onDelete = async () => {
@@ -382,7 +324,6 @@ export const AgentsPage: React.FC = () => {
       if (result.ok) {
         setSelected(null);
         refresh();
-        void refreshOnboarding();
       } else if (result.message) {
         setError(result.message);
       }
@@ -409,7 +350,6 @@ export const AgentsPage: React.FC = () => {
           showToast(t('agents.importSuccess', { imported, skipped }), 'success');
         }
         refresh();
-        void refreshOnboarding();
       } else {
         showToast(
           t('agents.importFailed', { error: result.message || result.error || result.code || 'unknown' }),
@@ -420,25 +360,6 @@ export const AgentsPage: React.FC = () => {
       showToast(t('agents.importFailed', { error: errorMessage(err) ?? String(err) }), 'error');
     } finally {
       setImporting(null);
-    }
-  };
-
-  const onOnboardAgents = async () => {
-    if (onboardingSubmitting) return;
-    setOnboardingSubmitting(true);
-    try {
-      const result = await api.onboardVibeAgents();
-      setOnboardingInventory(result);
-      showToast(
-        result.sync?.ok === false
-          ? t('agents.onboarding.savedPending')
-          : t('agents.onboarding.saved', { count: result.created ?? 0 }),
-        result.sync?.ok === false ? 'warning' : 'success',
-      );
-    } catch (err) {
-      showToast(t('agents.onboarding.failed', { error: errorMessage(err) ?? String(err) }), 'error');
-    } finally {
-      setOnboardingSubmitting(false);
     }
   };
 
@@ -454,26 +375,17 @@ export const AgentsPage: React.FC = () => {
         title={t('agents.title')}
         subtitle={t('agents.subtitle', { count: agents.length })}
         actions={
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            onClick={() => {
-              void refresh();
-              void refreshOnboarding();
-            }}
-            disabled={loading}
-          >
+          <Button type="button" variant="outline" size="xs" onClick={() => refresh()} disabled={loading}>
             <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
             {t('common.refresh')}
           </Button>
         }
       />
 
-      {/* Local runtime diagnostics are intentionally unavailable remotely. */}
+      {/* Sub-tab row: Definitions | Running */}
       <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
-        {visibleTabs.map((key) => {
-          const active = activeTab === key;
+        {AGENTS_TAB_ORDER.map((key) => {
+          const active = agentsTab === key;
           return (
             <button
               key={key}
@@ -509,22 +421,11 @@ export const AgentsPage: React.FC = () => {
         })}
       </div>
 
-      {/* The run graph follows the temporary Organization runtime policy. */}
-      {(!remote || canUseRuntime) && activeTab === 'running' && <AgentGraphTab />}
-
-      {activeTab === 'definitions' && onboardingInventory && (
-        <OrganizationAgentOnboarding
-          inventory={onboardingInventory}
-          expanded={onboardingExpanded}
-          submitting={onboardingSubmitting}
-          className={detailOpen ? 'max-lg:hidden' : undefined}
-          onExpandedChange={setOnboardingExpanded}
-          onOnboard={onOnboardAgents}
-        />
-      )}
+      {/* 运行 tab body — the run graph (replaces the old flat running list). */}
+      {agentsTab === 'running' && <AgentGraphTab />}
 
       {/* Toolbar — design.pen Imduv: search + backend filter + spacer + Import + 新建 Agent */}
-      <div className={clsx('flex flex-wrap items-center gap-2.5', activeTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
+      <div className={clsx('flex flex-wrap items-center gap-2.5', agentsTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
         <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
@@ -536,27 +437,18 @@ export const AgentsPage: React.FC = () => {
         </div>
         <BackendFilter value={backendFilter} onChange={setBackendFilter} />
         <div className="flex-1" />
-        {canEditAgents ? (
-          <>
-            <Button type="button" variant="outline" size="xs" onClick={() => setShowGlobalPrompts(true)}>
-              <FileText className="size-3.5" />
-              {t('globalPrompts.button')}
-            </Button>
-            <ImportMenu onImport={onImport} importing={importing} />
-            <Button type="button" variant="brand" size="xs" onClick={() => setShowNew(true)}>
-              <Plus />
-              {t('agents.newAgent')}
-            </Button>
-          </>
-        ) : (
-          <Badge variant="secondary" title={t('agents.remoteReadOnlyHint')}>
-            <Lock className="size-3" />
-            {t('agents.remoteReadOnly')}
-          </Badge>
-        )}
+        <Button type="button" variant="outline" size="xs" onClick={() => setShowGlobalPrompts(true)}>
+          <FileText className="size-3.5" />
+          {t('globalPrompts.button')}
+        </Button>
+        <ImportMenu onImport={onImport} importing={importing} />
+        <Button type="button" variant="brand" size="xs" onClick={() => setShowNew(true)}>
+          <Plus />
+          {t('agents.newAgent')}
+        </Button>
       </div>
 
-      {activeTab === 'definitions' && error && (
+      {agentsTab === 'definitions' && error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
           {error}
         </div>
@@ -571,7 +463,7 @@ export const AgentsPage: React.FC = () => {
       <div
         className={clsx(
           'grid gap-5',
-          activeTab === 'running' && 'hidden',
+          agentsTab === 'running' && 'hidden',
           // `minmax(0,1fr)` + `min-w-0` keep the list column shrinkable; bare
           // `1fr` would let a long agent row push the fixed detail card off-screen.
           selected ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]' : 'grid-cols-1',
@@ -611,12 +503,10 @@ export const AgentsPage: React.FC = () => {
             <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface px-6 py-16 text-center">
               <Bot className="size-8 text-muted" />
               <div className="text-[14px] font-semibold text-foreground">{t('agents.empty')}</div>
-              {canEditAgents && (
-                <Button type="button" variant="brand" size="sm" onClick={() => setShowNew(true)}>
-                  <Plus />
-                  {t('agents.newAgent')}
-                </Button>
-              )}
+              <Button type="button" variant="brand" size="sm" onClick={() => setShowNew(true)}>
+                <Plus />
+                {t('agents.newAgent')}
+              </Button>
             </div>
           )}
 
@@ -632,7 +522,6 @@ export const AgentsPage: React.FC = () => {
             <AgentDetailPanel
               agent={selected}
               isDefault={defaultName === selected.name}
-              canEdit={canEditAgents}
               onChange={updateField}
               onSetDefault={onSetDefault}
               onRenamed={onRenamed}
@@ -643,131 +532,9 @@ export const AgentsPage: React.FC = () => {
         )}
       </div>
 
-      {canEditAgents && (
-        <>
-          <NewAgentDialog open={showNew} onClose={() => setShowNew(false)} onCreated={onCreated} />
-          <GlobalPromptsDialog open={showGlobalPrompts} onClose={() => setShowGlobalPrompts(false)} />
-        </>
-      )}
+      <NewAgentDialog open={showNew} onClose={() => setShowNew(false)} onCreated={onCreated} />
+      <GlobalPromptsDialog open={showGlobalPrompts} onClose={() => setShowGlobalPrompts(false)} />
     </div>
-  );
-};
-
-interface OrganizationAgentOnboardingProps {
-  inventory: VibeAgentOnboardingResult;
-  expanded: boolean;
-  submitting: boolean;
-  className?: string;
-  onExpandedChange: (expanded: boolean) => void;
-  onOnboard: () => void;
-}
-
-const OrganizationAgentOnboarding: React.FC<OrganizationAgentOnboardingProps> = ({
-  inventory,
-  expanded,
-  submitting,
-  className,
-  onExpandedChange,
-  onOnboard,
-}) => {
-  const { t } = useTranslation();
-  const counts = inventory.counts;
-  const onboarded = counts.private + counts.published;
-
-  return (
-    <section className={clsx('border-y border-border bg-surface-2/60 py-4', className)}>
-      <div className="flex flex-col gap-4 px-1 sm:px-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-          <div className="flex min-w-0 flex-1 items-start gap-3">
-            <span className="grid size-9 shrink-0 place-items-center rounded-md border border-mint/30 bg-mint-soft text-mint">
-              <ShieldCheck className="size-4" />
-            </span>
-            <div className="min-w-0">
-              <div className="text-[13px] font-bold text-foreground">{t('agents.onboarding.title')}</div>
-              <div className="mt-0.5 text-[11px] leading-5 text-muted">
-                {t('agents.onboarding.summary', {
-                  total: counts.total,
-                  custom: counts.custom,
-                  system: counts.system,
-                })}
-              </div>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={counts.not_onboarded > 0 ? 'warning' : 'secondary'}>
-              {t('agents.onboarding.notOnboardedCount', { count: counts.not_onboarded })}
-            </Badge>
-            <Badge variant="secondary">{t('agents.onboarding.privateCount', { count: counts.private })}</Badge>
-            <Badge variant="success">{t('agents.onboarding.publishedCount', { count: counts.published })}</Badge>
-            {counts.conflicts > 0 && (
-              <Badge variant="destructive">{t('agents.onboarding.conflictCount', { count: counts.conflicts })}</Badge>
-            )}
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-          <button
-            type="button"
-            aria-expanded={expanded}
-            onClick={() => onExpandedChange(!expanded)}
-            className="flex min-w-0 items-center gap-2 text-[12px] font-medium text-foreground hover:text-mint"
-          >
-            <ChevronRight className={clsx('size-3.5 shrink-0 transition-transform', expanded && 'rotate-90')} />
-            {t('agents.onboarding.inventory', { count: counts.total })}
-          </button>
-          <div className="flex-1" />
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            onClick={onOnboard}
-            disabled={submitting || counts.not_onboarded === 0}
-          >
-            {submitting ? <Loader2 className="animate-spin" /> : <LockKeyhole />}
-            {counts.not_onboarded > 0
-              ? t('agents.onboarding.onboardPrivate')
-              : t('agents.onboarding.onboarded')}
-          </Button>
-          {inventory.console_url && onboarded > 0 && (
-            <Button asChild variant="accent" size="xs">
-              <a href={inventory.console_url} target="_blank" rel="noreferrer">
-                <ExternalLink />
-                {t('agents.onboarding.manageAccess')}
-              </a>
-            </Button>
-          )}
-        </div>
-
-        {expanded && (
-          <div className="divide-y divide-border border-t border-border">
-            {inventory.agents.map((agent) => {
-              const system = isSystemAgent(agent);
-              const statusVariant =
-                agent.status === 'published'
-                  ? 'success'
-                  : agent.status === 'not_onboarded'
-                    ? 'warning'
-                    : agent.status === 'managed_elsewhere'
-                      ? 'destructive'
-                      : 'secondary';
-              return (
-                <div key={agent.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2.5">
-                  <div className="min-w-0">
-                    <div className="truncate text-[12px] font-semibold text-foreground">{agent.name}</div>
-                    <div className="truncate font-mono text-[10px] text-muted">
-                      {agent.backend} · {system ? t('agents.onboarding.system') : t('agents.onboarding.custom')}
-                    </div>
-                  </div>
-                  <Badge variant={statusVariant} className="max-w-[45vw]">
-                    <span className="truncate">{t(`agents.onboarding.status.${agent.status}`)}</span>
-                  </Badge>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </section>
   );
 };
 
@@ -796,15 +563,9 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, onSel
       <div className="flex flex-1 flex-col gap-1">
         <div className="flex items-center gap-2">
           <span className="text-[14px] font-semibold text-foreground">{agent.name}</span>
-          {isDefault && (
-            <Badge variant="success" className="px-1.5 py-0 text-[9px] font-mono uppercase">
-              {t('common.default')}
-            </Badge>
-          )}
+          {isDefault && <Badge variant="success" className="px-1.5 py-0 text-[9px] font-mono uppercase">DEFAULT</Badge>}
           {isSystemAgent(agent) && (
-            <Badge variant="secondary" className="px-1.5 py-0 text-[9px] font-mono uppercase">
-              {t('common.systemSession')}
-            </Badge>
+            <Badge variant="secondary" className="px-1.5 py-0 text-[9px] font-mono uppercase">SYSTEM</Badge>
           )}
         </div>
         {description && <div className="text-[11px] text-muted">{description}</div>}
@@ -908,9 +669,7 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
 interface DetailProps {
   agent: VibeAgentFull;
   isDefault: boolean;
-  /** False on remote instances, where every mutating control is unavailable. */
-  canEdit: boolean;
-  onChange: (patch: VibeAgentUpdatePayload) => void;
+  onChange: (patch: Partial<VibeAgentFull>) => void;
   onSetDefault: () => Promise<void>;
   onRenamed: (newName: string) => void;
   onDelete: () => void;
@@ -921,14 +680,11 @@ interface DetailProps {
 // Name → Backend (read-only) → Model (Combobox) → Reasoning effort →
 // System Prompt (collapsible) → footer Run / Delete. Name is editable
 // for user agents. The backend renames the row and its references atomically;
-// system agents keep their locked identity. On a remote instance `canEdit` is
-// false and the panel degrades to a read-only view of the same fields.
-const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, onChange, onSetDefault, onRenamed, onDelete, onClose }) => {
+// system agents keep their locked identity.
+const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, onSetDefault, onRenamed, onDelete, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  // System agents are locked everywhere; remote access locks every agent.
-  const locked = isSystemAgent(agent) || !canEdit;
   const system = isSystemAgent(agent);
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
@@ -989,11 +745,6 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
     );
   }, [agent.backend, api]);
 
-  const lockHint = system
-    ? t('agents.detail.systemLocked')
-    : canEdit
-      ? undefined
-      : t('agents.remoteReadOnlyHint');
   const systemPromptTokens = estimateTokens(systemPrompt);
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
@@ -1006,7 +757,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       setName(agent.name);
       return;
     }
-    if (locked) {
+    if (system) {
       setName(agent.name);
       return;
     }
@@ -1074,8 +825,6 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         <Switch
           checked={agent.enabled}
           onCheckedChange={(next) => onChange({ enabled: next })}
-          disabled={!canEdit}
-          title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
           label={t('agents.detail.enabled')}
         />
       </div>
@@ -1099,7 +848,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
             <Star className="size-3" />
             {t('agents.detail.defaultActive')}
           </Badge>
-        ) : !canEdit ? null : (
+        ) : (
           <Button
             type="button"
             variant="outline"
@@ -1126,11 +875,11 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
               if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
               if (e.key === 'Escape') setName(agent.name);
             }}
-            disabled={locked || renaming}
-            title={lockHint}
+            disabled={system || renaming}
+            title={system ? t('agents.detail.systemLocked') : undefined}
             className="flex-1 bg-transparent text-[13px] font-medium text-foreground outline-none disabled:cursor-not-allowed disabled:opacity-70"
           />
-          {!locked && <Pencil className="size-3 shrink-0 text-muted" />}
+          {!system && <Pencil className="size-3 shrink-0 text-muted" />}
         </div>
       </Field>
 
@@ -1142,12 +891,12 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           onBlur={() => {
-            if (!locked && description !== (agent.description ?? '')) {
+            if (!system && description !== (agent.description ?? '')) {
               onChange({ description: description.trim() || null });
             }
           }}
-          disabled={locked}
-          title={lockHint}
+          disabled={system}
+          title={system ? t('agents.detail.systemLocked') : undefined}
           rows={2}
           placeholder={t('agents.detail.descriptionPlaceholder')}
           className="text-[13px] disabled:cursor-not-allowed disabled:opacity-70"
@@ -1169,44 +918,33 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         </div>
       </Field>
 
-      {/* Model — Combobox with chevron + searchable + custom values. Callers
-          outside the current runtime policy get the Backend field's locked
-          treatment. */}
+      {/* Model — Combobox with chevron + searchable + custom values. */}
       <Field label={t('agents.detail.model')}>
-        {!canEdit ? (
-          <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-2">
-            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground">
-              {model || t('agents.noConfig')}
-            </span>
-            <Lock className="size-3 shrink-0 text-muted" />
-          </div>
-        ) : (
-          <Combobox
-            options={modelOptions}
-            value={model}
-            onValueChange={(next) => {
-              const value = next.trim();
-              if (!value) return;
-              setModel(value);
-              const patch: Partial<VibeAgentFull> = { model: value };
-              // If the new model can't use the current effort, fall back to a
-              // valid one and persist it in the same patch — otherwise the record
-              // keeps an effort the model can't run (Codex P2).
-              const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
-              if (effort && !opts.includes(effort)) {
-                const fallback = opts.includes('medium') ? 'medium' : opts[0];
-                if (fallback) {
-                  setEffort(fallback);
-                  patch.reasoning_effort = fallback;
-                }
+        <Combobox
+          options={modelOptions}
+          value={model}
+          onValueChange={(next) => {
+            const value = next.trim();
+            if (!value) return;
+            setModel(value);
+            const patch: Partial<VibeAgentFull> = { model: value };
+            // If the new model can't use the current effort, fall back to a
+            // valid one and persist it in the same patch — otherwise the record
+            // keeps an effort the model can't run (Codex P2).
+            const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
+            if (effort && !opts.includes(effort)) {
+              const fallback = opts.includes('medium') ? 'medium' : opts[0];
+              if (fallback) {
+                setEffort(fallback);
+                patch.reasoning_effort = fallback;
               }
-              onChange(patch);
-            }}
-            placeholder={t('agents.detail.modelPlaceholder')}
-            emptyText={t('agents.detail.modelEmpty')}
-            allowCustomValue
-          />
-        )}
+            }
+            onChange(patch);
+          }}
+          placeholder={t('agents.detail.modelPlaceholder')}
+          emptyText={t('agents.detail.modelEmpty')}
+          allowCustomValue
+        />
       </Field>
 
       {/* Reasoning effort — design.pen LsjxT */}
@@ -1221,16 +959,13 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
               <button
                 key={opt}
                 type="button"
-                disabled={!canEdit}
-                title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
                 onClick={() => {
                   setEffort(opt);
                   onChange({ reasoning_effort: opt });
                 }}
                 className={clsx(
-                  'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition disabled:cursor-not-allowed',
+                  'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition',
                   active ? 'bg-mint-soft font-bold text-mint' : 'font-medium text-muted hover:text-foreground',
-                  !canEdit && !active && 'opacity-70 hover:text-muted',
                 )}
               >
                 {opt}
@@ -1267,31 +1002,27 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
           </button>
           {/* Expand into the full editor modal (large input + Markdown
               edit/preview) — the shared EditorDialog primitive. */}
-          {canEdit && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-9 shrink-0 text-muted hover:text-foreground"
-              onClick={() => setEditorOpen(true)}
-              aria-label={t('agents.detail.systemPromptExpand')}
-              title={t('agents.detail.systemPromptExpand')}
-            >
-              <Maximize2 className="size-3.5" />
-            </Button>
-          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-9 shrink-0 text-muted hover:text-foreground"
+            onClick={() => setEditorOpen(true)}
+            aria-label={t('agents.detail.systemPromptExpand')}
+            title={t('agents.detail.systemPromptExpand')}
+          >
+            <Maximize2 className="size-3.5" />
+          </Button>
         </div>
         {systemPromptOpen && (
           <Textarea
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
             onBlur={() => {
-              if (canEdit && systemPrompt !== (agent.system_prompt ?? '')) {
+              if (systemPrompt !== (agent.system_prompt ?? '')) {
                 onChange({ system_prompt: systemPrompt.trim() || null });
               }
             }}
-            readOnly={!canEdit}
-            title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
             rows={6}
             placeholder={t('agents.create.systemPromptPlaceholder')}
             className="text-[12px]"
@@ -1303,44 +1034,38 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
           button was redundant with the top Enable toggle and was
           removed. */}
       <div className="flex items-center gap-2 pt-2">
-        {canEdit ? (
-          <>
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              onClick={() => setRunning(true)}
-              className="border-mint/40 bg-mint-soft text-mint hover:brightness-110"
-            >
-              <Play className="size-3" />
-              {t('agents.detail.run')}
-            </Button>
-            <div className="flex-1" />
-            {!system ? (
-              <Button
-                type="button"
-                variant="destructive-soft"
-                size="xs"
-                onClick={onDelete}
-              >
-                <Trash2 className="size-3" />
-                {t('common.delete')}
-              </Button>
-            ) : (
-              <span className="text-[10px] text-muted">{t('agents.detail.systemLocked')}</span>
-            )}
-          </>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          onClick={() => setRunning(true)}
+          className="border-mint/40 bg-mint-soft text-mint hover:brightness-110"
+        >
+          <Play className="size-3" />
+          {t('agents.detail.run')}
+        </Button>
+        <div className="flex-1" />
+        {!system ? (
+          <Button
+            type="button"
+            variant="destructive-soft"
+            size="xs"
+            onClick={onDelete}
+          >
+            <Trash2 className="size-3" />
+            {t('common.delete')}
+          </Button>
         ) : (
-          <span className="text-[10px] text-muted">{t('agents.remoteReadOnlyHint')}</span>
+          <span className="text-[10px] text-muted">{t('agents.detail.systemLocked')}</span>
         )}
       </div>
 
-      {canEdit && running && <RunAgentDialog agent={agent} onClose={() => setRunning(false)} />}
+      {running && <RunAgentDialog agent={agent} onClose={() => setRunning(false)} />}
 
       {/* Full-screen system-prompt editor — large input + Markdown preview.
           Opening from collapsed or expanded both jump straight here. */}
       <EditorDialog
-        open={canEdit && editorOpen}
+        open={editorOpen}
         onClose={() => setEditorOpen(false)}
         title={t('agents.detail.systemPrompt')}
         description={t('agents.detail.systemPromptEditorHint')}

@@ -12,9 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, AsyncIterator, Final, Literal, Mapping, Protocol, Sequence
+from typing import Any, AsyncIterator, Literal, Mapping, Protocol, Sequence
 
-ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
 SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
 OBSERVATION_OUTCOMES = (
     "observed",
@@ -88,8 +87,6 @@ class RawCallOutcome:
     stream_started: bool
     model_id: str
     source_id: str
-    error_type: str | None = None  # raw upstream error type, if present
-    error_candidates: tuple[str, ...] = ()  # unsorted raw type/code candidates
 
 
 class ObservationOutcome(str, Enum):
@@ -300,23 +297,14 @@ class OAuthFlowState:
 class InvokeHandle(Protocol):
     """One in-flight upstream call.
 
-    ``stream`` is None when a streaming failure settles before its first model
-    output (the outcome is then immediately awaitable). When ``stream`` is not
-    None, the settlement owner closes it before reading the outcome. A
-    never-started stream may have no outcome after closing;
-    ``outcome_available`` is the non-blocking guard.
-    For streaming calls, ``stream_started`` becomes true only when the
-    protocol taxonomy observes the first model output; transport metadata and
-    error frames remain pre-output. ``close_stream()`` is idempotent.
+    ``stream`` is None iff the call failed before the first byte (outcome is
+    then immediately awaitable). When ``stream`` is not None, the caller must
+    consume it; ``outcome()`` resolves after the stream ends and reports
+    ``stream_started=True`` — per spec §4.2 no transparent retry then.
     """
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None: ...
-
-    @property
-    def outcome_available(self) -> bool: ...
-
-    async def close_stream(self) -> None: ...
 
     async def outcome(self) -> RawCallOutcome: ...
 

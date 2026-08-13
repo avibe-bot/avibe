@@ -98,7 +98,7 @@ describe('intendedFiles walks the whole repo-owned TypeScript tree', () => {
     try {
       expect(intendedFiles(tree)).toContain('src/keep/real.ts');
     } finally {
-      fs.rmSync(path.join(tree, 'src/loop'), { force: true, recursive: true });
+      fs.rmSync(path.join(tree, 'src/loop'), { force: true });
     }
   });
 });

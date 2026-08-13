@@ -103,64 +103,6 @@ scope_settings = Table(
     Index("ix_scope_settings_backend_model", "agent_backend", "model"),
 )
 
-project_access_policies = Table(
-    "project_access_policies",
-    metadata,
-    Column("project_id", String, primary_key=True),
-    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
-    Column("organization_id", String, nullable=True),
-    Column("mode", String, nullable=False, server_default="inherit"),
-    Column("policy_revision", Integer, nullable=False, server_default="0"),
-    Column("last_applied_control_plane_revision", Integer, nullable=False, server_default="0"),
-    Column("created_at", String, nullable=False),
-    Column("updated_at", String, nullable=False),
-    UniqueConstraint("scope_id", name="uq_project_access_policies_scope"),
-    CheckConstraint("mode in ('inherit', 'restricted')", name="ck_project_access_policies_mode"),
-    CheckConstraint("policy_revision >= 0", name="ck_project_access_policies_revision"),
-    CheckConstraint(
-        "last_applied_control_plane_revision >= 0",
-        name="ck_project_access_policies_control_revision",
-    ),
-    Index("ix_project_access_policies_organization", "organization_id"),
-)
-
-project_access_bindings = Table(
-    "project_access_bindings",
-    metadata,
-    Column(
-        "project_id",
-        String,
-        ForeignKey("project_access_policies.project_id", ondelete="CASCADE"),
-        primary_key=True,
-    ),
-    Column("principal_kind", String, primary_key=True),
-    Column("principal_value", String, primary_key=True),
-    Column("access_role", String, nullable=False),
-    Column("created_at", String, nullable=False),
-    CheckConstraint(
-        "principal_kind in ('email', 'email_domain', 'organization_group')",
-        name="ck_project_access_bindings_kind",
-    ),
-    CheckConstraint("access_role in ('editor', 'viewer')", name="ck_project_access_bindings_role"),
-    Index(
-        "ix_project_access_bindings_principal",
-        "principal_kind",
-        "principal_value",
-    ),
-)
-
-remote_access_authorizations = Table(
-    "remote_access_authorizations",
-    metadata,
-    Column("id", String, primary_key=True),
-    Column("instance_id", String, nullable=False),
-    Column("subject", String, nullable=False),
-    Column("claims_json", Text, nullable=False),
-    Column("expires_at", Integer, nullable=False),
-    Column("created_at", Integer, nullable=False),
-    Index("ix_remote_access_authorizations_expires", "expires_at"),
-)
-
 auth_codes = Table(
     "auth_codes",
     metadata,
@@ -878,14 +820,14 @@ show_session_events.append_constraint(
 # file referenced by an agent reply (or uploaded by the user) is registered
 # here and served back over ``/api/media/<token>``. The URL carries only the
 # opaque ``token`` — never a filesystem path, never a session — so it is stable
-# within the referencing session and the browser can cache it. ``content_type`` /
+# across messages/sessions and the browser can cache it. ``content_type`` /
 # ``file_ext`` are stored so the response and the UI file card don't have to
 # re-derive them; ``kind`` (image|file) selects inline-image vs download-card
 # rendering; ``source`` distinguishes agent output from user uploads so one
 # table serves both. ``size_bytes`` + ``mtime_ns`` are the content fingerprint:
 # :func:`storage.media_service.register` reuses an existing token for the same
-# session and (local_path, size_bytes, mtime_ns), while a different session or
-# changed file mints a fresh token.
+# (local_path, size_bytes, mtime_ns) so a re-referenced file keeps one cacheable
+# URL, while a changed file mints a fresh token (busting the browser cache).
 media_objects = Table(
     "media_objects",
     metadata,
@@ -911,26 +853,8 @@ media_objects = Table(
     Column("revoked_at", String, nullable=True),
     Index("ix_media_objects_session", "session_id"),
     Index("ix_media_objects_scope_created", "scope_id", "created_at"),
-    # Backs the fingerprint prefix of register()'s session-scoped dedup lookup.
+    # Backs register()'s dedup lookup (machine-global content fingerprint).
     Index("ix_media_objects_dedup", "local_path", "size_bytes", "mtime_ns"),
-)
-
-# A legacy media token could be reused across multiple sessions before token
-# dedup became session-scoped. Keep every trusted referencing session so those
-# historical attachments remain readable without treating the opaque token as
-# authorization for an arbitrary session.
-media_object_references = Table(
-    "media_object_references",
-    metadata,
-    Column("token", String, ForeignKey("media_objects.token", ondelete="CASCADE"), primary_key=True),
-    Column(
-        "session_id",
-        String,
-        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
-        primary_key=True,
-    ),
-    Column("created_at", String, nullable=False),
-    Index("ix_media_object_references_session", "session_id"),
 )
 
 # Per-install browser Push API subscriptions for PWA Web Push. These are
@@ -956,57 +880,6 @@ web_push_subscriptions = Table(
     UniqueConstraint("endpoint", name="uq_web_push_subscriptions_endpoint"),
     Index("ix_web_push_subscriptions_user_enabled", "user_key", "enabled"),
     Index("ix_web_push_subscriptions_user_device", "user_key", "device_id"),
-)
-
-# Resource ACLs are local enforcement state. The hosted control plane receives
-# only safe metadata and desired revisions; it never stores local resource
-# content or secret values.
-resource_access_policies = Table(
-    "resource_access_policies",
-    metadata,
-    Column("resource_kind", String, primary_key=True),
-    Column("resource_id", String, primary_key=True),
-    Column("organization_id", String, nullable=True),
-    Column("owner_user_id", String, nullable=True),
-    Column("owner_email", String, nullable=True),
-    Column("access_level", String, nullable=False, server_default=text("'private'")),
-    Column("created_by_user_id", String, nullable=True),
-    Column("updated_by_user_id", String, nullable=True),
-    Column("policy_revision", Integer, nullable=False, server_default=text("0")),
-    Column("last_applied_control_plane_revision", Integer, nullable=True),
-    Column("created_at", String, nullable=False),
-    Column("updated_at", String, nullable=False),
-    CheckConstraint(
-        "resource_kind in ('agent', 'vault_secret', 'skill', 'show_page')",
-        name="ck_resource_access_policies_kind",
-    ),
-    CheckConstraint(
-        "access_level in ('public', 'scope', 'private')",
-        name="ck_resource_access_policies_access_level",
-    ),
-    Index(
-        "ix_resource_access_policies_org_level",
-        "organization_id",
-        "access_level",
-        "resource_kind",
-    ),
-    Index("ix_resource_access_policies_owner", "owner_user_id", "resource_kind"),
-)
-
-resource_access_groups = Table(
-    "resource_access_groups",
-    metadata,
-    Column("resource_kind", String, primary_key=True),
-    Column("resource_id", String, primary_key=True),
-    Column("group_id", String, primary_key=True),
-    Column("organization_id", String, nullable=False),
-    Column("created_at", String, nullable=False),
-    ForeignKeyConstraint(
-        ["resource_kind", "resource_id"],
-        ["resource_access_policies.resource_kind", "resource_access_policies.resource_id"],
-        ondelete="CASCADE",
-    ),
-    Index("ix_resource_access_groups_group", "organization_id", "group_id", "resource_kind"),
 )
 
 # Vaults — secret management for agents.

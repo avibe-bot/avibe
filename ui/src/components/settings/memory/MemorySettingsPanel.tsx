@@ -230,36 +230,14 @@ export const MemorySettingsPanel: React.FC<{
         setConfirmRebuildOpen(false);
         setPendingPatch(null);
       } else {
-        const failure = res as {
-          error?: string;
-          diagnostic?: {
-            message?: string;
-            http_status?: number | null;
-            provider_error_code?: string | null;
-          };
-          rebuild_required?: boolean;
-        };
-        setError(
-          memoryErrorMessage(
-            t,
-            failure.error,
-            failure.diagnostic?.message,
-            failure.diagnostic?.http_status,
-            failure.diagnostic?.provider_error_code,
-          ),
-        );
+        setError(memoryErrorMessage(t, (res as { error?: string })?.error));
         // Confirmed rebuild keeps the candidate on failure. Exit the confirm
         // modal so a second click cannot re-submit a now-non-identity patch;
         // Retry rebuild is the recovery control under the pending marker.
         setConfirmRebuildOpen(false);
         setPendingPatch(null);
-        const validationFailure =
-          failure.error === 'memory_embedding_unavailable' ||
-          failure.error === 'memory_llm_unavailable';
-        if (!validationFailure || failure.rebuild_required === true) {
-          onReloadSettings();
-          onReloadMaintenance();
-        }
+        onReloadSettings();
+        onReloadMaintenance();
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
@@ -308,15 +286,7 @@ export const MemorySettingsPanel: React.FC<{
         onReloadSettings();
         onReloadMaintenance();
       } else {
-        setError(
-          memoryErrorMessage(
-            t,
-            res.error,
-            res.diagnostic?.message,
-            res.diagnostic?.http_status,
-            res.diagnostic?.provider_error_code,
-          ),
-        );
+        setError(memoryErrorMessage(t, res.error));
         onReloadSettings();
         onReloadMaintenance();
       }

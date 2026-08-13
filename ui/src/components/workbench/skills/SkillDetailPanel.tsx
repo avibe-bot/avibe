@@ -19,7 +19,6 @@ export interface SkillDetailPanelProps {
   onToggleBackend: (backend: Backend, next: boolean) => void;
   onUpdate?: () => void;
   onRemove: () => void;
-  canManage?: boolean;
 }
 
 function Eyebrow({ children }: { children: ReactNode }) {
@@ -43,7 +42,6 @@ export function SkillDetailPanel({
   onToggleBackend,
   onUpdate,
   onRemove,
-  canManage = true,
 }: SkillDetailPanelProps) {
   const { t } = useTranslation();
   const linked = new Set(backendsFromAgents(skill.agents));
@@ -99,12 +97,7 @@ export function SkillDetailPanel({
                 {busy ? (
                   <Loader2 className="size-3.5 animate-spin text-muted" />
                 ) : (
-                  <Switch
-                    checked={on}
-                    disabled={!canManage}
-                    onCheckedChange={(next) => onToggleBackend(backend, next)}
-                    label={BACKEND_LABEL[backend]}
-                  />
+                  <Switch checked={on} onCheckedChange={(next) => onToggleBackend(backend, next)} label={BACKEND_LABEL[backend]} />
                 )}
               </div>
             );
@@ -112,7 +105,7 @@ export function SkillDetailPanel({
         </div>
       </div>
 
-      {canManage ? <div className="flex items-center gap-2 pt-1">
+      <div className="flex items-center gap-2 pt-1">
         {updateAvailable ? (
           <Button type="button" variant="brand-gold" size="xs" onClick={onUpdate} disabled={updating} title={versionDelta}>
             {updating ? <Loader2 className="size-3 animate-spin" /> : <ArrowUp className="size-3" />}
@@ -124,7 +117,7 @@ export function SkillDetailPanel({
           <Trash2 className="size-3" />
           {t('skills.detail.remove')}
         </Button>
-      </div> : null}
+      </div>
     </div>
   );
 }

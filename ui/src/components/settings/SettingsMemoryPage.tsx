@@ -15,7 +15,6 @@ import { MemorySettingsPanel } from './memory/MemorySettingsPanel';
 import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
 import { useMemoryResource } from './memory/useMemoryResource';
 import { useApi } from '../../context/ApiContext';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type {
   MemoryMaintenanceResult,
   MemoryCascadeHealth,
@@ -25,7 +24,6 @@ import type {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { memoryErrorMessage } from '../../lib/memoryRead';
-import { canAdministerMemory } from '../../lib/remoteAuth';
 
 type MemoryTab = 'processingRecord' | 'profile' | 'search' | 'settings';
 
@@ -37,11 +35,6 @@ export const SettingsMemoryPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
-  const canAdminister = canAdministerMemory({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
 
   const [tab, setTab] = useState<MemoryTab>('processingRecord');
   const [clearOpen, setClearOpen] = useState(false);
@@ -229,13 +222,10 @@ export const SettingsMemoryPage: React.FC = () => {
       { id: 'processingRecord' as const, label: t('memory.tabs.processingRecord') },
       { id: 'profile' as const, label: t('memory.tabs.profile') },
       { id: 'search' as const, label: t('memory.tabs.search') },
-      ...(canAdminister
-        ? [{ id: 'settings' as const, label: t('memory.tabs.settings') }]
-        : []),
+      { id: 'settings' as const, label: t('memory.tabs.settings') },
     ],
-    [canAdminister, t],
+    [t],
   );
-  const activeTab = tabs.some((entry) => entry.id === tab) ? tab : 'processingRecord';
 
   const rebuildRequired = settings?.rebuild_required === true;
   const settingsPanel = settings ? (
@@ -274,7 +264,7 @@ export const SettingsMemoryPage: React.FC = () => {
       title={t('memory.title')}
       subtitle={t('memory.subtitle')}
     >
-      {!remoteUnavailable && canAdminister && settings?.enabled === true ? (
+      {!remoteUnavailable && settings?.enabled === true ? (
         <div className="flex justify-end">
           <Button
             variant="secondary"
@@ -323,19 +313,17 @@ export const SettingsMemoryPage: React.FC = () => {
           ) : null}
           <div data-testid="memory-tabs-scroll" className="max-w-full overflow-x-auto pb-1">
             <div className="min-w-max">
-              <SegmentedRadio value={activeTab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
+              <SegmentedRadio value={tab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
             </div>
           </div>
 
-          {activeTab === 'processingRecord' ? (
+          {tab === 'processingRecord' ? (
             <div className="flex flex-col gap-6">
               <MemoryStatusPanel
                 status={status}
                 failures={processingRecord?.anomalies.items ?? []}
                 recovery={processingRecord?.maintenance.clear_recovery ?? null}
                 logSections={processingRecord?.sources ?? null}
-                providerChecks={processingRecord?.provider_checks?.items ?? []}
-                providerChecksSource={processingRecord?.provider_checks?.source ?? null}
                 statusLoading={!processingRecordRead.loaded || processingRecordRead.loading}
                 failuresLoading={!processingRecordRead.loaded || processingRecordRead.loading}
                 statusError={processingRecordRead.error}
@@ -347,13 +335,9 @@ export const SettingsMemoryPage: React.FC = () => {
                 refreshPending={processingRecordRead.loading}
                 recoveryAction={recoveryAction}
                 onRefresh={refreshProcessingRecord}
-                onResumeClear={(operationId) => {
-                  if (canAdminister) void runClearRecovery('resume', operationId);
-                }}
-                onAbortClear={(operationId) => {
-                  if (canAdminister) void runClearRecovery('abort', operationId);
-                }}
-                repairSupported={canAdminister && settings.enabled === true && settings.repair_available === true}
+                onResumeClear={(operationId) => void runClearRecovery('resume', operationId)}
+                onAbortClear={(operationId) => void runClearRecovery('abort', operationId)}
+                repairSupported={settings.enabled === true && settings.repair_available === true}
                 repairBusy={repairBusy}
                 mutationBusy={repairMutationBusy}
                 repairError={repairError}
@@ -378,11 +362,11 @@ export const SettingsMemoryPage: React.FC = () => {
             </div>
           ) : null}
 
-          {activeTab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
+          {tab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
 
-          {activeTab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
+          {tab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
 
-          {canAdminister && activeTab === 'settings' &&
+          {tab === 'settings' &&
             (!settingsRead.loaded && !settings ? (
               <div className="flex items-center gap-2 px-1 text-sm text-muted">
                 <Loader2 className="size-4 animate-spin" />

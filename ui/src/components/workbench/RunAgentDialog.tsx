@@ -34,10 +34,9 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
       .listProjects()
       .then((result) => {
         if (cancelled) return;
-        const chatProjects = result.projects.filter((project) => project.capabilities.can_chat);
-        setProjects(chatProjects);
-        if (chatProjects.length > 0) {
-          const sorted = [...chatProjects].sort((a, b) => {
+        setProjects(result.projects);
+        if (result.projects.length > 0) {
+          const sorted = [...result.projects].sort((a, b) => {
             const aTs = a.last_active_at || a.created_at;
             const bTs = b.last_active_at || b.created_at;
             return bTs.localeCompare(aTs);
@@ -128,7 +127,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
             >
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.display_name}
+                  {p.display_name} · {p.folder_path}
                 </option>
               ))}
             </Select>
