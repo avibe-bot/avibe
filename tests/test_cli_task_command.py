@@ -820,9 +820,10 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     assert payload["help_command"] == "vibe task list"
 
 
-def test_remote_task_add_is_rejected_without_persisting_definition(
+def test_remote_editor_task_add_persists_authorization_context(
     tmp_path: Path,
     monkeypatch,
+    capsys,
 ) -> None:
     # ``patch.dict(..., clear=False)`` below pins only the five ids this test names, so
     # the ORIGIN half of the contract (platform/channel/session_key/...) leaked in from
@@ -864,11 +865,14 @@ def test_remote_task_add_is_rejected_without_persisting_definition(
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch("vibe.cli._task_store", return_value=store),
     ):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+        result = cli.cmd_task_add(args)
 
-    assert result == 1
-    assert payload["code"] == "remote_autonomous_harness_disabled"
-    assert cli.ScheduledTaskStore(store_path).list_tasks() == []
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["definition"]["metadata"]["resource_user_context"][
+        "vibe_instance_role"
+    ] == "editor"
+    assert len(cli.ScheduledTaskStore(store_path).list_tasks()) == 1
 
 
 def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:

@@ -36,9 +36,10 @@ def _boom(*_args, **_kwargs):
 
 
 def test_list_degrades_to_global_with_flag(folderless, monkeypatch):
-    async def fake_list(*, scope, project_dir=None, backends=None):
+    async def fake_list(*, scope, project_dir=None, backends=None, user_context=None):
         assert scope == "global"
         assert project_dir is None
+        assert user_context.is_instance_owner
         return {"ok": True, "skills": [{"name": "demo", "scope": "global"}]}
 
     monkeypatch.setattr(api, "list_skills", fake_list)
@@ -100,8 +101,9 @@ def test_check_returns_empty(folderless, monkeypatch):
 def test_upload_drops_project_cwd(folderless, monkeypatch):
     seen = {}
 
-    async def fake_upload(payload, *, project_dir=None):
+    async def fake_upload(payload, *, project_dir=None, user_context=None):
         seen["project_dir"] = project_dir
+        seen["is_instance_owner"] = user_context.is_instance_owner
         return {"ok": True, "skills": [], "dir": "/tmp/askill-upload-x"}
 
     monkeypatch.setattr(api, "upload_skill_zip", fake_upload)
@@ -115,14 +117,25 @@ def test_upload_drops_project_cwd(folderless, monkeypatch):
 
     assert res.status_code == 200
     assert res.get_json()["ok"] is True
-    assert seen["project_dir"] is None  # the project cwd was dropped, not errored
+    assert seen == {
+        "project_dir": None,
+        "is_instance_owner": True,
+    }
 
 
 def test_list_preserves_project_id_for_real_project(monkeypatch):
-    async def fake_list(*, scope, project_dir=None, backends=None, project_id=None):
+    async def fake_list(
+        *,
+        scope,
+        project_dir=None,
+        backends=None,
+        project_id=None,
+        user_context=None,
+    ):
         assert scope == "project"
         assert project_dir == "/tmp/project"
         assert project_id == "proj-real"
+        assert user_context.is_instance_owner
         return {"ok": True, "skills": [{"name": "demo", "scope": "project"}]}
 
     def fake_resolve(project_id):
@@ -144,9 +157,16 @@ def test_list_preserves_project_id_for_real_project(monkeypatch):
 def test_upload_preserves_project_id_for_real_project(monkeypatch):
     seen = {}
 
-    async def fake_upload(payload, *, project_dir=None, project_id=None):
+    async def fake_upload(
+        payload,
+        *,
+        project_dir=None,
+        project_id=None,
+        user_context=None,
+    ):
         seen["project_dir"] = project_dir
         seen["project_id"] = project_id
+        seen["is_instance_owner"] = user_context.is_instance_owner
         return {"ok": True, "skills": [], "dir": "/tmp/askill-upload-x"}
 
     def fake_resolve(project_id):
@@ -166,7 +186,11 @@ def test_upload_preserves_project_id_for_real_project(monkeypatch):
 
     assert res.status_code == 200
     assert res.get_json()["ok"] is True
-    assert seen == {"project_dir": "/tmp/project", "project_id": "proj-real"}
+    assert seen == {
+        "project_dir": "/tmp/project",
+        "project_id": "proj-real",
+        "is_instance_owner": True,
+    }
 
 
 @pytest.mark.parametrize(

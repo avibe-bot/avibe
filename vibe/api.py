@@ -12373,7 +12373,7 @@ async def upload_skill_zip(
     from vibe.authorization import require_instance_role
 
     context = resolve_resource_access_context() if user_context is None else user_context
-    require_instance_role(context, "owner")
+    require_instance_role(context, "editor")
 
     max_b64 = 24 * 1024 * 1024  # ~18 MB archive — skills are tiny; cap the body.
     max_uncompressed = 64 * 1024 * 1024

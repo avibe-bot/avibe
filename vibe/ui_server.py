@@ -8706,6 +8706,10 @@ def _session_runtime_projection(
         if isinstance(raw_activities, list)
         else []
     )
+    if authorization_context is not None and not authorization_context.has_role("editor"):
+        activities = [
+            item for item in activities if item.get("item_kind") == "backend_activity"
+        ]
     projection: dict[str, Any] = {
         # Retained as a read-only compatibility alias for older clients.
         "in_flight": None if foreground == "unknown" else foreground == "running",
