@@ -759,6 +759,19 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
                     "updated_at": f"2026-08-13T12:0{index}:00Z",
                 }
             )
+        harness.upsert_scheduled_task(
+            {
+                "id": "task-missing-agent",
+                "name": "missing agent task",
+                "prompt": "run missing",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "agent_name": "deleted-legacy-agent",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
     finally:
         harness.close()
 
@@ -870,6 +883,7 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
     watches = client.get("/api/harness/watches", **remote).get_json()["watches"]
     assert {row["id"] for row in tasks} == {"task-allowed", "task-unbound-allowed"}
     assert {row["id"] for row in watches} == {"watch-allowed"}
+    assert "task-missing-agent" not in {row["id"] for row in tasks}
 
     paged = client.get("/api/harness/tasks?page=1&limit=1", **remote).get_json()
     assert len(paged["tasks"]) == 1

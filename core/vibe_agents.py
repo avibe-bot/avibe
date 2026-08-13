@@ -256,7 +256,12 @@ def ensure_agent_selection_access(
     if row is None:
         if missing_is_error:
             raise LookupError("Agent not found")
-        return None
+        # Owners keep the pre-catalog fallback for historical backend names.
+        # Everyone else must resolve a real Agent row; a missing selector is
+        # not an authorization grant.
+        if context.is_instance_owner:
+            return None
+        raise VibeAgentAccessError("Agent access is not permitted.")
 
     agent = VibeAgentStore._from_row(row)
     if not resource_access_service.can_use_resource(
