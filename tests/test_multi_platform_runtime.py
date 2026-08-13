@@ -690,8 +690,16 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     active_polls = []
     active_poll_updates = []
     recovery_order = []
+    overlay_reservation = object()
+    configured_overlays = []
+    active_registrations = []
+    released_reservations = []
 
     class _Server:
+        async def configure_model_hub_overlay(self, overlay):
+            configured_overlays.append(overlay)
+            return overlay_reservation
+
         async def ensure_running(self):
             return None
 
@@ -716,8 +724,11 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
             recovery_order.append("prompt")
             calls.append(kwargs)
 
-        async def mark_run_active(self, session_id):
-            return None
+        async def mark_run_active(self, session_id, *, overlay_reservation=None):
+            active_registrations.append((session_id, overlay_reservation))
+
+        async def release_model_hub_overlay_reservation(self, reservation):
+            released_reservations.append(reservation)
 
         async def mark_run_inactive(self, session_id):
             return None
@@ -845,6 +856,9 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["attempt_id"] == ATTEMPT_ID
     assert "message_id" not in calls[0]
     assert recovery_order[:3] == ["poll", "prompt", "accepted"]
+    assert configured_overlays == [None]
+    assert active_registrations == [("oc-session", overlay_reservation)]
+    assert released_reservations == []
     assert active_poll_updates[0][0] == "oc-session"
     assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]

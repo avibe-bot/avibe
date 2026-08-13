@@ -21,7 +21,10 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.message_output import stop_output_for, terminal_output_for
 from core.processing_indicator import STOPPED_REACTION_EMOJI
-from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.native_dispatch_phase import (
+    mark_backend_dispatch_attempted,
+    prewrite_user_stop_requested,
+)
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
@@ -857,6 +860,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         poll_server: _SteeringAwareOpenCodeServer | None = None
         model_hub_overlay: OpenCodeOverlay | None = None
         model_hub_launch: ModelHubLaunch | None = None
+        model_hub_overlay_reservation: object | None = None
+        server = None
         # Bind early: get_or_create_session_id (below) can raise BEFORE assigning
         # session_id (a transient server error now that get_session raises on
         # non-404), and the error-cleanup paths reference session_id — keep it
@@ -880,10 +885,24 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             server = await self._get_server()
             configure_overlay = getattr(server, "configure_model_hub_overlay", None)
             if callable(configure_overlay):
-                await configure_overlay(model_hub_overlay)
+                model_hub_overlay_reservation = await configure_overlay(
+                    model_hub_overlay
+                )
             await server.ensure_running()
             activation_identity = self._attach_server_activation(server)
+        except asyncio.CancelledError:
+            await self._finish_prestart_cancellation(
+                request,
+                server,
+                model_hub_overlay_reservation,
+            )
+            raise
         except Exception as e:
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+            model_hub_overlay_reservation = None
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
             await emit_backend_failure(
                 self.controller,
@@ -896,12 +915,39 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
 
-        await self._delete_ack(request)
-        await self._session_manager.ensure_working_dir(request.working_path)
+        try:
+            await self._delete_ack(request)
+            await self._session_manager.ensure_working_dir(request.working_path)
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                await self._finish_prestart_cancellation(
+                    request,
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            else:
+                await self._release_model_hub_overlay_reservation(
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            model_hub_overlay_reservation = None
+            raise
 
         try:
             session_id = await self._session_manager.get_or_create_session_id(request, server)
+        except asyncio.CancelledError:
+            await self._finish_prestart_cancellation(
+                request,
+                server,
+                model_hub_overlay_reservation,
+            )
+            raise
         except OpenCodeResumeUnavailableError as e:
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+            model_hub_overlay_reservation = None
             # The previous session is gone server-side — surface it as a terminal
             # ERROR result (outbound chokepoint turns the dot red), don't silently
             # fork a fresh session and lose context.
@@ -916,6 +962,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
         except Exception as e:
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+            model_hub_overlay_reservation = None
             # A transient/transport/auth failure while acquiring the session
             # (get_session now raises on non-404, Codex P2): surface it as a
             # terminal error result instead of letting it propagate unhandled or be
@@ -934,6 +985,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
         if not session_id:
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+            model_hub_overlay_reservation = None
             await emit_backend_failure(
                 self.controller,
                 request.context,
@@ -945,18 +1001,32 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
 
-        self._session_manager.set_request_session(
-            request.base_session_id,
-            session_id,
-            request.working_path,
-            request.session_key,
-        )
-        self._session_manager.set_agent_session_id(
-            request.base_session_id,
-            _target_agent_session_id(request),
-        )
-
-        self._session_manager.mark_initialized(session_id)
+        try:
+            self._session_manager.set_request_session(
+                request.base_session_id,
+                session_id,
+                request.working_path,
+                request.session_key,
+            )
+            self._session_manager.set_agent_session_id(
+                request.base_session_id,
+                _target_agent_session_id(request),
+            )
+            self._session_manager.mark_initialized(session_id)
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                await self._finish_prestart_cancellation(
+                    request,
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            else:
+                await self._release_model_hub_overlay_reservation(
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            model_hub_overlay_reservation = None
+            raise
 
         try:
             override_agent, override_model, override_reasoning = self.controller.get_opencode_overrides(request.context)
@@ -1098,7 +1168,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if launch_identity is not None:
                 processing_indicator["model_hub_launch"] = launch_identity
 
-            await server.mark_run_active(session_id)
+            if model_hub_overlay_reservation is None:
+                await server.mark_run_active(session_id)
+            else:
+                await server.mark_run_active(
+                    session_id,
+                    overlay_reservation=model_hub_overlay_reservation,
+                )
+                model_hub_overlay_reservation = None
             run_registered = True
             # Persist the complete recovery address before the first native write.
             # A crash after OpenCode accepts the exact attempt part can now rebuild
@@ -1252,7 +1329,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request,
                 terminal_emoji=(
                     STOPPED_REACTION_EMOJI
-                    if self.consume_user_stop_intent(request.base_session_id)
+                    if self._claim_user_stop_receipt(request)
                     else None
                 ),
             )
@@ -1356,6 +1433,51 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     self._steering_states.pop(request.base_session_id, None)
             if run_registered:
                 await server.mark_run_inactive(session_id)
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+
+    @staticmethod
+    async def _release_model_hub_overlay_reservation(
+        server: Any,
+        reservation: object | None,
+    ) -> None:
+        if server is None or reservation is None:
+            return
+        release = getattr(server, "release_model_hub_overlay_reservation", None)
+        if not callable(release):
+            return
+        try:
+            await release(reservation)
+        except Exception:
+            logger.warning(
+                "Failed to release OpenCode Model Hub overlay reservation",
+                exc_info=True,
+            )
+
+    async def _finish_prestart_cancellation(
+        self,
+        request: AgentRequest,
+        server: Any,
+        reservation: object | None,
+    ) -> None:
+        await self._release_model_hub_overlay_reservation(server, reservation)
+        await self._remove_ack_reaction(
+            request,
+            terminal_emoji=(
+                STOPPED_REACTION_EMOJI
+                if self._claim_user_stop_receipt(request)
+                else None
+            ),
+        )
+
+    def _claim_user_stop_receipt(self, request: AgentRequest) -> bool:
+        """Recognize adapter-local and shared prewrite Stop ownership."""
+
+        return self.consume_user_stop_intent(
+            request.base_session_id
+        ) or prewrite_user_stop_requested(request.context)
 
     def additional_steer_targets(self, session_id: str) -> list[ActiveSteerTarget]:
         """Expose restored poll owners that did not pass through AgentService."""

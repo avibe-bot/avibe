@@ -33,7 +33,10 @@ from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_turn_sink_key,
 )
-from core.native_dispatch_phase import backend_dispatch_attempted
+from core.native_dispatch_phase import (
+    backend_dispatch_attempted,
+    mark_prewrite_user_stop,
+)
 from core.run_settlement import (
     NON_COMPLETING_TURN_SETTLEMENTS,
     SETTLEMENTS_WITHOUT_RESULT,
@@ -1768,6 +1771,7 @@ class SessionTurnManager:
         delivery_id: str,
         *,
         attempted_turn_id: str | None = None,
+        reason: str | None = None,
     ) -> DeliveryResult:
         """Return the exact post-transition Delivery instead of a cached claim."""
 
@@ -1787,6 +1791,7 @@ class SessionTurnManager:
             str(delivery.get("message_id") or "").strip() or None,
             state,
             turn_id or None,
+            reason,
             # Every caller reaches here right after dispatching a Turn this
             # Delivery participates in, so an owned state means this input
             # started the work rather than joining a Turn already running.
@@ -3284,6 +3289,7 @@ class SessionTurnManager:
         successor_id: str | None = None
         interrupt_target_id: str | None = None
         should_interrupt = False
+        should_cancel_prewrite = False
         joined = False
         with self._runtime_start_owner(
             request.session_id,
@@ -3567,6 +3573,24 @@ class SessionTurnManager:
                     if claimed_control is None:
                         raise RuntimeError("P0 control-slot claim lost")
                     should_interrupt = current["state"] == "active"
+                    projected = self.in_flight.get(request.session_id)
+                    should_cancel_prewrite = bool(
+                        current["state"] == "starting"
+                        and projected is not None
+                        and projected.logical_turn_id == current_id
+                        and not projected.task.done()
+                        and backend_dispatch_attempted(projected.context) is False
+                    )
+                    if should_cancel_prewrite:
+                        claimed_control = delivery_store.cas_turn(
+                            conn,
+                            current_id,
+                            expected_version=int(claimed_control["version"]),
+                            expected_states=("starting",),
+                            values={"control_state": "interrupting"},
+                        )
+                        if claimed_control is None:
+                            raise RuntimeError("pre-write P0 control claim lost")
 
         if current is None and successor_id:
             await self._start_persisted_turn(successor_id, context=context)
@@ -3583,6 +3607,24 @@ class SessionTurnManager:
                 "queued" if delivery_id else "interrupt_waiting",
                 interrupt_target_id,
                 "joined_existing_interrupt",
+            )
+        if should_cancel_prewrite:
+            canceled = await self._cancel_prewrite_durable_turn(
+                request.session_id,
+                interrupt_target_id,
+            )
+            if delivery_id is not None:
+                return self._committed_delivery_result(
+                    delivery_id,
+                    attempted_turn_id=successor_id,
+                    reason=canceled.get("reason"),
+                )
+            return DeliveryResult(
+                delivery_id,
+                None,
+                str(canceled.get("state") or "reconciling"),
+                interrupt_target_id,
+                canceled.get("reason"),
             )
         if not should_interrupt:
             return DeliveryResult(
@@ -3602,6 +3644,68 @@ class SessionTurnManager:
             interrupt_target_id,
             interrupted.get("reason"),
         )
+
+    async def _cancel_prewrite_durable_turn(
+        self,
+        session_id: str,
+        logical_turn_id: str | None,
+    ) -> dict[str, Any]:
+        """Cancel a live Turn that has definitive evidence of no native write."""
+
+        projected = self.in_flight.get(session_id)
+        if (
+            projected is None
+            or not logical_turn_id
+            or projected.logical_turn_id != logical_turn_id
+            or projected.task.done()
+            or backend_dispatch_attempted(projected.context) is not False
+        ):
+            return {"state": "reconciling", "reason": "prewrite_owner_changed"}
+
+        projected.cancel_settled_by = SETTLED_BY_STOPPED
+        mark_prewrite_user_stop(projected.context)
+        projected.task.cancel()
+        await asyncio.gather(projected.task, return_exceptions=True)
+
+        with self._sqlite_engine().connect() as conn:
+            turn = delivery_store.get_turn(conn, logical_turn_id)
+            initial_delivery_ids = {
+                str(row["id"])
+                for row in delivery_store.initial_deliveries_for_turn(
+                    conn,
+                    logical_turn_id,
+                )
+                if row["state"] == "claimed"
+            }
+        if turn is None:
+            return {"state": "reconciling", "reason": "turn_missing"}
+        if turn["state"] == "terminal":
+            return {
+                "state": "settled",
+                "reason": (
+                    "prewrite_canceled"
+                    if turn.get("settled_by") == SETTLED_BY_STOPPED
+                    else "already_terminal"
+                ),
+            }
+
+        terminal = self._terminalize_durable_turn(
+            logical_turn_id,
+            "not_written",
+            settled_by=SETTLED_BY_STOPPED,
+            evidence_kind="user_stop_before_native_write",
+            evidence={"reason": "prewrite_canceled"},
+            retire_unwritten_delivery_ids=initial_delivery_ids,
+            retire_unwritten_attempt_outcome="canceled",
+        )
+        if not terminal.get("changed"):
+            return {"state": "reconciling", "reason": "prewrite_terminal_cas_lost"}
+
+        successor_turn_id = str(terminal.get("successor_turn_id") or "")
+        if successor_turn_id:
+            await self._start_persisted_turn(successor_turn_id)
+            return {"state": "claimed", "reason": "prewrite_canceled"}
+        return {"state": "settled", "reason": "prewrite_canceled"}
 
     async def _interrupt_durable_turn(
         self,
@@ -4291,6 +4395,7 @@ class SessionTurnManager:
         replay_unknown_start: bool = False,
         abandon_unaccepted_start: bool = False,
         retire_unwritten_delivery_ids: set[str] | None = None,
+        retire_unwritten_attempt_outcome: str = "invalid_input",
         resume_successors: bool = True,
     ) -> dict[str, Any]:
         if not self._durable_schema_available():
@@ -4478,7 +4583,11 @@ class SessionTurnManager:
                                 str(initial["id"]),
                                 expected_version=int(initial["version"]),
                                 expected_states=("claimed",),
-                                outcome=("invalid_input" if retire_unwritten else "not_written"),
+                                outcome=(
+                                    retire_unwritten_attempt_outcome
+                                    if retire_unwritten
+                                    else "not_written"
+                                ),
                                 next_state=next_state,
                                 next_priority="p3",
                                 receipt={"kind": evidence_kind, **(evidence or {})},
@@ -4912,6 +5021,25 @@ class SessionTurnManager:
                     outcome=SETTLED_BY_REFUSED_CONCURRENT_TURN,
                 )
             if definitive_prewrite_exit:
+                if settled_by == SETTLED_BY_STOPPED:
+                    with self._sqlite_engine().connect() as conn:
+                        initial_delivery_ids = {
+                            str(row["id"])
+                            for row in delivery_store.initial_deliveries_for_turn(
+                                conn,
+                                turn_id,
+                            )
+                            if row["state"] == "claimed"
+                        }
+                    return self._terminalize_durable_turn(
+                        turn_id,
+                        "not_written",
+                        settled_by=SETTLED_BY_STOPPED,
+                        evidence_kind="user_stop_before_native_write",
+                        evidence={"reason": "prewrite_canceled"},
+                        retire_unwritten_delivery_ids=initial_delivery_ids,
+                        retire_unwritten_attempt_outcome="canceled",
+                    )
                 return self._settle_durable_prewrite_failure(
                     turn_id,
                     outcome=SETTLED_BY_NO_TERMINAL_RESULT,
@@ -7099,6 +7227,19 @@ class SessionTurnManager:
                 )
                 settled_by = outcome.settled_by
                 definitive_prewrite_exit = outcome.backend_dispatch_attempted is False
+                current = self.in_flight.get(str(session_id or ""))
+                if (
+                    definitive_prewrite_exit
+                    and current is not None
+                    and current.task is asyncio.current_task()
+                    and current.logical_turn_id == logical_turn_id
+                    and current.cancel_settled_by == SETTLED_BY_STOPPED
+                ):
+                    # OpenCode intentionally absorbs the inner cancellation after
+                    # cleaning up its request. Preserve the Stop attribution at
+                    # this outer durable boundary so the input is retired instead
+                    # of becoming a queued retry.
+                    settled_by = SETTLED_BY_STOPPED
             except asyncio.CancelledError:
                 cancelled = True
                 # Do NOT decide the reason here: the canceller knows it, and it is
@@ -7172,7 +7313,10 @@ class SessionTurnManager:
                     # persistence failure leaves the durable Turn unresolved for
                     # exact reconciliation; an empty fallback would overwrite that
                     # evidence with a fabricated terminal response.
-                    if definitive_prewrite_exit:
+                    if (
+                        definitive_prewrite_exit
+                        and settled_by != SETTLED_BY_STOPPED
+                    ):
                         try:
                             await self.controller.emit_agent_message(
                                 context,
