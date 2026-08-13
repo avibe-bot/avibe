@@ -25,7 +25,7 @@ export interface CheckboxProps {
 export function Checkbox({ checked, onCheckedChange, disabled, label, className, presentational }: CheckboxProps) {
   const visual = clsx(
     'flex size-[18px] shrink-0 items-center justify-center rounded-[5px] border transition-colors',
-    checked ? 'border-transparent bg-mint text-[#06060e]' : 'border-border-strong bg-surface-3 text-transparent',
+    checked ? 'border-transparent bg-mint text-primary-foreground' : 'border-border-strong bg-surface-3 text-transparent',
     disabled && 'cursor-not-allowed opacity-50',
     className,
   );

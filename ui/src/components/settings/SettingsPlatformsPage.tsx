@@ -293,7 +293,7 @@ export const SettingsPlatformsPage: React.FC = () => {
                   )}
                 >
                   {active && (
-                    <span className="absolute right-1.5 top-1.5 inline-flex size-4 items-center justify-center rounded-full bg-mint text-background">
+                    <span className="absolute right-1.5 top-1.5 inline-flex size-4 items-center justify-center rounded-full bg-mint text-primary-foreground">
                       {busy ? <Loader2 size={10} className="animate-spin" /> : <Check size={11} strokeWidth={3} />}
                     </span>
                   )}

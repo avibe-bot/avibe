@@ -849,7 +849,7 @@ export const EditorApp: React.FC<{
           the left, but we have no real git/diagnostics data for an arbitrary folder — showing a
           hardcoded "master · 0 ⚠ 0" would be misleading, so those are omitted until wired. The
           right side (cursor / indentation / language) is real. */}
-      <div className="flex items-center gap-3.5 bg-cyan px-3.5 py-1 font-mono text-[10.5px] font-semibold text-[#06222B]">
+      <div className="flex items-center gap-3.5 bg-cyan px-3.5 py-1 font-mono text-[10.5px] font-semibold text-accent-foreground">
         {active && activeTab?.kind === 'preview' ? (
           <span className="ml-auto truncate">{t('preview.title')}</span>
         ) : active ? (

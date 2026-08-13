@@ -601,7 +601,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                     className={clsx(
                       'rounded-md px-2.5 py-0.5 text-[11px] font-semibold transition',
                       newFolderName.trim()
-                        ? 'bg-mint text-[#080812] hover:brightness-110'
+                        ? 'bg-mint text-primary-foreground hover:brightness-110'
                         : 'bg-muted-soft text-muted',
                     )}
                   >
@@ -642,7 +642,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             className={clsx(
               'flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-semibold transition',
               canConfirm
-                ? 'bg-mint text-[#080812] shadow-[0_0_14px_-4px_rgba(91,255,160,0.6)] hover:brightness-110'
+                ? 'bg-mint text-primary-foreground shadow-[0_0_14px_-4px_rgba(91,255,160,0.6)] hover:brightness-110'
                 : 'cursor-not-allowed bg-muted-soft text-muted',
             )}
           >

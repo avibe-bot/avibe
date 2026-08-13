@@ -164,6 +164,76 @@ assertEqual('system dark background', systemDark.get('--background'), '#080812')
 assertEqual('system light color-scheme', systemLight.get('color-scheme'), 'light');
 assertEqual('system dark color-scheme', systemDark.get('color-scheme'), 'dark');
 
+// An accent doubles as small status text — text-mint / text-gold / text-cyan /
+// text-destructive are used app-wide — and every X / X-foreground pair is a fill
+// plus the label printed on it. Both have to clear WCAG AA for small text, in
+// both themes. Light is the fragile side: the dark palette's vivid accents read
+// at 2.5-4.2:1 on a light surface, which is what this guard exists to catch.
+const AA_SMALL_TEXT = 4.5;
+
+function parseColor(value) {
+  const match = /^#([\da-f]{3}|[\da-f]{6})$/i.exec(value ?? '');
+  if (!match) {
+    // Washes, hairlines and gradients are rgba or composed; they carry no
+    // small-text contract, so they are out of scope rather than a failure.
+    return null;
+  }
+
+  const hex = match[1].length === 3 ? [...match[1]].map((channel) => channel + channel).join('') : match[1];
+  return [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16));
+}
+
+function relativeLuminance(rgb) {
+  const [r, g, b] = rgb.map((channel) => {
+    const ratio = channel / 255;
+    return ratio <= 0.03928 ? ratio / 12.92 : ((ratio + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(foreground, background) {
+  const [lighter, darker] = [relativeLuminance(foreground), relativeLuminance(background)]
+    .sort((a, b) => b - a);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function assertContrast(name, tokens, inkProp, surfaceProp) {
+  const ink = parseColor(tokens.get(inkProp));
+  const surface = parseColor(tokens.get(surfaceProp));
+  if (!ink || !surface) {
+    return;
+  }
+
+  const ratio = contrastRatio(ink, surface);
+  if (ratio < AA_SMALL_TEXT) {
+    throw new Error(
+      `${name}: ${inkProp} on ${surfaceProp} is ${ratio.toFixed(2)}:1, below WCAG AA ${AA_SMALL_TEXT}:1`,
+    );
+  }
+}
+
+const INK_TOKENS = ['--foreground', '--muted', '--mint', '--cyan', '--violet', '--gold', '--pink', '--destructive'];
+const INK_SURFACES = ['--card', '--background', '--surface-3'];
+
+for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
+  for (const ink of INK_TOKENS) {
+    assertEqual(`${theme} ${ink} is defined`, tokens.has(ink), true);
+    for (const surface of INK_SURFACES) {
+      assertContrast(`${theme} ink`, tokens, ink, surface);
+    }
+  }
+
+  // Every fill that declares its own foreground is checked against it, so a
+  // deepened or lightened fill can never silently strand its label.
+  const pairs = [...tokens.keys()]
+    .filter((prop) => prop.endsWith('-foreground') && tokens.has(prop.slice(0, -'-foreground'.length)))
+    .map((prop) => [prop, prop.slice(0, -'-foreground'.length)]);
+  assertEqual(`${theme} fill pairs exist`, pairs.length > 0, true);
+  for (const [foreground, fill] of pairs) {
+    assertContrast(`${theme} fill`, tokens, foreground, fill);
+  }
+}
+
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });
 const modelHubSystemDark = modelHub({ prefersLight: false, themeAttr: null });
 const modelHubSystemLight = modelHub({ prefersLight: true, themeAttr: null });
