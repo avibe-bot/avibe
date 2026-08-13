@@ -888,7 +888,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await server.ensure_running()
             activation_identity = self._attach_server_activation(server)
         except asyncio.CancelledError:
-            await self._release_model_hub_overlay_reservation(
+            await self._finish_prestart_cancellation(
+                request,
                 server,
                 model_hub_overlay_reservation,
             )
@@ -914,18 +915,26 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         try:
             await self._delete_ack(request)
             await self._session_manager.ensure_working_dir(request.working_path)
-        except BaseException:
-            await self._release_model_hub_overlay_reservation(
-                server,
-                model_hub_overlay_reservation,
-            )
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                await self._finish_prestart_cancellation(
+                    request,
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            else:
+                await self._release_model_hub_overlay_reservation(
+                    server,
+                    model_hub_overlay_reservation,
+                )
             model_hub_overlay_reservation = None
             raise
 
         try:
             session_id = await self._session_manager.get_or_create_session_id(request, server)
         except asyncio.CancelledError:
-            await self._release_model_hub_overlay_reservation(
+            await self._finish_prestart_cancellation(
+                request,
                 server,
                 model_hub_overlay_reservation,
             )
@@ -1001,11 +1010,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 _target_agent_session_id(request),
             )
             self._session_manager.mark_initialized(session_id)
-        except BaseException:
-            await self._release_model_hub_overlay_reservation(
-                server,
-                model_hub_overlay_reservation,
-            )
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                await self._finish_prestart_cancellation(
+                    request,
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            else:
+                await self._release_model_hub_overlay_reservation(
+                    server,
+                    model_hub_overlay_reservation,
+                )
             model_hub_overlay_reservation = None
             raise
 
@@ -1436,6 +1452,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 "Failed to release OpenCode Model Hub overlay reservation",
                 exc_info=True,
             )
+
+    async def _finish_prestart_cancellation(
+        self,
+        request: AgentRequest,
+        server: Any,
+        reservation: object | None,
+    ) -> None:
+        await self._release_model_hub_overlay_reservation(server, reservation)
+        await self._remove_ack_reaction(
+            request,
+            terminal_emoji=(
+                STOPPED_REACTION_EMOJI
+                if self.consume_user_stop_intent(request.base_session_id)
+                else None
+            ),
+        )
 
     def additional_steer_targets(self, session_id: str) -> list[ActiveSteerTarget]:
         """Expose restored poll owners that did not pass through AgentService."""
