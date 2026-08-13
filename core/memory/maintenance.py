@@ -20,6 +20,7 @@ from core.memory.clear_intent import (
     LEGACY_ABORT_ERROR_CODE,
     cleanup_legacy_backup_storage,
 )
+from core.memory.confined_filesystem import ConfinedFilesystemError, required_no_follow_flag
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.store import MemoryStore
 
@@ -101,6 +102,12 @@ class MemoryMaintenance:
         self._intent_error: Exception | None = None
         self._legacy_migration_deferred = False
         self._closing = False
+        try:
+            required_no_follow_flag()
+        except ConfinedFilesystemError as error:
+            self._initialization_error = error
+            logger.warning("Memory Clear persistence is unavailable; keeping Memory fenced")
+            return
         self._migrate_legacy(store)
 
     @property
