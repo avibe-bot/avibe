@@ -155,6 +155,9 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/asr/status"),
         ("POST", "/api/asr/transcribe"),
         ("POST", "/api/asr/telemetry"),
+        ("POST", "/api/sessions/session-1/messages"),
+        ("POST", "/api/sessions/session-1/attachments"),
+        ("POST", "/api/sessions/session-1/cancel"),
     )
     for method, path in editor_examples:
         assert http_authorization_policy(method, path).minimum_role == "editor", path
@@ -164,6 +167,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("PATCH", "/api/memory/settings"),
         ("POST", "/api/memory/runtime/restart"),
         ("POST", "/api/memory/future-capability"),
+        ("POST", "/api/sessions/session-1/mark-read"),
         ("DELETE", "/api/terminal/term-1"),
         ("GET", "/api/web-push/status"),
         ("POST", "/api/web-push/status"),

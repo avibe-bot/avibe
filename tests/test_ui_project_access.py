@@ -627,6 +627,23 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     assert _get(viewer, f"/api/sessions/{ids['session_a']}").status_code == 200
     assert _get(viewer, f"/api/sessions/{ids['session_b']}").status_code == 404
     headers = csrf_headers(viewer, REMOTE_ORIGIN)
+    mark_read = viewer.post(
+        f"/api/sessions/{ids['session_a']}/mark-read",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=headers,
+        json={},
+    )
+    assert mark_read.status_code == 200
+    for action in ("messages", "attachments", "cancel"):
+        response = viewer.post(
+            f"/api/sessions/{ids['session_a']}/{action}",
+            base_url=REMOTE_ORIGIN,
+            environ_base=REMOTE_PEER,
+            headers=headers,
+            json={"text": "viewer must not send"} if action == "messages" else {},
+        )
+        assert response.status_code == 403
     assert viewer.post(
         "/api/sessions",
         base_url=REMOTE_ORIGIN,

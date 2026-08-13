@@ -370,6 +370,7 @@ _VIEWER_HTTP_NAMESPACES = (
     "/api/web-push",
 )
 _VIEWER_HTTP_MUTATION_RULES = (
+    ("POST", re.compile(r"^/api/sessions/[^/]+/mark-read$")),
     ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
 )
 
@@ -394,7 +395,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/sessions/[^/]+/fork$"),
         ("PATCH", r"^/api/sessions/[^/]+$"),
         ("DELETE", r"^/api/sessions/[^/]+$"),
-        ("POST", r"^/api/sessions/[^/]+/(?:messages|attachments|cancel|mark-read)$"),
+        ("POST", r"^/api/sessions/[^/]+/(?:messages|attachments|cancel)$"),
         ("DELETE", r"^/api/sessions/[^/]+/queue/[^/]+$"),
         ("POST", r"^/api/sessions/[^/]+/queue/[^/]+/send-now$"),
         ("PUT", r"^/api/sessions/[^/]+/draft$"),
