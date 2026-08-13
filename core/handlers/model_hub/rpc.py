@@ -8,6 +8,12 @@ from typing import Any
 from .service import ModelHubError, ModelHubService
 
 
+async def _refresh_agent_presence(service: ModelHubService) -> None:
+    """Refresh host CLI facts without blocking the controller event loop."""
+
+    await asyncio.to_thread(service.refresh_cli_presence)
+
+
 async def dispatch_model_hub_rpc(
     service: ModelHubService,
     operation: str,
@@ -41,13 +47,16 @@ async def dispatch_model_hub_rpc(
     if operation == "list_agents":
         return await asyncio.to_thread(service.list_agents)
     if operation == "get_agent_sources":
+        await _refresh_agent_presence(service)
         return service.get_agent_sources(payload.get("backend"))
     if operation == "set_agent_sources":
+        await _refresh_agent_presence(service)
         return await service.set_agent_sources(
             payload.get("backend"),
             payload.get("sources"),
         )
     if operation == "set_agent_mode":
+        await _refresh_agent_presence(service)
         return await service.set_agent_mode(payload.get("backend"), payload.get("mode"))
     if operation == "set_agent_chain":
         return await service.set_agent_chain(
@@ -56,6 +65,7 @@ async def dispatch_model_hub_rpc(
             payload.get("chain"),
         )
     if operation == "set_opencode_menu":
+        await _refresh_agent_presence(service)
         return await service.set_opencode_menu(payload.get("menu"))
     if operation == "add_custom_model":
         return await service.add_custom_model(payload.get("source_id"), payload.get("model"))

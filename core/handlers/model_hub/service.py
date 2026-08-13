@@ -3003,11 +3003,11 @@ class ModelHubService:
         }
 
     def list_agents(self) -> list[dict]:
-        self._refresh_cli_presence()
+        self.refresh_cli_presence()
         config = self.store.load()
         return [self._agent_payload(config, config.agents[backend]) for backend in ("claude", "codex", "opencode")]
 
-    def _refresh_cli_presence(self) -> None:
+    def refresh_cli_presence(self) -> None:
         if self.cli_presence_refresh is None:
             return
         try:

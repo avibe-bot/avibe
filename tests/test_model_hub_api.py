@@ -753,6 +753,26 @@ def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
     assert all(agent["cli_present"] is False for agent in agents.values())
 
 
+def test_agent_supply_rpc_refreshes_cli_presence_before_first_response(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    calls = []
+    service.cli_presence_refresh = lambda: calls.append("refresh")
+    service.cli_present_override = lambda backend: backend == "claude"
+
+    payload = asyncio.run(
+        dispatch_model_hub_rpc(
+            service,
+            "get_agent_sources",
+            {"backend": "claude"},
+        )
+    )
+
+    assert payload["cli_present"] is True
+    assert calls == ["refresh"]
+
+
 def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.requested_model = lambda backend: {
