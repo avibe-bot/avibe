@@ -172,15 +172,31 @@ assertEqual('system dark color-scheme', systemDark.get('color-scheme'), 'dark');
 const AA_SMALL_TEXT = 4.5;
 
 function parseColor(value) {
-  const match = /^#([\da-f]{3}|[\da-f]{6})$/i.exec(value ?? '');
+  const match = /^#([\da-f]{3}|[\da-f]{6})$/i.exec((value ?? '').trim());
   if (!match) {
-    // Washes, hairlines and gradients are rgba or composed; they carry no
-    // small-text contract, so they are out of scope rather than a failure.
     return null;
   }
 
   const hex = match[1].length === 3 ? [...match[1]].map((channel) => channel + channel).join('') : match[1];
   return [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16));
+}
+
+// A ratio only means something between two opaque colours. Anything else -- an
+// alpha channel, a var() indirection, a gradient, oklch() or color-mix() -- has
+// no single value to measure, so the guard must say so instead of skipping the
+// assertion it advertises.
+function requireMeasurableColor(name, prop, value) {
+  const rgb = parseColor(value);
+  if (!rgb) {
+    throw new Error(
+      `${name}: ${prop} is ${value ?? 'undefined'}, which carries no measurable contrast. `
+      + 'Guarded tokens must resolve to an opaque #rgb or #rrggbb value; a translucent or computed '
+      + 'colour depends on its backdrop, so AA cannot be asserted from the token alone. Give the '
+      + 'token an opaque value, or drop it from the guarded list and record why.',
+    );
+  }
+
+  return rgb;
 }
 
 function relativeLuminance(rgb) {
@@ -198,11 +214,8 @@ function contrastRatio(foreground, background) {
 }
 
 function assertContrast(name, tokens, inkProp, surfaceProp) {
-  const ink = parseColor(tokens.get(inkProp));
-  const surface = parseColor(tokens.get(surfaceProp));
-  if (!ink || !surface) {
-    return;
-  }
+  const ink = requireMeasurableColor(name, inkProp, tokens.get(inkProp));
+  const surface = requireMeasurableColor(name, surfaceProp, tokens.get(surfaceProp));
 
   const ratio = contrastRatio(ink, surface);
   if (ratio < AA_SMALL_TEXT) {
