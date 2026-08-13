@@ -526,6 +526,38 @@ def test_failed_legacy_backup_cleanup_retains_migration_fence(
     assert journal.exists()
 
 
+def test_post_unlink_legacy_cleanup_failure_retains_migration_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    journal = _write_backup_restore_journal(tmp_path, state="completed", open_slot=None)
+    from core.memory import clear_intent
+
+    original_remove = clear_intent.remove_confined_path
+
+    def unlink_then_fail(home: Path, path: Path):
+        if path == journal:
+            path.unlink()
+            raise OSError("journal parent sync failed")
+        return original_remove(home, path)
+
+    monkeypatch.setattr(clear_intent, "remove_confined_path", unlink_then_fail)
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.is_open() is True
+    assert maintenance._legacy_migration_deferred is True
+
+
+def test_clear_rescans_legacy_restore_authority_after_construction(tmp_path: Path):
+    maintenance, _port = _maintenance(tmp_path)
+    journal = _write_backup_restore_journal(tmp_path, state="recovery_needed", open_slot=1)
+
+    result = asyncio.run(maintenance.clear(operator_ref="user-1"))
+
+    assert result.status == "failed"
+    assert result.error == "memory_operation_in_progress"
+    assert journal.exists()
+
+
 def test_legacy_migration_retries_after_transient_store_failure(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     journal = tmp_path / "state/memory/clear-journal.sqlite"

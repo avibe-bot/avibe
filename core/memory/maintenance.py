@@ -417,6 +417,10 @@ class MemoryMaintenance:
     async def _run_clear(self, *, operator_ref: str, boot: bool) -> ClearResult:
         if self._store is None:
             raise MemoryStoreUnavailableError("Memory store is unavailable")
+        # The legacy writers use the same operation lease. Re-inspect while
+        # this lease is held so a journal published after construction cannot
+        # grant Clear destructive authority through stale cached flags.
+        self._migrate_legacy(self._store, lease_held=True)
         if self.has_legacy_restore_authority():
             return ClearResult(status="failed", error="memory_operation_in_progress")
         async with self._runtime.exclusive_fence():

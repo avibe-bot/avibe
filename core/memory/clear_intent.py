@@ -728,11 +728,11 @@ def _legacy_recovery_from_state(connection: sqlite3.Connection, operation_id: st
 def _best_effort_remove(home: Path, path: Path) -> bool:
     try:
         remove_confined_path(home, path)
-    except (ConfinedFilesystemError, OSError) as error:
-        if os.path.lexists(path):
-            # Cleanup is deliberately non-blocking; callers log at their boundary.
-            _ = error
-            return False
+    except (ConfinedFilesystemError, OSError):
+        # A post-unlink directory fsync failure can make the path disappear
+        # before the removal is durable. Keep the migration fence in that
+        # case instead of inferring success from the current path lookup.
+        return False
     return not os.path.lexists(path)
 
 
