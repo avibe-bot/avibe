@@ -620,6 +620,24 @@ class ModelHubService:
             )
         )
 
+    @staticmethod
+    def _existing_native_source(
+        config: ModelHubConfig,
+        vendor: str,
+    ) -> ModelHubSourceConfig | None:
+        backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
+        if backend is None:
+            return None
+        return next(
+            (
+                source
+                for source in config.sources
+                if source.supply_channel == "native_cli"
+                and source_eligible_for_backend(source, cast(BackendName, backend))
+            ),
+            None,
+        )
+
     async def _engine_call(self, awaitable):
         try:
             return await awaitable
@@ -1460,6 +1478,24 @@ class ModelHubService:
                     return existing.to_payload()
                 if existing is not None:
                     raise ModelHubError("migration_item_conflict", status=409)
+                if channel == "native_cli":
+                    occupied = self._existing_native_source(previous, vendor)
+                    if occupied is not None:
+                        # A second provider flow can finish after the first one
+                        # committed. Re-check under the mutation lock and clean
+                        # the losing native flow before surfacing the singleton
+                        # conflict, so it cannot materialize a second Source.
+                        await self._discard_started_oauth_flow(flow, channel)
+                        try:
+                            self.oauth_flows.forget(oauth_ref)
+                        except OSError:
+                            pass
+                        raise ModelHubError(
+                            "native_source_already_exists",
+                            status=409,
+                            detail="modelHub.errors.native_subscription_slot_taken",
+                            data={"existing_source_id": occupied.id},
+                        )
                 account_label: str | None = None
                 state = ModelHubSourceStateConfig(status="standby")
                 discovered: list[str] | None
@@ -3818,33 +3854,23 @@ class ModelHubService:
                 return await asyncio.shield(task)
 
         if oauth_channel == "native_cli":
-            backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
-            if backend is not None:
-                existing = next(
-                    (
-                        source
-                        for source in self.store.load().sources
-                        if source.supply_channel == "native_cli"
-                        and source_eligible_for_backend(source, cast(BackendName, backend))
-                    ),
-                    None,
-                )
-                if existing is not None:
-                    # This request owns a new nonce claim, so release it before
-                    # rejecting the occupied singleton. A committed/in-flight
-                    # nonce has already returned above and never reaches here.
-                    if client_nonce is not None:
-                        self.oauth_flows.release_nonce(
-                            client_nonce,
-                            vendor,
-                            oauth_channel,
-                        )
-                    raise ModelHubError(
-                        "native_source_already_exists",
-                        status=409,
-                        detail="modelHub.errors.native_subscription_slot_taken",
-                        data={"existing_source_id": existing.id},
+            existing = self._existing_native_source(self.store.load(), vendor)
+            if existing is not None:
+                # This request owns a new nonce claim, so release it before
+                # rejecting the occupied singleton. A committed/in-flight
+                # nonce has already returned above and never reaches here.
+                if client_nonce is not None:
+                    self.oauth_flows.release_nonce(
+                        client_nonce,
+                        vendor,
+                        oauth_channel,
                     )
+                raise ModelHubError(
+                    "native_source_already_exists",
+                    status=409,
+                    detail="modelHub.errors.native_subscription_slot_taken",
+                    data={"existing_source_id": existing.id},
+                )
 
         async def start_and_remember() -> dict:
             pending_source_id = _source_id()

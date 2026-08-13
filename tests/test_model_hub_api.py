@@ -1082,6 +1082,38 @@ def test_nonce_oauth_start_replays_committed_flow_before_native_slot_conflict(tm
     assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
 
 
+def test_concurrent_native_oauth_materialization_keeps_singleton_source(tmp_path):
+    async def run_race():
+        service, store, adapter = _service(tmp_path)
+        started = await asyncio.gather(
+            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}),
+            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}),
+        )
+        first, second = (result["flow"] for result in started)
+        for flow in (first, second):
+            adapter.flows[flow["flow_id"]] = OAuthFlowState(
+                **{**adapter.flows[flow["flow_id"]].__dict__, "state": "success"}
+            )
+        results = await asyncio.gather(
+            service.oauth_status(first["flow_id"]),
+            service.oauth_status(second["flow_id"]),
+            return_exceptions=True,
+        )
+        return results, store, adapter, first, second
+
+    results, store, adapter, first, second = asyncio.run(run_race())
+
+    assert sum(isinstance(result, dict) for result in results) == 1
+    failures = [result for result in results if isinstance(result, ModelHubError)]
+    assert len(failures) == 1
+    assert failures[0].code == "native_source_already_exists"
+    assert failures[0].data["existing_source_id"] == store.config.sources[0].id
+    assert len(store.config.sources) == 1
+    winner = next(result for result in results if isinstance(result, dict))
+    loser = second["flow_id"] if winner["flow"]["flow_id"] == first["flow_id"] else first["flow_id"]
+    assert adapter.cancelled == [loser]
+
+
 def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):
     service, _store, adapter = _service(tmp_path)
 
