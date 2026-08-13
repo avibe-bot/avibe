@@ -37,6 +37,7 @@ LEGACY_SNAPSHOT_RELATIVE_PATH = "state/memory/clear-snapshots"
 BACKUP_JOURNAL_RELATIVE_PATH = "state/memory/backup-restore-journal.sqlite"
 BACKUP_ROOT_RELATIVE_PATH = "state/memory/backups"
 MARKER_SCHEMA_VERSION = 1
+LEGACY_ABORT_ERROR_CODE = "memory_clear_legacy_abort_unsupported"
 _LEGACY_OPERATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
@@ -191,6 +192,7 @@ class ClearIntentStore:
             operator_ref = str(row["operator_ref"])
             pre_epoch = int(row["pre_epoch"])
             columns = set(row.keys())
+            resolution = row["resolution"] if "resolution" in columns else None
             target_value = row["target_epoch"] if "target_epoch" in columns else None
             if target_value is None:
                 # Older released journals did not persist the target. Defer
@@ -212,6 +214,8 @@ class ClearIntentStore:
                 return None
         except (KeyError, TypeError, ValueError, IndexError) as error:
             raise ClearIntentUnreadable("legacy Memory clear journal has invalid shape") from error
+        migrated_state = "failed" if resolution == "abort" else "deleting"
+        migrated_error = LEGACY_ABORT_ERROR_CODE if resolution == "abort" else None
         now = _utc_now()
         intent = ClearIntent(
             schema_version=MARKER_SCHEMA_VERSION,
@@ -219,8 +223,8 @@ class ClearIntentStore:
             operator_ref=operator_ref,
             pre_epoch=pre_epoch,
             target_epoch=target_epoch,
-            state="deleting",
-            error_code=None,
+            state=migrated_state,
+            error_code=migrated_error,
             created_at=str(row["started_at"] or now),
             updated_at=now,
         )

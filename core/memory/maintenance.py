@@ -17,6 +17,7 @@ from core.memory.clear_intent import (
     ClearIntentUnreadable,
     ClearSurface,
     DEFAULT_CLEAR_SURFACES,
+    LEGACY_ABORT_ERROR_CODE,
     cleanup_legacy_backup_storage,
 )
 from core.memory.store import MemoryStore
@@ -247,6 +248,11 @@ class MemoryMaintenance:
             return False
         if intent is None:
             return True
+        if intent.state == "failed" and intent.error_code == LEGACY_ABORT_ERROR_CODE:
+            # The old Abort-and-restore choice cannot be replayed after the
+            # snapshot stack is removed. Keep the migrated operation fenced;
+            # an explicit new Clear is the destructive opt-in.
+            return False
         if intent.state == "failed":
             intent = intent.deleting()
             try:

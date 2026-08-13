@@ -99,12 +99,12 @@ finish before starting another one.
 ### Clear Memory Data
 
 Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data or the
-call-log database is corrupt. Clear Memory Data creates and verifies a private snapshot
- of the queue, provider data, call log, and pinned attachments, then removes only
- those four Avibe-owned surfaces under a durable clear-intent marker. It does not delete
+call-log database is corrupt. Clear Memory Data records a durable intent marker, then
+removes only the queue, provider data, call log, and pinned attachments through their
+idempotent deletion primitives. Clear is irreversible; it does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
-already sent to providers, or data outside those surfaces (including logs,
-backups, and user-created snapshots); it is not a secure wipe.
+already sent to providers, or data outside those surfaces (including logs or
+user-created snapshots); it is not a secure wipe.
 
 Clear Memory Data is also the explicit discard path for a timed-out or otherwise
 unknown provider add. It removes the retained `manual_required` queue evidence

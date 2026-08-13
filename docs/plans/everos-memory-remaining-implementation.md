@@ -178,7 +178,8 @@ never removed.
 ## 6. Durable clear intent
 
 Clear Memory Data uses `<effective_home>/state/memory/clear-intent.json` as its single
-source of truth. The marker contains schema version, UUID4 operation id, operator reference,
+source of truth. New markers contain a UUID4 operation id; migrated markers preserve the
+legacy operation id for log correlation. The marker also contains operator reference,
 pre/target epochs, `deleting|failed` state, error code, and creation/update timestamps. It
 is atomically written through a same-directory temporary file, file fsync, replace, and
 parent-directory fsync.
@@ -270,8 +271,8 @@ absolute paths, attachment metadata/hashes, vectors, or raw exceptions. `manual_
 The UI merges status and processing-log tabs into one Processing Record view with explicit Refresh,
 runtime/capabilities, source availability, anomalies/recovery, recent timeline, and existing detail.
 It does not poll the composite status every four seconds. Disabled Memory still renders retained local
-recovery/anomaly evidence. Clear recovery may offer its distinct resume/abort commands;
-`manual_required` has no command. Embedding configuration lock reads a separate cheap local
+recovery/anomaly evidence. Clear recovery is marker-owned and has no user-facing resume/abort
+commands; `manual_required` has no command. Embedding configuration lock reads a separate cheap local
 `data_exists` maintenance fact rather than health or a deep provider-root scan. All copy uses i18n.
 
 ## 9. File scope
