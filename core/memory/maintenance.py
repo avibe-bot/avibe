@@ -161,8 +161,10 @@ class MemoryMaintenance:
                 )
                 logger.warning("Legacy Memory cleanup lease could not be acquired", exc_info=True)
                 return
+        backup_restore_classified = False
         try:
             backup_restore = inspect_legacy_backup_restore(self._intent.home)
+            backup_restore_classified = True
             self._legacy_restore_unreadable = False
             if backup_restore == "open":
                 self._legacy_restore_open = True
@@ -193,9 +195,7 @@ class MemoryMaintenance:
             self._legacy_migration_deferred = False
             self._legacy_abort_open = False
         except ClearIntentUnreadable as error:
-            if os.path.lexists(
-                self._intent.home / "state/memory/backup-restore-journal.sqlite"
-            ):
+            if not backup_restore_classified:
                 self._legacy_migration_deferred = True
                 self._legacy_restore_unreadable = True
                 logger.warning(

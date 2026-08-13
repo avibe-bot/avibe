@@ -600,6 +600,29 @@ def test_unreadable_legacy_clear_retains_snapshots(tmp_path: Path):
     assert snapshot.read_text(encoding="utf-8") == "recovery material"
 
 
+@pytest.mark.asyncio
+async def test_unreadable_legacy_clear_with_terminal_backup_allows_replacement(
+    tmp_path: Path,
+):
+    backup_journal = _write_backup_restore_journal(
+        tmp_path,
+        state="completed",
+        open_slot=None,
+    )
+    clear_journal = tmp_path / "state/memory/clear-journal.sqlite"
+    clear_journal.write_bytes(b"not sqlite")
+
+    maintenance, port = _maintenance(tmp_path)
+
+    assert maintenance.has_legacy_restore_authority() is False
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "completed"
+    assert len(port.deleted) == len(DEFAULT_CLEAR_SURFACES)
+    assert not clear_journal.exists()
+    assert not backup_journal.exists()
+
+
 def test_post_unlink_legacy_cleanup_failure_retains_migration_fence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
