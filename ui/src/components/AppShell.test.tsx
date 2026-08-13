@@ -83,6 +83,8 @@ vi.mock('react-i18next', () => ({
 
 beforeEach(() => {
   instanceAuth.capabilities.can_manage_instance = true;
+  instanceAuth.capabilities.can_chat = true;
+  instanceAuth.capabilities.can_use_show_pages = true;
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getMemorySettings.mockResolvedValue({
     status: 'failed',
@@ -206,5 +208,45 @@ describe('AppShell remote Apps access', () => {
 
     expect(await screen.findByTestId('app-surface')).toBeTruthy();
     expect(screen.queryByTestId('redirected-workbench')).toBeNull();
+  });
+
+  it('lets a Viewer open an authorized Show Page app without the Editor Apps capability', async () => {
+    instanceAuth.capabilities.can_manage_instance = false;
+    instanceAuth.capabilities.can_chat = false;
+    instanceAuth.capabilities.can_use_show_pages = true;
+
+    render(
+      <MemoryRouter initialEntries={['/apps/show/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="apps/show/:sessionId" element={<div data-testid="show-page-surface" />} />
+            <Route index element={<div data-testid="redirected-workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('show-page-surface')).toBeTruthy();
+    expect(screen.queryByTestId('redirected-workbench')).toBeNull();
+  });
+
+  it('still withholds Editor-only Apps from a Viewer', async () => {
+    instanceAuth.capabilities.can_manage_instance = false;
+    instanceAuth.capabilities.can_chat = false;
+    instanceAuth.capabilities.can_use_show_pages = true;
+
+    render(
+      <MemoryRouter initialEntries={['/apps/library']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="apps/library" element={<div data-testid="library-surface" />} />
+            <Route index element={<div data-testid="workbench-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench-surface')).toBeTruthy();
+    expect(screen.queryByTestId('library-surface')).toBeNull();
   });
 });

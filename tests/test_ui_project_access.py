@@ -779,3 +779,50 @@ def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) ->
         minimum_role="viewer",
         project_session_id=ids["session_b"],
     ) is False
+
+
+def test_terminal_websocket_requires_editor_role_without_a_project(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, _ids = _setup_state(tmp_path)
+    viewer_cookie = remote_session_cookie(
+        config,
+        "viewer@example.com",
+        "user-viewer",
+        role="viewer",
+        access_source="organization_group",
+        organization_id="org-1",
+        organization_member_id="member-viewer",
+        organization_role="member",
+        group_ids=["grp_beta"],
+    )
+    editor_cookie = remote_session_cookie(
+        config,
+        "alice@example.com",
+        "user-editor",
+        role="editor",
+        access_source="organization_group",
+        organization_id="org-1",
+        organization_member_id="member-1",
+        organization_role="member",
+        group_ids=["grp_beta"],
+    )
+    viewer_socket = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.10"),
+        headers={"host": "alex.avibe.bot"},
+        cookies={remote_access.SESSION_COOKIE_NAME: viewer_cookie},
+        url=SimpleNamespace(scheme="wss"),
+    )
+    editor_socket = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.10"),
+        headers={"host": "alex.avibe.bot"},
+        cookies={remote_access.SESSION_COOKIE_NAME: editor_cookie},
+        url=SimpleNamespace(scheme="wss"),
+    )
+    assert ui_server._show_runtime_websocket_authorized(
+        viewer_socket,
+        minimum_role="editor",
+    ) is False
+    assert ui_server._show_runtime_websocket_authorized(
+        editor_socket,
+        minimum_role="editor",
+    ) is True

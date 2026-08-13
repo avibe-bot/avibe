@@ -7,6 +7,7 @@ import {
   isLocalOnlyMessagingField,
   isOwnerOnlyPath,
   isMemorySettingsPath,
+  visibleAdminNavItems,
 } from './adminNavigation';
 
 describe('isAdvancedSettingsPath', () => {
@@ -94,6 +95,24 @@ describe('filterOwnerOnlyNavItems', () => {
         children: [{ to: '/admin/settings/messaging' }],
       },
       { onClick: expect.any(Function) },
+      { to: '/admin/settings/messaging' },
+    ]);
+  });
+});
+
+describe('visibleAdminNavItems', () => {
+  const adminItems = [
+    { to: '/admin/dashboard' },
+    { to: '/admin/remote-access' },
+    { to: '/admin/settings/messaging' },
+  ];
+
+  it('keeps Owner destinations when the caller can manage the instance', () => {
+    expect(visibleAdminNavItems(adminItems, true)).toEqual(adminItems);
+  });
+
+  it('hides Owner destinations only when the caller cannot manage the instance', () => {
+    expect(visibleAdminNavItems(adminItems, false)).toEqual([
       { to: '/admin/settings/messaging' },
     ]);
   });

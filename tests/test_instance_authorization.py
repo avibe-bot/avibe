@@ -3,6 +3,8 @@ import pytest
 from vibe.authorization import (
     AuthorizationContext,
     InstanceAuthorizationError,
+    _EDITOR_HTTP_NAMESPACES,
+    _VIEWER_HTTP_NAMESPACES,
     can_receive_workbench_event,
     context_from_session_payload,
     http_authorization_policy,
@@ -106,6 +108,72 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
 
     assert http_authorization_policy("GET", "/api/org/context").minimum_role == "viewer"
     assert http_authorization_policy("GET", "/show/ses-1/").minimum_role == "viewer"
+
+
+def test_advertised_capability_namespaces_cover_current_and_future_routes() -> None:
+    """Every advertised Editor/Viewer surface is a namespace, not a case list.
+
+    A newly added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push
+    route must inherit the same Instance role as the rest of that capability.
+    Owner-only Agent create/import and unknown APIs stay fail-closed.
+    """
+
+    assert _EDITOR_HTTP_NAMESPACES == (
+        "/api/skills",
+        "/api/vault",
+        "/api/files",
+        "/api/dock",
+        "/api/harness",
+        "/api/terminal",
+    )
+    assert _VIEWER_HTTP_NAMESPACES == ("/api/web-push",)
+
+    editor_examples = (
+        ("POST", "/api/skills"),
+        ("POST", "/api/skills/update"),
+        ("POST", "/api/skills/preview"),
+        ("POST", "/api/skills/upload"),
+        ("DELETE", "/api/skills/demo"),
+        ("POST", "/api/skills/future-mutation"),
+        ("POST", "/api/vault/secrets"),
+        ("PATCH", "/api/vault/secrets/OPENAI_API_KEY"),
+        ("DELETE", "/api/vault/secrets/OPENAI_API_KEY"),
+        ("POST", "/api/vault/requests/access"),
+        ("POST", "/api/vault/grants"),
+        ("DELETE", "/api/vault/grants/grant-1"),
+        ("PATCH", "/api/vault/settings"),
+        ("POST", "/api/vault/future-mutation"),
+        ("POST", "/api/harness/tasks"),
+        ("PATCH", "/api/harness/watches/watch-1"),
+        ("DELETE", "/api/terminal/term-1"),
+        ("GET", "/api/files/list"),
+        ("PUT", "/api/files/write"),
+        ("POST", "/api/dock/pins"),
+    )
+    for method, path in editor_examples:
+        assert http_authorization_policy(method, path).minimum_role == "editor", path
+
+    viewer_examples = (
+        ("GET", "/api/web-push/status"),
+        ("POST", "/api/web-push/status"),
+        ("GET", "/api/web-push/vapid-public-key"),
+        ("POST", "/api/web-push/subscriptions"),
+        ("DELETE", "/api/web-push/subscriptions"),
+        ("POST", "/api/web-push/test"),
+        ("POST", "/api/web-push/future-mutation"),
+    )
+    for method, path in viewer_examples:
+        assert http_authorization_policy(method, path).minimum_role == "viewer", path
+
+    owner_examples = (
+        ("POST", "/api/agents"),
+        ("POST", "/api/agents/import"),
+        ("PATCH", "/api/agents/demo"),
+        ("DELETE", "/api/agents/demo"),
+        ("GET", "/api/future-owner-capability"),
+    )
+    for method, path in owner_examples:
+        assert http_authorization_policy(method, path).minimum_role == "owner", path
 
 
 def test_workbench_events_follow_role_boundaries() -> None:

@@ -34,10 +34,10 @@ import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms'
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import {
   adminLandingPath,
-  filterOwnerOnlyNavItems,
   isAdvancedSettingsPath,
   isOwnerOnlyPath,
   isMemorySettingsPath,
+  visibleAdminNavItems,
 } from '../lib/adminNavigation';
 
 type ShellNavItem = {
@@ -394,13 +394,15 @@ export const AppShell: React.FC = () => {
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
   const canUseApps = capabilities.can_chat;
+  const canUseShowPageApp =
+    location.pathname.startsWith('/apps/show/') && capabilities.can_use_show_pages;
   const localSystemPath = isOwnerOnlyPath(location.pathname);
   const resourceUseDenied =
     (location.pathname.startsWith('/agents') && !capabilities.can_use_agents) ||
     (location.pathname.startsWith('/harness') && !capabilities.can_chat) ||
     (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
     (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
-  const appAccessDenied = location.pathname.startsWith('/apps/') && !canUseApps;
+  const appAccessDenied = location.pathname.startsWith('/apps/') && !canUseApps && !canUseShowPageApp;
   if (
     (localSystemPath && !capabilities.can_manage_instance) ||
     resourceUseDenied ||
@@ -486,7 +488,7 @@ export const AppShell: React.FC = () => {
   // Second half of the runtime-access gate: a page the redirect above withholds
   // must not still be advertised, or a non-owner taps a nav entry and lands
   // back on the Workbench.
-  const visibleAdminItems = filterOwnerOnlyNavItems(adminItems);
+  const visibleAdminItems = visibleAdminNavItems(adminItems, capabilities.can_manage_instance);
 
   const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
 
@@ -508,7 +510,7 @@ export const AppShell: React.FC = () => {
       match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
-  const adminMobileTabs = filterOwnerOnlyNavItems(adminMobileTabsAll);
+  const adminMobileTabs = visibleAdminNavItems(adminMobileTabsAll, capabilities.can_manage_instance);
   // The More sheet shows the overflow: admin sections not already on the bottom
   // bar. Keep its filtering aligned with the currently visible primary tabs.
   const adminBottomBarPaths = new Set(

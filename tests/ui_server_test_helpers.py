@@ -55,7 +55,7 @@ def _save_config(tmp_path):
     return config
 
 
-def save_config(tmp_path) -> V2Config:
+def save_config(tmp_path):
     """Return the canonical V2 test configuration."""
 
     return _save_config(tmp_path)
