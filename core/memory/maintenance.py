@@ -297,7 +297,11 @@ class MemoryMaintenance:
                     await self._run_maintenance_io(self._intent.consume_legacy_clear_state)
                     self._intent_error = None
                 elif intent.state == "failed":
-                    intent = intent.deleting()
+                    meta = await self._run_maintenance_io(self._store.ensure_meta)
+                    if meta.epoch not in {intent.pre_epoch, intent.target_epoch}:
+                        intent = ClearIntent.new(operator_ref=operator_ref, pre_epoch=meta.epoch)
+                    else:
+                        intent = intent.deleting()
                     await self._run_maintenance_io(lambda: self._intent.write(intent))
                     self._intent_error = None
                 try:

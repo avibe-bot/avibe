@@ -185,7 +185,7 @@ class ClearIntentStore:
             _best_effort_remove(self.home, self.home / LEGACY_JOURNAL_RELATIVE_PATH)
             return existing
         journal_path = self.home / LEGACY_JOURNAL_RELATIVE_PATH
-        if not journal_path.exists():
+        if not os.path.lexists(journal_path):
             return None
         connection = None
         try:

@@ -159,3 +159,12 @@ def test_legacy_journal_symlink_is_unreadable(tmp_path: Path):
 
     with pytest.raises(ClearIntentUnreadable):
         ClearIntentStore(tmp_path).migrate_legacy(current_epoch=0)
+
+
+def test_dangling_legacy_journal_is_not_treated_as_absent(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    journal.symlink_to(tmp_path / "missing-clear-journal.sqlite")
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=0)

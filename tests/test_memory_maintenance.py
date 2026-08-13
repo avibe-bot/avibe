@@ -192,6 +192,25 @@ async def test_explicit_clear_consumes_unreadable_legacy_journal(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_failed_clear_retry_rebases_after_store_epoch_moves(tmp_path: Path):
+    maintenance, port = _maintenance(tmp_path)
+    store = maintenance._store
+    assert store is not None
+    failed = ClearIntent.new(operator_ref="old", pre_epoch=store.ensure_meta().epoch).failed(
+        "memory_clear_failed"
+    )
+    ClearIntentStore(tmp_path).write(failed)
+    store.reset_for_clear()
+    store.reset_for_clear()
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "completed"
+    assert result.epoch == 3
+    assert {epoch for _surface, epoch in port.deleted} == {3}
+
+
+@pytest.mark.asyncio
 async def test_boot_quiesce_failure_persists_failed_marker(tmp_path: Path):
     maintenance, port = _maintenance(tmp_path)
     meta = maintenance._store.ensure_meta()  # type: ignore[union-attr]
