@@ -19,6 +19,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -11676,7 +11677,7 @@ def harness_tasks_list():
             newest_first=True,
         )
         counts = store.count_scheduled_tasks(query=query, session_id=session_id)
-    page_result.items = _harness_visible_items(page_result.items)
+    page_result = replace(page_result, items=_harness_visible_items(page_result.items))
     return jsonify(_harness_page_payload(page_result, items_key="tasks", counts=counts))
 
 
@@ -11752,7 +11753,7 @@ def harness_watches_list():
             newest_first=True,
         )
         counts = store.count_watches(query=query, session_id=session_id)
-    page_result.items = _harness_visible_items(page_result.items)
+    page_result = replace(page_result, items=_harness_visible_items(page_result.items))
     return jsonify(_harness_page_payload(page_result, items_key="watches", counts=counts))
 
 
@@ -11831,7 +11832,7 @@ def harness_runs_list():
         # The types present in the ledger, so the selector can offer one the UI
         # has no built-in name for instead of stranding those rows under All.
         run_types = store.list_run_types()
-    page_result.items = _harness_visible_items(page_result.items)
+    page_result = replace(page_result, items=_harness_visible_items(page_result.items))
     return jsonify(
         {
             "runs": page_result.items,
@@ -11881,7 +11882,7 @@ def harness_bootstrap():
                 page_request=page_request,
                 newest_first=True,
             )
-            page_result.items = _harness_visible_items(page_result.items)
+            page_result = replace(page_result, items=_harness_visible_items(page_result.items))
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="tasks",
@@ -11896,7 +11897,7 @@ def harness_bootstrap():
                 page_request=page_request,
                 newest_first=True,
             )
-            page_result.items = _harness_visible_items(page_result.items)
+            page_result = replace(page_result, items=_harness_visible_items(page_result.items))
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="watches",
@@ -11919,7 +11920,7 @@ def harness_bootstrap():
                 page_request=page_request,
                 newest_first=True,
             )
-            page_result.items = _harness_visible_items(page_result.items)
+            page_result = replace(page_result, items=_harness_visible_items(page_result.items))
             page_payload = {
                 "runs": page_result.items,
                 "counts": store.count_runs_by_status(
