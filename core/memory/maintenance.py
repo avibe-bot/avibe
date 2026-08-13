@@ -180,14 +180,16 @@ class MemoryMaintenance:
                 )
                 return
             self._legacy_abort_open = False
+            current_epoch = store.ensure_meta().epoch if store is not None else None
+            self._intent.migrate_legacy(current_epoch=current_epoch)
+            # Validate and migrate the retired Clear journal before deleting
+            # snapshots that may be its only recovery material.
             failures = cleanup_legacy_backup_storage(self._intent.home)
             if failures:
                 self._legacy_migration_deferred = True
                 for relative in failures:
                     logger.warning("Legacy Memory cleanup could not remove %s", relative)
                 return
-            current_epoch = store.ensure_meta().epoch if store is not None else None
-            self._intent.migrate_legacy(current_epoch=current_epoch)
             self._legacy_migration_deferred = False
             self._legacy_abort_open = False
         except ClearIntentUnreadable as error:
@@ -200,6 +202,7 @@ class MemoryMaintenance:
                     "Legacy Memory backup restore state is unreadable; keeping Memory fenced"
                 )
             else:
+                self._legacy_migration_deferred = False
                 self._intent_error = error
                 logger.warning("Memory Clear state is unreadable; keeping Memory fenced")
         except Exception as error:
@@ -380,7 +383,9 @@ class MemoryMaintenance:
         if self._store is None:
             return False
         if self._legacy_migration_deferred:
-            self._migrate_legacy(self._store, lease_held=lease_held)
+            await self._run_maintenance_io(
+                lambda: self._migrate_legacy(self._store, lease_held=lease_held)
+            )
         if (
             self._initialization_error is not None
             or self._intent_error is not None
@@ -427,11 +432,15 @@ class MemoryMaintenance:
     async def _run_clear(self, *, operator_ref: str, boot: bool) -> ClearResult:
         if self._store is None:
             raise MemoryStoreUnavailableError("Memory store is unavailable")
-        # The legacy writers use the same operation lease. Re-inspect while
-        # this lease is held so a journal published after construction cannot
-        # grant Clear destructive authority through stale cached flags.
-        self._migrate_legacy(self._store, lease_held=True)
-        if self.has_legacy_restore_authority():
+        # Re-inspect while the current operation lease is held so legacy state
+        # published before this Clear cannot bypass admission through stale
+        # cached flags.
+        await self._run_maintenance_io(
+            lambda: self._migrate_legacy(self._store, lease_held=True)
+        )
+        if self.has_legacy_restore_authority() or (
+            self._legacy_migration_deferred and not self._legacy_abort_open
+        ):
             return ClearResult(status="failed", error="memory_operation_in_progress")
         async with self._runtime.exclusive_fence():
             self._runtime.enter_maintenance()
@@ -497,7 +506,9 @@ class MemoryMaintenance:
             # Re-scan retired artifacts while the replacement operation owns
             # the lease, clearing an abort-only fence without dropping a
             # separate unresolved backup-restore authority.
-            self._migrate_legacy(self._store, lease_held=True)
+            await self._run_maintenance_io(
+                lambda: self._migrate_legacy(self._store, lease_held=True)
+            )
             if write_error is not None:
                 raise write_error
             if cancellation is not None:

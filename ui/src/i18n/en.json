@@ -4187,7 +4187,7 @@
       "clearInProgress": {
         "title": "Clear Memory Data is in progress",
         "description": "Memory remains fenced while the deletion completes automatically.",
-        "explicitRetryDescription": "This older Memory restore state cannot resume automatically. Run Clear Memory Data to replace it.",
+        "explicitRetryDescription": "Clear did not finish automatically. Run Clear Memory Data again to retry or replace the failed operation.",
         "deleting": "Deleting Memory data",
         "failed": "Clear needs another attempt",
         "loadFailed": "Couldn't load Clear maintenance state."

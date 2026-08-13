@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import asyncio
 import sqlite3
+import threading
 
 import pytest
 
@@ -547,6 +548,58 @@ def test_failed_legacy_backup_cleanup_retains_migration_fence(
     assert journal.exists()
 
 
+@pytest.mark.asyncio
+async def test_deferred_legacy_cleanup_blocks_explicit_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    journal = _write_backup_restore_journal(tmp_path, state="completed", open_slot=None)
+    from core.memory import clear_intent
+
+    original_remove = clear_intent.remove_confined_path
+
+    def fail_journal_remove(home: Path, path: Path):
+        if path == journal:
+            raise clear_intent.ConfinedFilesystemError("journal is busy")
+        return original_remove(home, path)
+
+    monkeypatch.setattr(clear_intent, "remove_confined_path", fail_journal_remove)
+    maintenance, port = _maintenance(tmp_path)
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "failed"
+    assert result.error == "memory_operation_in_progress"
+    assert port.deleted == []
+    assert journal.exists()
+
+
+def test_unreadable_legacy_clear_retains_snapshots(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, resolution TEXT, "
+        "started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-invalid", "user-1", 0, 1, "deleting", None, "now"),
+    )
+    connection.commit()
+    connection.close()
+    journal.chmod(0o600)
+    snapshot = tmp_path / "state/memory/clear-snapshots/legacy-invalid/queue"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("recovery material", encoding="utf-8")
+
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.is_open() is True
+    assert journal.exists()
+    assert snapshot.read_text(encoding="utf-8") == "recovery material"
+
+
 def test_post_unlink_legacy_cleanup_failure_retains_migration_fence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -577,6 +630,28 @@ def test_clear_rescans_legacy_restore_authority_after_construction(tmp_path: Pat
     assert result.status == "failed"
     assert result.error == "memory_operation_in_progress"
     assert journal.exists()
+
+
+@pytest.mark.asyncio
+async def test_clear_runs_legacy_rescan_off_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    maintenance, _port = _maintenance(tmp_path)
+    event_loop_thread = threading.get_ident()
+    rescan_threads: list[int] = []
+    original_migrate = maintenance._migrate_legacy
+
+    def tracked_migrate(store: MemoryStore | None, *, lease_held: bool = False) -> None:
+        rescan_threads.append(threading.get_ident())
+        original_migrate(store, lease_held=lease_held)
+
+    monkeypatch.setattr(maintenance, "_migrate_legacy", tracked_migrate)
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "completed"
+    assert rescan_threads
+    assert all(thread_id != event_loop_thread for thread_id in rescan_threads)
 
 
 def test_legacy_migration_retries_after_transient_store_failure(tmp_path: Path, monkeypatch):
