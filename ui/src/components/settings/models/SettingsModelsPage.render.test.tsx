@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
@@ -106,6 +108,16 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
+  it('coalesces the OAuth success landing with its trailing stale-row notification', () => {
+    const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
+    const start = page.indexOf('const subscriptionAdded');
+    const callback = page.slice(start, page.indexOf('React.useEffect(() => {', start));
+
+    expect(callback).toMatch(/if \(!source\) \{[\s\S]*?subscriptionSuccessReconcileRef\.current/);
+    expect(callback).toMatch(/sourceEntityAuthority\.landLatest\(source\)[\s\S]*?subscriptionSuccessReconcileRef\.current = true;[\s\S]*?void refresh\(\)/);
+    expect((callback.match(/void refresh\(\)/g) ?? []).length).toBe(2);
+  });
+
   it('renders Frame 09 without tabs when every backend is direct and no source exists', async () => {
     renderPage([]);
 

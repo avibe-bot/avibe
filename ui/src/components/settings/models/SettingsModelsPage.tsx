@@ -295,6 +295,11 @@ export const SettingsModelsPage: React.FC = () => {
   const subscriptionPickerRefs = React.useRef<Partial<Record<'anthropic' | 'openai', HTMLButtonElement | null>>>({});
   const subscriptionPickerHandoffRef = React.useRef(false);
   const subscriptionCloseTimer = React.useRef<number | null>(null);
+  // A successful OAuth terminal reports the same moved rows twice: first with
+  // the created source, then as the generic stale-row notification. The source
+  // callback owns the one full reconciliation; consume the trailing notification
+  // so it cannot launch a second refresh that overwrites a successful landing.
+  const subscriptionSuccessReconcileRef = React.useRef(false);
   const sourceDetailHeadingRef = React.useRef<HTMLHeadingElement>(null);
   const focusSourceDetailPendingRef = React.useRef(false);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
@@ -844,6 +849,10 @@ export const SettingsModelsPage: React.FC = () => {
   };
   const subscriptionAdded = React.useCallback((source?: Source) => {
     if (!source) {
+      if (subscriptionSuccessReconcileRef.current) {
+        subscriptionSuccessReconcileRef.current = false;
+        return;
+      }
       void refresh();
       return;
     }
@@ -852,6 +861,7 @@ export const SettingsModelsPage: React.FC = () => {
     focusSourceDetailPendingRef.current = true;
     sourceEntityAuthority.landLatest(source);
     selectSource(source.id);
+    subscriptionSuccessReconcileRef.current = true;
     void refresh();
     if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
     subscriptionCloseTimer.current = window.setTimeout(() => {
