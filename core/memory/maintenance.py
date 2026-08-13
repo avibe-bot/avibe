@@ -373,9 +373,10 @@ class MemoryMaintenance:
 
     async def _settle_prepare_clear(self, intent: ClearIntent, *, write_intent: bool) -> None:
         cancellation: asyncio.CancelledError | None = None
+        write_error: Exception | None = None
 
         async def prepare() -> None:
-            nonlocal cancellation
+            nonlocal cancellation, write_error
             assert self._store is not None
             if write_intent:
                 try:
@@ -384,11 +385,19 @@ class MemoryMaintenance:
                     # The blocking write has settled durably; finish the
                     # safety fence before propagating the caller cancellation.
                     cancellation = error
-                self._intent_error = None
+                except Exception as error:
+                    # The marker may have been renamed before its directory
+                    # fsync failed. Continue fencing claims before reporting
+                    # the write failure to the clear coordinator.
+                    write_error = error
+                else:
+                    self._intent_error = None
             await self._runtime.pause_claims()
             await self._run_maintenance_io(self._store.begin_clear_fence)
             await self._runtime.quiesce(False)
             await self._run_maintenance_io(self._intent.consume_legacy_clear_state)
+            if write_error is not None:
+                raise write_error
             if cancellation is not None:
                 raise cancellation
 
@@ -461,6 +470,7 @@ class MemoryMaintenance:
             await self._run_maintenance_io(lambda: self._intent.write(intent.failed(error_code)))
         except Exception:
             logger.exception("Memory Clear failure could not be persisted")
+            self._intent_error = ClearIntentError("Memory Clear failure could not be persisted")
 
     def _failed_result(self) -> ClearResult:
         return ClearResult(

@@ -263,6 +263,34 @@ def test_legacy_journal_rejects_multiple_open_operations(tmp_path: Path):
     assert journal.exists()
 
 
+@pytest.mark.parametrize(
+    ("pre_epoch", "target_epoch"),
+    ((1.5, 2.5), ("1", 2), (1, 2.5)),
+)
+def test_legacy_journal_rejects_coercible_epochs(
+    tmp_path: Path, pre_epoch: object, target_epoch: object
+):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch, target_epoch, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-one", "user-1", pre_epoch, target_epoch, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(journal, 0o600)
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=1)
+
+    assert journal.exists()
+
+
 def test_legacy_migration_requires_durable_journal_removal(tmp_path: Path, monkeypatch):
     journal = tmp_path / "state/memory/clear-journal.sqlite"
     journal.parent.mkdir(parents=True)

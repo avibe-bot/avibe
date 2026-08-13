@@ -222,7 +222,14 @@ class ClearIntentStore:
         try:
             operation_id = str(row["operation_id"])
             operator_ref = str(row["operator_ref"])
-            pre_epoch = int(row["pre_epoch"])
+            pre_epoch_value = row["pre_epoch"]
+            if (
+                not isinstance(pre_epoch_value, int)
+                or isinstance(pre_epoch_value, bool)
+                or pre_epoch_value < 0
+            ):
+                raise ValueError("legacy clear pre epoch is invalid")
+            pre_epoch = pre_epoch_value
             columns = set(row.keys())
             resolution = row["resolution"] if "resolution" in columns else None
             target_value = row["target_epoch"] if "target_epoch" in columns else None
@@ -237,7 +244,13 @@ class ClearIntentStore:
                 if current_epoch not in {pre_epoch, target_epoch}:
                     raise ValueError("legacy clear epoch is not replay-safe")
             else:
-                target_epoch = int(target_value)
+                if (
+                    not isinstance(target_value, int)
+                    or isinstance(target_value, bool)
+                    or target_value < 0
+                ):
+                    raise ValueError("legacy clear target epoch is invalid")
+                target_epoch = target_value
             if target_epoch != pre_epoch + 1:
                 raise ValueError("legacy clear target epoch is invalid")
             state = row["state"]

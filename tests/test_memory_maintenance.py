@@ -279,6 +279,35 @@ async def test_marker_write_cancellation_settles_claim_fence(tmp_path: Path, mon
     assert failed.state == "failed"
 
 
+@pytest.mark.asyncio
+async def test_marker_post_rename_write_failure_settles_claim_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from core.memory import clear_intent
+
+    maintenance, port = _maintenance(tmp_path)
+    original_fsync = clear_intent.fsync_directory
+    fsync_calls = 0
+
+    def fail_once(path: Path) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 1:
+            raise clear_intent.ConfinedFilesystemError("marker directory fsync failed")
+        original_fsync(path)
+
+    monkeypatch.setattr(clear_intent, "fsync_directory", fail_once)
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "failed"
+    assert port.claim_events == ["pause", "quiesce"]
+    assert port.resumed == 0
+    failed = ClearIntentStore(tmp_path).load()
+    assert failed is not None
+    assert failed.state == "failed"
+
+
 def test_legacy_cleanup_defers_while_operation_lease_is_busy(tmp_path: Path):
     snapshot = tmp_path / "state/memory/clear-snapshots/snapshot.json"
     snapshot.parent.mkdir(parents=True)
