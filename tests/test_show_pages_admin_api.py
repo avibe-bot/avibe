@@ -3,7 +3,7 @@
 import pytest
 
 from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
-from tests.ui_server_test_helpers import save_config
+from tests.ui_server_test_helpers import _save_config
 from vibe import api
 from vibe.ui_server import app
 
@@ -60,7 +60,7 @@ def _set_visibility(session_id: str, visibility: str) -> None:
 
 def test_list_show_pages_orders_newest_first_and_joins_title(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_titled", title="Q2 funnel dashboard")
     _seed_session("ses_plain")
     _set_visibility("ses_titled", "public")
@@ -89,7 +89,7 @@ def test_list_show_pages_preserves_archived_agent_display_name(monkeypatch, tmp_
     from storage.models import agent_sessions
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     store = VibeAgentStore()
     try:
         original = store.create(name="pm", backend="claude")
@@ -120,7 +120,7 @@ def test_list_show_pages_preserves_archived_agent_display_name(monkeypatch, tmp_
 
 def test_set_show_page_visibility_public_then_offline(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_x")
     _set_visibility("ses_x", "private")
 
@@ -137,7 +137,7 @@ def test_set_show_page_visibility_public_then_offline(monkeypatch, tmp_path):
 
 def test_set_show_page_visibility_rejects_invalid(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_x")
 
     with pytest.raises(ShowPageError) as excinfo:
@@ -147,7 +147,7 @@ def test_set_show_page_visibility_rejects_invalid(monkeypatch, tmp_path):
 
 def test_rotate_share_requires_public_and_revokes_previous(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_x")
     _set_visibility("ses_x", "private")
 
@@ -165,7 +165,7 @@ def test_rotate_share_requires_public_and_revokes_previous(monkeypatch, tmp_path
 
 def test_show_pages_list_route_returns_payload(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    save_config(tmp_path)
+    _save_config(tmp_path)
     _seed_session("ses_route", title="Release notes preview")
     _set_visibility("ses_route", "public")
 

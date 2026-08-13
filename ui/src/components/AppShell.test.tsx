@@ -26,22 +26,27 @@ vi.hoisted(() => {
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getMemorySettings: vi.fn(),
+  getVersion: vi.fn(),
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
 const instanceAuth = vi.hoisted(() => ({
   remote: true,
-  hasTemporaryUnrestrictedOrgAccess: true,
-  hasTemporaryUnrestrictedOrgAppAccess: true,
   capabilities: {
     can_manage_instance: true,
-    can_use_system: false,
-    can_manage_agents: false,
-    can_manage_projects: false,
-    can_use_skills: false,
-    can_use_vault_secrets: false,
-    can_use_files: false,
-    can_use_terminal: false,
+    can_chat: true,
+    can_use_agents: true,
+    can_use_skills: true,
+    can_use_vault_secrets: true,
+    can_use_files: true,
+    can_use_terminal: true,
+    can_use_terminal_files: true,
+    can_use_system: true,
+    can_manage_agents: true,
+    can_manage_projects: true,
+    can_read_instance: true,
+    can_use_show_pages: true,
+    is_instance_owner: true,
   },
 }));
 
@@ -50,8 +55,6 @@ vi.mock('../context/StatusContext', () => ({ useStatus: () => ({ status }) }));
 vi.mock('../context/WorkbenchInboxContext', () => ({ useWorkbenchInbox: () => inbox }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => instanceAuth,
-  canUseAppsSurface: (remote: boolean, temporaryAccess: boolean | undefined) =>
-    !remote || temporaryAccess === true,
 }));
 vi.mock('../context/DockProvider', () => ({
   DockProvider: ({ children, enabled = true }: { children: ReactNode; enabled?: boolean }) => (
@@ -80,13 +83,12 @@ vi.mock('react-i18next', () => ({
 
 beforeEach(() => {
   instanceAuth.capabilities.can_manage_instance = true;
-  instanceAuth.hasTemporaryUnrestrictedOrgAccess = true;
-  instanceAuth.hasTemporaryUnrestrictedOrgAppAccess = true;
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getMemorySettings.mockResolvedValue({
     status: 'failed',
     error: 'memory_settings_remote_only',
   });
+  api.getVersion.mockResolvedValue({ version: 'test' });
 });
 
 afterEach(() => {
@@ -107,9 +109,7 @@ describe('AppShell setup recovery', () => {
     );
 
     expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe(
-      '/admin/dashboard',
-    );
+    expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/admin/dashboard');
     expect(screen.queryByTestId('wizard')).toBeNull();
   });
 });
@@ -120,6 +120,7 @@ describe('AppShell remote Apps access', () => {
     ['member', false],
   ])('mounts the Apps shell for an authenticated remote %s', async (_role, canManageInstance) => {
     instanceAuth.capabilities.can_manage_instance = canManageInstance;
+    instanceAuth.capabilities.can_chat = true;
 
     render(
       <MemoryRouter initialEntries={['/']}>
@@ -139,8 +140,7 @@ describe('AppShell remote Apps access', () => {
   });
 
   it('hides Apps surfaces and redirects App routes for non-Organization remote users', async () => {
-    instanceAuth.hasTemporaryUnrestrictedOrgAccess = false;
-    instanceAuth.hasTemporaryUnrestrictedOrgAppAccess = false;
+    instanceAuth.capabilities.can_chat = false;
 
     render(
       <MemoryRouter initialEntries={['/apps/library']}>
@@ -166,6 +166,7 @@ describe('AppShell remote Apps access', () => {
     ['member', false],
   ])('keeps App Library available to a remote %s', async (_role, canManageInstance) => {
     instanceAuth.capabilities.can_manage_instance = canManageInstance;
+    instanceAuth.capabilities.can_chat = true;
 
     render(
       <MemoryRouter initialEntries={['/apps/library']}>
@@ -190,6 +191,7 @@ describe('AppShell remote Apps access', () => {
     '/apps/show/session-1',
   ])('keeps the remote App route %s available when legacy capabilities are false', async (path) => {
     instanceAuth.capabilities.can_manage_instance = false;
+    instanceAuth.capabilities.can_chat = true;
 
     render(
       <MemoryRouter initialEntries={[path]}>

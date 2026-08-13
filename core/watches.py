@@ -624,11 +624,11 @@ class ManagedWatchStore:
     ) -> ManagedWatch:
         from core.vibe_agents import ensure_agent_name_access
         from storage.resource_access_service import (
-            ensure_local_harness_definition_write,
+            ensure_harness_definition_write,
             metadata_with_resource_user_context,
         )
 
-        ensure_local_harness_definition_write(user_context)
+        ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         watch = ManagedWatch(
             id=uuid4().hex[:12],
@@ -733,11 +733,11 @@ class ManagedWatchStore:
     ) -> ManagedWatch:
         from core.vibe_agents import ensure_agent_name_access
         from storage.resource_access_service import (
-            ensure_local_harness_definition_write,
+            ensure_harness_definition_write,
             metadata_with_resource_user_context,
         )
 
-        ensure_local_harness_definition_write(user_context)
+        ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         watch = self._watches[watch_id]
         # Captured before the first mutation: the state ``vibe watch update`` read and
@@ -2081,8 +2081,8 @@ class ManagedWatchService:
 
     async def _run_watch(self, watch_id: str) -> None:
         from storage.resource_access_service import (
-            REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-            metadata_allows_temporary_unrestricted_runtime,
+            HARNESS_ACCESS_FORBIDDEN_CODE,
+            metadata_allows_harness_runtime,
         )
 
         lifetime_started: float | None = None
@@ -2104,14 +2104,14 @@ class ManagedWatchService:
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
                 return
-            if not metadata_allows_temporary_unrestricted_runtime(watch.metadata):
+            if not metadata_allows_harness_runtime(watch.metadata):
                 self._watch_store_call(
                     watch.id,
                     "suspend_remote_origin",
                     lambda: self.store.mark_cycle_result(
                         watch.id,
                         exit_code=None,
-                        error=REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+                        error=HARNESS_ACCESS_FORBIDDEN_CODE,
                         disable=True,
                     ),
                     guarded=True,

@@ -192,6 +192,15 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     config, ids = _setup_state(tmp_path)
     engine = create_sqlite_engine()
     with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id=ids["session_a"],
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="public",
+        )
+    with engine.begin() as conn:
         conn.execute(
             scopes.update()
             .where(scopes.c.native_id == ids["project_a"])
@@ -213,7 +222,7 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     )
 
     project_rows = _get(client, "/api/projects").get_json()["projects"]
-    assert {row["id"] for row in project_rows} == {ids["project_a"], ids["project_b"]}
+    assert {row["id"] for row in project_rows} == {ids["project_a"]}
     project_a = next(row for row in project_rows if row["id"] == ids["project_a"])
     assert project_a["folder_path"] == str((tmp_path / "project-a").resolve())
     assert project_a["metadata"] == {"host_path_hint": "/private/host"}
@@ -221,8 +230,6 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     sessions = _get(client, "/api/sessions?status=active").get_json()["sessions"]
     assert {row["id"] for row in sessions} == {
         ids["session_a"],
-        ids["session_b"],
-        ids["unscoped"],
     }
     sessions_by_id = {row["id"]: row for row in sessions}
     local_sessions = app.test_client().get(
@@ -230,33 +237,31 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
         base_url="http://localhost",
     ).get_json()["sessions"]
     local_sessions_by_id = {row["id"]: row for row in local_sessions}
-    for session_id in ids["session_a"], ids["session_b"], ids["unscoped"]:
+    for session_id in (ids["session_a"],):
         assert sessions_by_id[session_id]["workdir"] == local_sessions_by_id[session_id]["workdir"]
         assert sessions_by_id[session_id]["metadata"] == local_sessions_by_id[session_id]["metadata"]
     assert _get(client, f"/api/projects/{ids['project_a']}").status_code == 200
-    assert _get(client, f"/api/projects/{ids['project_b']}").status_code == 200
+    assert _get(client, f"/api/projects/{ids['project_b']}").status_code == 404
     session = _get(client, f"/api/sessions/{ids['session_a']}").get_json()
     assert session["workdir"] == str((tmp_path / "project-a").resolve())
     assert session["metadata"] == {"created_via": "workbench"}
     assert _get(client, f"/api/sessions/{ids['session_a']}/messages").status_code == 200
-    assert _get(client, f"/api/sessions/{ids['session_b']}/messages").status_code == 200
-    assert _get(client, f"/api/sessions/{ids['unscoped']}").status_code == 200
+    assert _get(client, f"/api/sessions/{ids['session_b']}/messages").status_code == 404
+    assert _get(client, f"/api/sessions/{ids['unscoped']}").status_code == 404
 
     search = _get(client, "/api/search/messages?q=needle").get_json()
     assert {row["session_id"] for row in search["sessions"]} == {
         ids["session_a"],
-        ids["session_b"],
     }
     inbox = _get(client, "/api/inbox").get_json()
     assert {row["session_id"] for row in inbox["sessions"]} == {
         ids["session_a"],
-        ids["session_b"],
     }
-    assert set(inbox["unread_by_session"]) == {ids["session_a"], ids["session_b"]}
+    assert set(inbox["unread_by_session"]) == {ids["session_a"]}
     media_response = _get(client, f"/api/media/{ids['media_a']}")
     assert media_response.status_code == 200
     assert media_response.headers["Cache-Control"] == "private, no-store"
-    assert _get(client, f"/api/media/{ids['media_b']}").status_code == 200
+    assert _get(client, f"/api/media/{ids['media_b']}").status_code == 404
     show_pages = _get(client, "/api/show-pages").get_json()
     assert {page["session_id"] for page in show_pages["pages"]} == {
         ids["session_a"],
@@ -276,6 +281,26 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
         json={},
     )
     assert mark_read.status_code == 200
+
+    allowed_action = client.post(
+        f"/api/sessions/{ids['session_a']}/attachments",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=headers,
+        json={},
+    )
+    hidden_action = client.post(
+        f"/api/sessions/{ids['session_b']}/attachments",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=headers,
+        json={},
+    )
+    # Empty JSON is rejected by the upload parser, but the request must reach
+    # the endpoint rather than being stopped by the remote execution gate.
+    assert allowed_action.status_code != 403 or allowed_action.get_json().get("code") != "remote_execution_disabled"
+    assert hidden_action.status_code != 403 or hidden_action.get_json().get("code") != "remote_execution_disabled"
+
 
 def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -320,17 +345,17 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     client = _remote_client(config, role="editor", email="alice@example.com")
 
     viewer_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
-    assert viewer_project["capabilities"] == {"can_chat": True}
+    assert viewer_project["capabilities"] == {"can_chat": False}
 
     viewer_bootstrap = _get(client, f"/api/sessions/{ids['session_a']}/bootstrap")
 
     assert viewer_bootstrap.status_code == 200
     viewer_payload = viewer_bootstrap.get_json()
-    assert viewer_payload["capabilities"] == {"can_chat": True}
-    assert viewer_payload["agents"][0]["name"] == "editor-agent"
-    assert viewer_payload["default_agent_name"] == "editor-agent"
-    assert viewer_payload["queued"][0]["text"] == "editor-only queued prompt"
-    assert viewer_payload["draft"] == expected_draft
+    assert viewer_payload["capabilities"] == {"can_chat": False}
+    assert viewer_payload["agents"] == []
+    assert viewer_payload["default_agent_name"] is None
+    assert viewer_payload["queued"] == []
+    assert viewer_payload["draft"] == {"text": ""}
     assert [message["text"] for message in viewer_payload["messages"]] == ["shared needle"]
     assert viewer_payload["session"]["workdir"] == str((tmp_path / "project-a").resolve())
     assert viewer_payload["session"]["metadata"] == {"created_via": "workbench"}
@@ -353,9 +378,9 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert editor_payload["default_agent_name"] == "editor-agent"
     assert editor_payload["queued"][0]["text"] == "editor-only queued prompt"
     assert editor_payload["draft"] == expected_draft
-    assert editor_payload["config"]["runtime"]["default_cwd"] == "."
-    assert "agents" in editor_payload["config"]
-    assert "memory" not in editor_payload["config"]
+    # Editors receive the non-sensitive runtime UI projection used by ChatPage;
+    # Owner-only management data remains available only to the Owner payload.
+    assert editor_payload["config"]["ui"]["chat_message_font_size"]
     assert "remote_access" not in editor_payload["config"]
 
     owner = _remote_client(config, role="owner", email="owner@example.com")
@@ -363,7 +388,7 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert owner_payload["config"]["runtime"]["default_cwd"] == "."
     assert "agents" in owner_payload["config"]
     assert "memory" not in owner_payload["config"]
-    assert "remote_access" not in owner_payload["config"]
+    assert "remote_access" in owner_payload["config"]
 
     local_payload = app.test_client().get(
         f"/api/sessions/{ids['session_a']}/bootstrap",
@@ -423,17 +448,24 @@ def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path
     )
     client = _remote_client(config, role="editor", email="alice@example.com")
 
-    assert [row["id"] for row in _get(client, "/api/projects").get_json()["projects"]] == [
-        ids["project_b"]
-    ]
+    assert _get(client, "/api/projects").get_json()["projects"] == []
     archived_project = _get(client, f"/api/projects/{ids['project_a']}")
-    assert archived_project.status_code == 200
-    assert archived_project.get_json()["archived"] is True
-    assert _get(client, f"/api/sessions/{ids['session_a']}/messages").status_code == 200
-    assert _get(client, f"/api/media/{ids['media_a']}").status_code == 200
+    assert archived_project.status_code == 404
+    assert _get(client, f"/api/sessions/{ids['session_a']}/messages").status_code == 404
+    assert _get(client, f"/api/media/{ids['media_a']}").status_code == 404
     assert _get(client, "/api/show-pages").get_json()["pages"] == [
         {"session_id": ids["session_a"]}
     ]
+
+    response = client.post(
+        f"/api/sessions/{ids['session_a']}/attachments",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=csrf_headers(client, REMOTE_ORIGIN),
+        json={},
+    )
+    assert response.status_code != 403 or response.get_json().get("code") != "remote_execution_disabled"
+
 
 def test_legacy_media_token_uses_all_migrated_session_references(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -593,7 +625,7 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
 
     viewer = _remote_client(config, role="viewer", email="alice@example.com")
     assert _get(viewer, f"/api/sessions/{ids['session_a']}").status_code == 200
-    assert _get(viewer, f"/api/sessions/{ids['session_b']}").status_code == 200
+    assert _get(viewer, f"/api/sessions/{ids['session_b']}").status_code == 404
     headers = csrf_headers(viewer, REMOTE_ORIGIN)
     assert viewer.post(
         "/api/sessions",
@@ -601,7 +633,7 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
         environ_base=REMOTE_PEER,
         headers=headers,
         json={"project_id": ids["project_a"]},
-    ).status_code != 403
+    ).status_code == 403
 
     no_match = _remote_client(
         config,
@@ -610,6 +642,7 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
         active_org=False,
     )
     assert _get(no_match, "/api/projects").status_code == 200
+    assert _get(no_match, "/api/projects").get_json()["projects"] == []
     assert _get(no_match, "/api/sessions").status_code == 200
     assert _get(no_match, f"/api/sessions/{ids['session_a']}").status_code == 404
     no_match_headers = csrf_headers(no_match, REMOTE_ORIGIN)
@@ -621,7 +654,6 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
         json={"project_id": ids["project_a"]},
     )
     assert denied.status_code == 403
-    assert denied.get_json()["code"] == "project_access_denied"
 
     organization_member = app.test_client()
     organization_member.set_cookie(
@@ -639,14 +671,11 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
         ),
         domain="alex.avibe.bot",
     )
-    assert {row["id"] for row in _get(organization_member, "/api/projects").get_json()["projects"]} == {
-        ids["project_a"],
-        ids["project_b"],
-    }
+    assert {row["id"] for row in _get(organization_member, "/api/projects").get_json()["projects"]} == {ids["project_b"]}
     assert _get(organization_member, f"/api/sessions/{ids['session_b']}").status_code == 200
-    assert _get(organization_member, f"/api/sessions/{ids['session_a']}").status_code == 200
+    assert _get(organization_member, f"/api/sessions/{ids['session_a']}").status_code == 404
     assert _get(organization_member, f"/api/media/{ids['media_b']}").status_code == 200
-    assert _get(organization_member, f"/api/media/{ids['media_a']}").status_code == 200
+    assert _get(organization_member, f"/api/media/{ids['media_a']}").status_code == 404
 
     owner = _remote_client(config, role="owner", email="owner@example.com")
     owner_projects = _get(owner, "/api/projects").get_json()["projects"]
@@ -703,10 +732,20 @@ def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) ->
         organization_role="member",
         is_remote=True,
     )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id=ids["session_a"],
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="public",
+        )
     visible_payload = json.dumps({"type": "session.status", "data": {"session_id": ids["session_a"]}})
     hidden_payload = json.dumps({"type": "session.status", "data": {"session_id": ids["session_b"]}})
     assert ui_server._workbench_event_visible_to_context(context, "session.status", visible_payload) is True
-    assert ui_server._workbench_event_visible_to_context(context, "session.status", hidden_payload) is True
+    assert ui_server._workbench_event_visible_to_context(context, "session.status", hidden_payload) is False
     assert ui_server._workbench_event_visible_to_context(
         context,
         "authorization.changed",
@@ -722,7 +761,7 @@ def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) ->
         organization_id="org-1",
         organization_member_id="member-1",
         organization_role="member",
-        group_ids=[],
+        group_ids=["grp_beta"],
     )
     websocket = SimpleNamespace(
         client=SimpleNamespace(host="203.0.113.10"),
@@ -739,4 +778,4 @@ def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) ->
         websocket,
         minimum_role="viewer",
         project_session_id=ids["session_b"],
-    ) is True
+    ) is False

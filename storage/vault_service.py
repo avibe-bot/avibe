@@ -46,8 +46,6 @@ from storage.models import (
 )
 from storage.vault_addresses import derive_addresses
 from storage.vault_crypto import Sealed
-from vibe.authorization import has_temporary_unrestricted_runtime_access
-
 logger = logging.getLogger(__name__)
 
 SKILL_TAG_PREFIX = "skill:"
@@ -1538,7 +1536,7 @@ def _require_request_secret_access(
     """Authorize a request before hydrating or mutating its member secrets."""
 
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local or has_temporary_unrestricted_runtime_access(context):
+    if context.has_role("editor"):
         return
     member_names = _request_member_names(row)
     if not member_names:
@@ -1551,7 +1549,7 @@ def _require_request_secret_access(
         # Provision requests legitimately precede the secret. Only the paired
         # instance owner may inspect or decide those owner-level requests.
         if (
-            (context.is_instance_owner or has_temporary_unrestricted_runtime_access(context))
+            context.is_instance_owner
             and row.get("request_type") == "provision"
         ):
             return
@@ -1789,7 +1787,7 @@ def _require_row(conn: Connection, name: str) -> dict[str, Any]:
 
 
 def resolve_resource_access_context(user_context: Any = None):
-    """Resolve request ACL context while preserving trusted local Vault use."""
+    """Resolve request context for Vault ACL checks."""
 
     from storage import resource_access_service
 
@@ -1830,7 +1828,7 @@ def _require_secret_resource_management(conn: Connection, row: dict[str, Any], u
 
 def require_secret_create_access(*, user_context: Any = None):
     context = resolve_resource_access_context(user_context)
-    if context.can_manage_instance or has_temporary_unrestricted_runtime_access(context):
+    if context.has_role("editor"):
         return context
     raise VaultSecretAccessError("Vault secret access is not permitted.")
 
@@ -1849,7 +1847,7 @@ def _require_secret_names_access(
     management: bool = False,
 ) -> None:
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local or has_temporary_unrestricted_runtime_access(context):
+    if context.has_role("editor"):
         return
     member_names = sorted({str(name) for name in names if str(name)})
     if not member_names:
@@ -1885,7 +1883,7 @@ def _register_created_secret_resource_policy(conn: Connection, secret_id: str, u
 
     from storage import resource_access_service
 
-    if not (user_context.is_remote and user_context.is_active_organization_member and user_context.subject):
+    if not user_context.subject:
         return
     resource_access_service.ensure_resource_policy(
         conn,
@@ -3831,10 +3829,7 @@ def list_requests(
         query = query.where(vault_requests.c.request_type == request_type)
     # Session and remote ACL filters run in Python, so apply the limit only after
     # those filters or newer inaccessible rows could hide older visible requests.
-    has_full_runtime_access = (
-        context.is_trusted_local
-        or has_temporary_unrestricted_runtime_access(context)
-    )
+    has_full_runtime_access = context.has_role("editor")
     requires_post_filter = session is not None or not has_full_runtime_access
     if not requires_post_filter:
         query = query.limit(limit)
@@ -4431,10 +4426,7 @@ def list_grants(
         query = query.where(or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id))
     context = resolve_resource_access_context(user_context)
     rows = [dict(row) for row in conn.execute(query).mappings()]
-    if not (
-        context.is_trusted_local
-        or has_temporary_unrestricted_runtime_access(context)
-    ):
+    if not context.has_role("editor"):
         accessible_rows: list[dict[str, Any]] = []
         for row in rows:
             try:
@@ -4978,8 +4970,7 @@ def _audit_secret_name_allowed(
         )
         if not has_tombstone:
             allowed = bool(
-                context.is_instance_owner
-                or has_temporary_unrestricted_runtime_access(context)
+                context.has_role("editor")
             )
     access_by_name[name] = allowed
     return allowed
@@ -4996,7 +4987,7 @@ def _require_audit_row_access(
     tombstone_policies: dict[str, tuple[bool, Any]] | None = None,
 ) -> None:
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local or has_temporary_unrestricted_runtime_access(context):
+    if context.has_role("editor"):
         return
 
     snapshot_present, snapshot = _audit_access_snapshot(row)
@@ -5013,8 +5004,7 @@ def _require_audit_row_access(
     )
     if not names:
         if (
-            context.is_instance_owner
-            or has_temporary_unrestricted_runtime_access(context)
+            context.has_role("editor")
         ):
             return
         raise VaultSecretAccessError("Vault secret access is not permitted.")
@@ -5042,7 +5032,7 @@ def list_audit(
     requested_limit = max(0, limit)
     if requested_limit == 0:
         return []
-    if context.is_trusted_local or has_temporary_unrestricted_runtime_access(context):
+    if context.has_role("editor"):
         query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
         if secret_name is not None:
             query = query.where(vault_audit.c.secret_name == secret_name)

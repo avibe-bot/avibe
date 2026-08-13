@@ -1621,11 +1621,11 @@ class ScheduledTaskStore:
     ) -> ScheduledTask:
         from core.vibe_agents import ensure_agent_name_access
         from storage.resource_access_service import (
-            ensure_local_harness_definition_write,
+            ensure_harness_definition_write,
             metadata_with_resource_user_context,
         )
 
-        ensure_local_harness_definition_write(user_context)
+        ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
@@ -1729,11 +1729,11 @@ class ScheduledTaskStore:
     ) -> ScheduledTask:
         from core.vibe_agents import ensure_agent_name_access
         from storage.resource_access_service import (
-            ensure_local_harness_definition_write,
+            ensure_harness_definition_write,
             metadata_with_resource_user_context,
         )
 
-        ensure_local_harness_definition_write(user_context)
+        ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         task = self._tasks[task_id]
         # Captured before the first mutation: this is the state the CALLER read
@@ -8223,15 +8223,15 @@ class ScheduledTaskService:
         escalation_run_id: Optional[str] = None
         try:
             from storage.resource_access_service import (
-                REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-                metadata_allows_temporary_unrestricted_runtime,
+                HARNESS_ACCESS_FORBIDDEN_CODE,
+                metadata_allows_harness_runtime,
             )
 
             if (
                 request.request_type not in {"task_run", "scheduled"}
-                and not metadata_allows_temporary_unrestricted_runtime(request.metadata)
+                and not metadata_allows_harness_runtime(request.metadata)
             ):
-                raise PermissionError(REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE)
+                raise PermissionError(HARNESS_ACCESS_FORBIDDEN_CODE)
             if request.request_type in {"task_run", "scheduled"}:
                 # A scheduled one-shot is retired in the same SQLite transaction
                 # that created this Run. Only that transaction stamps the Run as
@@ -8939,8 +8939,8 @@ class ScheduledTaskService:
         schedule_generation: Optional[dict[str, str]] = None,
     ) -> TaskExecutionResult:
         from storage.resource_access_service import (
-            REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-            metadata_allows_temporary_unrestricted_runtime,
+            HARNESS_ACCESS_FORBIDDEN_CODE,
+            metadata_allows_harness_runtime,
         )
 
         error: Optional[str] = None
@@ -8949,8 +8949,8 @@ class ScheduledTaskService:
         failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
-        if not metadata_allows_temporary_unrestricted_runtime(task.metadata):
-            error = REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE
+        if not metadata_allows_harness_runtime(task.metadata):
+            error = HARNESS_ACCESS_FORBIDDEN_CODE
             if not self.store.suspend_task(task.id, error=error):
                 logger.warning(
                     "Remote-origin scheduled task %s changed before it could be suspended",
@@ -8961,7 +8961,7 @@ class ScheduledTaskService:
                 error=error,
                 session_key=session_key,
                 session_id=session_id,
-                failure_code=REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+                failure_code=HARNESS_ACCESS_FORBIDDEN_CODE,
             )
         user_context = self._resource_user_context(task.metadata)
         binding_change: Optional[SessionBindingChange] = None

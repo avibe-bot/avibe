@@ -22,8 +22,6 @@ export const InstanceAuthorizationProvider = ({
       return {
         remote: false,
         instanceRole: session.instance_role ?? 'owner',
-        hasTemporaryUnrestrictedOrgAccess: false,
-        hasTemporaryUnrestrictedOrgAppAccess: false,
         capabilities: session.capabilities ?? OWNER_INSTANCE_CAPABILITIES,
       };
     }
@@ -31,20 +29,12 @@ export const InstanceAuthorizationProvider = ({
       return {
         remote: true,
         instanceRole: null,
-        hasTemporaryUnrestrictedOrgAccess: false,
-        hasTemporaryUnrestrictedOrgAppAccess: false,
         capabilities: DENIED_INSTANCE_CAPABILITIES,
       };
     }
     return {
       remote: true,
       instanceRole: session.instance_role,
-      hasTemporaryUnrestrictedOrgAccess:
-        session.temporary_unrestricted_org_access ||
-        session.temporary_unrestricted_org_app_access,
-      hasTemporaryUnrestrictedOrgAppAccess:
-        session.temporary_unrestricted_org_access ||
-        session.temporary_unrestricted_org_app_access,
       capabilities: session.capabilities,
     };
   }, [session]);

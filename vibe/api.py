@@ -1285,7 +1285,7 @@ def client_config_payload(config: V2Config) -> dict:
     return payload
 
 
-_REMOTE_CONFIG_UI_FIELDS = (
+_NON_OWNER_CONFIG_UI_FIELDS = (
     "instance_name",
     "default_instance_name",
     "chat_message_font_size",
@@ -1294,12 +1294,13 @@ _REMOTE_CONFIG_UI_FIELDS = (
 )
 
 
-def remote_config_payload(config: V2Config) -> dict:
-    """Return the fallback projection for remote identities without rollout access.
+def non_owner_config_payload(config: V2Config) -> dict:
+    """Return the configuration projection available below the Owner role.
 
-    Active Organization members use the full runtime projection with the
-    pairing/tunnel block removed. Keep this allowlist for every other remote
-    identity so a future caller cannot inherit host paths or runtime settings.
+    This projection is role-based rather than origin-based. It keeps sensitive
+    runtime and control-plane fields out of Viewer and Editor responses while
+    leaving ordinary messaging and UI preferences available to both local and
+    remote callers.
     """
 
     payload = client_config_payload(config)
@@ -1317,7 +1318,7 @@ def remote_config_payload(config: V2Config) -> dict:
         "agent_progress_style": payload.get("agent_progress_style"),
         "ui": {
             key: ui_payload[key]
-            for key in _REMOTE_CONFIG_UI_FIELDS
+            for key in _NON_OWNER_CONFIG_UI_FIELDS
             if isinstance(ui_payload, dict) and key in ui_payload
         },
     }
@@ -1528,7 +1529,7 @@ def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
 
     organization_id = policy.get("organization_id") if policy else None
     instance_id = context.instance_id
-    if context.is_trusted_local and organization_id and not instance_id:
+    if context.is_instance_owner and organization_id and not instance_id:
         instance_id = V2Config.load().remote_access.vibe_cloud.instance_id or None
     return {
         "ok": True,
@@ -1969,8 +1970,6 @@ def onboard_vibe_agents(*, user_context: Any = None) -> dict:
 
 def get_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     user_context = resolve_resource_access_context(user_context)
-    from vibe.authorization import has_temporary_unrestricted_runtime_access
-
     store = VibeAgentStore()
     try:
         agent = store.require_accessible(name, user_context=user_context)
@@ -1984,10 +1983,7 @@ def get_vibe_agent(name: str, *, user_context: Any = None) -> dict:
             "ok": True,
             "agent": _vibe_agent_payload(
                 agent,
-                remote_safe=(
-                    user_context.is_remote
-                    and not has_temporary_unrestricted_runtime_access(user_context)
-                ),
+                remote_safe=False,
             ),
             "default_agent_name": default_agent.name if default_agent else None,
         }

@@ -26,7 +26,6 @@ from storage import project_access_service
 from storage.models import agents, scope_settings, scopes
 from vibe.authorization import (
     AuthorizationContext,
-    has_temporary_unrestricted_runtime_access,
     require_instance_role,
 )
 
@@ -214,11 +213,6 @@ def _project_for_context(
             str(project.get("id") or ""),
         )
     }
-    if context.is_remote and not has_temporary_unrestricted_runtime_access(context):
-        # Remote identities outside the temporary active-Organization rollout
-        # remain unable to inspect the host's workdir and local metadata.
-        payload["folder_path"] = ""
-        payload["metadata"] = {}
     return payload
 
 

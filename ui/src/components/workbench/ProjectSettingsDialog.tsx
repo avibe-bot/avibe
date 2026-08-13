@@ -5,10 +5,7 @@ import { FileText } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import type { ProjectDefaultAgent, VibeAgentBrief, WorkbenchProject } from '../../context/ApiContext';
-import {
-  canUseRuntimeSurfaces,
-  useInstanceAuthorization,
-} from '../../context/InstanceAuthorizationContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
@@ -16,7 +13,6 @@ import { InfoHint } from '../ui/info-hint';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { AgentRoutePatch } from './AgentRoutePicker';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
-import { canEditProjectDefaultAgent, canEditProjectInstructions } from '../../lib/remoteAuth';
 
 // Per-project settings. Three sections:
 //   1. Working directory (read-only) — where the Agent runs.
@@ -34,17 +30,10 @@ export const ProjectSettingsDialog: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const { setProjectDefaultAgent } = useWorkbenchProjectsTree();
-  const { capabilities, remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
-  const canManageProjects = capabilities.can_manage_projects || canUseRuntime;
-  const canEditAgentsMd = canManageProjects && canEditProjectInstructions({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
-  const canEditDefaultAgent = canManageProjects && canEditProjectDefaultAgent({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
+  const { capabilities } = useInstanceAuthorization();
+  const canManageProjects = capabilities.can_manage_projects;
+  const canEditAgentsMd = canManageProjects;
+  const canEditDefaultAgent = canManageProjects;
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [agentsMdOpen, setAgentsMdOpen] = useState(false);
 

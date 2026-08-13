@@ -19,11 +19,7 @@ import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
 import { errorMessage } from '@/lib/errorMessage';
 import { Badge } from '../ui/badge';
-import { canManageSkills } from '../../lib/remoteAuth';
-import {
-  canUseRuntimeSurfaces,
-  useInstanceAuthorization,
-} from '../../context/InstanceAuthorizationContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 const skillKey = (s: SkillBrief) => `${s.scope}:${s.name}`;
 
@@ -31,14 +27,8 @@ export const SkillsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { capabilities, remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
-  const canManage =
-    (capabilities.can_manage_instance || canUseRuntime) &&
-    canManageSkills({
-      remote,
-      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-    });
+  const { capabilities } = useInstanceAuthorization();
+  const canManage = capabilities.can_use_skills;
 
   const [scope, setScope] = useState<SkillScope>('global');
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
@@ -306,7 +296,7 @@ export const SkillsPage: React.FC = () => {
               {t('skills.addSkill')}
             </Button>
           </>
-        ) : remote && !canUseRuntime ? (
+        ) : !capabilities.can_use_skills ? (
           <Badge variant="secondary" title={t('skills.remoteReadOnlyHint')}>
             <Lock className="size-3" />
             {t('skills.remoteReadOnly')}

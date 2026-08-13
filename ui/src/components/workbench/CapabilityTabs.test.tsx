@@ -26,16 +26,17 @@ const localOwner: InstanceAuthorizationValue = {
 };
 
 describe('CapabilityTabs', () => {
-  it('shows the Harness tab to a trusted-local owner', () => {
+  it('shows the Harness tab to a local owner', () => {
     const markup = renderWith(localOwner);
     expect(markup).toContain('workbench.modules.harness.title');
   });
 
-  it('shows the Harness tab for an active Organization member', () => {
+  it('shows the Harness tab for an Editor', () => {
     const remoteOwner: InstanceAuthorizationValue = {
       ...localOwner,
       remote: true,
-      hasTemporaryUnrestrictedOrgAccess: true,
+      instanceRole: 'editor',
+      capabilities: { ...OWNER_INSTANCE_CAPABILITIES, can_manage_instance: false },
     };
     const markup = renderWith(remoteOwner);
     expect(markup).toContain('workbench.modules.agents.title');

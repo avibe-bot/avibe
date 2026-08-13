@@ -2,12 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   adminLandingPath,
-  filterLocalSystemNavItems,
-  filterRuntimeAccessNavItems,
+  filterOwnerOnlyNavItems,
   isAdvancedSettingsPath,
   isLocalOnlyMessagingField,
-  isLocalSystemPath,
-  isLocalSystemPathForAccess,
+  isOwnerOnlyPath,
   isMemorySettingsPath,
 } from './adminNavigation';
 
@@ -36,50 +34,50 @@ describe('isAdvancedSettingsPath', () => {
   });
 });
 
-describe('isLocalSystemPath', () => {
-  it('covers every destination with a historical trusted-local gate', () => {
-    expect(isLocalSystemPath('/admin/dashboard')).toBe(true);
-    expect(isLocalSystemPath('/admin/remote-access')).toBe(true);
-    expect(isLocalSystemPath('/admin/groups')).toBe(true);
-    expect(isLocalSystemPath('/admin/users')).toBe(true);
-    expect(isLocalSystemPath('/admin/logs')).toBe(true);
-    expect(isLocalSystemPath('/admin/settings/service')).toBe(true);
-    expect(isLocalSystemPath('/admin/settings/platforms')).toBe(true);
-    expect(isLocalSystemPath('/admin/settings/backends')).toBe(true);
-    expect(isLocalSystemPath('/admin/settings/models')).toBe(true);
-    expect(isLocalSystemPath('/admin/settings/dependencies')).toBe(true);
-    expect(isLocalSystemPath('/admin/settings/diagnostics')).toBe(true);
-    expect(isLocalSystemPath('/admin/settings/logs')).toBe(true);
-    expect(isLocalSystemPath('/harness')).toBe(true);
+describe('isOwnerOnlyPath', () => {
+  it('covers every destination with an Owner management gate', () => {
+    expect(isOwnerOnlyPath('/admin/dashboard')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/remote-access')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/groups')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/users')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/logs')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/service')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/platforms')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/backends')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/models')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/dependencies')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/diagnostics')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/logs')).toBe(true);
+    expect(isOwnerOnlyPath('/harness')).toBe(false);
   });
 
   it('matches nested paths under a gated destination', () => {
-    expect(isLocalSystemPath('/admin/settings/platforms/slack')).toBe(true);
-    expect(isLocalSystemPath('/admin/groups/engineering')).toBe(true);
-    expect(isLocalSystemPath('/harness/')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/platforms/slack')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/groups/engineering')).toBe(true);
+    expect(isOwnerOnlyPath('/harness/')).toBe(false);
   });
 
   it('leaves remotely usable destinations open', () => {
-    expect(isLocalSystemPath('/admin/settings/messaging')).toBe(false);
-    expect(isLocalSystemPath('/admin/organization/overview')).toBe(false);
-    expect(isLocalSystemPath('/apps/files')).toBe(false);
-    expect(isLocalSystemPath('/apps/editor')).toBe(false);
-    expect(isLocalSystemPath('/apps/terminal')).toBe(false);
-    expect(isLocalSystemPath('/apps/library')).toBe(false);
-    expect(isLocalSystemPath('/apps/show/session-1')).toBe(false);
-    expect(isLocalSystemPath('/')).toBe(false);
+    expect(isOwnerOnlyPath('/admin/settings/messaging')).toBe(false);
+    expect(isOwnerOnlyPath('/admin/organization/overview')).toBe(false);
+    expect(isOwnerOnlyPath('/apps/files')).toBe(false);
+    expect(isOwnerOnlyPath('/apps/editor')).toBe(false);
+    expect(isOwnerOnlyPath('/apps/terminal')).toBe(false);
+    expect(isOwnerOnlyPath('/apps/library')).toBe(false);
+    expect(isOwnerOnlyPath('/apps/show/session-1')).toBe(false);
+    expect(isOwnerOnlyPath('/')).toBe(false);
   });
 
   it('does not match a route that only shares a gated prefix', () => {
-    expect(isLocalSystemPath('/admin/dashboards')).toBe(false);
-    expect(isLocalSystemPath('/harness-status')).toBe(false);
-    expect(isLocalSystemPath('/apps/library-picker')).toBe(false);
+    expect(isOwnerOnlyPath('/admin/dashboards')).toBe(false);
+    expect(isOwnerOnlyPath('/harness-status')).toBe(false);
+    expect(isOwnerOnlyPath('/apps/library-picker')).toBe(false);
   });
 });
 
-describe('filterLocalSystemNavItems', () => {
-  it('removes local-only destinations from nested admin navigation trees', () => {
-    const visible = filterLocalSystemNavItems([
+describe('filterOwnerOnlyNavItems', () => {
+  it('removes Owner-only destinations from nested admin navigation trees', () => {
+    const visible = filterOwnerOnlyNavItems([
       {
         children: [
           { to: '/admin/settings/platforms' },
@@ -101,65 +99,24 @@ describe('filterLocalSystemNavItems', () => {
   });
 });
 
-describe('filterRuntimeAccessNavItems', () => {
-  const navItems = [
-    { to: '/admin/dashboard' },
-    {
-      children: [
-        { to: '/admin/remote-access' },
-        { to: '/admin/settings/models' },
-      ],
-    },
-    { to: '/admin/settings/messaging' },
-  ];
-
-  it('withholds only Remote Access during the temporary Organization rollout', () => {
-    expect(filterRuntimeAccessNavItems(navItems, true)).toEqual([
-      { to: '/admin/dashboard' },
-      { children: [{ to: '/admin/settings/models' }] },
-      { to: '/admin/settings/messaging' },
-    ]);
-  });
-
-  it('keeps the baseline local-system filter outside the temporary rollout', () => {
-    expect(filterRuntimeAccessNavItems(navItems, false)).toEqual([
-      { to: '/admin/settings/messaging' },
-    ]);
-  });
-});
-
 describe('adminLandingPath', () => {
-  it('opens the Dashboard for a trusted-local caller', () => {
+  it('opens the Dashboard for an owner', () => {
     expect(adminLandingPath(true)).toBe('/admin/dashboard');
   });
 
   it('sends a remote owner to an admin page they can actually use', () => {
     const destination = adminLandingPath(false);
     expect(destination).toBe('/admin/settings/messaging');
-    expect(isLocalSystemPath(destination)).toBe(false);
+    expect(isOwnerOnlyPath(destination)).toBe(false);
   });
 
-  it('opens the Dashboard for the temporary Organization runtime policy', () => {
-    expect(adminLandingPath(false, true)).toBe('/admin/dashboard');
-  });
-});
-
-describe('isLocalSystemPathForAccess', () => {
-  it('opens known runtime administration while preserving Remote Access control', () => {
-    expect(isLocalSystemPathForAccess('/admin/dashboard', true)).toBe(false);
-    expect(isLocalSystemPathForAccess('/admin/users', true)).toBe(false);
-    expect(isLocalSystemPathForAccess('/admin/settings/models', true)).toBe(false);
-    expect(isLocalSystemPathForAccess('/admin/remote-access', true)).toBe(true);
-  });
-
-  it('keeps the baseline gate without the signed temporary signal', () => {
-    expect(isLocalSystemPathForAccess('/admin/users', false)).toBe(true);
-    expect(isLocalSystemPathForAccess('/admin/settings/models', false)).toBe(true);
+  it('keeps non-owners on messaging settings', () => {
+    expect(adminLandingPath(false)).toBe('/admin/settings/messaging');
   });
 });
 
 describe('isLocalOnlyMessagingField', () => {
-  it('marks the messaging controls governed by the runtime admission signal', () => {
+  it('marks messaging controls governed by the Owner capability', () => {
     expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
     expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
     expect(isLocalOnlyMessagingField('show_pages_prompt')).toBe(true);

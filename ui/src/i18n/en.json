@@ -3451,7 +3451,7 @@
       },
       "workspaceHelp": {
         "private": "Only the Show Page owner can open it through this access rule.",
-        "public": "All active Organization members may open it, subject to their Avibe and Project access.",
+        "public": "Anyone with the Show Page link may open it when it is public.",
         "scope": "Only active members of the selected groups may open it, subject to their Avibe and Project access."
       },
       "selectedGroups": "Selected groups",

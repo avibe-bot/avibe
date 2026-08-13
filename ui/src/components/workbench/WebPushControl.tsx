@@ -5,7 +5,6 @@ import { Bell, BellOff, Loader2, Smartphone } from 'lucide-react';
 import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useToast } from '@/context/ToastContext';
-import { canRegisterWebPush } from '@/lib/remoteAuth';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import {
@@ -24,16 +23,13 @@ type Status = 'checking' | 'unsupported' | 'needs_install' | 'disabled' | 'enabl
 export const WebPushControl: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
-  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const { capabilities } = useInstanceAuthorization();
   const { showToast } = useToast();
   const [status, setStatus] = useState<Status>('checking');
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [support, setSupport] = useState<WebPushSupportState | null>(null);
-  const canRegister = canRegisterWebPush({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
+  const canRegister = capabilities.can_read_instance;
 
   const refresh = async () => {
     const nextSupport = getWebPushSupportState();

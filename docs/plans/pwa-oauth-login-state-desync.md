@@ -122,7 +122,7 @@ the highest layer plus backstops:
 
 ## Testing
 
-- Unit (`tests/test_ui_remote_access_auth.py`):
+- Unit (`tests/test_ui_server_fastapi.py` and `tests/ui_server_test_helpers.py`):
   - new: valid-but-mismatched cookie + matching server-side record → callback
     completes via the store, using the record's verifier/nonce (not the stale
     cookie's).

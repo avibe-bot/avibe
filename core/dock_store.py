@@ -182,9 +182,7 @@ def _filter_dock_for_access(
     user_context: Any,
     db_path: Path | None,
 ) -> dict[str, Any]:
-    from vibe.authorization import has_temporary_unrestricted_org_access
-
-    if user_context.is_trusted_local or has_temporary_unrestricted_org_access(user_context):
+    if user_context.is_instance_owner:
         return doc
     store = ShowPageStore(db_path)
     try:
@@ -206,10 +204,9 @@ def _require_show_page_management(
     user_context: Any,
     db_path: Path | None,
 ) -> None:
-    # Dock pin/unpin/reorder stay reserved to owner/admin Organization roles
-    # under the Resource ACL boundary (see #1343); the temporary Organization
-    # rollout does not bypass Show Page management.
-    if user_context.is_trusted_local or not session_ids:
+    # Dock pin/unpin/reorder require the Instance Owner or the Show Page
+    # management capability represented by its ACL.
+    if user_context.is_instance_owner or not session_ids:
         return
     store = ShowPageStore(db_path)
     try:
@@ -363,11 +360,7 @@ def set_dock_order(
         raise DockError("Dock order has duplicate ids.", code="invalid_order")
 
     context = _resource_context(user_context)
-    from vibe.authorization import has_temporary_unrestricted_org_access
-
-    has_full_runtime_access = (
-        context.is_trusted_local or has_temporary_unrestricted_org_access(context)
-    )
+    has_full_runtime_access = context.is_instance_owner
     with _DOCK_MUTATION_LOCK:
         doc = _load(db_path)
         visible_doc = _filter_dock_for_access(doc, user_context=context, db_path=db_path)

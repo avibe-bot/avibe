@@ -61,7 +61,7 @@ describe('OrganizationShell cloud_not_connected action', () => {
     vi.clearAllMocks();
   });
 
-  it('keeps the trusted-local remote access CTA reachable for local owners', () => {
+  it('keeps the remote access CTA reachable for owners', () => {
     renderShell(OWNER_INSTANCE_CAPABILITIES);
 
     const action = screen.getByRole('link', { name: 'organization.actions.openRemoteAccess' });

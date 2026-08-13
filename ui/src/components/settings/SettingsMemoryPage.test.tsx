@@ -8,6 +8,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { SettingsMemoryPage } from './SettingsMemoryPage';
 import type { MemoryProcessingRecordSummary } from '../../context/ApiContext';
 import { memoryCascadeHealth } from '../../test/memoryFixtures';
+import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 
 const api = vi.hoisted(() => ({
   abortMemoryClear: vi.fn(),
@@ -129,9 +131,15 @@ const readyProcessingRecord = (): MemoryProcessingRecordSummary => ({
 });
 
 const renderPage = () => render(
-  <MemoryRouter>
-    <SettingsMemoryPage />
-  </MemoryRouter>,
+  <InstanceAuthorizationContext.Provider value={{
+    remote: false,
+    instanceRole: 'owner',
+    capabilities: OWNER_INSTANCE_CAPABILITIES,
+  }}>
+    <MemoryRouter>
+      <SettingsMemoryPage />
+    </MemoryRouter>
+  </InstanceAuthorizationContext.Provider>,
 );
 
 beforeEach(() => {

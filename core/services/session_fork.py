@@ -18,7 +18,6 @@ from config import paths
 from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
 from vibe.authorization import (
     AuthorizationContext,
-    has_temporary_unrestricted_runtime_access,
     require_instance_role,
 )
 from vibe.i18n import t
@@ -191,10 +190,7 @@ def reserve_forked_session(
     try:
         with engine.begin() as conn:
             reserve_write_lock(conn)
-            if not (
-                context.is_instance_owner
-                or has_temporary_unrestricted_runtime_access(context)
-            ):
+            if not context.is_instance_owner:
                 from storage import project_access_service
 
                 if not project_access_service.role_allows(

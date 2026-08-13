@@ -65,10 +65,9 @@ const remoteOwner: InstanceAuthorizationValue = {
   },
 };
 
-const activeOrgMember: InstanceAuthorizationValue = {
+const remoteEditor: InstanceAuthorizationValue = {
   ...remoteOwner,
-  instanceRole: 'viewer',
-  hasTemporaryUnrestrictedOrgAccess: true,
+  instanceRole: 'editor',
 };
 
 function renderPage(context: InstanceAuthorizationValue) {
@@ -103,7 +102,7 @@ describe('SettingsMessagingPage locality gating', () => {
     expect(screen.queryByText('dashboard.showPagesPrompt')).toBeNull();
   });
 
-  it('shows the protected messaging controls to a trusted-local owner', async () => {
+  it('shows the protected messaging controls to a local owner', async () => {
     renderPage(localOwner);
 
     expect(await screen.findByText('dashboard.errorRetryLimit')).toBeTruthy();
@@ -111,11 +110,12 @@ describe('SettingsMessagingPage locality gating', () => {
     expect(screen.getByText('dashboard.showPagesPrompt')).toBeTruthy();
   });
 
-  it('shows every runtime messaging control to an active Organization member', async () => {
-    renderPage(activeOrgMember);
+  it('keeps owner-only runtime messaging controls hidden from an Editor', async () => {
+    renderPage(remoteEditor);
 
-    expect(await screen.findByText('dashboard.errorRetryLimit')).toBeTruthy();
-    expect(screen.getByText('dashboard.opencodeActiveTurnTimeout')).toBeTruthy();
-    expect(screen.getByText('dashboard.showPagesPrompt')).toBeTruthy();
+    await screen.findByText('dashboard.ackMode');
+    expect(screen.queryByText('dashboard.errorRetryLimit')).toBeNull();
+    expect(screen.queryByText('dashboard.opencodeActiveTurnTimeout')).toBeNull();
+    expect(screen.queryByText('dashboard.showPagesPrompt')).toBeNull();
   });
 });

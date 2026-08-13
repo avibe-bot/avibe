@@ -42,12 +42,13 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
         "message.new",
         "session.activity",
         "session.status",
+        "show.event",
         "turn.end",
         "turn.start",
         "workbench.events.bridge.status",
     }
 )
-_EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "show.event"})
+_EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated"})
 _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset(
     {
         DEFINITIONS_UPDATED_EVENT,
@@ -56,13 +57,9 @@ _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset(
     }
 )
 
-REMOTE_HTTP_ALLOWED = "allowed"
-
-
 @dataclass(frozen=True)
 class HttpAuthorizationPolicy:
     minimum_role: str | None
-    remote_access: str = REMOTE_HTTP_ALLOWED
 
 
 @dataclass(frozen=True)
@@ -81,12 +78,9 @@ class AuthorizationContext:
     authorization_revision: int | None = None
     show_page_id: str | None = None
     is_remote: bool = False
-    is_trusted_local: bool = False
 
     @property
     def is_instance_owner(self) -> bool:
-        if self.is_trusted_local:
-            return True
         return self.instance_role == "owner"
 
     @property
@@ -99,32 +93,7 @@ class AuthorizationContext:
             and self.organization_role in ORGANIZATION_ROLES
         )
 
-    def _has_admitted_remote_identity(self) -> bool:
-        """Return whether identity-sensitive projections may trust this subject.
-
-        Runtime HTTP admission and ordinary role rank are evaluated separately.
-        This predicate is reserved for projections such as ``is_instance_owner``
-        that must not infer identity from a caller-constructed role alone. Show
-        Page email grants retain their signed viewer/page scope.
-        """
-
-        if not self.is_remote:
-            return True
-        if self.instance_access_source == "show_page_email":
-            return self.instance_role == "viewer" and bool(self.show_page_id)
-        if self.instance_access_source == "email":
-            # Email-grant sessions are scoped by the Show Page email access
-            # boundary; their instance role rank governs non-page surfaces.
-            return True
-        return self.is_active_organization_member
-
     def has_role(self, minimum_role: str) -> bool:
-        if self.is_trusted_local:
-            return True
-        # The temporary Organization rollout intentionally has no per-surface
-        # role split: an admitted active member may use any runtime surface.
-        if has_temporary_unrestricted_org_access(self):
-            return True
         return _ROLE_RANK.get(self.instance_role or "", 0) >= _ROLE_RANK[minimum_role]
 
     @property
@@ -137,9 +106,7 @@ class AuthorizationContext:
 
     @property
     def can_use_cloud_asr(self) -> bool:
-        """Allow the explicit remote Cloud ASR capability, not local execution."""
-
-        return self.is_remote and self.has_role("editor")
+        return self.has_role("editor")
 
     @property
     def can_manage_projects(self) -> bool:
@@ -171,31 +138,19 @@ class AuthorizationContext:
 
     @property
     def can_use_terminal_files(self) -> bool:
-        """Legacy trusted-local control capability, not an Apps visibility gate."""
-
-        return not self.is_remote and self.has_role("owner")
+        return self.has_role("editor")
 
     @property
     def can_use_terminal(self) -> bool:
-        """Legacy trusted-local control capability, not Terminal App access."""
-
-        return not self.is_remote and self.has_role("owner")
+        return self.has_role("editor")
 
     @property
     def can_use_files(self) -> bool:
-        """Legacy local-project filesystem capability, not Files App access."""
-
-        return not self.is_remote and self.has_role("owner")
+        return self.has_role("editor")
 
     @property
     def can_use_system(self) -> bool:
-        """Return access to trusted-local control-plane surfaces.
-
-        Apps are not system administration and must not use this capability as
-        an availability gate.
-        """
-
-        return not self.is_remote and self.has_role("owner")
+        return self.has_role("owner")
 
     def capability_projection(self) -> dict[str, bool]:
         return {
@@ -214,54 +169,6 @@ class AuthorizationContext:
             "can_use_files": self.can_use_files,
             "can_use_system": self.can_use_system,
         }
-
-
-def has_temporary_unrestricted_org_access(
-    context: AuthorizationContext | Mapping[str, Any] | None,
-) -> bool:
-    """Return whether the temporary unrestricted Organization policy applies.
-
-    This is an HTTP/product rollout rule, not a projected capability. Until the
-    per-surface authorization model tracked in avibe#1313 ships, every
-    authenticated active Organization member may use the explicitly opened
-    runtime surfaces. Exact Show Page email grants remain confined to their
-    signed page subtree.
-    """
-
-    resolved = (
-        context
-        if isinstance(context, AuthorizationContext)
-        else context_from_session_payload(context)
-        if context is not None
-        else None
-    )
-    return bool(
-        resolved is not None
-        and resolved.is_remote
-        and resolved.instance_access_source != "show_page_email"
-        and resolved.is_active_organization_member
-    )
-
-
-def has_temporary_unrestricted_org_app_access(
-    context: AuthorizationContext | Mapping[str, Any] | None,
-) -> bool:
-    """Backward-compatible alias for the renamed unrestricted policy signal."""
-
-    return has_temporary_unrestricted_org_access(context)
-
-
-def has_temporary_unrestricted_runtime_access(
-    context: AuthorizationContext | Mapping[str, Any] | None,
-) -> bool:
-    """Return the temporary runtime admission signal without changing identity.
-
-    Callers must use this predicate for the explicitly opened runtime surfaces
-    instead of treating an Organization member as a trusted-local principal or
-    projecting synthetic owner capabilities to the browser.
-    """
-
-    return has_temporary_unrestricted_org_access(context)
 
 
 def _optional_string(value: Any, *, limit: int = 320) -> str | None:
@@ -351,8 +258,10 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
     )
 
 
-def trusted_local_context() -> AuthorizationContext:
-    return AuthorizationContext(instance_role="owner", is_trusted_local=True)
+def instance_owner_context() -> AuthorizationContext:
+    """Return the ordinary Owner identity used by standalone local entry points."""
+
+    return AuthorizationContext(instance_role="owner")
 
 
 class InstanceAuthorizationError(PermissionError):
@@ -366,10 +275,10 @@ def require_instance_role(
     context: AuthorizationContext | Mapping[str, Any] | None,
     minimum_role: str,
 ) -> AuthorizationContext:
-    """Authorize a service call; omitted context denotes a trusted local caller."""
+    """Authorize a service call; omitted context denotes local Owner administration."""
 
     resolved = (
-        trusted_local_context()
+        instance_owner_context()
         if context is None
         else context
         if isinstance(context, AuthorizationContext)
@@ -400,13 +309,6 @@ def can_receive_workbench_event(
 ) -> bool:
     """Return whether an SSE subscriber may receive a workbench event."""
 
-    known_event = event_type in (
-        _VIEWER_WORKBENCH_EVENTS
-        | _EDITOR_WORKBENCH_EVENTS
-        | _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS
-    )
-    if has_temporary_unrestricted_org_access(context) and known_event:
-        return True
     # A signed Show Page email grant is still a viewer session, but its exact
     # page subtree is enforced by the payload/resource visibility filters below.
     if (
@@ -416,17 +318,9 @@ def can_receive_workbench_event(
         and context.can_use_show_page(context.show_page_id or "")
     ):
         return True
-    # Unknown event names remain owner-only. The temporary rollout is an
-    # explicit allowlist for known runtime events, not a blanket event-bus
-    # capability that would expose a future control-plane event. Existing
-    # remote owners still retain their established owner-level behavior.
-    if not known_event and has_temporary_unrestricted_org_access(context):
-        return False
     try:
         require_instance_role(context, required_workbench_event_role(event_type))
     except InstanceAuthorizationError:
-        return False
-    if getattr(context, "is_remote", False) and event_type in _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS:
         return False
     return True
 
@@ -458,28 +352,35 @@ _VIEWER_HTTP_RULES = tuple(
     )
 )
 
-_VIEWER_HTTP_MUTATION_RULES = tuple(
-    (method, re.compile(pattern))
-    for method, pattern in (
-        ("POST", r"^/api/show-pages/[^/]+/ensure$"),
-        ("POST", r"^/api/show-pages/[^/]+/visibility$"),
-        ("POST", r"^/api/show-pages/[^/]+/rotate-share$"),
-        ("POST", r"^/api/show-pages/[^/]+/share-id$"),
-        ("PUT", r"^/api/show-pages/[^/]+/authorized-emails$"),
-    )
+# Advertised Editor/Viewer surfaces are admitted by namespace so a newly
+# added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push route
+# inherits the same Instance role as the rest of that capability. Routes
+# that stay Owner-only — Agent create/import/update/delete, system config —
+# remain outside these prefixes and fail closed to owner.
+_EDITOR_HTTP_NAMESPACES = (
+    "/api/skills",
+    "/api/vault",
+    "/api/files",
+    "/api/dock",
+    "/api/harness",
+    "/api/terminal",
 )
+_VIEWER_HTTP_NAMESPACES = ("/api/web-push",)
 
 _EDITOR_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
         ("GET", r"^/api/agents$"),
+        ("GET", r"^/api/agents/[^/]+$"),
+        ("GET", r"^/api/agents-graph$"),
         ("GET", r"^/api/agent-backends$"),
-        ("GET", r"^/api/skills$"),
-        ("GET", r"^/api/vault/(?:secrets|tags)$"),
+        ("GET", r"^/api/running-agents$"),
+        ("POST", r"^/api/running-agents/end$"),
         ("GET", r"^/api/cloud/token$"),
         ("GET", r"^/api/asr/status$"),
         ("GET", r"^/api/sessions/[^/]+/(?:archive-preview|queue|draft)$"),
         ("POST", r"^/api/sessions$"),
+        ("POST", r"^/api/sessions/[^/]+/cli-activity$"),
         ("POST", r"^/api/sessions/[^/]+/fork$"),
         ("PATCH", r"^/api/sessions/[^/]+$"),
         ("DELETE", r"^/api/sessions/[^/]+$"),
@@ -490,7 +391,9 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/asr/transcribe$"),
         ("POST", r"^/api/show/sessions/[^/]+/events$"),
         ("POST", r"^/api/show/sessions/[^/]+/prewarm$"),
-        ("POST", r"^/api/vault/requests/(?:access|sign)$"),
+        ("POST", r"^/api/show-pages/[^/]+/icon$"),
+        ("POST", r"^/api/show-pages/[^/]+/(?:ensure|visibility|rotate-share|share-id)$"),
+        ("PUT", r"^/api/show-pages/[^/]+/authorized-emails$"),
     )
 )
 
@@ -502,18 +405,15 @@ def _http_rule_matches(
     return any(rule_method == method and pattern.fullmatch(path) for rule_method, pattern in rules)
 
 
+def _path_in_namespaces(path: str, namespaces: tuple[str, ...]) -> bool:
+    return any(path == namespace or path.startswith(f"{namespace}/") for namespace in namespaces)
+
+
 def http_authorization_policy(
     method: str,
     path: str,
-    *,
-    temporary_org_access: bool = False,
 ) -> HttpAuthorizationPolicy:
-    """Return role and remote-exposure policy for one HTTP request.
-
-    Remote requests use the same role and resource authorization as local requests.
-    The former trust-local/local-only transport boundary was transitional and is
-    intentionally removed; unknown API routes still default to owner role.
-    """
+    """Return the minimum Instance role for one HTTP request."""
 
     normalized_method = method.upper()
     # Organization management is an explicit Cloud proxy namespace. Cloud user
@@ -521,37 +421,26 @@ def http_authorization_policy(
     if path.startswith("/api/cloud-management/"):
         return HttpAuthorizationPolicy("viewer")
     if path.startswith("/show/"):
-        is_read = normalized_method in {"GET", "HEAD", "OPTIONS"}
-        # The server-owned event endpoint does not proxy into Show Runtime. Its
-        # handler rejects any remote request that would dispatch an Agent turn
-        # before the event store can reserve a delivery.
-        is_safe_human_event = normalized_method == "POST" and re.fullmatch(
-            r"^/show/[^/]+/(?:__show/events|__events)$",
-            path,
-        )
-        minimum_role = "viewer"
-        return HttpAuthorizationPolicy(minimum_role)
+        return HttpAuthorizationPolicy("viewer")
     if path == "/status":
         return HttpAuthorizationPolicy(None)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
-    # Route exposure is no longer split into local-only and remote-only
-    # matrices. Every API reaches the role/resource checks below.
+    if _path_in_namespaces(path, _VIEWER_HTTP_NAMESPACES):
+        return HttpAuthorizationPolicy("viewer")
+    if _path_in_namespaces(path, _EDITOR_HTTP_NAMESPACES):
+        return HttpAuthorizationPolicy("editor")
+
     minimum_role = "owner"
-    if _http_rule_matches(normalized_method, path, _VIEWER_HTTP_MUTATION_RULES):
-        # These mutations enforce Show Page ownership and Organization authority
-        # in the resource service. Admit a viewer to that final authorization gate.
-        minimum_role = "viewer"
+    for rule_method, pattern in _EDITOR_HTTP_RULES:
+        if normalized_method == rule_method and pattern.fullmatch(path):
+            minimum_role = "editor"
+            break
     else:
-        for rule_method, pattern in _EDITOR_HTTP_RULES:
-            if normalized_method == rule_method and pattern.fullmatch(path):
-                minimum_role = "editor"
-                break
-        else:
-            if normalized_method in {"GET", "HEAD", "OPTIONS"} and any(
-                pattern.fullmatch(path) for pattern in _VIEWER_HTTP_RULES
-            ):
-                minimum_role = "viewer"
+        if normalized_method in {"GET", "HEAD", "OPTIONS"} and any(
+            pattern.fullmatch(path) for pattern in _VIEWER_HTTP_RULES
+        ):
+            minimum_role = "viewer"
 
     return HttpAuthorizationPolicy(minimum_role)
 

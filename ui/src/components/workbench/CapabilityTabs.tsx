@@ -3,11 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Activity, Bot, KeyRound, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
-import {
-  canUseRuntimeSurfaces,
-  useInstanceAuthorization,
-} from '../../context/InstanceAuthorizationContext';
-import { canUseHarness } from '../../lib/remoteAuth';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 const TABS = [
   { to: '/agents', icon: Bot, key: 'workbench.modules.agents.title' },
@@ -26,19 +22,12 @@ export const CapabilityTabs: React.FC = () => {
   const activeTabRef = useRef<HTMLAnchorElement | null>(null);
   const {
     capabilities,
-    remote,
-    hasTemporaryUnrestrictedOrgAccess,
   } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
   const tabs = TABS.filter(({ to }) => {
-    if (canUseRuntime) return true;
-    if (to === '/harness') return (capabilities.can_manage_agents || canUseRuntime) && canUseHarness({
-      remote,
-      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-    });
-    if (to === '/agents') return capabilities.can_manage_agents || canUseRuntime;
-    if (to === '/skills') return capabilities.can_use_skills || canUseRuntime;
-    if (to === '/vaults') return capabilities.can_use_vault_secrets || canUseRuntime;
+    if (to === '/harness') return capabilities.can_chat;
+    if (to === '/agents') return capabilities.can_use_agents;
+    if (to === '/skills') return capabilities.can_use_skills;
+    if (to === '/vaults') return capabilities.can_use_vault_secrets;
     return false;
   });
 
