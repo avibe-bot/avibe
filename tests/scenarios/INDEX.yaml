@@ -15,6 +15,7 @@ capabilities:
     observations: tests/scenarios/memory_clear_recovery/observations.yaml
     scenario_tests:
       - tests/test_memory_maintenance.py
+      - tests/test_memory_runtime.py
     unit_or_contract_tests:
       - tests/test_memory_store.py
       - tests/test_memory_clear_intent.py

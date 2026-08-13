@@ -4,6 +4,7 @@ capability:
   name: Durable Memory Clear intent
   canonical_tests:
     - tests/test_memory_maintenance.py
+    - tests/test_memory_runtime.py
 status_legend:
   covered: scenario coverage exists
   partial: unit or contract coverage exists but the closed loop is incomplete

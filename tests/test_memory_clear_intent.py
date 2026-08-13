@@ -131,6 +131,35 @@ def test_legacy_abort_resolution_migrates_to_a_fenced_failed_intent(tmp_path: Pa
     assert intent.error_code == "memory_clear_legacy_abort_unsupported"
 
 
+@pytest.mark.parametrize(
+    ("state", "resolution"),
+    (("unknown", None), ("deleting", "abort"), ("recovery_needed", "unknown")),
+)
+def test_legacy_journal_rejects_invalid_state_and_resolution(
+    tmp_path: Path, state: str, resolution: str | None
+):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, resolution TEXT, "
+        "started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+        ("legacy-invalid", "user-1", 2, 3, state, resolution, "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=2)
+
+    assert not (tmp_path / MARKER_RELATIVE_PATH).exists()
+    assert journal.exists()
+
+
 def test_legacy_open_journal_without_target_epoch_defers_until_store_epoch(tmp_path: Path):
     journal = tmp_path / "state/memory/clear-journal.sqlite"
     journal.parent.mkdir(parents=True)

@@ -233,7 +233,28 @@ class ClearIntentStore:
                 target_epoch = int(target_value)
             if target_epoch != pre_epoch + 1:
                 raise ValueError("legacy clear target epoch is invalid")
-            state = str(row["state"])
+            state = row["state"]
+            if state not in {
+                "preparing",
+                "prepared",
+                "deleting",
+                "recovery_needed",
+                "completed",
+                "aborted",
+            }:
+                raise ValueError("legacy clear state is invalid")
+            if resolution not in {None, "resume", "abort"}:
+                raise ValueError("legacy clear resolution is invalid")
+            valid_resolution = {
+                "preparing": {None, "resume"},
+                "prepared": {None, "resume"},
+                "deleting": {None, "resume"},
+                "recovery_needed": {None, "resume", "abort"},
+                "completed": {None, "resume"},
+                "aborted": {"abort"},
+            }
+            if resolution not in valid_resolution[state]:
+                raise ValueError("legacy clear resolution is out of state")
             if state in {"completed", "aborted"}:
                 _best_effort_remove(self.home, journal_path)
                 return None

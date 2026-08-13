@@ -294,7 +294,6 @@ class MemoryMaintenance:
                     meta = await self._run_maintenance_io(self._store.ensure_meta)
                     intent = ClearIntent.new(operator_ref=operator_ref, pre_epoch=meta.epoch)
                     await self._run_maintenance_io(lambda: self._intent.write(intent))
-                    await self._run_maintenance_io(self._intent.consume_legacy_clear_state)
                     self._intent_error = None
                 elif intent.state == "failed":
                     meta = await self._run_maintenance_io(self._store.ensure_meta)
@@ -315,6 +314,14 @@ class MemoryMaintenance:
                     self._runtime.resume_claims()
                     await self._record_failure(intent, "memory_clear_failed")
                     return ClearResult(status="failed", error="memory_clear_failed")
+                try:
+                    await self._run_maintenance_io(self._intent.consume_legacy_clear_state)
+                except asyncio.CancelledError:
+                    await self._record_failure(intent, "memory_clear_failed")
+                    raise
+                except Exception:
+                    await self._record_failure(intent, "memory_clear_failed")
+                    return self._failed_result()
                 assert intent is not None
                 return await self._run_clear_intent(intent, operator_ref=operator_ref, boot=boot)
             finally:

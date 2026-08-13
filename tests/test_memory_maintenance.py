@@ -26,6 +26,7 @@ class _Port:
         self.fail_strict_quiesce = False
         self.fail_quiesce = False
         self.quiesce_modes: list[bool] = []
+        self.claim_events: list[str] = []
 
     def exclusive_fence(self):
         from contextlib import asynccontextmanager
@@ -49,12 +50,14 @@ class _Port:
         self.left += 1
 
     async def pause_claims(self):
+        self.claim_events.append("pause")
         return None
 
     def resume_claims(self):
         return None
 
     async def quiesce(self, _strict: bool):
+        self.claim_events.append("quiesce")
         self.quiesce_modes.append(_strict)
         if self.fail_quiesce or (_strict and self.fail_strict_quiesce):
             raise RuntimeError("quiesce failed")
@@ -214,6 +217,30 @@ async def test_explicit_clear_consumes_unreadable_legacy_journal(tmp_path: Path)
     assert result.status == "completed"
     assert not journal.exists()
     assert maintenance.is_open() is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_journal_removal_failure_keeps_claims_fenced(tmp_path: Path, monkeypatch):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"not sqlite")
+    maintenance, port = _maintenance(tmp_path)
+
+    def unlink_then_fail():
+        journal.unlink()
+        raise ClearIntentError("legacy journal sync failed")
+
+    monkeypatch.setattr(maintenance._intent, "consume_legacy_clear_state", unlink_then_fail)
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "failed"
+    assert port.claim_events == ["pause", "quiesce"]
+    assert port.resumed == 0
+    failed = ClearIntentStore(tmp_path).load()
+    assert failed is not None
+    assert failed.state == "failed"
+    assert failed.error_code == "memory_clear_failed"
 
 
 @pytest.mark.asyncio
