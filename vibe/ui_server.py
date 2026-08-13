@@ -5065,13 +5065,19 @@ def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
 
 def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) -> dict:
     from storage import project_access_service
+    from storage import resource_access_service
 
     effective_role = project_access_service.get_effective_session_role(
         conn,
         context,
         str(payload.get("session_id") or ""),
     )
-    if project_access_service.role_allows(effective_role, "editor"):
+    if project_access_service.role_allows(effective_role, "editor") or resource_access_service.can_manage_resource_acl(
+        context,
+        "show_page",
+        str(payload.get("session_id") or ""),
+        connection=conn,
+    ):
         return payload
     return {key: value for key, value in payload.items() if key != "path"}
 
