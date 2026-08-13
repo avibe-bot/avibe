@@ -297,7 +297,10 @@ def _service(tmp_path, adapter=None):
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json"),
         native_oauth_adapter=adapter,
-        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        oauth_flows=OAuthFlowRegistry(
+            tmp_path / "oauth_flows.json",
+            now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+        ),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
         requested_model_override=lambda backend: store.requested_model(backend),
@@ -1016,6 +1019,34 @@ def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):
 
     assert flow["vendor"] == "anthropic"
     assert adapter.oauth_start_calls == [(flow["source_id"], "anthropic")]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {"vendor": "anthropic", "channel": "hub", "client_nonce": None},
+        {
+            "vendor": "anthropic",
+            "channel": "hub",
+            "client_nonce": "invalid",
+        },
+        {
+            "vendor": "anthropic",
+            "channel": "hub",
+            "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+            "unexpected": True,
+        },
+    ],
+)
+def test_oauth_start_rejects_invalid_nonce_payload_before_provider(tmp_path, payload):
+    service, _, adapter = _service(tmp_path)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_start(payload))
+
+    assert exc_info.value.code == "flow_not_found"
+    assert adapter.oauth_start_calls == []
 
 
 def test_model_hub_oauth_blocks_recovery_before_external_auth(tmp_path):
@@ -1759,7 +1790,7 @@ def test_native_reauth_logout_spawn_failure_restores_prior_supply(tmp_path):
     )
 
 
-def test_hub_reauth_is_transactional_without_native_acknowledgement(tmp_path):
+def test_hub_reauth_requires_acknowledgement_then_materializes(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_huboauth01",
@@ -1784,7 +1815,18 @@ def test_hub_reauth_is_transactional_without_native_acknowledgement(tmp_path):
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
 
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    for acknowledgement in ({}, {"acknowledge_irreversible": False}):
+        with pytest.raises(ModelHubError) as exc_info:
+            asyncio.run(service.reauth_source(source.id, acknowledgement))
+        assert exc_info.value.code == "reauth_confirmation_required"
+        assert adapter.oauth_start_calls == []
+
+    flow = asyncio.run(
+        service.reauth_source(
+            source.id,
+            {"acknowledge_irreversible": True},
+        )
+    )["flow"]
     assert flow["intent"] == "reauth"
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
@@ -1826,7 +1868,7 @@ def test_hub_reauth_replaces_pending_flow_unknown_to_restarted_adapter(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    first = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    first = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
 
     async def restarted_adapter_does_not_know_flow(_flow_id):
         raise RuntimeError("OAuth flow is unknown after restart")
@@ -1842,7 +1884,7 @@ def test_hub_reauth_replaces_pending_flow_unknown_to_restarted_adapter(
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
     )
-    second = asyncio.run(restarted.reauth_source(source.id, {}))["flow"]
+    second = asyncio.run(restarted.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
 
     assert first["flow_id"] in adapter.flows
     assert second["flow_id"] in restarted_adapter.flows
@@ -1880,7 +1922,7 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
 
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -1919,7 +1961,7 @@ def test_completed_hub_reauth_blocks_recovery_before_discovery(tmp_path):
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -1991,7 +2033,7 @@ def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
         store.config.sources.append(source)
         _refresh_fixture_routes(store.config)
 
-        flow = (await service.reauth_source(source.id, {}))["flow"]
+        flow = (await service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
         adapter.flows[flow["flow_id"]] = OAuthFlowState(
             **{
                 **adapter.flows[flow["flow_id"]].__dict__,
@@ -2062,7 +2104,7 @@ def test_hub_reauth_irreversible_dispositions_fail_closed(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -2137,7 +2179,7 @@ def test_failed_hub_reauth_non_owned_material_preserves_prior_state(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -2191,7 +2233,7 @@ def test_failed_hub_reauth_orphan_is_journaled_and_retried_by_ref(tmp_path):
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -2492,7 +2534,7 @@ def test_hub_reauth_retry_materializes_pending_flow(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    first = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    first = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[first["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[first["flow_id"]].__dict__,
@@ -2504,7 +2546,7 @@ def test_hub_reauth_retry_materializes_pending_flow(
         }
     )
 
-    second = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    second = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
 
     persisted = store.config.sources[0]
     assert [model.id for model in persisted.models] == ["manual-model"]
@@ -2541,7 +2583,7 @@ def test_hub_reauth_returns_terminal_tail_when_registry_completion_fails(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -2596,7 +2638,7 @@ def test_failed_same_handle_hub_reauth_requires_user_action(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -2743,7 +2785,7 @@ def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -2800,7 +2842,7 @@ def test_completed_hub_reauth_revokes_replacement_after_source_disappears(
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     asyncio.run(service.delete_source(source.id, force=True))
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
@@ -2843,7 +2885,7 @@ def test_failed_hub_reauth_rolls_back_when_old_journal_cleanup_fails(tmp_path):
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -3143,6 +3185,141 @@ def test_failed_oauth_cancel_keeps_flow_retryable(tmp_path):
     assert adapter.cancelled == [flow_id, flow_id]
 
 
+def test_nonce_oauth_start_replays_cancelled_flow_until_expiry(tmp_path):
+    current = [datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc)]
+    store = MemoryStore()
+    adapter = FakeAdapter()
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        native_oauth_adapter=adapter,
+        oauth_flows=OAuthFlowRegistry(
+            tmp_path / "oauth_flows.json",
+            now=lambda: current[0],
+        ),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        now=lambda: current[0],
+        requested_model_override=store.requested_model,
+    )
+    request = {
+        "vendor": "anthropic",
+        "channel": "native_cli",
+        "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+    }
+
+    first = asyncio.run(service.oauth_start(request))["flow"]
+    asyncio.run(service.oauth_cancel(first["flow_id"]))
+    retained = asyncio.run(service.oauth_start(request))["flow"]
+
+    assert retained == {
+        **first,
+        "state": "cancelled",
+        "presentation": {
+            "auth_url": None,
+            "device_code": None,
+            "expects": "none",
+            "instructions_key": None,
+        },
+    }
+    assert retained["expires_at"] == first["expires_at"]
+    assert adapter.oauth_start_calls == [
+        (first["source_id"], "anthropic")
+    ]
+
+    current[0] = datetime(2026, 7, 23, 4, 15, tzinfo=timezone.utc)
+    fresh = asyncio.run(service.oauth_start(request))["flow"]
+
+    assert fresh["flow_id"] != first["flow_id"]
+    assert len(adapter.oauth_start_calls) == 2
+
+
+def test_nonce_oauth_start_coalesces_provider_failure_then_retries(tmp_path):
+    async def run_failure_and_retry():
+        service, _, adapter = _service(tmp_path)
+        request = {
+            "vendor": "anthropic",
+            "channel": "native_cli",
+            "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+        }
+        provider_started = asyncio.Event()
+        release_provider = asyncio.Event()
+        original_start = adapter.start_oauth
+        provider_calls = 0
+
+        async def failing_start(source_id, vendor):
+            nonlocal provider_calls
+            provider_calls += 1
+            provider_started.set()
+            await release_provider.wait()
+            raise RuntimeError("provider start failed")
+
+        adapter.start_oauth = failing_start
+        first = asyncio.create_task(service.oauth_start(request))
+        await provider_started.wait()
+        second = asyncio.create_task(service.oauth_start(dict(request)))
+        await asyncio.sleep(0)
+        assert second.done() is False
+        release_provider.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+
+        assert all(isinstance(result, ModelHubError) for result in results)
+        assert [result.code for result in results] == [
+            "engine_down",
+            "engine_down",
+        ]
+        assert provider_calls == 1
+
+        adapter.start_oauth = original_start
+        fresh = await service.oauth_start(request)
+        return fresh, provider_calls, adapter
+
+    fresh, failed_calls, adapter = asyncio.run(run_failure_and_retry())
+
+    assert fresh["flow"]["client_nonce"] == "ofn_01j5w8z7p4n6q2rt"
+    assert failed_calls == 1
+    assert len(adapter.oauth_start_calls) == 1
+
+
+def test_nonce_oauth_start_owner_cancellation_releases_waiter_and_tuple(tmp_path):
+    async def run_cancellation_and_retry():
+        service, _, adapter = _service(tmp_path)
+        request = {
+            "vendor": "anthropic",
+            "channel": "native_cli",
+            "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+        }
+        provider_started = asyncio.Event()
+        original_start = adapter.start_oauth
+        provider_calls = 0
+
+        async def blocked_start(source_id, vendor):
+            nonlocal provider_calls
+            provider_calls += 1
+            provider_started.set()
+            await asyncio.Event().wait()
+
+        adapter.start_oauth = blocked_start
+        owner = asyncio.create_task(service.oauth_start(request))
+        await provider_started.wait()
+        waiter = asyncio.create_task(service.oauth_start(dict(request)))
+        await asyncio.sleep(0)
+        owner.cancel()
+        results = await asyncio.gather(owner, waiter, return_exceptions=True)
+
+        assert all(isinstance(result, asyncio.CancelledError) for result in results)
+        assert provider_calls == 1
+
+        adapter.start_oauth = original_start
+        fresh = await service.oauth_start(request)
+        return fresh, adapter
+
+    fresh, adapter = asyncio.run(run_cancellation_and_retry())
+
+    assert fresh["flow"]["client_nonce"] == "ofn_01j5w8z7p4n6q2rt"
+    assert len(adapter.oauth_start_calls) == 1
+
+
 def test_cancel_materializes_terminal_successful_hub_reauth(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
@@ -3167,7 +3344,7 @@ def test_cancel_materializes_terminal_successful_hub_reauth(tmp_path):
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -3215,7 +3392,7 @@ def test_cancel_materializes_terminal_failed_hub_reauth(tmp_path):
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -3262,7 +3439,7 @@ def test_cancel_materializes_post_cancel_unknown_hub_reauth(tmp_path):
     )
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
-    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
