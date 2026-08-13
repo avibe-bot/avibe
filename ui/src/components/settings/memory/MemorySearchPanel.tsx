@@ -40,11 +40,19 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
 
   useEffect(() => {
     if (!enabled) return;
-    void api.listMemoryProjects().then((result) => {
-      if (result && 'status' in result && result.status === 'ok' && Array.isArray(result.projects)) {
-        setProjects(result.projects);
-      }
-    });
+    void api
+      .listMemoryProjects()
+      .then((result) => {
+        if (result && 'status' in result && result.status === 'ok' && Array.isArray(result.projects)) {
+          setProjects(result.projects);
+        }
+      })
+      .catch(() => {
+        setProjects([
+          { id: 'default', kind: 'default' },
+          { id: 'all', kind: 'all' },
+        ]);
+      });
   }, [api, enabled]);
 
   const runSearch = () => {

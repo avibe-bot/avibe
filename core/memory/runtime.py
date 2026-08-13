@@ -1399,7 +1399,7 @@ class MemoryRuntime:
     ) -> _SessionLifecycleResult:
         """Flush all session scopes and run one transition under every fence."""
 
-        canonical_scopes = tuple(sorted(set(scopes)))
+        canonical_scopes = tuple(dict.fromkeys(scopes))
         if (
             not canonical_scopes
             or not isinstance(raw_session_id, str)
@@ -1481,15 +1481,36 @@ class MemoryRuntime:
     ) -> RecallResult:
         if policy.mode == "agentic" or policy.include_current_session:
             return OperationFailed(error="memory_invalid_input")
-        projects = self.list_memory_projects(principal_id)
+        deadline = time.monotonic() + 20.0
+        projects = await run_blocking(self.list_memory_projects, principal_id)
         if not projects:
             projects = (DEFAULT_MEMORY_PROJECT_ID,)
-        deadline = time.monotonic() + 20.0
         collected: list[MemoryItem] = []
         warnings: list[MemoryWarningCode] = []
         first_failure: OperationFailed | None = None
         succeeded = False
-        effective_mode = policy.mode if policy.mode != "auto" else "keyword"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return RecallItems(
+                items=(),
+                requested_mode=policy.mode,
+                effective_mode="keyword",
+                warnings=("memory_search_truncated",),
+            )
+        try:
+            effective_mode = await asyncio.wait_for(
+                self.module.resolve_recall_mode(policy),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            return RecallItems(
+                items=(),
+                requested_mode=policy.mode,
+                effective_mode="keyword",
+                warnings=("memory_search_truncated",),
+            )
+        if isinstance(effective_mode, OperationFailed):
+            return effective_mode
         for index, project_id in enumerate(projects):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1507,6 +1528,7 @@ class MemoryRuntime:
                         policy=scope_policy,
                         principal_id=principal_id,
                         project_id=project_id,
+                        effective_mode=effective_mode,
                     ),
                     timeout=remaining,
                 )
@@ -1527,14 +1549,15 @@ class MemoryRuntime:
             return first_failure or RecallItems(
                 items=(),
                 requested_mode=policy.mode,
-                effective_mode=effective_mode if effective_mode != "auto" else "keyword",
+                effective_mode=effective_mode,
+                warnings=tuple(dict.fromkeys(warnings)),
             )
         merged = _merge_search_items(collected, limit=policy.max_results)
         unique_warnings = tuple(dict.fromkeys(warnings))
         return RecallItems(
             items=merged,
             requested_mode=policy.mode,
-            effective_mode=effective_mode if effective_mode != "auto" else "keyword",
+            effective_mode=effective_mode,
             warnings=unique_warnings,
         )
 

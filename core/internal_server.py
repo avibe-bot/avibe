@@ -1487,7 +1487,7 @@ def create_app(
         from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID, MEMORY_SEARCH_ALL_PROJECTS
 
         try:
-            catalogued = runtime.list_memory_projects(principal_id)
+            catalogued = await run_blocking(runtime.list_memory_projects, principal_id)
         except Exception:
             logger.warning("internal memory project list failed")
             return JSONResponse(
@@ -1546,7 +1546,7 @@ def create_app(
         current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
         if project_id not in {DEFAULT_MEMORY_PROJECT_ID, "all"}:
             try:
-                catalog = runtime.list_memory_projects(principal_id)
+                catalog = await run_blocking(runtime.list_memory_projects, principal_id)
             except Exception:
                 logger.warning("internal memory project catalog failed")
                 return JSONResponse(

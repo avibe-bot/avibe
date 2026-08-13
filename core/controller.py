@@ -1882,6 +1882,7 @@ class Controller:
     def memory_scope_for_cli_session(self, session_id: str) -> Optional[tuple[str, str]]:
         """Return the principal and project owned by an admitted Agent session."""
 
+        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
         from core.memory.store import is_principal_id, is_project_id
 
         session_key = str(session_id or "").strip()
@@ -2102,6 +2103,7 @@ class Controller:
         runtime lifecycle operation as final flush.
         """
 
+        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
         from core.memory.store import is_principal_id, is_project_id
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
@@ -2170,7 +2172,12 @@ class Controller:
                     or not is_project_id(scope[1])
                 ):
                     raise RuntimeError("invalid canonical Memory session scope")
-            canonical_scopes = tuple(sorted(scopes))
+            canonical_scopes = tuple(
+                sorted(
+                    scopes,
+                    key=lambda scope: (scope[1] != DEFAULT_MEMORY_PROJECT_ID, scope),
+                )
+            )
 
             run_lifecycle = getattr(runtime, "run_session_scopes_lifecycle", None)
             if not callable(run_lifecycle):
