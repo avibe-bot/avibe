@@ -728,6 +728,51 @@ def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
     assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
 
 
+def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    service.cli_present_override = lambda backend: backend in {"claude", "codex"}
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert {backend: agent["cli_present"] for backend, agent in agents.items()} == {
+        "claude": True,
+        "codex": True,
+        "opencode": False,
+    }
+
+
+def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+
+    def broken_probe(_backend):
+        raise OSError("probe failed")
+
+    service.cli_present_override = broken_probe
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert all(agent["cli_present"] is False for agent in agents.values())
+
+
+def test_agent_supply_rpc_refreshes_cli_presence_before_first_response(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    calls = []
+    service.cli_presence_refresh = lambda: calls.append("refresh")
+    service.cli_present_override = lambda backend: backend == "claude"
+
+    payload = asyncio.run(
+        dispatch_model_hub_rpc(
+            service,
+            "get_agent_sources",
+            {"backend": "claude"},
+        )
+    )
+
+    assert payload["cli_present"] is True
+    assert calls == ["refresh"]
+
+
 def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.requested_model = lambda backend: {

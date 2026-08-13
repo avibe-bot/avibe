@@ -382,10 +382,36 @@ class Controller:
                 if agent.backend == backend
             ]
 
+        cli_presence: dict[str, bool] = {}
+
+        def cli_present(backend: str) -> bool:
+            # Payload assembly runs on the controller loop. Read only the last
+            # worker-produced snapshot here; a missing/erroring probe is false.
+            return cli_presence.get(backend, False)
+
+        def refresh_cli_presence() -> None:
+            from config.v2_config import V2Config
+            from vibe.api import resolve_cli_path
+
+            try:
+                v2_config = V2Config.load()
+            except FileNotFoundError:
+                v2_config = None
+            for backend in ("claude", "codex", "opencode"):
+                backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
+                configured_path = getattr(backend_config, "cli_path", None) or backend
+                try:
+                    cli_presence[backend] = resolve_cli_path(str(configured_path)) is not None
+                except Exception:
+                    logger.warning("Model Hub CLI presence probe failed for %s", backend, exc_info=True)
+                    cli_presence[backend] = False
+
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
+            cli_present_override=cli_present,
+            cli_presence_refresh=refresh_cli_presence,
         )
         self.model_hub_turn_gateway = ModelHubTurnGateway(
             self.model_hub_service,
