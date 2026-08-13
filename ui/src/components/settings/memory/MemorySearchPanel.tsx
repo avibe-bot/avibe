@@ -115,8 +115,10 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
             <div key={idx} className="rounded-xl border border-border bg-surface px-4 py-3">
               <div className="mb-1 flex items-center gap-2">
                 <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
-                {item.project && item.project !== 'default' ? (
-                  <Badge variant="outline">{item.project}</Badge>
+                {item.project && (project === 'all' || item.project !== 'default') ? (
+                  <Badge variant="outline">
+                    {item.project === 'default' ? t('memory.search.projectDefault') : item.project}
+                  </Badge>
                 ) : null}
                 {item.date ? <span className="font-mono text-[10.5px] text-muted">{item.date}</span> : null}
               </div>

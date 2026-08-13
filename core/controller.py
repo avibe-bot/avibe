@@ -2056,33 +2056,37 @@ class Controller:
             scopes.add(live_scope)
         if not scopes:
             return False
-        ordered = sorted(
-            scopes,
-            key=lambda scope: (scope[1] != DEFAULT_MEMORY_PROJECT_ID, scope),
-        )
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + max(deadline_seconds, 0.001)
-        flushed_any = False
-        failed = False
-        for principal_id, project_id in ordered:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return False
-            if not is_principal_id(principal_id) or not is_persisted_memory_project_id(
-                project_id
-            ):
-                failed = True
-                continue
-            ok = await self._final_flush_memory_scope(
-                raw_session_id,
-                principal_id,
-                project_id,
-                deadline_seconds=remaining,
+        ordered = tuple(
+            sorted(
+                scopes,
+                key=lambda scope: (scope[1] != DEFAULT_MEMORY_PROJECT_ID, scope),
             )
-            flushed_any = flushed_any or ok
-            if not ok:
-                failed = True
-        return flushed_any and not failed
+        )
+        if any(
+            not is_principal_id(principal_id)
+            or not is_persisted_memory_project_id(project_id)
+            for principal_id, project_id in ordered
+        ):
+            return False
+        run_lifecycle = getattr(runtime, "run_session_scopes_lifecycle", None)
+        if not callable(run_lifecycle):
+            return False
+
+        async def _flushed() -> bool:
+            return True
+
+        try:
+            return bool(
+                await run_lifecycle(
+                    scopes=ordered,
+                    raw_session_id=raw_session_id,
+                    operation=_flushed,
+                    deadline_seconds=deadline_seconds,
+                )
+            )
+        except Exception:
+            logger.debug("Memory multi-scope final flush failed", exc_info=True)
+            return False
 
     async def archive_memory_cli_session(
         self,

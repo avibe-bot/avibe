@@ -1500,12 +1500,19 @@ class MemoryRuntime:
                 include_current_session=False,
                 include_profile=bool(policy.include_profile and index == 0),
             )
-            result = await self.module.recall(
-                query,
-                policy=scope_policy,
-                principal_id=principal_id,
-                project_id=project_id,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    self.module.recall(
+                        query,
+                        policy=scope_policy,
+                        principal_id=principal_id,
+                        project_id=project_id,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                warnings.append("memory_search_truncated")
+                break
             if isinstance(result, OperationFailed):
                 if first_failure is None:
                     first_failure = result

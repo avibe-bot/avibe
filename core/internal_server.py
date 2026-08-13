@@ -1543,11 +1543,21 @@ def create_app(
                 project_id = parse_agent_search_project(raw_project)
         except (TypeError, ValueError):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        if project_id not in {DEFAULT_MEMORY_PROJECT_ID, "all"}:
-            catalog = runtime.list_memory_projects(principal_id)
-            if project_id not in catalog:
-                return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
+        if project_id not in {DEFAULT_MEMORY_PROJECT_ID, "all"}:
+            try:
+                catalog = runtime.list_memory_projects(principal_id)
+            except Exception:
+                logger.warning("internal memory project catalog failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "failed", "error": "memory_store_unavailable"},
+                )
+            if project_id not in catalog:
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "failed", "error": "memory_invalid_input"},
+                )
         try:
             return await runtime.search_payload(
                 payload["query"],

@@ -56,6 +56,7 @@ def test_omitted_project_becomes_default() -> None:
 
 
 def test_parsers_reject_empty_and_mixed_case() -> None:
+    """Scenario: MEMORY-SEARCH-002"""
     for parser in (
         parse_writable_memory_project,
         parse_agent_search_project,
@@ -74,7 +75,22 @@ def test_named_slug_rejects_p_prefix() -> None:
     assert is_named_memory_project_id("p-foo") is False
 
 
+def test_prompt_exclusions_are_rejected_by_parsers() -> None:
+    """Scenario: MEMORY-SEARCH-004. Prompt examples must fail the shared parser."""
+
+    from core.system_prompt_injection import _MEMORY_CLI_PROMPT
+
+    assert "cannot be `all`, `personal`" in _MEMORY_CLI_PROMPT
+    assert "start with `p-` / `u-`" in _MEMORY_CLI_PROMPT
+    for value in ("all", "personal", "p-deadbeef", "u-" + "1" * 32, "Billing", ""):
+        with pytest.raises(ValueError):
+            parse_writable_memory_project(value)
+        with pytest.raises(ValueError):
+            parse_agent_search_project(value)
+
+
 def test_ui_parser_accepts_all_agent_does_not() -> None:
+    """Scenario: MEMORY-SEARCH-003 MEMORY-SEARCH-004"""
     assert parse_ui_search_project("all") == "all"
     with pytest.raises(ValueError):
         parse_agent_search_project("all")

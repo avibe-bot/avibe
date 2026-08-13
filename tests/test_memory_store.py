@@ -516,7 +516,47 @@ def test_store_rolls_back_failed_v1_migration_without_changing_data(
         ).fetchone()[0] == "preserved payload"
 
 
+def test_named_project_cap_is_invalid_input_not_store_failure(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path / "named-cap"))
+    principal = "u-11111111111111111111111111111111"
+    for index in range(16):
+        accepted = store.enqueue_request(
+            source_message_id=f"named-{index}",
+            session_id=f"ses-{index}",
+            principal_id=principal,
+            project_ref=f"proj{index:02d}",
+            provenance="agent",
+            payload_text="named",
+            occurred_at_ms=index + 1,
+            max_provider_timestamp_ms=4_102_444_800_000,
+        )
+        assert accepted.outcome == "accepted"
+    limited = store.enqueue_request(
+        source_message_id="named-overflow",
+        session_id="ses-overflow",
+        principal_id=principal,
+        project_ref="proj16",
+        provenance="agent",
+        payload_text="overflow",
+        occurred_at_ms=100,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert limited.outcome == "project_limit"
+    reuse = store.enqueue_request(
+        source_message_id="named-reuse",
+        session_id="ses-reuse",
+        principal_id=principal,
+        project_ref="proj00",
+        provenance="agent",
+        payload_text="reuse",
+        occurred_at_ms=101,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert reuse.outcome == "accepted"
+
+
 def test_store_migrates_v2_queue_and_accepts_default_project(tmp_path: Path) -> None:
+    """Scenario: MEMORY-SEARCH-005"""
     database = _store_path(tmp_path / "schema-v2")
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:
@@ -591,6 +631,7 @@ def test_store_rejects_unknown_nonzero_schema_without_rebuilding(
 
 
 def test_session_scope_recovery_survives_store_reopen_and_separates_sessions(tmp_path: Path) -> None:
+    """Scenario: MEMORY-SEARCH-006"""
     store_path = _store_path(tmp_path)
     first_scope = ("u-11111111111111111111111111111111", PROJECT)
     second_scope = (

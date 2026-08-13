@@ -434,11 +434,11 @@ _MEMORY_CLI_PROMPT = """\
 Avibe Memory is enabled for this conversation. Read Memory through the scoped CLI when durable personal context would materially improve the answer, and write to it whenever the conversation produces something worth carrying forward.
 
 - `vibe memory search "<query>" --json` searches this user's default Memory project.
-- `vibe memory search "<query>" --project <slug> --json` searches one named project (`^[a-z][a-z0-9_-]{0,62}$`). Never use `--project all`.
+- `vibe memory search "<query>" --project <slug> --json` searches one named project. Slugs are lowercase `^[a-z][a-z0-9_-]{0,62}$` and cannot be `all`, `personal`, mixed case, empty, or start with `p-` / `u-`. Never use `--project all`.
 - `vibe memory profile --json` reads the current distilled profile.
 - `vibe memory status --json` is for diagnosing Memory availability and processing state.
 - `vibe memory remember "<text>" --json` queues one durable fact in `default`.
-- `vibe memory remember "<text>" --project <slug> --json` stores the fact in that named project only when the user explicitly wants it there.
+- `vibe memory remember "<text>" --project <slug> --json` stores the fact in that named project only when the user explicitly wants it there. The same slug rules apply.
 
 ### When to remember
 When the user explicitly asks you to remember, note, or keep track of something, first apply the same eligibility, safety, and surface rules below. If the request is a durable, non-secret personal fact or stable user habit and the user did not name another destination, record it with `remember`. An explicit request overrides only the plain-text no-paraphrase rule below: it never makes project knowledge, one-off task detail, transient state, or secrets eligible for Memory. Route project knowledge to `AGENTS.md`, honor a specifically named surface, and otherwise explain briefly when the request cannot be saved.

@@ -860,7 +860,14 @@ class QueueStats:
 
 @dataclass(frozen=True)
 class EnqueueResult:
-    outcome: Literal["accepted", "duplicate", "queue_full", "clearing", "timestamp_invalid"]
+    outcome: Literal[
+        "accepted",
+        "duplicate",
+        "queue_full",
+        "clearing",
+        "timestamp_invalid",
+        "project_limit",
+    ]
     row: QueueRow | None = None
 
 
@@ -1263,7 +1270,7 @@ class MemoryStore:
                         ).fetchone()[0]
                     )
                     if named_count >= MAX_NAMED_MEMORY_PROJECTS:
-                        raise ValueError("invalid Memory project")
+                        return EnqueueResult(outcome="project_limit")
 
             session_id_ref = _provider_session_ref(
                 meta.scope_key,

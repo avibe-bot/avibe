@@ -151,6 +151,7 @@ def test_workbench_turn_uses_its_own_source_namespace() -> None:
 
 
 def test_user_turns_capture_into_default_without_a_workdir() -> None:
+    """Scenario: MEMORY-SEARCH-001"""
     request = _admission().decide(_facts(workdir=None))
 
     assert isinstance(request, CaptureRequest)

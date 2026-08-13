@@ -442,17 +442,18 @@ def test_final_flush_memory_cli_session_uses_trusted_stored_scope() -> None:
     )
 
     assert result is True
-    assert len(controller.memory_runtime.final_flush_calls) == 1
-    flush = controller.memory_runtime.final_flush_calls[0]
-    assert flush["principal_id"] == principal_id
-    assert flush["project_id"] == PROJECT
-    assert flush["raw_session_id"] == "ses-workbench"
-    assert 0 < flush["deadline_seconds"] <= 4.0
+    assert controller.memory_runtime.session_lifecycle_calls == [
+        {
+            "scopes": ((principal_id, PROJECT),),
+            "raw_session_id": "ses-workbench",
+            "deadline_seconds": 4.0,
+        }
+    ]
 
 
 def test_final_flush_memory_cli_session_swallows_runtime_failure() -> None:
     controller = _controller()
-    controller.memory_runtime.final_flush_error = RuntimeError("provider unavailable")
+    controller.memory_runtime.session_lifecycle_error = RuntimeError("provider unavailable")
     controller._memory_scopes_by_session = {
         "ses-workbench": ("u-" + ("2" * 32), PROJECT),
     }
@@ -465,7 +466,7 @@ def test_final_flush_memory_cli_session_swallows_runtime_failure() -> None:
     )
 
     assert result is False
-    assert len(controller.memory_runtime.final_flush_calls) == 1
+    assert len(controller.memory_runtime.session_lifecycle_calls) == 1
 
 
 def test_final_flush_memory_cli_session_recovers_scope_after_controller_restart() -> None:
@@ -478,12 +479,13 @@ def test_final_flush_memory_cli_session_recovers_scope_after_controller_restart(
 
     assert result is True
     assert controller.memory_runtime.scopes_recovery_calls == ["ses-workbench"]
-    assert len(controller.memory_runtime.final_flush_calls) == 1
-    flush = controller.memory_runtime.final_flush_calls[0]
-    assert flush["principal_id"] == principal_id
-    assert flush["project_id"] == PROJECT
-    assert flush["raw_session_id"] == "ses-workbench"
-    assert 0 < flush["deadline_seconds"] <= 5.0
+    assert controller.memory_runtime.session_lifecycle_calls == [
+        {
+            "scopes": ((principal_id, PROJECT),),
+            "raw_session_id": "ses-workbench",
+            "deadline_seconds": 5.0,
+        }
+    ]
 
 
 def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:

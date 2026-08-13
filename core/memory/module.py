@@ -550,6 +550,8 @@ class MemoryModule:
             return CaptureSkipped(reason="memory_queue_full")
         if result.outcome == "timestamp_invalid":
             return CaptureSkipped(reason="memory_invalid_input")
+        if result.outcome == "project_limit":
+            return CaptureSkipped(reason="memory_invalid_input")
         return CaptureSkipped(reason="memory_clear_failed")
 
     async def _capture_pin_failure(self, error: MemoryErrorCode) -> CaptureReceipt:
