@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -41,6 +42,10 @@ from tests.scenario_harness.organization_management import (
 )
 from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
 from vibe import cloud_management
+from tests.scenario_harness.model_hub_native_oauth import (
+    HubOAuthScenarioHarness,
+    NativeOAuthScenarioHarness,
+)
 from vibe.api import (
     get_claude_auth,
     save_claude_auth,
@@ -1137,6 +1142,10 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             harness.store.config.sources[0].state.status,
             "needs_action",
         )
+        self.assertEqual(
+            harness.store.config.sources[0].state.detail_key,
+            "models.source.needs_action.oauth_expired",
+        )
         self.assertEqual(harness.store.config.sources[0].models, [])
 
         harness.agent_auth.timeout(flow_id)
@@ -1240,6 +1249,217 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             harness.service.get_agent_sources("claude")["supply_status"],
             "ok",
         )
+
+    async def test_duplicate_native_source_is_rejected_before_login_starts(self):
+        """Scenario: AUTH-SETUP-108"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(Path(state_dir.name))
+        source = ModelHubSourceConfig.from_payload(
+            {
+                "id": "src_native0001",
+                "created_at": "2026-07-25T00:00:00+00:00",
+                "last_discovered_at": "2026-07-25T00:00:00+00:00",
+                "kind": "subscription",
+                "vendor": "anthropic",
+                "display_name": "Claude subscription",
+                "protocol": "anthropic",
+                "base_url": None,
+                "supply_channel": "native_cli",
+                "billing": "monthly",
+                "state": {
+                    "status": "standby",
+                    "retry_at": None,
+                    "detail_key": None,
+                },
+                "usage": {
+                    "cycle_used_pct": None,
+                    "month_spend_cents": None,
+                    "currency": None,
+                    "projected_exhaust_at": None,
+                },
+                "models": [
+                    {
+                        "id": "claude-opus-4-6",
+                        "display_name": None,
+                        "origin": "discovered",
+                        "reasoning_efforts": [],
+                        "discovered_at": "2026-07-25T00:00:00+00:00",
+                    }
+                ],
+                "credential_ref": None,
+                "account_label": None,
+                "masked_credential": None,
+            }
+        )
+        harness.store.config.sources.append(source)
+
+        with self.assertRaises(ModelHubError) as refused:
+            await harness.service.oauth_start(
+                {"vendor": "anthropic", "channel": "native_cli"}
+            )
+
+        self.assertEqual(refused.exception.code, "native_source_already_exists")
+        self.assertEqual(
+            refused.exception.data,
+            {"existing_source_id": source.id},
+        )
+        self.assertEqual(harness.agent_auth.start_calls, [])
+
+        started = await harness.service.oauth_start(
+            {"vendor": "openai", "channel": "native_cli"}
+        )
+        self.assertEqual(started["flow"]["channel"], "native_cli")
+        self.assertEqual(harness.agent_auth.start_calls, [("codex", False)])
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="AC-52: awaiting I7 service.py wiring for the Hub re-auth gate",
+    )
+    async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
+        """Scenario: AUTH-SETUP-109.
+
+        Prewritten against merged #1326 head ea26ee6a0; recheck at implementation head.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = HubOAuthScenarioHarness(Path(state_dir.name))
+        source = ModelHubSourceConfig.from_payload(
+            {
+                "id": "src_hubreauth01",
+                "created_at": "2026-07-25T00:00:00+00:00",
+                "last_discovered_at": "2026-07-25T00:00:00+00:00",
+                "kind": "subscription",
+                "vendor": "anthropic",
+                "display_name": "Claude Hub subscription",
+                "protocol": "anthropic",
+                "base_url": None,
+                "supply_channel": "hub",
+                "billing": "monthly",
+                "state": {
+                    "status": "needs_action",
+                    "retry_at": None,
+                    "detail_key": "models.source.needs_action.oauth_expired",
+                },
+                "usage": {
+                    "cycle_used_pct": None,
+                    "month_spend_cents": None,
+                    "currency": None,
+                    "projected_exhaust_at": None,
+                },
+                "models": [
+                    {
+                        "id": "claude-opus-4-6",
+                        "display_name": None,
+                        "origin": "discovered",
+                        "reasoning_efforts": [],
+                        "discovered_at": "2026-07-25T00:00:00+00:00",
+                    }
+                ],
+                "credential_ref": "cred_hubold01",
+                "account_label": None,
+                "masked_credential": None,
+            }
+        )
+        harness.store.config.sources.append(source)
+        harness.store.config.agents["claude"].sources.order.append(source.id)
+        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = (
+            ModelHubRouteConfig(
+                hops=(
+                    ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),
+                )
+            )
+        )
+
+        for acknowledgement in ({}, {"acknowledge_irreversible": False}):
+            with self.assertRaises(ModelHubError) as refused:
+                await harness.service.reauth_source(source.id, acknowledgement)
+            self.assertEqual(refused.exception.code, "reauth_confirmation_required")
+            self.assertEqual(harness.adapter.flows, {})
+            self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
+
+        started = await harness.service.reauth_source(
+            source.id,
+            {"acknowledge_irreversible": True},
+        )
+        self.assertEqual(started["flow"]["channel"], "hub")
+        self.assertEqual(started["flow"]["intent"], "reauth")
+        self.assertEqual(len(harness.adapter.flows), 1)
+
+        flow_id = started["flow"]["flow_id"]
+        harness.adapter.complete(flow_id)
+        terminal = await harness.service.oauth_status(flow_id)
+
+        self.assertEqual(terminal["flow"]["state"], "success")
+        self.assertEqual(terminal["flow"]["intent"], "reauth")
+        self.assertEqual(terminal["source"], harness.service.list_sources()[0])
+        self.assertEqual(terminal["source"]["id"], source.id)
+        self.assertEqual(terminal["source"]["credential_ref"], "cred_consent01")
+        self.assertEqual(terminal["source"]["state"]["status"], "standby")
+        self.assertIn(
+            "claude-opus-4-6",
+            [model["id"] for model in terminal["source"]["models"]],
+        )
+        agent = harness.service.get_agent_sources("claude")
+        self.assertEqual(agent["sources"]["order"], [source.id])
+        self.assertEqual(agent["supply_status"], "ok")
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="AC-48: awaiting I7 service.py wiring for OAuth nonce coalescing",
+    )
+    async def test_lost_model_hub_oauth_start_response_reuses_nonce_flow(self):
+        """Scenario: AUTH-SETUP-210.
+
+        Prewritten against merged #1326 head ea26ee6a0; recheck at implementation head.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(Path(state_dir.name))
+        start_request = {
+            "vendor": "anthropic",
+            "channel": "native_cli",
+            "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+        }
+
+        provider_started = asyncio.Event()
+        retry_started = asyncio.Event()
+        release_provider = asyncio.Event()
+        provider_calls = 0
+        original_start = harness.agent_auth.start_web_setup
+
+        async def blocked_provider_start(*args, **kwargs):
+            nonlocal provider_calls
+            provider_calls += 1
+            provider_started.set()
+            await release_provider.wait()
+            return await original_start(*args, **kwargs)
+
+        harness.agent_auth.start_web_setup = blocked_provider_start
+        first_task = asyncio.create_task(harness.service.oauth_start(start_request))
+        await asyncio.wait_for(provider_started.wait(), timeout=1)
+
+        async def retry_after_lost_response():
+            retry_started.set()
+            return await harness.service.oauth_start(dict(start_request))
+
+        retry_task = asyncio.create_task(retry_after_lost_response())
+        await asyncio.wait_for(retry_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        self.assertFalse(retry_task.done())
+
+        release_provider.set()
+        lost_response, recovered_response = await asyncio.gather(
+            first_task,
+            retry_task,
+        )
+
+        lost_flow = lost_response["flow"]
+        recovered_flow = recovered_response["flow"]
+        self.assertEqual(lost_flow["client_nonce"], start_request["client_nonce"])
+        self.assertEqual(recovered_flow["client_nonce"], start_request["client_nonce"])
+        self.assertEqual(recovered_flow, lost_flow)
+        self.assertEqual(provider_calls, 1)
 
     async def test_codex_failure_scenario_emits_reset_path(self):
         """Scenario: AUTH-SETUP-202"""
