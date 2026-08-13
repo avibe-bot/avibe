@@ -169,7 +169,7 @@ scenarios:
     status: covered
     kind: network_policy
     layer: contract
-    test: tests/test_ui_remote_access_auth.py::test_ra_tq_026_remote_status_uses_cf_ray_on_paired_public_host
+    test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_026_remote_status_uses_cf_ray_on_paired_public_host
   - id: RA-TQ-027
     name: User optimization policies change recovery sensitivity without changing path measurements
     status: covered

@@ -7,8 +7,7 @@ import pytest
 
 from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
 from storage import resource_access_service
-from tests.test_ui_remote_access_auth import _remote_peer, _save_config
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
 from vibe import remote_access
 from vibe.ui_server import app
 
@@ -209,7 +208,7 @@ def test_onboarding_preserves_existing_acl_revision(monkeypatch, tmp_path) -> No
 
 def test_onboarding_publication_redacts_prompt_credentials_paths_and_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     config.remote_access.vibe_cloud.enabled = True
     config.remote_access.vibe_cloud.instance_id = "inst_123"
     config.remote_access.vibe_cloud.instance_secret = "paired-device-secret"
@@ -294,7 +293,7 @@ def test_agent_rename_and_delete_converge_in_full_resource_index(monkeypatch, tm
 
 def test_owner_http_workflow_lists_and_onboards_agents_and_editor_is_admitted(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     store = VibeAgentStore()
     try:
         store.create(name="legacy-http", backend="codex", system_prompt="must-not-appear")
@@ -317,14 +316,14 @@ def test_owner_http_workflow_lists_and_onboards_agents_and_editor_is_admitted(mo
     inventory = client.get(
         "/api/agent-onboarding",
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     onboarded = client.post(
         "/api/agent-onboarding",
         json={},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
 
     assert inventory.status_code == 200
@@ -376,7 +375,7 @@ def test_owner_http_workflow_lists_and_onboards_agents_and_editor_is_admitted(mo
     denied = client.get(
         "/api/agent-onboarding",
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     # Temporary full-access rollout (#1343): an active Organization editor is
     # admitted to the onboarding surface too.

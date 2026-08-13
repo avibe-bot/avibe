@@ -242,7 +242,6 @@
     "tests/test_tunnel_quality.py": 2,
     "tests/test_tunnel_recovery.py": 4,
     "tests/test_ui_api.py": 24,
-    "tests/test_ui_remote_access_auth.py": 9,
     "tests/test_ui_server_fastapi.py": 15,
     "tests/test_ui_server_install.py": 3,
     "tests/test_ui_server_logs.py": 3,

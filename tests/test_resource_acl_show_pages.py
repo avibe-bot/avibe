@@ -11,8 +11,7 @@ from storage import workbench_sessions_service as sessions_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, show_pages
-from tests.test_ui_remote_access_auth import _remote_peer, _save_config
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
 from vibe import api, remote_access, ui_server
 from vibe.ui_server import app
 
@@ -200,7 +199,7 @@ def test_remote_org_members_can_open_all_show_pages_temporarily(
     organization_role,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
 
@@ -224,19 +223,19 @@ def test_remote_org_members_can_open_all_show_pages_temporarily(
     catalog = client.get(
         "/api/show-pages",
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     mutation = client.post(
         "/api/show-pages/ses-public/visibility",
         json={"visibility": "offline"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     page = client.get(
         "/show/ses-private/",
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
         headers={"Accept": "text/html"},
         follow_redirects=False,
     )
@@ -353,7 +352,7 @@ def test_active_organization_admin_can_manage_all_pages_temporarily(monkeypatch,
 
 def test_access_only_manager_visibility_response_does_not_expose_page_payload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     admin = _organization_context(
         "admin-1",
@@ -384,7 +383,7 @@ def test_access_only_manager_visibility_response_does_not_expose_page_payload(mo
 
 def test_excluded_scoped_owner_share_mutations_do_not_expose_page_payload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     excluded_owner = _organization_context(
         "owner-1",
@@ -438,7 +437,7 @@ def test_remote_show_page_owner_can_control_sharing_without_instance_owner_role(
 
 def test_remote_show_page_owner_mutations_reach_resource_acl_as_viewer(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     store = ShowPageStore()
     project_path = tmp_path / "project"
     project_path.mkdir()
@@ -470,7 +469,7 @@ def test_remote_show_page_owner_mutations_reach_resource_acl_as_viewer(monkeypat
     request_options = {
         "headers": csrf_headers(client, "https://alex.avibe.bot"),
         "base_url": "https://alex.avibe.bot",
-        "environ_base": _remote_peer(),
+        "environ_base": remote_peer(),
     }
 
     ensured = client.post(
@@ -504,7 +503,7 @@ def test_remote_show_page_owner_mutations_reach_resource_acl_as_viewer(monkeypat
 
 def test_organization_admin_can_read_show_page_access_metadata_without_use_access(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
     admin = _organization_context(
@@ -569,7 +568,7 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "public_link_enabled": False,
     }
 
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     store = ShowPageStore()
     try:
         store.ensure("ses-organization")
@@ -603,7 +602,7 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
     organization = client.get(
         "/api/show-pages/ses-organization/access",
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     assert organization.status_code == 200
     assert organization.get_json() == {
@@ -691,7 +690,7 @@ def test_show_page_email_grants_reject_non_owner_without_contacting_backend(
     instance_role: str,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
     monkeypatch.setattr(
@@ -723,7 +722,7 @@ def test_show_page_email_grants_report_unavailable_without_cloud_pairing(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     store = ShowPageStore()
     try:
         store.ensure("ses-email-access")
@@ -742,7 +741,7 @@ def test_show_page_email_grants_report_transient_device_failures_as_retryable(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     store = ShowPageStore()
     try:
         store.ensure("ses-email-access-transient")
@@ -766,7 +765,7 @@ def test_show_page_email_grants_report_transient_device_failures_as_retryable(
 
 def test_show_page_email_grant_device_requests_freeze_the_target(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     calls: list[tuple] = []
     monkeypatch.setattr(remote_access, "_resource_acl_sync_configured", lambda _config: True)
     monkeypatch.setattr(
@@ -815,7 +814,7 @@ def test_show_page_email_grant_device_requests_freeze_the_target(monkeypatch, tm
 
 def test_show_page_email_grant_change_requires_authorization_revision(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     monkeypatch.setattr(remote_access, "_resource_acl_sync_configured", lambda _config: True)
     monkeypatch.setattr(
         remote_access,
@@ -836,7 +835,7 @@ def test_show_page_email_grant_change_requires_authorization_revision(monkeypatc
 
 def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
     owner = _organization_context("owner-1", instance_role="owner")
@@ -883,7 +882,7 @@ def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> Non
         "/api/dock/pins/ses-public",
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     # A plain active Organization member is denied dock mutations under the
     # Resource ACL boundary (see #1343).
@@ -892,7 +891,7 @@ def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> Non
 
 def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
     owner = _organization_context("owner-1", instance_role="owner")
@@ -919,7 +918,7 @@ def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_
 
 def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
     owner = _organization_context("owner-1", instance_role="owner")
@@ -943,7 +942,7 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
     from unittest.mock import AsyncMock
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     ensure_sqlite_state()
@@ -996,7 +995,7 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
             f"/api/sessions/{session_id}",
             headers=csrf_headers(client, "https://alex.avibe.bot"),
             base_url="https://alex.avibe.bot",
-            environ_base=_remote_peer(),
+            environ_base=remote_peer(),
         )
 
         assert response.status_code in {403, 404}
@@ -1015,7 +1014,7 @@ def test_remote_org_show_annotation_media_temporarily_follows_open_page_policy(
 ) -> None:
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     ensure_sqlite_state()
@@ -1100,7 +1099,7 @@ def test_remote_org_show_annotation_media_temporarily_follows_open_page_policy(
             return client.get(
                 f"/api/media/{token}",
                 base_url="https://alex.avibe.bot",
-                environ_base=_remote_peer(),
+                environ_base=remote_peer(),
             )
 
         # Show annotation screenshots are part of the temporarily open page.

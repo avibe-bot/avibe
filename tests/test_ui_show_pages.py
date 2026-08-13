@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import socket
@@ -18,6 +19,15 @@ from unittest.mock import patch
 import pytest
 
 from config import paths
+from config.v2_config import (
+    AgentsConfig,
+    PlatformsConfig,
+    RemoteAccessConfig,
+    RuntimeConfig,
+    SlackConfig,
+    UiConfig,
+    V2Config,
+)
 from core.show_pages import (
     SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS,
     ShowPageStore,
@@ -34,11 +44,54 @@ from core.show_runtime import (
     set_show_runtime_manager_for_tests,
 )
 from storage import resource_access_service
-from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, ui_server
 from vibe.ui_server import app
 from storage import message_deliveries
+
+
+def _mock_interface(monkeypatch, ip: str, prefix: int, name: str = "en0") -> None:
+    address = ipaddress.ip_address(ip)
+    family = socket.AF_INET if address.version == 4 else socket.AF_INET6
+    netmask = str(
+        ipaddress.ip_network(f"{'0.0.0.0' if address.version == 4 else '::'}/{prefix}").netmask
+    )
+    snic = SimpleNamespace(
+        family=family,
+        address=ip,
+        netmask=netmask,
+        broadcast=None,
+        ptp=None,
+    )
+    monkeypatch.setattr("vibe.ui_server.psutil.net_if_addrs", lambda: {name: [snic]})
+
+
+def _remote_peer() -> dict[str, str]:
+    return {"REMOTE_ADDR": "203.0.113.10"}
+
+
+def _save_config(tmp_path):
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        platform="slack",
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        ui=UiConfig(),
+        remote_access=RemoteAccessConfig(),
+    )
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.public_url = "https://alex.avibe.bot"
+    cloud.client_id = "vr_client_123"
+    cloud.instance_id = "inst_123"
+    cloud.session_secret = "session-secret"
+    cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
+    cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
+    config.save()
+    return config
 
 
 def _active_org_cookie(config, email="member@example.com", subject="member-1"):
@@ -708,13 +761,16 @@ def test_remote_show_page_icon_is_not_persistently_cached(monkeypatch, tmp_path)
     assert response.headers["Cache-Control"] == "private, no-store"
 
 
-def test_remote_non_org_owner_cannot_ensure_show_page(monkeypatch, tmp_path):
+def test_remote_personal_owner_can_ensure_show_page(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     calls = []
     monkeypatch.setattr(
         "vibe.api.ensure_show_page",
-        lambda session_id, **_kwargs: calls.append(session_id),
+        lambda session_id, **_kwargs: (
+            calls.append(session_id)
+            or {"session_id": session_id, "visibility": "private"}
+        ),
     )
     client = app.test_client()
     client.set_cookie(
@@ -730,9 +786,12 @@ def test_remote_non_org_owner_cannot_ensure_show_page(monkeypatch, tmp_path):
         headers=csrf_headers(client, "https://alex.avibe.bot"),
     )
 
-    assert response.status_code == 403
-    assert response.get_json()["code"] == "remote_execution_disabled"
-    assert calls == []
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "session_id": "ses123",
+        "visibility": "private",
+    }
+    assert calls == ["ses123"]
 
 
 def test_show_page_icon_endpoint_enforces_token_without_selecting_the_file(monkeypatch, tmp_path):
