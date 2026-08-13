@@ -1901,8 +1901,8 @@ export type MemoryStatus = {
     version: string | null;
     capabilities: Record<string, unknown>;
     disabled_features: string[];
-    cascade: Record<string, unknown>;
-    recorder: Record<string, unknown>;
+    cascade: Record<string, unknown> | null;
+    recorder: Record<string, unknown> | null;
   };
 };
 

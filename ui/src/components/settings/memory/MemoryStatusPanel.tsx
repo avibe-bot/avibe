@@ -40,12 +40,12 @@ import {
 } from './memoryStatusPresentation';
 
 const FactList: React.FC<{
-  facts: Record<string, unknown>;
+  facts: Record<string, unknown> | null | undefined;
   emptyLabel: string;
   group: RuntimeFactGroup;
 }> = ({ facts, emptyLabel, group }) => {
   const { t } = useTranslation();
-  const entries = Object.entries(facts);
+  const entries = Object.entries(facts ?? {});
   if (entries.length === 0) return <span className="text-[11.5px] text-muted">{emptyLabel}</span>;
   return (
     <dl className="grid min-w-0 gap-x-4 gap-y-2 text-[11.5px] sm:grid-cols-2">

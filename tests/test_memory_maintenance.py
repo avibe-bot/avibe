@@ -127,6 +127,7 @@ async def test_failed_clear_persists_failed_projection_and_boot_retries(tmp_path
     port.delete_surface = _Port.delete_surface.__get__(port, _Port)
     assert await maintenance.reconcile_pending() is True
     assert ClearIntentStore(tmp_path).load() is None
+    assert port.resumed == 0
 
 
 @pytest.mark.asyncio

@@ -346,7 +346,8 @@ class MemoryMaintenance:
             await self._record_failure(intent, str(error_code))
             return self._failed_result()
         self._runtime.restore_completed()
-        await self._runtime.resume()
+        if not boot:
+            await self._runtime.resume()
         self._intent_error = None
         return ClearResult("completed", intent.operation_id, intent.target_epoch)
 
