@@ -209,7 +209,17 @@ class MemoryMaintenance:
             logger.exception("Memory Clear state migration failed")
         finally:
             if lease is not None:
-                lease.release()
+                try:
+                    lease.release()
+                except Exception:
+                    self._legacy_migration_deferred = True
+                    self._initialization_error = ClearIntentError(
+                        "Legacy Memory cleanup lease could not be released"
+                    )
+                    logger.warning(
+                        "Legacy Memory cleanup lease could not be released",
+                        exc_info=True,
+                    )
 
     def is_open(self) -> bool:
         if (
@@ -572,8 +582,13 @@ class MemoryMaintenance:
                 await self._run_maintenance_io(release_fence)
             except asyncio.CancelledError as error:
                 if "error" in release_outcome:
-                    raise release_outcome["error"]
-                final_cancellation = error
+                    if not await self._settle_clear_fence_release(intent):
+                        return self._failed_result()
+                else:
+                    final_cancellation = error
+            except Exception:
+                if not await self._settle_clear_fence_release(intent):
+                    return self._failed_result()
         except asyncio.CancelledError:
             await self._record_failure(intent, "memory_clear_failed")
             raise
@@ -588,6 +603,22 @@ class MemoryMaintenance:
         if final_cancellation is not None:
             logger.info("Memory Clear reached terminal state after final-stage cancellation")
         return ClearResult("completed", intent.operation_id, intent.target_epoch)
+
+    async def _settle_clear_fence_release(self, intent: ClearIntent) -> bool:
+        """Keep replay authority only when the shared queue fence is still held."""
+
+        assert self._store is not None
+        try:
+            fence_open = await self._run_maintenance_io(self._store.clear_in_progress)
+        except Exception:
+            self._intent_error = ClearIntentError(
+                "Memory Clear fence release could not be determined"
+            )
+            return False
+        if not fence_open:
+            return True
+        await self._record_failure(intent, "memory_clear_failed")
+        return False
 
     async def _record_failure(self, intent: ClearIntent, error_code: str) -> None:
         try:

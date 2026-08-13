@@ -416,6 +416,27 @@ def test_legacy_cleanup_lease_failure_fences_memory(tmp_path: Path, monkeypatch)
     assert (maintenance._initialization_error is not None)
 
 
+def test_legacy_cleanup_lease_release_failure_is_contained(tmp_path: Path, monkeypatch):
+    snapshot = tmp_path / "state/memory/clear-snapshots/snapshot.json"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("obsolete", encoding="utf-8")
+    from core.memory import maintenance as maintenance_module
+
+    original_release = maintenance_module.MemoryOperationLease.release
+
+    def release_then_fail(lease):
+        original_release(lease)
+        raise OSError("lock descriptor close failed")
+
+    monkeypatch.setattr(maintenance_module.MemoryOperationLease, "release", release_then_fail)
+
+    maintenance, _port = _maintenance(tmp_path)
+
+    assert maintenance.is_open() is True
+    assert maintenance._initialization_error is not None
+    assert maintenance._legacy_migration_deferred is True
+
+
 def test_open_legacy_backup_restore_is_preserved_and_fences_memory(tmp_path: Path):
     journal = _write_backup_restore_journal(tmp_path, state="recovery_needed", open_slot=1)
     backup = tmp_path / "state/memory/backups/backup-one/manifest.json"
@@ -694,6 +715,30 @@ async def test_terminal_marker_removal_cancellation_resumes_runtime(
     result = await clear_task
 
     assert result.status == "completed"
+    assert maintenance.is_open() is False
+    assert port.resumed == 1
+
+
+@pytest.mark.asyncio
+async def test_committed_clear_fence_release_failure_does_not_restore_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    maintenance, port = _maintenance(tmp_path)
+    store = maintenance._store
+    assert store is not None
+    original_release = store.release_clear_fence
+
+    def release_then_fail():
+        original_release()
+        raise OSError("post-commit mode hardening failed")
+
+    monkeypatch.setattr(store, "release_clear_fence", release_then_fail)
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "completed"
+    assert store.clear_in_progress() is False
+    assert ClearIntentStore(tmp_path).load() is None
     assert maintenance.is_open() is False
     assert port.resumed == 1
 
