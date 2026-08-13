@@ -149,6 +149,9 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("PUT", "/api/files/write"),
         ("POST", "/api/dock/pins"),
         ("GET", "/api/browse/favorites"),
+        ("GET", "/api/asr/status"),
+        ("POST", "/api/asr/transcribe"),
+        ("POST", "/api/asr/telemetry"),
     )
     for method, path in editor_examples:
         assert http_authorization_policy(method, path).minimum_role == "editor", path

@@ -396,6 +396,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/sessions/[^/]+/queue/[^/]+/send-now$"),
         ("PUT", r"^/api/sessions/[^/]+/draft$"),
         ("POST", r"^/api/asr/transcribe$"),
+        ("POST", r"^/api/asr/telemetry$"),
         ("POST", r"^/api/show/sessions/[^/]+/events$"),
         ("POST", r"^/api/show/sessions/[^/]+/prewarm$"),
         ("POST", r"^/api/show-pages/[^/]+/icon$"),
