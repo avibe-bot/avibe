@@ -152,7 +152,7 @@ export const RecentSwitchesCard: React.FC<{
                 {namesDeletedSource(event) && (
                   <Badge
                     variant="secondary"
-                    className="model-hub-fill-white-08 ml-1.5 translate-y-[-1px] px-2 py-0 text-[10px] font-medium"
+                    className="model-hub-fill-08 ml-1.5 translate-y-[-1px] px-2 py-0 text-[10px] font-medium"
                   >
                     {t('settings.models.recent.deletedSource')}
                   </Badge>

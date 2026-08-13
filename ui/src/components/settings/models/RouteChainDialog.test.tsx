@@ -150,7 +150,7 @@ describe("RouteChainDialog", () => {
     expect(current?.textContent).toContain("opus-5");
     const ordinals = [...document.querySelectorAll(".model-hub-route-ordinal")];
     expect(ordinals[0]?.className).toContain("model-hub-accent-pill--mint");
-    expect(ordinals[1]?.className).toContain("model-hub-fill-white-0a");
+    expect(ordinals[1]?.className).toContain("model-hub-fill-0a");
     expect(screen.getAllByRole("button", { name: "Remove hop" })).toHaveLength(
       2,
     );
