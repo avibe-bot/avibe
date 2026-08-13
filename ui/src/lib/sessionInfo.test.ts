@@ -33,6 +33,7 @@ describe('normalizeSessionInfo', () => {
       authenticated: true,
       email: 'owner@example.com',
       sub: 'owner-1',
+      instance_kind: null,
       instance_role: 'owner',
       capabilities: OWNER_INSTANCE_CAPABILITIES,
     });
@@ -43,6 +44,7 @@ describe('normalizeSessionInfo', () => {
       remote: true,
       authenticated: true,
       email: 'viewer@example.com',
+      instance_kind: null,
       instance_role: 'viewer',
       capabilities: {
         can_read_instance: true,
@@ -54,6 +56,7 @@ describe('normalizeSessionInfo', () => {
       remote: true,
       authenticated: true,
       email: 'viewer@example.com',
+      instance_kind: null,
       instance_role: 'viewer',
       capabilities: {
         ...DENIED_INSTANCE_CAPABILITIES,
@@ -66,6 +69,7 @@ describe('normalizeSessionInfo', () => {
   it('keeps local sessions owner-compatible when an older server omits capabilities', () => {
     expect(normalizeSessionInfo({ remote: false })).toEqual({
       remote: false,
+      instance_kind: null,
       instance_role: 'owner',
       capabilities: OWNER_INSTANCE_CAPABILITIES,
     });
@@ -73,5 +77,17 @@ describe('normalizeSessionInfo', () => {
 
   it('fails closed for malformed session payloads', () => {
     expect(normalizeSessionInfo(null)).toEqual({ remote: true, authenticated: false });
+  });
+
+  it.each([
+    ['personal', 'personal'],
+    ['organization', 'organization'],
+    ['enterprise', null],
+    ['', null],
+    [null, null],
+  ])('normalizes instance kind %j to %j', (rawKind, expectedKind) => {
+    expect(normalizeSessionInfo({ remote: false, instance_kind: rawKind })).toMatchObject({
+      instance_kind: expectedKind,
+    });
   });
 });

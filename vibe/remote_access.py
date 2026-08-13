@@ -58,6 +58,7 @@ _INSTANCE_ACCESS_SOURCES = frozenset(
     {"owner", "public_instance", "email", "email_domain", "organization_group", "show_page_email"}
 )
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
+_INSTANCE_KINDS = frozenset({"personal", "organization"})
 _CONNECTOR_LOCK = threading.RLock()
 _STATUS_HEARTBEAT_LOCK = threading.Lock()
 _STATUS_HEARTBEAT_STARTED = False
@@ -1353,9 +1354,30 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
             timeout=5.0,
         )
         _replace_active_hostnames(config, result.get("active_hostnames"))
+        _persist_instance_kind(cloud.instance_id, result.get("instance_kind"))
         return {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "error": "remote_status_report_failed", "detail": str(exc)}
+
+
+def _normalized_instance_kind(value: object) -> str | None:
+    return value if isinstance(value, str) and value in _INSTANCE_KINDS else None
+
+
+def _persist_instance_kind(instance_id: str, value: object) -> bool:
+    instance_kind = _normalized_instance_kind(value)
+    if instance_kind is None:
+        return False
+    with CONFIG_LOCK:
+        live_config = V2Config.load()
+        live_cloud = live_config.remote_access.vibe_cloud
+        if live_cloud.instance_id != instance_id or live_cloud.instance_kind == instance_kind:
+            return False
+        api.save_config(
+            {"remote_access": {"vibe_cloud": {"instance_kind": instance_kind}}},
+            validate_remote_access_network=False,
+        )
+    return True
 
 
 def mint_cloud_token(
@@ -4121,6 +4143,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
     missing = [field for field in required if not result.get(field)]
     if missing:
         return {"ok": False, "error": "invalid_pairing_response", "missing": missing}
+    instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     origin_update = result.get("tunnel_origin_update")
     if isinstance(origin_update, dict) and origin_update.get("ok") is False:
         return {
@@ -4136,6 +4159,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
                     "enabled": True,
                     "backend_url": backend.base_url,
                     "instance_id": result["instance_id"],
+                    "instance_kind": instance_kind or "",
                     "client_id": result["client_id"],
                     "issuer": result["issuer"],
                     "authorization_endpoint": result["authorization_endpoint"],

@@ -59,10 +59,6 @@ type ShellNavItem = {
   variant?: 'workbench';
 };
 
-// Organization is exposed from the admin control panel only. The workbench
-// keeps its compact navigation focused on agent work.
-const ORGANIZATION_NAV_ENABLED = true;
-
 const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
   item.match
     ? item.match(pathname)
@@ -264,6 +260,7 @@ export const AppShell: React.FC = () => {
   const { totalUnread } = useWorkbenchInbox();
   const {
     capabilities,
+    instanceKind,
     remote,
   } = useInstanceAuthorization();
   const api = useApi();
@@ -394,6 +391,7 @@ export const AppShell: React.FC = () => {
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
   const canUseApps = capabilities.can_chat;
+  const showOrganizationNavigation = instanceKind === 'organization';
   const canUseShowPageApp =
     location.pathname.startsWith('/apps/show/') && capabilities.can_use_show_pages;
   const localSystemPath = isOwnerOnlyPath(location.pathname);
@@ -425,7 +423,7 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    ...(ORGANIZATION_NAV_ENABLED
+    ...(showOrganizationNavigation
       ? [{
           to: '/admin/organization/overview',
           label: t('nav.organization'),
@@ -499,7 +497,7 @@ export const AppShell: React.FC = () => {
   const adminMobileTabsAll: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    ...(ORGANIZATION_NAV_ENABLED
+    ...(showOrganizationNavigation
       ? [{ to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 }]
       : []),
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },

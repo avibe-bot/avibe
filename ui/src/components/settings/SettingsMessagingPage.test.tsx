@@ -52,12 +52,14 @@ const baseConfig = {
 
 const localOwner: InstanceAuthorizationValue = {
   remote: false,
+  instanceKind: null,
   instanceRole: 'owner',
   capabilities: OWNER_INSTANCE_CAPABILITIES,
 };
 
 const remoteOwner: InstanceAuthorizationValue = {
   remote: true,
+  instanceKind: null,
   instanceRole: 'owner',
   capabilities: {
     ...OWNER_INSTANCE_CAPABILITIES,

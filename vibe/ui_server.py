@@ -6590,11 +6590,17 @@ def api_session():
     from vibe.authorization import context_from_session_payload, instance_owner_context
 
     config = _load_remote_access_config()
+    instance_kind = None
+    if config is not None:
+        configured_instance_kind = config.remote_access.vibe_cloud.instance_kind
+        if configured_instance_kind in {"personal", "organization"}:
+            instance_kind = configured_instance_kind
     if config is None or not _is_remote_access_request(config):
         context = instance_owner_context()
         response = jsonify(
             {
                 "remote": False,
+                "instance_kind": instance_kind,
                 "instance_role": "owner",
                 "capabilities": context.capability_projection(),
             }
@@ -6621,6 +6627,7 @@ def api_session():
                     "authenticated": True,
                     "email": str(payload.get("email", "")),
                     "sub": str(payload.get("sub", "")),
+                    "instance_kind": instance_kind,
                     "instance_role": context.instance_role,
                     "capabilities": context.capability_projection(),
                 }

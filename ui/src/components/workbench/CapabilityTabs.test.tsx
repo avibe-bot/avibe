@@ -21,6 +21,7 @@ function renderWith(context: InstanceAuthorizationValue, path = '/agents') {
 
 const localOwner: InstanceAuthorizationValue = {
   remote: false,
+  instanceKind: null,
   instanceRole: 'owner',
   capabilities: OWNER_INSTANCE_CAPABILITIES,
 };

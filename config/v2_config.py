@@ -2423,6 +2423,7 @@ class VibeCloudRemoteAccessConfig:
     backend_url: str = "https://avibe.bot"
     public_url: str = ""
     instance_id: str = ""
+    instance_kind: str = ""
     client_id: str = ""
     issuer: str = ""
     authorization_endpoint: str = ""
@@ -2869,6 +2870,10 @@ class V2Config:
                 **_filter_dataclass_fields(VibeCloudRemoteAccessConfig, vibe_cloud_payload)
             ),
         )
+        if not isinstance(remote_access.vibe_cloud.instance_kind, str) or (
+            remote_access.vibe_cloud.instance_kind not in {"personal", "organization"}
+        ):
+            remote_access.vibe_cloud.instance_kind = ""
         remote_access.vibe_cloud.transport_protocol = str(
             remote_access.vibe_cloud.transport_protocol or "auto"
         ).strip().lower()

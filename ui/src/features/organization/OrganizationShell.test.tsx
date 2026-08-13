@@ -44,6 +44,7 @@ function renderShell(capabilities: InstanceAuthorizationValue['capabilities']) {
     <InstanceAuthorizationContext.Provider
       value={{
         remote: true,
+        instanceKind: 'organization',
         instanceRole: 'owner',
         capabilities,
       }}

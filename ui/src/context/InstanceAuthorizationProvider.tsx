@@ -21,6 +21,7 @@ export const InstanceAuthorizationProvider = ({
     if (!session.remote) {
       return {
         remote: false,
+        instanceKind: session.instance_kind,
         instanceRole: session.instance_role ?? 'owner',
         capabilities: session.capabilities ?? OWNER_INSTANCE_CAPABILITIES,
       };
@@ -28,12 +29,14 @@ export const InstanceAuthorizationProvider = ({
     if (!session.authenticated) {
       return {
         remote: true,
+        instanceKind: null,
         instanceRole: null,
         capabilities: DENIED_INSTANCE_CAPABILITIES,
       };
     }
     return {
       remote: true,
+      instanceKind: session.instance_kind,
       instanceRole: session.instance_role,
       capabilities: session.capabilities,
     };

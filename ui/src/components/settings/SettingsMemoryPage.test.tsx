@@ -133,6 +133,7 @@ const readyProcessingRecord = (): MemoryProcessingRecordSummary => ({
 const renderPage = () => render(
   <InstanceAuthorizationContext.Provider value={{
     remote: false,
+    instanceKind: null,
     instanceRole: 'owner',
     capabilities: OWNER_INSTANCE_CAPABILITIES,
   }}>
