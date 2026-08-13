@@ -39,6 +39,8 @@ def _boom(*_args, **_kwargs):
 
 def test_skills_guarded_redacts_missing_project_path(monkeypatch, tmp_path):
     from core.services import skills as skills_service
+    from storage import project_access_service
+    from vibe.authorization import AuthorizationContext
 
     monkeypatch.setattr(api, "resolve_cli_path", lambda _name: "askill")
 
@@ -48,11 +50,61 @@ def test_skills_guarded_redacts_missing_project_path(monkeypatch, tmp_path):
             f"project folder not found: {tmp_path / 'deleted-project'}",
         )
 
-    result = asyncio.run(api._skills_guarded(fail))
+    class _Engine:
+        class _Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
+
+        def connect(self):
+            return self._Connection()
+
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: _Engine())
+    monkeypatch.setattr(project_access_service, "get_effective_project_role", lambda *_args: "viewer")
+    context = AuthorizationContext(instance_role="editor", subject="viewer", is_remote=True)
+    result = asyncio.run(
+        api._skills_guarded(fail, user_context=context, project_id="proj-viewer")
+    )
 
     assert result["error"]["code"] == "project_dir_missing"
     assert result["error"]["message"] == "The configured project folder is unavailable."
     assert str(tmp_path) not in result["error"]["message"]
+
+
+def test_skills_guarded_preserves_missing_project_path_for_effective_editor(monkeypatch, tmp_path):
+    from core.services import skills as skills_service
+    from storage import project_access_service
+    from vibe.authorization import AuthorizationContext
+
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _name: "askill")
+
+    async def fail(_askill, _service):
+        raise skills_service.SkillsError(
+            "project_dir_missing",
+            f"project folder not found: {tmp_path / 'deleted-project'}",
+        )
+
+    class _Engine:
+        class _Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
+
+        def connect(self):
+            return self._Connection()
+
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: _Engine())
+    monkeypatch.setattr(project_access_service, "get_effective_project_role", lambda *_args: "editor")
+    context = AuthorizationContext(instance_role="editor", subject="editor", is_remote=True)
+    result = asyncio.run(
+        api._skills_guarded(fail, user_context=context, project_id="proj-editor")
+    )
+
+    assert str(tmp_path) in result["error"]["message"]
 
 
 def test_list_degrades_to_global_with_flag(folderless, monkeypatch):

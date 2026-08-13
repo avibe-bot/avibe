@@ -102,7 +102,7 @@ async def _run_askill(
         # A deleted/moved project folder also makes create_subprocess_exec raise
         # FileNotFoundError; distinguish it from a missing askill binary so the
         # UI reports the actionable problem (the project path) not "not installed".
-        raise SkillsError("project_dir_missing", "The configured project folder is unavailable.")
+        raise SkillsError("project_dir_missing", f"project folder not found: {cwd}")
     cmd = [askill_path, *args, "--json"]
     try:
         proc = await asyncio.create_subprocess_exec(

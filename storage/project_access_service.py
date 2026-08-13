@@ -361,13 +361,19 @@ def get_effective_session_role(
     context: AuthorizationContext,
     session_id: str,
 ) -> str | None:
-    scope_id = conn.execute(
-        select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id).limit(1)
-    ).scalar_one_or_none()
-    project_id = project_id_from_scope_id(scope_id)
+    project_id = get_session_project_id(conn, session_id)
     if project_id is None:
         return "owner" if context.is_instance_owner else None
     return get_effective_project_role(conn, context, project_id)
+
+
+def get_session_project_id(conn: Connection, session_id: str) -> str | None:
+    """Return a session's owning project id without applying caller access."""
+
+    scope_id = conn.execute(
+        select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id).limit(1)
+    ).scalar_one_or_none()
+    return project_id_from_scope_id(scope_id)
 
 
 def accessible_project_ids(

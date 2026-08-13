@@ -12196,7 +12196,21 @@ def _stop_temp_ws_internal():
 # service so core/ never imports vibe/. See docs/plans/workbench-skills-page.md.
 
 
-async def _skills_guarded(call):
+def _skills_error_message(exc, context, project_id):
+    if exc.code != "project_dir_missing" or not project_id or context is None:
+        return exc.message
+    from storage import project_access_service
+    from storage.db import get_cached_sqlite_engine
+
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        role = project_access_service.get_effective_project_role(connection, context, project_id)
+    if project_access_service.role_allows(role, "editor"):
+        return exc.message
+    return "The configured project folder is unavailable."
+
+
+async def _skills_guarded(call, *, user_context=None, project_id=None):
     askill = resolve_cli_path("askill")
     if not askill:
         return {"ok": False, "error": {"code": "askill_not_found", "message": "askill CLI not found on PATH"}}
@@ -12205,11 +12219,7 @@ async def _skills_guarded(call):
     try:
         return await call(askill, skills_service)
     except skills_service.SkillsError as exc:
-        message = (
-            "The configured project folder is unavailable."
-            if exc.code == "project_dir_missing"
-            else exc.message
-        )
+        message = _skills_error_message(exc, user_context, project_id)
         return {"ok": False, "error": {"code": exc.code, "message": message, "details": exc.details}}
     except LookupError:
         return {"ok": False, "error": {"code": "askill_not_found", "message": "askill CLI not found on PATH"}}
@@ -12232,7 +12242,9 @@ async def list_skills(
             project_id=project_id,
             backends=backends,
             user_context=context,
-        )
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
@@ -12251,7 +12263,9 @@ async def preview_skill_source(
             project_dir=project_dir,
             project_id=project_id,
             user_context=context,
-        )
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
@@ -12280,7 +12294,9 @@ async def add_skill(
             skill=skill,
             copy=copy,
             user_context=context,
-        )
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
@@ -12303,7 +12319,9 @@ async def remove_skill(
             project_id=project_id,
             backends=backends,
             user_context=context,
-        )
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
@@ -12329,7 +12347,9 @@ async def check_skills(
             project_dir=project_dir,
             project_id=project_id,
             user_context=context,
-        )
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
@@ -12350,7 +12370,9 @@ async def update_skill(
             project_dir=project_dir,
             project_id=project_id,
             user_context=context,
-        )
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
@@ -12454,7 +12476,9 @@ async def upload_skill_zip(
             project_dir=project_dir,
             project_id=project_id,
             user_context=context,
-        )
+        ),
+        user_context=context,
+        project_id=project_id,
     )
     if preview.get("ok"):
         preview["dir"] = unpack

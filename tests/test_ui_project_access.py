@@ -806,6 +806,11 @@ def test_show_page_mutation_payload_redacts_direct_and_nested_pages(monkeypatch)
         lambda _conn, _context, _session_id: "viewer",
     )
     monkeypatch.setattr(
+        project_access_service,
+        "get_session_project_id",
+        lambda _conn, _session_id: "project-1",
+    )
+    monkeypatch.setattr(
         resource_access_service,
         "can_manage_resource_acl",
         lambda _context, _kind, _resource_id, *, connection: False,
@@ -853,6 +858,11 @@ def test_show_page_payload_preserves_path_for_non_project_page_owner(monkeypatch
         lambda _conn, _context, _session_id: None,
     )
     monkeypatch.setattr(
+        project_access_service,
+        "get_session_project_id",
+        lambda _conn, _session_id: None,
+    )
+    monkeypatch.setattr(
         resource_access_service,
         "can_manage_resource_acl",
         lambda _context, _kind, _resource_id, *, connection: True,
@@ -890,6 +900,55 @@ def test_show_page_payload_does_not_bypass_project_viewer_with_resource_manager(
         project_access_service,
         "get_effective_session_role",
         lambda _conn, _context, _session_id: "viewer",
+    )
+    monkeypatch.setattr(
+        project_access_service,
+        "get_session_project_id",
+        lambda _conn, _session_id: "project-1",
+    )
+    monkeypatch.setattr(
+        resource_access_service,
+        "can_manage_resource_acl",
+        lambda _context, _kind, _resource_id, *, connection: True,
+    )
+
+    payload = ui_server._show_page_response_for_request(
+        {"ok": True, "session_id": "project-session", "path": "/private/page"},
+        context,
+    )
+
+    assert "path" not in payload
+
+
+def test_show_page_payload_does_not_treat_inaccessible_project_as_unscoped(monkeypatch) -> None:
+    context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        subject="user-editor",
+        is_remote=True,
+    )
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr(
+        project_access_service,
+        "get_effective_session_role",
+        lambda _conn, _context, _session_id: None,
+    )
+    monkeypatch.setattr(
+        project_access_service,
+        "get_session_project_id",
+        lambda _conn, _session_id: "project-removed-binding",
     )
     monkeypatch.setattr(
         resource_access_service,

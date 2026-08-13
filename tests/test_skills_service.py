@@ -911,7 +911,7 @@ def test_active_org_editor_can_upload_skill_zip(monkeypatch, tmp_path) -> None:
     with zipfile.ZipFile(archive_bytes, "w") as archive:
         archive.writestr("uploaded-skill/SKILL.md", "# Uploaded Skill\n")
 
-    async def preview_uploaded_skill(_callback):
+    async def preview_uploaded_skill(_callback, **_kwargs):
         return {"ok": True, "skills": [{"name": "uploaded-skill"}]}
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
@@ -939,7 +939,7 @@ def test_viewer_cannot_upload_skill_zip(monkeypatch) -> None:
     from vibe import api
     from vibe.authorization import InstanceAuthorizationError
 
-    async def unexpected_preview(_callback):
+    async def unexpected_preview(_callback, **_kwargs):
         raise AssertionError("viewer upload must fail before inspecting the archive")
 
     monkeypatch.setattr(api, "_skills_guarded", unexpected_preview)
@@ -996,9 +996,9 @@ def test_missing_binary_raises_lookup():
         _run(skills._run_askill("", ["list"]))
 
 
-def test_missing_project_dir_error_does_not_include_host_path(tmp_path):
+def test_missing_project_dir_error_preserves_host_path_for_authorized_service_call(tmp_path):
     missing = tmp_path / "deleted-project"
     with pytest.raises(skills.SkillsError) as info:
         _run(skills._run_askill("askill", ["list"], cwd=str(missing)))
     assert info.value.code == "project_dir_missing"
-    assert str(missing) not in info.value.message
+    assert str(missing) in info.value.message
