@@ -346,6 +346,8 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
 
     viewer_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
     assert viewer_project["capabilities"] == {"can_chat": False}
+    assert viewer_project["folder_path"] == ""
+    assert viewer_project["metadata"] == {}
 
     viewer_bootstrap = _get(client, f"/api/sessions/{ids['session_a']}/bootstrap")
 
