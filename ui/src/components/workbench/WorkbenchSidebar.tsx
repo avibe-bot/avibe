@@ -28,11 +28,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
-import {
-  canUseAppsSurface,
-  canUseRuntimeSurfaces,
-  useInstanceAuthorization,
-} from '../../context/InstanceAuthorizationContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
@@ -41,7 +37,6 @@ import { SESSION_ROW_MENU_POSITION_CLASS, sessionRowActionPaddingClass } from '.
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
-import { canArchiveProjects, canEditProjectInstructions, canUseHarness } from '../../lib/remoteAuth';
 import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
@@ -666,23 +661,16 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const {
     capabilities,
-    remote,
-    hasTemporaryUnrestrictedOrgAccess,
   } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
-  const canUseApps = canUseAppsSurface(remote, hasTemporaryUnrestrictedOrgAccess);
-  const canManageProjects = capabilities.can_manage_projects || canUseRuntime;
-  const canChat = capabilities.can_chat || canUseRuntime;
-  const canCreateProject = canUseRuntime || canCreateLocalProject(capabilities);
+  const canUseApps = capabilities.can_chat;
+  const canManageProjects = capabilities.can_manage_projects;
+  const canChat = capabilities.can_chat;
+  const canCreateProject = canCreateLocalProject(capabilities);
   const capabilityNav = CAPABILITY_NAV.filter(({ to }) => {
-    if (canUseRuntime) return true;
-    if (to === '/harness') return (capabilities.can_manage_agents || canUseRuntime) && canUseHarness({
-      remote,
-      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-    });
-    if (to === '/agents') return capabilities.can_manage_agents || canUseRuntime;
-    if (to === '/skills') return capabilities.can_use_skills || canUseRuntime;
-    if (to === '/vaults') return capabilities.can_use_vault_secrets || canUseRuntime;
+    if (to === '/harness') return capabilities.can_chat;
+    if (to === '/agents') return capabilities.can_use_agents;
+    if (to === '/skills') return capabilities.can_use_skills;
+    if (to === '/vaults') return capabilities.can_use_vault_secrets;
     return false;
   });
   const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
@@ -937,18 +925,12 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     }
                   }}
                   creatingSession={creatingSession(project.id)}
-                  canChat={canChat && (canUseRuntime || project.capabilities.can_chat)}
-                  canManageMetadata={canUseRuntime || project.capabilities.can_chat}
+                  canChat={canChat && project.capabilities.can_chat}
+                  canManageMetadata={canManageProjects || project.capabilities.can_chat}
                   canManageProjects={canManageProjects}
-                  canArchive={canManageProjects && canArchiveProjects({
-                    remote,
-                    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-                  })}
+                  canArchive={canManageProjects}
                   canOpenInEditor={canUseApps}
-                  canEditAgentsMd={canManageProjects && canEditProjectInstructions({
-                    remote,
-                    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-                  })}
+                  canEditAgentsMd={canManageProjects}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}

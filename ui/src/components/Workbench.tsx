@@ -8,10 +8,7 @@ import { NewProjectDialog } from './workbench/NewProjectDialog';
 import { Composer } from './workbench/Composer';
 import { ProjectPicker } from './workbench/ProjectPicker';
 import { AgentRoutePicker } from './workbench/AgentRoutePicker';
-import {
-  canUseRuntimeSurfaces,
-  useInstanceAuthorization,
-} from '../context/InstanceAuthorizationContext';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { canCreateLocalProject } from '../lib/sessionInfo';
 
 // Mirrors design.pen DnkGJ "Workbench" canvas: a centered hero panel +
@@ -26,13 +23,10 @@ export const Workbench: React.FC = () => {
   const navigate = useNavigate();
   const {
     capabilities,
-    remote,
-    hasTemporaryUnrestrictedOrgAccess,
   } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
-  const canCreateProject = canUseRuntime || canCreateLocalProject(capabilities);
+  const canCreateProject = canCreateLocalProject(capabilities);
   const ns = useNewSession({
-    active: capabilities.can_chat || canUseRuntime,
+    active: capabilities.can_chat,
     loadErrorText: t('newSession.loadError'),
     createFailedText: t('newSession.createFailed'),
   });
@@ -58,15 +52,15 @@ export const Workbench: React.FC = () => {
     ...(canCreateProject
       ? [{ key: 'newProject', icon: FolderPlus, onClick: () => setNewProjectOpen(true) }]
       : []),
-    ...(capabilities.can_manage_agents || canUseRuntime
+    ...(capabilities.can_manage_agents
       ? [{ key: 'openAgents', icon: Bot, onClick: () => navigate('/agents') }]
       : []),
-    ...(capabilities.can_manage_instance || canUseRuntime
+    ...(capabilities.can_manage_instance
       ? [{ key: 'openHarness', icon: Activity, onClick: () => navigate('/harness') }]
       : []),
   ];
 
-  if (!capabilities.can_chat && !canUseRuntime) return <Navigate to="/projects" replace />;
+  if (!capabilities.can_chat) return <Navigate to="/projects" replace />;
 
   return (
     // Desktop centers the hero + Composer as a group (min-h + justify-center). On

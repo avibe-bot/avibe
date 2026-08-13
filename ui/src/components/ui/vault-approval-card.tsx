@@ -11,7 +11,6 @@ import {
   type VaultSourceSelector,
 } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
-import { canManageVaultSecrets } from '@/lib/remoteAuth';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { SigningAddressList } from './signing-address-list';
@@ -116,7 +115,7 @@ export const VaultApprovalCard: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const vault = useProtectedVault();
-  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const { capabilities } = useInstanceAuthorization();
 
   // The request is passed in already hydrated by the UI-audience inbox list
   // (`getVaultRequests`, #708), so `card.secret_unlock_material` /
@@ -360,10 +359,7 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const canApprove = canManageVaultSecrets({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
+  const canApprove = capabilities.can_use_vault_secrets;
   const approveDisabled = busy || !canApprove || (!isSign && !option);
 
   return (

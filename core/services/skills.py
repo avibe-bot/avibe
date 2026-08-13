@@ -32,8 +32,6 @@ import os
 import re
 from typing import Any, Optional
 
-from vibe.authorization import has_temporary_unrestricted_runtime_access
-
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
@@ -190,7 +188,7 @@ def _cwd_for(scope: str, project_dir: Optional[str]) -> Optional[str]:
 
 
 def resolve_resource_access_context(user_context: Any = None):
-    """Resolve request ACL context while preserving trusted local Skill use."""
+    """Resolve request context for Skill ACL checks."""
 
     from storage import resource_access_service
 
@@ -380,7 +378,7 @@ def _filter_skill_listing(
     if not result.get("ok") or not isinstance(result.get("skills"), list):
         return result
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local or has_temporary_unrestricted_runtime_access(context):
+    if context.has_role("editor"):
         return result
 
     raw_skills = [dict(skill) for skill in result["skills"] if isinstance(skill, dict)]
@@ -493,7 +491,7 @@ def _require_skill_management_access(
     from storage.db import get_cached_sqlite_engine
 
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local or has_temporary_unrestricted_runtime_access(context):
+    if context.has_role("editor"):
         return
     engine = get_cached_sqlite_engine()
     with engine.connect() as connection:
@@ -514,7 +512,7 @@ def _require_skill_management_access(
 
 def _require_skill_create_access(user_context: Any) -> None:
     context = resolve_resource_access_context(user_context)
-    if context.can_manage_instance or has_temporary_unrestricted_runtime_access(context):
+    if context.has_role("editor"):
         return
     raise SkillAccessError()
 
@@ -529,14 +527,10 @@ def _require_skill_use_access(
 
     if (
         not context.can_use_resource("skill")
-        and not has_temporary_unrestricted_runtime_access(context)
+        and not context.has_role("editor")
     ):
         raise SkillAccessError()
-    if (
-        context.is_trusted_local
-        or context.is_instance_owner
-        or has_temporary_unrestricted_runtime_access(context)
-    ):
+    if context.has_role("editor"):
         return
     if not project_dir:
         if scope in {"all", "global"}:
@@ -636,7 +630,7 @@ def _register_created_skill_policies(
     from storage.db import get_cached_sqlite_engine
 
     context = resolve_resource_access_context(user_context)
-    if not (context.is_remote and context.is_active_organization_member and context.subject):
+    if not context.subject:
         return
     engine = get_cached_sqlite_engine()
     with engine.begin() as connection:
@@ -821,8 +815,8 @@ async def add_skill(
         raise SkillsError("invalid_scope", "install scope must be global or project")
     context = resolve_resource_access_context(user_context)
     if not (
-        context.is_trusted_local
-        or has_temporary_unrestricted_runtime_access(context)
+        context.is_instance_owner
+        or context.has_role("editor")
     ):
         _require_skill_create_access(context)
         target_names = [skill] if skill else []
@@ -928,8 +922,8 @@ async def remove_skill(
         raise SkillsError("invalid_scope", "remove scope must be global or project")
     context = resolve_resource_access_context(user_context)
     if not (
-        context.is_trusted_local
-        or has_temporary_unrestricted_runtime_access(context)
+        context.is_instance_owner
+        or context.has_role("editor")
     ):
         _require_skill_create_access(context)
         resource_ids = await _installed_skill_resource_ids(
@@ -1006,8 +1000,8 @@ async def check(
         user_context=context,
     )
     if (
-        context.is_trusted_local
-        or has_temporary_unrestricted_runtime_access(context)
+        context.is_instance_owner
+        or context.has_role("editor")
         or not isinstance(filtered.get("summary"), dict)
     ):
         return filtered
@@ -1038,8 +1032,8 @@ async def update(
         raise SkillsError("invalid_scope", "update scope must be global or project")
     context = resolve_resource_access_context(user_context)
     if not (
-        context.is_trusted_local
-        or has_temporary_unrestricted_runtime_access(context)
+        context.is_instance_owner
+        or context.has_role("editor")
     ):
         _require_skill_create_access(context)
         resource_ids = await _installed_skill_resource_ids(

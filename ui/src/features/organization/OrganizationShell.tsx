@@ -34,14 +34,10 @@ const NAV = [
   { path: '/admin/organization/resources', key: 'resources', icon: Building2 },
 ] as const;
 
-// Resolve "back to control panel" against the temporary runtime admission.
-// Remote Access itself remains on the separate pairing/tunnel boundary below.
+// Resolve "back to control panel" against the current Instance capability.
 function useBackToControlPanelPath(): string {
-  const { capabilities, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
-  return adminLandingPath(
-    capabilities.can_use_system,
-    hasTemporaryUnrestrictedOrgAccess === true,
-  );
+  const { capabilities } = useInstanceAuthorization();
+  return adminLandingPath(capabilities.can_use_system);
 }
 
 function GateState() {

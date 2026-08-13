@@ -29,12 +29,11 @@ const remoteOwner = {
 
 const activeOrgMember = {
   remote: true,
-  instanceRole: 'viewer' as const,
-  hasTemporaryUnrestrictedOrgAccess: true,
+  instanceRole: 'editor' as const,
   capabilities: {
     ...OWNER_INSTANCE_CAPABILITIES,
     can_manage_instance: false,
-    can_use_vault_secrets: false,
+    can_use_vault_secrets: true,
     can_use_system: false,
   },
 };
@@ -100,7 +99,7 @@ describe('VaultsPage remote audit history', () => {
     renderPage();
 
     const history = await screen.findByRole('button', { name: 'vaults.history' });
-    expect(screen.queryByRole('button', { name: 'vaults.add' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'vaults.add' })).toBeTruthy();
 
     await user.click(history);
 
@@ -110,7 +109,7 @@ describe('VaultsPage remote audit history', () => {
     expect(await screen.findByText('alpha')).toBeTruthy();
   });
 
-  it('shows Vault management controls to an active Organization member', async () => {
+  it('shows Vault management controls to an Editor', async () => {
     renderPage(activeOrgMember);
 
     expect(await screen.findByRole('button', { name: 'vaults.add' })).toBeTruthy();

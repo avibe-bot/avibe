@@ -15,18 +15,23 @@ export type InstanceCapabilities = {
   can_use_system: boolean;
 };
 
+export type InstanceKind = 'personal' | 'organization';
+
 export type SessionInfo =
-  | { remote: false; instance_role?: 'owner'; capabilities?: InstanceCapabilities }
+  | {
+      remote: false;
+      instance_kind: InstanceKind | null;
+      instance_role?: 'owner';
+      capabilities?: InstanceCapabilities;
+    }
   | { remote: true; authenticated: false; authorization_refresh_required?: boolean }
   | {
       remote: true;
       authenticated: true;
       email: string;
       sub?: string;
+      instance_kind: InstanceKind | null;
       instance_role: 'owner' | 'editor' | 'viewer';
-      temporary_unrestricted_org_access: boolean;
-      /** Compatibility with the previous Apps-only rollout field. */
-      temporary_unrestricted_org_app_access: boolean;
       capabilities: InstanceCapabilities;
     };
 
@@ -62,12 +67,16 @@ const normalizeCapabilities = (value: Record<string, unknown>): InstanceCapabili
     Object.keys(DENIED_INSTANCE_CAPABILITIES).map((key) => [key, value[key] === true]),
   ) as InstanceCapabilities;
 
+const normalizeInstanceKind = (value: unknown): InstanceKind | null =>
+  value === 'personal' || value === 'organization' ? value : null;
+
 export const normalizeSessionInfo = (value: unknown): SessionInfo => {
   if (!isRecord(value)) return { remote: true, authenticated: false };
 
   if (value.remote === false) {
     return {
       remote: false,
+      instance_kind: normalizeInstanceKind(value.instance_kind),
       instance_role: 'owner',
       capabilities: OWNER_INSTANCE_CAPABILITIES,
     };
@@ -103,13 +112,8 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
     authenticated: true,
     email: typeof value.email === 'string' ? value.email : '',
     ...(typeof value.sub === 'string' ? { sub: value.sub } : {}),
+    instance_kind: normalizeInstanceKind(value.instance_kind),
     instance_role: instanceRole,
-    temporary_unrestricted_org_access:
-      value.temporary_unrestricted_org_access === true ||
-      value.temporary_unrestricted_org_app_access === true,
-    temporary_unrestricted_org_app_access:
-      value.temporary_unrestricted_org_app_access === true ||
-      value.temporary_unrestricted_org_access === true,
     capabilities,
   };
 };

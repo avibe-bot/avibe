@@ -2,7 +2,6 @@ import asyncio
 import base64
 import hashlib
 import io
-import ipaddress
 import json
 import os
 import socket
@@ -19,15 +18,6 @@ from unittest.mock import patch
 import pytest
 
 from config import paths
-from config.v2_config import (
-    AgentsConfig,
-    PlatformsConfig,
-    RemoteAccessConfig,
-    RuntimeConfig,
-    SlackConfig,
-    UiConfig,
-    V2Config,
-)
 from core.show_pages import (
     SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS,
     ShowPageStore,
@@ -44,62 +34,19 @@ from core.show_runtime import (
     set_show_runtime_manager_for_tests,
 )
 from storage import resource_access_service
+from tests.ui_server_test_helpers import _mock_interface, _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, ui_server
 from vibe.ui_server import app
 from storage import message_deliveries
 
 
-def _mock_interface(monkeypatch, ip: str, prefix: int, name: str = "en0") -> None:
-    address = ipaddress.ip_address(ip)
-    family = socket.AF_INET if address.version == 4 else socket.AF_INET6
-    netmask = str(
-        ipaddress.ip_network(f"{'0.0.0.0' if address.version == 4 else '::'}/{prefix}").netmask
-    )
-    snic = SimpleNamespace(
-        family=family,
-        address=ip,
-        netmask=netmask,
-        broadcast=None,
-        ptp=None,
-    )
-    monkeypatch.setattr("vibe.ui_server.psutil.net_if_addrs", lambda: {name: [snic]})
-
-
-def _remote_peer() -> dict[str, str]:
-    return {"REMOTE_ADDR": "203.0.113.10"}
-
-
-def _save_config(tmp_path):
-    config = V2Config(
-        mode="self_host",
-        version="v2",
-        platform="slack",
-        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
-        slack=SlackConfig(bot_token=""),
-        runtime=RuntimeConfig(default_cwd="."),
-        agents=AgentsConfig(),
-        ui=UiConfig(),
-        remote_access=RemoteAccessConfig(),
-    )
-    cloud = config.remote_access.vibe_cloud
-    cloud.enabled = True
-    cloud.public_url = "https://alex.avibe.bot"
-    cloud.client_id = "vr_client_123"
-    cloud.instance_id = "inst_123"
-    cloud.session_secret = "session-secret"
-    cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
-    cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
-    config.save()
-    return config
-
-
-def _active_org_cookie(config, email="member@example.com", subject="member-1"):
+def _active_org_cookie(config, email="member@example.com", subject="member-1", *, role="editor"):
     return remote_session_cookie(
         config,
         email,
         subject,
-        role="viewer",
+        role=role,
         access_source="organization_group",
         organization_id="org-1",
         organization_member_id=f"membership-{subject}",
@@ -209,6 +156,18 @@ def _create_show_page(session_id: str, visibility: str) -> str | None:
     store = ShowPageStore()
     try:
         page = store.update_visibility(session_id, visibility)
+        # The factory represents a page that has been published to this test
+        # Organization. Runtime access still requires the caller's Instance role;
+        # this ACL only supplies the independent Show Page entitlement.
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id=session_id,
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="public",
+            )
         return page.share_id
     finally:
         store.close()
@@ -234,6 +193,15 @@ def _create_show_page_record(session_id: str, visibility: str) -> str | None:
     store = ShowPageStore()
     try:
         page = store.update_visibility(session_id, visibility)
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id=session_id,
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="public",
+            )
         return page.share_id
     finally:
         store.close()
@@ -1873,7 +1841,7 @@ def _screenshot_event(local_path: str) -> dict:
     }
 
 
-def test_remote_non_org_owner_cannot_read_private_show_events(monkeypatch, tmp_path):
+def test_remote_owner_can_read_private_show_events(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     _create_show_page("ses123", "private")
@@ -1895,12 +1863,14 @@ def test_remote_non_org_owner_cannot_read_private_show_events(monkeypatch, tmp_p
         environ_base=_remote_peer(),
     )
 
-    assert response.status_code == 401
-    assert response.get_json()["error"] == "remote_access_login_required"
+    assert response.status_code == 200
+    event = response.get_json()["events"][0]
+    assert "path" not in event["payload"]["screenshot"]
+    assert event["payload"]["screenshot"]["attachmentId"] == "med_1"
 
 
 def test_local_private_show_events_keep_the_local_screenshot_path(monkeypatch, tmp_path):
-    # Trusted-local authoring tools still read the materialized file directly.
+    # Local Owner authoring tools still read the materialized file directly.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
@@ -1956,7 +1926,7 @@ def test_remote_private_show_page_denies_at_fs_workspace_symlink_escape(monkeypa
 
 def test_private_show_page_allows_at_fs_workspace_symlink(monkeypatch, tmp_path):
     # The private authoring surface intentionally allows a workspace symlink to a
-    # disk file (a supported feature) for trusted-local authors. Public and remote
+    # disk file (a supported feature) for local Owner authors. Public and remote
     # viewers are confined to the workspace.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -2083,7 +2053,7 @@ def test_public_show_page_denies_at_fs_extra_leading_slash_symlink_escape(monkey
     assert ui_server._is_show_page_runtime_denied_path(
         decoded, session_id="ses123", confine_to_workspace=True
     )
-    # The same request stays allowed for a trusted-local author.
+    # The same request stays allowed for a local Owner author.
     assert not ui_server._is_show_page_runtime_denied_path(
         decoded, session_id="ses123", confine_to_workspace=False
     )
@@ -3334,7 +3304,7 @@ def test_public_show_page_clears_show_event_write_cookie(monkeypatch, tmp_path):
 
 def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch, tmp_path):
     from core.show_session_events import ShowSessionEventStore
-    from vibe.authorization import trusted_local_context
+    from vibe.authorization import instance_owner_context
     from vibe.ui_server import _show_events_stream
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -3362,7 +3332,7 @@ def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch,
     async def _collect_replay() -> str:
         response = await _show_events_stream(
             "ses123",
-            authorization_context=trusted_local_context(),
+            authorization_context=instance_owner_context(),
         )
         iterator = response.body_iterator.__aiter__()
         chunks = []
@@ -3386,7 +3356,7 @@ def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch,
 
 def test_show_events_stream_forwards_live_dispatch_events(monkeypatch, tmp_path):
     from vibe.sse_broker import broker
-    from vibe.authorization import trusted_local_context
+    from vibe.authorization import instance_owner_context
     from vibe.ui_server import _show_events_stream
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -3397,7 +3367,7 @@ def test_show_events_stream_forwards_live_dispatch_events(monkeypatch, tmp_path)
     async def _collect_live_dispatch() -> str:
         response = await _show_events_stream(
             "ses123",
-            authorization_context=trusted_local_context(),
+            authorization_context=instance_owner_context(),
         )
         iterator = response.body_iterator.__aiter__()
         chunks = []
@@ -3509,7 +3479,7 @@ def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypa
     assert len(asyncio.run(_collect_until_revoked())) == 1
 
 
-def test_remote_org_show_events_stream_stays_open_when_resource_access_is_revoked(
+def test_remote_org_show_events_stream_closes_when_resource_access_is_revoked(
     monkeypatch,
     tmp_path,
 ):
@@ -3569,17 +3539,8 @@ def test_remote_org_show_events_stream_stays_open_when_resource_access_is_revoke
                 "authorization.changed",
                 {"project_ids": [], "resource_kinds": ["show_page"]},
             )
-            broker.publish(
-                "show.dispatch",
-                {
-                    "session_id": "ses123",
-                    "scope_id": "scope123",
-                    "show_event_id": "show_evt_after_acl_change",
-                    "event": "turn.chunk",
-                    "data": {"text": "still connected"},
-                },
-            )
-            chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iterator.__anext__(), timeout=1)
         finally:
             await iterator.aclose()
         return "".join(
@@ -3588,8 +3549,7 @@ def test_remote_org_show_events_stream_stays_open_when_resource_access_is_revoke
         )
 
     body = asyncio.run(_collect_after_revocation())
-    assert "event: show.dispatch" in body
-    assert "still connected" in body
+    assert body == ": show events connected\n\n"
 
 
 def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_path):
@@ -5960,8 +5920,22 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id="ses123",
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="public",
+        )
+    engine.dispose()
     monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
     monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(ui_server, "_project_session_access_allowed", lambda *args: True)
     monkeypatch.setattr(
         ui_server,
         "_show_runtime_websocket_resource_context",
@@ -6006,7 +5980,7 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 
-def test_remote_org_show_page_hmr_stays_open_when_resource_access_is_revoked(
+def test_remote_org_show_page_hmr_closes_when_resource_access_is_revoked(
     monkeypatch,
     tmp_path,
 ):
@@ -6104,15 +6078,14 @@ def test_remote_org_show_page_hmr_stays_open_when_resource_access_is_revoked(
             "authorization.changed",
             {"project_ids": [], "resource_kinds": ["show_page"]},
         )
-        await asyncio.sleep(0.05)
-        assert task.done() is False
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await asyncio.wait_for(task, timeout=1)
 
     asyncio.run(_run_after_revocation())
 
-    assert websocket.calls == [("accept", "vite-hmr")]
+    assert websocket.calls == [
+        ("accept", "vite-hmr"),
+        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+    ]
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 

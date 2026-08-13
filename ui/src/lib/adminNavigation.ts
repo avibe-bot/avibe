@@ -5,19 +5,12 @@ export const isMemorySettingsPath = (pathname: string): boolean =>
   matchesRoute(pathname, '/admin/settings/memory');
 
 /**
- * Destinations that historically depended on trusted-local APIs. Active
- * Organization members are temporarily admitted to the runtime surfaces by
- * the signed `temporary_unrestricted_org_access` signal; Remote Access
- * pairing/tunnel management remains a separate control-plane boundary.
- *
- * This is the single source of truth for both halves of the gate — the route
- * redirect and the navigation entries that point at it — so a withheld page can
- * never still be advertised in the sidebar, mobile tabs or the More sheet.
+ * Destinations that require Instance Owner management capability.
  * Messaging settings are deliberately absent: the page has its own field-level
  * control-plane handling, and the remaining protected controls are gated by
  * `isLocalOnlyMessagingField` below.
  */
-export const LOCAL_SYSTEM_ROUTES = [
+export const OWNER_ONLY_ROUTES = [
   '/admin/dashboard',
   '/admin/remote-access',
   '/admin/groups',
@@ -30,7 +23,6 @@ export const LOCAL_SYSTEM_ROUTES = [
   '/admin/settings/dependencies',
   '/admin/settings/diagnostics',
   '/admin/settings/logs',
-  '/harness',
 ] as const;
 
 const LOCAL_ONLY_MESSAGING_FIELDS = new Set([
@@ -39,8 +31,8 @@ const LOCAL_ONLY_MESSAGING_FIELDS = new Set([
   'show_pages_prompt',
 ]);
 
-export const isLocalSystemPath = (pathname: string): boolean =>
-  LOCAL_SYSTEM_ROUTES.some((route) => matchesRoute(pathname, route));
+export const isOwnerOnlyPath = (pathname: string): boolean =>
+  OWNER_ONLY_ROUTES.some((route) => matchesRoute(pathname, route));
 
 export type LocalSystemNavItem = {
   to?: string;
@@ -48,59 +40,27 @@ export type LocalSystemNavItem = {
   children?: LocalSystemNavItem[];
 };
 
-export const filterLocalSystemNavItems = <T extends LocalSystemNavItem>(navItems: T[]): T[] =>
+export const filterOwnerOnlyNavItems = <T extends LocalSystemNavItem>(navItems: T[]): T[] =>
   navItems
-    .filter((item) => !item.to || !isLocalSystemPath(item.to))
+    .filter((item) => !item.to || !isOwnerOnlyPath(item.to))
     .map((item) =>
-      item.children ? ({ ...item, children: filterLocalSystemNavItems(item.children) } as T) : item,
+      item.children ? ({ ...item, children: filterOwnerOnlyNavItems(item.children) } as T) : item,
     )
     .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
 
-/**
- * Temporary rollout exception for authenticated active Organization members.
- * Remote-access pairing/tunnel management remains a control-plane boundary.
- */
-export const isLocalSystemPathForAccess = (
-  pathname: string,
-  temporaryUnrestrictedOrgAccess: boolean,
-): boolean => {
-  if (!temporaryUnrestrictedOrgAccess) return isLocalSystemPath(pathname);
-  // Remote Access pairing and tunnel management retain their control-plane gate.
-  return matchesRoute(pathname, '/admin/remote-access');
-};
-
-export const filterRuntimeAccessNavItems = <T extends LocalSystemNavItem>(
+export const visibleAdminNavItems = <T extends LocalSystemNavItem>(
   navItems: T[],
-  temporaryUnrestrictedOrgAccess: boolean,
-): T[] => {
-  if (temporaryUnrestrictedOrgAccess) {
-    return navItems
-      .filter((item) => !item.to || !matchesRoute(item.to, '/admin/remote-access'))
-      .map((item) =>
-        item.children
-          ? { ...item, children: filterRuntimeAccessNavItems(item.children, true) }
-          : item,
-      )
-      .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
-  }
-  return filterLocalSystemNavItems(navItems);
-};
+  canManageInstance: boolean,
+): T[] => (canManageInstance ? navItems : filterOwnerOnlyNavItems(navItems));
 
 export const isLocalOnlyMessagingField = (field: string): boolean =>
   LOCAL_ONLY_MESSAGING_FIELDS.has(field);
 
 /**
- * Where the "Control Panel" entry points. A remote principal outside the
- * temporary Organization rollout cannot open the Dashboard, so send it to the
- * first admin page it can actually use instead of bouncing through a redirect.
+ * Where the "Control Panel" entry points for the current instance role.
  */
-export const adminLandingPath = (
-  canUseSystem: boolean,
-  temporaryUnrestrictedOrgAccess = false,
-): string =>
-  canUseSystem || temporaryUnrestrictedOrgAccess
-    ? '/admin/dashboard'
-    : '/admin/settings/messaging';
+export const adminLandingPath = (canUseSystem: boolean): string =>
+  canUseSystem ? '/admin/dashboard' : '/admin/settings/messaging';
 
 export const isAdvancedSettingsPath = (
   pathname: string,

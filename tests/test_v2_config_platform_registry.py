@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from config.v2_config import (
     AgentsConfig,
     DiscordConfig,
@@ -319,9 +321,19 @@ def test_config_payload_includes_vibe_cloud_remote_access() -> None:
     config.remote_access.vibe_cloud.enabled = True
     config.remote_access.vibe_cloud.public_url = "https://alex.avibe.bot"
     config.remote_access.vibe_cloud.instance_id = "inst_123"
+    config.remote_access.vibe_cloud.instance_kind = "organization"
 
     payload = api.config_to_payload(config)
 
     assert payload["remote_access"]["provider"] == "vibe_cloud"
     assert payload["remote_access"]["vibe_cloud"]["enabled"] is True
     assert payload["remote_access"]["vibe_cloud"]["public_url"] == "https://alex.avibe.bot"
+    assert payload["remote_access"]["vibe_cloud"]["instance_kind"] == "organization"
+
+
+@pytest.mark.parametrize("instance_kind", [None, "", "enterprise", 7, [], {}])
+def test_config_degrades_invalid_instance_kind_to_unknown(instance_kind) -> None:
+    payload = api.config_to_payload(_base_config(), include_secrets=True)
+    payload["remote_access"]["vibe_cloud"]["instance_kind"] = instance_kind
+
+    assert V2Config.from_payload(payload).remote_access.vibe_cloud.instance_kind == ""

@@ -33,10 +33,7 @@ import type {
   VibeAgentOnboardingResult,
   VibeAgentUpdatePayload,
 } from '../../context/ApiContext';
-import {
-  canUseRuntimeSurfaces,
-  useInstanceAuthorization,
-} from '../../context/InstanceAuthorizationContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { AgentGraphTab } from './AgentGraphTab';
 import { useToast } from '../../context/ToastContext';
 import { NewAgentDialog } from './NewAgentDialog';
@@ -53,7 +50,6 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
-import { canEditAgentDefinitions } from '../../lib/remoteAuth';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
@@ -84,10 +80,7 @@ export const AgentsPage: React.FC = () => {
   const { showToast } = useToast();
   const {
     capabilities,
-    remote,
-    hasTemporaryUnrestrictedOrgAccess,
   } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
   // General navigation (sidebar / nav / capability tabs) resumes the tab the user
   // left the page on; a fresh browser opens Definitions. A contextual caller that
   // needs a specific tab passes ``?tab=`` and wins over the memory — the tab it
@@ -126,15 +119,12 @@ export const AgentsPage: React.FC = () => {
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
-  const visibleTabs = remote && !canUseRuntime ? (['definitions'] as const) : AGENTS_TAB_ORDER;
-  const activeTab = remote && !canUseRuntime ? 'definitions' : agentsTab;
-  const canEditAgents = canEditAgentDefinitions({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
+  const visibleTabs = capabilities.can_use_agents ? AGENTS_TAB_ORDER : (['definitions'] as const);
+  const activeTab = capabilities.can_use_agents ? agentsTab : 'definitions';
+  const canEditAgents = capabilities.can_manage_agents;
 
   const refreshOnboarding = useCallback(async () => {
-    if (!capabilities.can_manage_agents && !canUseRuntime) {
+    if (!capabilities.can_manage_agents) {
       setOnboardingInventory(null);
       return;
     }
@@ -144,7 +134,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setOnboardingInventory(null);
     }
-  }, [api, capabilities.can_manage_agents, canUseRuntime]);
+  }, [api, capabilities.can_manage_agents]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -192,7 +182,7 @@ export const AgentsPage: React.FC = () => {
   }, [selected]);
 
   const fetchRunningActiveCount = useCallback(async () => {
-    if (remote && !canUseRuntime) {
+    if (!capabilities.can_use_agents) {
       setRunningActiveCount(null);
       return;
     }
@@ -210,7 +200,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setRunningActiveCount(null);
     }
-  }, [api, canUseRuntime, remote]);
+  }, [api, capabilities.can_use_agents]);
 
   // Keep the badge fresh on every tab (including 运行) so it never depends on
   // the graph view's filters.
@@ -219,7 +209,7 @@ export const AgentsPage: React.FC = () => {
   }, [fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (remote && !canUseRuntime) {
+    if (!capabilities.can_use_agents) {
       setEventBridgeConnected(false);
       return;
     }
@@ -241,10 +231,10 @@ export const AgentsPage: React.FC = () => {
       onSessionStatus: () => fetchRunningActiveCount(),
       onAuthorizationChanged: () => void refresh(),
     });
-  }, [api, canUseRuntime, fetchRunningActiveCount, refresh, remote]);
+  }, [api, capabilities.can_use_agents, fetchRunningActiveCount, refresh]);
 
   useEffect(() => {
-    if (remote && !canUseRuntime) return;
+    if (!capabilities.can_use_agents) return;
     // Reconcile the badge even while SSE is connected: process death / orphan /
     // reap is a sampled snapshot with no run/session SSE event, so a slow
     // liveness poll keeps the count fresh (30s connected, 8s disconnected),
@@ -294,7 +284,7 @@ export const AgentsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [canUseRuntime, eventBridgeConnected, fetchRunningActiveCount, remote]);
+  }, [capabilities.can_use_agents, eventBridgeConnected, fetchRunningActiveCount]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
@@ -509,8 +499,8 @@ export const AgentsPage: React.FC = () => {
         })}
       </div>
 
-      {/* The run graph follows the temporary Organization runtime policy. */}
-      {(!remote || canUseRuntime) && activeTab === 'running' && <AgentGraphTab />}
+      {/* The run graph follows the Agent capability. */}
+      {capabilities.can_use_agents && activeTab === 'running' && <AgentGraphTab />}
 
       {activeTab === 'definitions' && onboardingInventory && (
         <OrganizationAgentOnboarding

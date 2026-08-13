@@ -56,7 +56,7 @@ def _seed_policies(connection) -> None:
     )
 
 
-def test_active_org_members_bypass_resource_acl_without_changing_unknown_kind_fail_closed(tmp_path) -> None:
+def test_resource_acl_is_enforced_for_editors_and_unknown_kinds_fail_closed(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
     engine = create_sqlite_engine(db)
@@ -64,25 +64,18 @@ def test_active_org_members_bypass_resource_acl_without_changing_unknown_kind_fa
         with engine.begin() as connection:
             _seed_policies(connection)
 
-            owner = _context("owner-1")
+            owner = _context("owner-1", instance_role="owner", access_source="owner")
             engineering_member = _context("member-2", group_ids=frozenset({"group-engineering"}))
             member_without_groups = _context("member-3", group_ids=None)
             member_other_group = _context("member-4", group_ids=frozenset({"group-sales"}))
             outside_org = _context("member-5", organization_id="org-2", group_ids=frozenset({"group-engineering"}))
 
-            for context in (owner, engineering_member, member_without_groups, member_other_group):
-                assert resource_access_service.can_use_resource(
-                    context, "agent", "private-agent", connection=connection
-                )
-                assert resource_access_service.can_use_resource(
-                    context, "agent", "public-agent", connection=connection
-                )
-                assert resource_access_service.can_use_resource(
-                    context, "agent", "scoped-agent", connection=connection
-                )
-            assert resource_access_service.can_use_resource(
-                outside_org, "agent", "public-agent", connection=connection
-            )
+            assert resource_access_service.can_use_resource(owner, "agent", "private-agent", connection=connection)
+            assert resource_access_service.can_use_resource(owner, "agent", "public-agent", connection=connection) is True
+            assert resource_access_service.can_use_resource(engineering_member, "agent", "scoped-agent", connection=connection)
+            assert not resource_access_service.can_use_resource(member_without_groups, "agent", "scoped-agent", connection=connection)
+            assert not resource_access_service.can_use_resource(member_other_group, "agent", "scoped-agent", connection=connection)
+            assert not resource_access_service.can_use_resource(outside_org, "agent", "public-agent", connection=connection)
             with pytest.raises(resource_access_service.ResourceAccessError, match="invalid_resource_kind"):
                 resource_access_service.can_use_resource(
                     engineering_member, "future_resource", "future-1", connection=connection
@@ -138,14 +131,14 @@ def test_active_org_members_can_use_legacy_resources_without_forging_local_ident
                 instance_role="owner",
                 access_source="owner",
             )
-            local = resource_access_service.ResourceUserContext(is_trusted_local=True)
+            local = resource_access_service.instance_owner_context()
 
-            assert resource_access_service.can_use_resource(member, "agent", "legacy-agent", connection=connection)
+            assert not resource_access_service.can_use_resource(member, "agent", "legacy-agent", connection=connection)
             assert resource_access_service.can_use_resource(owner, "agent", "legacy-agent", connection=connection)
-            assert resource_access_service.can_use_resource(
+            assert not resource_access_service.can_use_resource(
                 diagnostic_owner, "agent", "legacy-agent", connection=connection
             )
-            assert not resource_access_service.can_use_resource(
+            assert resource_access_service.can_use_resource(
                 non_member_owner, "agent", "legacy-agent", connection=connection
             )
             assert resource_access_service.can_use_resource(local, "agent", "legacy-agent", connection=connection)
@@ -176,17 +169,11 @@ def test_non_member_role_rank_does_not_bypass_organization_resource_acl(tmp_path
                 access_source="email_invitation",
             )
 
-            assert not resource_access_service.can_use_resource(
-                removed_owner,
-                "agent",
-                "private-agent",
-                connection=connection,
+            assert resource_access_service.can_use_resource(
+                removed_owner, "agent", "private-agent", connection=connection
             )
-            assert not resource_access_service.can_manage_resource_acl(
-                removed_owner,
-                "agent",
-                "private-agent",
-                connection=connection,
+            assert resource_access_service.can_manage_resource_acl(
+                removed_owner, "agent", "private-agent", connection=connection
             )
             # Direct service calls retain ordinary role plus resource-policy
             # semantics; HTTP admission rejects this non-member before runtime
@@ -214,8 +201,8 @@ def test_request_context_resolution_failure_does_not_become_trusted_local(monkey
         request_context = resource_access_service.resolve_resource_access_context()
     local_context = resource_access_service.resolve_resource_access_context()
 
-    assert request_context.is_trusted_local is False
-    assert local_context.is_trusted_local is True
+    assert request_context.is_instance_owner is False
+    assert local_context.is_instance_owner is True
 
 
 def test_http_resource_services_reuse_the_parsed_authorization_context() -> None:

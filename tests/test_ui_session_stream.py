@@ -1185,7 +1185,7 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert body["turn_state"]["connection"] == "connected"
 
 
-def test_chat_bootstrap_filters_non_backend_activities_for_remote_context(isolated_state, tmp_path):
+def test_chat_bootstrap_filters_harness_activities_for_viewer(isolated_state, tmp_path):
     from vibe.ui_server import app
 
     monkeypatch = pytest.MonkeyPatch()
@@ -1197,7 +1197,12 @@ def test_chat_bootstrap_filters_non_backend_activities_for_remote_context(isolat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+        ),
         domain="alex.avibe.bot",
     )
 
@@ -1250,7 +1255,7 @@ def test_chat_bootstrap_filters_non_backend_activities_for_remote_context(isolat
     assert body["turn_state"]["background_activities"][0]["label"] == "Waiting for approval"
 
 
-def test_turn_state_route_filters_non_backend_activities_for_remote_context(isolated_state, tmp_path):
+def test_turn_state_route_preserves_harness_activities_for_editor(isolated_state, tmp_path):
     from vibe.ui_server import app
 
     monkeypatch = pytest.MonkeyPatch()
@@ -1262,7 +1267,12 @@ def test_turn_state_route_filters_non_backend_activities_for_remote_context(isol
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        remote_session_cookie(
+            config,
+            "editor@example.com",
+            "user-editor",
+            role="editor",
+        ),
         domain="alex.avibe.bot",
     )
 
@@ -1303,8 +1313,11 @@ def test_turn_state_route_filters_non_backend_activities_for_remote_context(isol
 
     assert response.status_code == 200
     body = response.get_json()
-    assert [item["id"] for item in body["background_activities"]] == ["backend-1"]
-    assert body["background_activities"][0]["label"] == "Waiting for approval"
+    assert [item["id"] for item in body["background_activities"]] == [
+        "backend-1",
+        "watch-1",
+    ]
+    assert body["background_activities"][1]["label"] == "private waiter prompt"
 
 def test_session_draft_compare_and_set_protects_newer_writes_and_clears(
     isolated_state,

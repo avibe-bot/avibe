@@ -27,7 +27,6 @@ from config import paths
 from storage import project_access_service
 from vibe.authorization import (
     AuthorizationContext,
-    has_temporary_unrestricted_runtime_access,
     require_instance_role,
 )
 from storage.agent_session_rows import (
@@ -146,15 +145,11 @@ def _dumps_metadata(metadata: dict[str, Any]) -> str:
 
 
 def _has_runtime_owner_access(context: AuthorizationContext) -> bool:
-    """Return runtime owner-equivalent access without changing identity."""
-
-    return context.is_instance_owner or has_temporary_unrestricted_runtime_access(context)
+    return context.is_instance_owner
 
 
 def _include_local_details(context: AuthorizationContext) -> bool:
-    """Expose runtime details only to local or temporarily admitted members."""
-
-    return not context.is_remote or has_temporary_unrestricted_runtime_access(context)
+    return context.has_role("editor")
 
 
 def list_sessions(
@@ -439,26 +434,20 @@ def create_session(
     )
 
     resource_context = resolve_resource_access_context(user_context)
-    if (
-        resource_context.is_remote
-        and not has_temporary_unrestricted_runtime_access(resource_context)
-        and not agent_name
-        and not agent_id
-    ):
-        if agent_backend:
+    if not agent_name and not agent_id:
+        if agent_backend and not resource_context.has_role("editor"):
             from core.vibe_agents import VibeAgentAccessError
 
             raise VibeAgentAccessError("Agent access is not permitted.")
-        else:
-            default_agent = ensure_default_agent_access(
+        if not agent_backend and not resource_context.is_instance_owner:
+            # Validate the effective global default without pinning it into the
+            # Session. An empty selector must keep following the global default
+            # at dispatch time.
+            ensure_default_agent_access(
                 conn,
                 user_context=resource_context,
                 missing_is_error=True,
             )
-            assert default_agent is not None
-            agent_id = default_agent.id
-            agent_name = default_agent.name
-            agent_backend = default_agent.backend
 
     if agent_name or agent_id:
         selected_agent = ensure_agent_selection_access(
@@ -657,16 +646,15 @@ def update_session(
             agent_id=None if agent_id is _UNSET else agent_id,
             user_context=resource_context,
         )
-        if (
-            selected_agent is None
-            and resource_context.is_remote
-            and not has_temporary_unrestricted_runtime_access(resource_context)
-        ):
-            selected_agent = ensure_default_agent_access(
-                conn,
-                user_context=resource_context,
-                missing_is_error=True,
-            )
+        if selected_agent is None:
+            # Validate the effective default, but preserve the empty selector so
+            # future dispatch follows changes to the global default Agent.
+            if not resource_context.is_instance_owner:
+                ensure_default_agent_access(
+                    conn,
+                    user_context=resource_context,
+                    missing_is_error=True,
+                )
         if selected_agent is not None:
             requested_backend = str(agent_backend or "").strip() if agent_backend is not _UNSET else ""
             if requested_backend and requested_backend != selected_agent.backend:
@@ -688,8 +676,7 @@ def update_session(
                 derived_backend = True
 
     if (
-        resource_context.is_remote
-        and not has_temporary_unrestricted_runtime_access(resource_context)
+        not resource_context.has_role("editor")
         and agent_backend is not _UNSET
         and bool(str(agent_backend or "").strip())
         and selected_agent is None

@@ -1,20 +1,37 @@
 from __future__ import annotations
 
+import ipaddress
+import socket
+from collections import namedtuple
 from urllib.parse import urlparse
 
-from config.v2_config import (
-    AgentsConfig,
-    PlatformsConfig,
-    RemoteAccessConfig,
-    RuntimeConfig,
-    SlackConfig,
-    UiConfig,
-    V2Config,
-)
 from vibe import remote_access
 
 
-def save_config(tmp_path) -> V2Config:
+_FakeSnicaddr = namedtuple("snicaddr", ["family", "address", "netmask", "broadcast", "ptp"])
+
+
+def _remote_peer() -> dict[str, str]:
+    return {"REMOTE_ADDR": "203.0.113.10"}
+
+
+def remote_peer() -> dict[str, str]:
+    """Return the canonical remote test peer environment."""
+
+    return _remote_peer()
+
+
+def _save_config(tmp_path):
+    from config.v2_config import (
+        AgentsConfig,
+        PlatformsConfig,
+        RemoteAccessConfig,
+        RuntimeConfig,
+        SlackConfig,
+        UiConfig,
+        V2Config,
+    )
+
     config = V2Config(
         mode="self_host",
         version="v2",
@@ -38,8 +55,19 @@ def save_config(tmp_path) -> V2Config:
     return config
 
 
-def remote_peer() -> dict[str, str]:
-    return {"REMOTE_ADDR": "203.0.113.10"}
+def save_config(tmp_path):
+    """Return the canonical V2 test configuration."""
+
+    return _save_config(tmp_path)
+
+
+def _mock_interface(monkeypatch, ip: str, prefix: int, name: str = "en0") -> None:
+    address = ipaddress.ip_address(ip)
+    family = socket.AF_INET if address.version == 4 else socket.AF_INET6
+    network = ipaddress.IPv4Network if address.version == 4 else ipaddress.IPv6Network
+    netmask = str(network(f"0.0.0.0/{prefix}" if address.version == 4 else f"::/{prefix}").netmask)
+    snic = _FakeSnicaddr(family=family, address=ip, netmask=netmask, broadcast=None, ptp=None)
+    monkeypatch.setattr("vibe.ui_server.psutil.net_if_addrs", lambda: {name: [snic]})
 
 
 def remote_session_cookie(

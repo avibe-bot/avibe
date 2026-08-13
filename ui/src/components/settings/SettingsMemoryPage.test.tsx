@@ -3,7 +3,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
+import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { ToastProvider } from '../../context/ToastProvider';
+import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { SettingsMemoryPage } from './SettingsMemoryPage';
 
 const translate = vi.hoisted(() =>
@@ -31,11 +33,18 @@ vi.mock('../../context/ApiContext', () => ({
 }));
 
 describe('SettingsMemoryPage', () => {
-  it('mounts the memory settings surface', () => {
+  it('mounts the memory settings surface for an instance owner', () => {
     render(
-      <ToastProvider>
-        <SettingsMemoryPage />
-      </ToastProvider>,
+      <InstanceAuthorizationContext.Provider value={{
+        remote: false,
+        instanceKind: null,
+        instanceRole: 'owner',
+        capabilities: OWNER_INSTANCE_CAPABILITIES,
+      }}>
+        <ToastProvider>
+          <SettingsMemoryPage />
+        </ToastProvider>
+      </InstanceAuthorizationContext.Provider>,
     );
     expect(screen.getByRole('heading', { name: 'memory.title' })).toBeTruthy();
   });

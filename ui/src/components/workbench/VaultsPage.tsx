@@ -21,11 +21,9 @@ import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
 import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
-import { canManageVaultSecrets } from '../../lib/remoteAuth';
 import { useProtectedVault } from '../../lib/useProtectedVault';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
 import {
-  canUseRuntimeSurfaces,
   useInstanceAuthorization,
 } from '../../context/InstanceAuthorizationContext';
 
@@ -492,15 +490,9 @@ export const VaultsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const vault = useProtectedVault();
-  const { capabilities, remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
-  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
-  const canManage =
-    (capabilities.can_manage_instance || canUseRuntime) &&
-    canManageVaultSecrets({
-      remote,
-      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-    });
-  const canReadVaultState = capabilities.can_manage_instance || canUseRuntime;
+  const { capabilities } = useInstanceAuthorization();
+  const canManage = capabilities.can_use_vault_secrets;
+  const canReadVaultState = capabilities.can_use_vault_secrets;
   const [searchParams, setSearchParams] = useSearchParams();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
   const [grants, setGrants] = useState<VaultGrant[]>([]);
@@ -781,7 +773,7 @@ export const VaultsPage: React.FC = () => {
                 <Plus className="size-4" />
                 {t('vaults.add')}
               </Button>
-            ) : remote && !canUseRuntime ? (
+            ) : !capabilities.can_use_vault_secrets ? (
               <Badge variant="secondary" title={t('vaults.remoteReadOnlyHint')}>
                 <Lock className="size-3" />
                 {t('vaults.remoteReadOnly')}
