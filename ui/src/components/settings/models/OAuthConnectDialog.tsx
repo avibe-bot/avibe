@@ -150,6 +150,18 @@ export const OAuthConnectDialog: React.FC<{
     }
   }, []);
 
+  const closeProviderWindow = React.useCallback(() => {
+    const target = providerWindow.current;
+    providerWindow.current = null;
+    if (!target || target.closed) return;
+    try {
+      target.close();
+    } catch {
+      // Cross-origin or already-closing windows can reject access; clearing the
+      // ref above is still the important ownership transition.
+    }
+  }, []);
+
   const createClientNonce = React.useCallback(() => {
     const uuid = globalThis.crypto?.randomUUID?.();
     if (uuid) return `ofn_${uuid.replaceAll('-', '').toLowerCase()}`;
@@ -370,6 +382,7 @@ export const OAuthConnectDialog: React.FC<{
       // the guard above already makes that poll harmless, but there is no reason
       // to let it fire.
       if (isDone(step.action)) stop();
+      if (isDone(step.action)) closeProviderWindow();
       return isDone(step.action);
     };
     settleRef.current = settle;
@@ -533,6 +546,7 @@ export const OAuthConnectDialog: React.FC<{
           errorKey: isReauth ? 'settings.models.oauth.error.start' : oauthStartFailureKey(failure?.detail ?? failure?.code),
         });
         if (!isReauth) setStartFailureCode(failure?.detail ?? failure?.code ?? 'start_failed');
+        closeProviderWindow();
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     })();
@@ -567,6 +581,7 @@ export const OAuthConnectDialog: React.FC<{
       // first, and by then the attempt it belongs to is not merely settled but
       // GONE. Whatever gap report is on screen when it returns is somebody else's.
       const opened = openedFlowId;
+      closeProviderWindow();
       if (heldFlowId.current === opened) heldFlowId.current = null;
       rereadHeldFlow.current = null;
       void releaseFlow(authority, owner, {
@@ -643,6 +658,7 @@ export const OAuthConnectDialog: React.FC<{
       setNativeSlotTaken(true);
       setChannel('hub');
       setStartFailureCode(null);
+      closeProviderWindow();
       setPhase('choose');
       return;
     }
@@ -685,9 +701,14 @@ export const OAuthConnectDialog: React.FC<{
       : 'settings.models.oauth.pasteCode.hint';
   const step2Label = serverText(t, presentation?.instructions_key, step2Fallback) ?? '';
 
+  const flowActive = Boolean(
+    flow
+      && !view.settled
+      && (flow.state === 'starting' || flow.state === 'awaiting_action' || flow.state === 'verifying'),
+  );
   React.useEffect(() => {
     const target = providerWindow.current;
-    if (!target || !presentation?.auth_url || target.closed) return;
+    if (!flowActive || !target || !presentation?.auth_url || target.closed) return;
     try {
       target.location.href = presentation.auth_url;
     } catch {
@@ -695,7 +716,7 @@ export const OAuthConnectDialog: React.FC<{
       // the fallback in that case.
     }
     providerWindow.current = null;
-  }, [presentation?.auth_url]);
+  }, [flowActive, presentation?.auth_url]);
 
   const choosing = !isReauth && phase === 'choose';
   const vendorCopy = subscriptionVendorCopy(vendor);
