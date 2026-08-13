@@ -223,7 +223,7 @@ def _like_pattern(value: str, *, prefix: bool = False, contains: bool = False) -
 
 
 def _resolve_resource_access_context(user_context: Any = None):
-    """Resolve request ACL context while retaining trusted local workflows."""
+    """Resolve the request context used by Show Page ACL checks."""
 
     from storage import resource_access_service
 
@@ -463,26 +463,33 @@ class ShowPageStore:
 
     @staticmethod
     def _require_create_access(user_context: Any) -> None:
-        from vibe.authorization import has_temporary_unrestricted_org_access
-
-        if user_context.can_manage_instance or has_temporary_unrestricted_org_access(user_context):
+        if user_context.has_role("editor"):
             return
         raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
     @staticmethod
+    def _require_project_edit_access(connection: Connection, session_id: str, user_context: Any) -> None:
+        """Require Editor access to the Project that owns this session."""
+
+        if user_context.is_instance_owner:
+            return
+        from storage import project_access_service
+
+        scope_id = connection.execute(
+            select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id).limit(1)
+        ).scalar_one_or_none()
+        project_id = project_access_service.project_id_from_scope_id(scope_id)
+        if project_id is None or not project_access_service.role_allows(
+            project_access_service.get_effective_project_role(connection, user_context, project_id),
+            "editor",
+        ):
+            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+    @staticmethod
     def _register_created_resource_policy(connection, session_id: str, user_context: Any) -> None:
         from storage import resource_access_service
-        from vibe.authorization import has_temporary_unrestricted_org_access
 
-        if not (
-            user_context.is_remote
-            and user_context.is_active_organization_member
-            and user_context.subject
-            and (
-                user_context.can_manage_instance
-                or has_temporary_unrestricted_org_access(user_context)
-            )
-        ):
+        if not (user_context.subject and user_context.has_role("editor")):
             return
         resource_access_service.ensure_resource_policy(
             connection,
@@ -515,8 +522,10 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
+                self._require_project_edit_access(conn, session_id, context)
                 self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing)
+            self._require_project_edit_access(conn, session_id, context)
             self._require_create_access(context)
             conn.execute(
                 insert(show_pages).values(
@@ -551,8 +560,10 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
+                self._require_project_edit_access(conn, session_id, context)
                 self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing), False
+            self._require_project_edit_access(conn, session_id, context)
             self._require_create_access(context)
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)

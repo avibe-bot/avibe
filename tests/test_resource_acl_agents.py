@@ -7,13 +7,21 @@ import pytest
 from sqlalchemy import select
 
 from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
-from core.vibe_agents import AgentImportCandidate, VibeAgent, VibeAgentAccessError, VibeAgentStore
+from core.vibe_agents import (
+    AgentImportCandidate,
+    VibeAgent,
+    VibeAgentAccessError,
+    VibeAgentStore,
+    ensure_agent_selection_access,
+    ensure_session_agent_access,
+)
 from core.watches import ManagedWatchStore
 from storage import resource_access_service, workbench_sessions_service
 from storage.db import get_cached_sqlite_engine
 from storage.models import resource_access_groups, resource_access_policies
 from storage.settings_service import upsert_scope
-from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
+from tests.ui_server_test_helpers import _remote_peer, _save_config
+from tests.ui_server_test_helpers import csrf_headers
 from vibe import remote_access
 from vibe.ui_server import app
 
@@ -115,8 +123,8 @@ def test_active_org_agent_catalog_includes_every_builtin_and_acl_shape(monkeypat
         store.close()
 
     assert owner_names == {"private-agent", "public-agent", "scope-agent"}
-    assert member_names == {"private-agent", "public-agent", "scope-agent"}
-    assert no_group_names == {"private-agent", "public-agent", "scope-agent"}
+    assert member_names == {"public-agent", "scope-agent"}
+    assert no_group_names == {"public-agent"}
 
 
 def test_agent_removal_deletes_resource_policy_and_groups(monkeypatch, tmp_path) -> None:
@@ -156,15 +164,15 @@ def test_agent_removal_deletes_resource_policy_and_groups(monkeypatch, tmp_path)
     assert groups == []
 
 
-def test_active_org_agent_creation_is_allowed_without_trusted_local_identity(monkeypatch, tmp_path) -> None:
+def test_owner_can_create_agent_without_a_trusted_local_identity(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = save_config(tmp_path)
+    config = _save_config(tmp_path)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
         _organization_cookie(
             config,
-            subject="member-1",
+            subject="owner-1",
             groups=["group-engineering"],
             instance_role="owner",
         ),
@@ -176,7 +184,7 @@ def test_active_org_agent_creation_is_allowed_without_trusted_local_identity(mon
         json={"name": "remote-private", "backend": "codex"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
+        environ_base=_remote_peer(),
     )
 
     assert response.status_code in {200, 201}
@@ -274,9 +282,144 @@ def test_remote_partial_agent_updates_persist_canonical_selector_pair(monkeypatc
     )
 
 
+def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store, agents = _seed_agents_with_policies()
+    try:
+        store.set_default_agent_name(agents["private"].name)
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as connection:
+            scope_id = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_clear_default",
+                now="2026-07-20T00:00:00Z",
+            )
+            session = workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                agent_id=agents["public"].id,
+                user_context=_organization_context("member-1"),
+            )
+        with pytest.raises(VibeAgentAccessError):
+            with engine.begin() as connection:
+                workbench_sessions_service.update_session(
+                    connection,
+                    session["id"],
+                    agent_name="",
+                    agent_id="",
+                    agent_backend="",
+                    user_context=_organization_context("member-1"),
+                )
+        store.set_default_agent_name(agents["public"].name)
+        with engine.begin() as connection:
+            cleared = workbench_sessions_service.update_session(
+                connection,
+                session["id"],
+                agent_name="",
+                agent_id="",
+                agent_backend="",
+                user_context=_organization_context("member-1"),
+            )
+        store.set_default_agent_name(agents["scope"].name)
+        with engine.connect() as connection:
+            effective = ensure_session_agent_access(
+                connection,
+                cleared,
+                user_context=_organization_context("member-1"),
+            )
+    finally:
+        store.close()
+
+    assert (cleared["agent_id"], cleared["agent_name"], cleared["agent_backend"]) == (
+        None,
+        None,
+        "",
+    )
+    assert effective is not None
+    assert effective.id == agents["scope"].id
+
+
+def test_editor_creating_default_session_validates_without_pinning(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store, agents = _seed_agents_with_policies()
+    engine = get_cached_sqlite_engine()
+    try:
+        with engine.begin() as connection:
+            scope_id = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_create_default",
+                now="2026-08-13T00:00:00Z",
+            )
+
+        store.set_default_agent_name(agents["private"].name)
+        with pytest.raises(VibeAgentAccessError):
+            with engine.begin() as connection:
+                workbench_sessions_service.create_session(
+                    connection,
+                    scope_id=scope_id,
+                    agent_backend="",
+                    user_context=_organization_context("member-1"),
+                )
+
+        store.set_default_agent_name(agents["public"].name)
+        with engine.begin() as connection:
+            created = workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                user_context=_organization_context("member-1"),
+            )
+
+        store.set_default_agent_name(agents["scope"].name)
+        with engine.connect() as connection:
+            effective = ensure_session_agent_access(
+                connection,
+                created,
+                user_context=_organization_context("member-1"),
+            )
+    finally:
+        store.close()
+
+    assert (created["agent_id"], created["agent_name"], created["agent_backend"]) == (
+        None,
+        None,
+        "",
+    )
+    assert effective is not None
+    assert effective.id == agents["scope"].id
+
+
+def test_missing_agent_selector_fails_closed_for_editor_only(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = VibeAgentStore()
+    try:
+        with store.engine.connect() as connection:
+            with pytest.raises(VibeAgentAccessError):
+                ensure_agent_selection_access(
+                    connection,
+                    agent_name="deleted-legacy-agent",
+                    user_context=_organization_context("member-1"),
+                )
+            assert (
+                ensure_agent_selection_access(
+                    connection,
+                    agent_name="deleted-legacy-agent",
+                    user_context=_organization_context("owner-1", instance_role="owner"),
+                )
+                is None
+            )
+    finally:
+        store.close()
+
+
 def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = save_config(tmp_path)
+    config = _save_config(tmp_path)
     store = VibeAgentStore()
     try:
         agent = store.create(
@@ -308,7 +451,7 @@ def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_p
     remote_response = remote.get(
         "/api/agents/imported-agent",
         base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
+        environ_base=_remote_peer(),
     )
     local_response = app.test_client().get("/api/agents/imported-agent")
 
@@ -322,35 +465,38 @@ def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_p
     assert local_response.get_json()["agent"]["metadata"]["secret"] == "local-only"
 
 
-def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch, tmp_path) -> None:
+def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = save_config(tmp_path)
+    config = _save_config(tmp_path)
     store, agents = _seed_agents_with_policies()
     private_agent = agents["private"]
     store.set_default_agent_name(private_agent.name)
     store.close()
     context = _organization_context("member-1")
 
-    # Agent management stays reserved to admin/owner Organization roles under
-    # the temporary full-access rollout (see #1343). The reads and catalog
-    # remain open to all active members.
+    # Editors may read only Agents allowed by Agent ACL and cannot manage them.
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _organization_cookie(config, subject="member-1", groups=[], instance_role="editor"),
+        _organization_cookie(
+            config,
+            subject="member-1",
+            groups=["group-engineering"],
+            instance_role="editor",
+        ),
         domain="alex.avibe.bot",
     )
     response = client.get(
         "/api/agents/private-agent",
         base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
+        environ_base=_remote_peer(),
     )
-    assert response.status_code == 200
-    catalog = client.get("/api/agents", base_url="https://alex.avibe.bot", environ_base=remote_peer())
+    assert response.status_code == 403
+    catalog = client.get("/api/agents", base_url="https://alex.avibe.bot", environ_base=_remote_peer())
     assert catalog.status_code == 200
-    assert {"private-agent", "public-agent", "scope-agent"}.issubset(
-        {agent["name"] for agent in catalog.get_json()["agents"]}
-    )
+    assert {"public-agent", "scope-agent"} == {
+        agent["name"] for agent in catalog.get_json()["agents"]
+    }
     # A plain active Organization member is denied mutations under the
     # Resource ACL boundary.
     denied_mutation = client.patch(
@@ -358,16 +504,16 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
         json={"description": "member update"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
+        environ_base=_remote_peer(),
     )
     assert denied_mutation.status_code == 403
-    # An active Organization admin/owner can manage.
+    # Only the Instance Owner can manage Agents.
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
         _organization_cookie(
             config,
             subject="admin-1",
-            groups=[],
+            groups=["group-engineering"],
             instance_role="owner",
             organization_role="admin",
         ),
@@ -378,7 +524,7 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
         json={"description": "admin update"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
+        environ_base=_remote_peer(),
     )
     assert mutation.status_code == 200
     default_mutation = client.post(
@@ -386,7 +532,7 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
         json={"name": private_agent.name},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=remote_peer(),
+        environ_base=_remote_peer(),
     )
     assert default_mutation.status_code == 200
 
@@ -403,11 +549,11 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
             connection,
             scope_id=scope_id,
             agent_backend="codex",
-            agent_name=private_agent.name,
-            agent_id=private_agent.id,
+            agent_name=agents["scope"].name,
+            agent_id=agents["scope"].id,
             user_context=context,
         )
-        assert session["agent_id"] == private_agent.id
+        assert session["agent_id"] == agents["scope"].id
         backend_only = workbench_sessions_service.create_session(
             connection,
             scope_id=scope_id,
@@ -423,7 +569,7 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
             session_key="avibe::project::proj_acl_agents",
             prompt="run",
             schedule_type="cron",
-            agent_name=private_agent.name,
+            agent_name=agents["scope"].name,
             cron="0 * * * *",
             timezone_name="UTC",
             user_context=context,
@@ -442,25 +588,25 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
             retry_delay_seconds=1,
             post_to=None,
             deliver_key=None,
-            agent_name=private_agent.name,
+            agent_name=agents["scope"].name,
             user_context=context,
         )
-        assert task.agent_name == private_agent.name
-        assert watch.agent_name == private_agent.name
+        assert task.agent_name == agents["scope"].name
+        assert watch.agent_name == agents["scope"].name
     finally:
         pass
 
 
-def test_non_member_cannot_create_agent_but_active_org_member_can(monkeypatch, tmp_path) -> None:
+def test_only_owner_can_create_or_import_agents(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = VibeAgentStore()
     try:
-        created = store.create(
-            name="editor-agent",
-            backend="codex",
-            user_context=_organization_context("member-1"),
-        )
-        assert created.name == "editor-agent"
+        with pytest.raises(VibeAgentAccessError):
+            store.create(
+                name="editor-agent",
+                backend="codex",
+                user_context=_organization_context("member-1"),
+            )
         with pytest.raises(VibeAgentAccessError):
             store.create(
                 name="guest-agent",
@@ -525,10 +671,10 @@ def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_befo
         )
         assert task.agent_name == agents["public"].name
         assert watch.agent_name == agents["public"].name
-        assert resource_access_service.metadata_allows_temporary_unrestricted_runtime(
+        assert resource_access_service.metadata_allows_harness_runtime(
             task.metadata
         )
-        assert resource_access_service.metadata_allows_temporary_unrestricted_runtime(
+        assert resource_access_service.metadata_allows_harness_runtime(
             watch.metadata
         )
         restored = resource_access_service.resource_user_context_from_metadata(
@@ -537,7 +683,7 @@ def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_befo
         assert restored is not None
         assert restored.subject == context.subject
         assert restored.is_remote is True
-        assert restored.is_trusted_local is False
+        assert restored.is_instance_owner is False
 
         task = task_store.add_task(
             session_key="slack::channel::C123",
@@ -585,11 +731,11 @@ def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_befo
         task_result = asyncio.run(
             service._execute_task(task, execution_id="task-run", disable_one_shot=False)
         )
-        assert task_result.error == "remote_autonomous_harness_disabled"
+        assert task_result.error == "harness_access_forbidden"
         stored_task = task_store.get_task(task.id)
         assert stored_task is not None
         assert stored_task.enabled is False
-        assert stored_task.last_error == "remote_autonomous_harness_disabled"
+        assert stored_task.last_error == "harness_access_forbidden"
         assert not (tmp_path / "should-not-run").exists()
 
         request = request_store.enqueue_hook_send(
@@ -608,6 +754,357 @@ def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_befo
         completed = request_store.get_run(request.id)
         assert completed is not None
         assert completed["status"] == "failed"
-        assert completed["error"] == "remote_autonomous_harness_disabled"
+        assert completed["error"] == "harness_access_forbidden"
     finally:
         agent_store.close()
+
+
+def test_project_runtime_uses_acls_while_harness_remains_editor_wide(monkeypatch, tmp_path) -> None:
+    """Project-bound runtime and global Harness follow their distinct contracts.
+
+    Running Agents and the graph honor Project and Agent ACLs. Harness has no
+    additional resource ACL in this MVP, so an Editor can see and manage every
+    definition even when it references an inaccessible or deleted Agent.
+    """
+
+    from datetime import datetime, timezone
+
+    from core.services import agent_graph
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.importer import ensure_sqlite_state
+    from vibe import internal_client, ui_server
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    config = _save_config(tmp_path)
+    store, agents = _seed_agents_with_policies()
+    engine = get_cached_sqlite_engine()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with engine.begin() as connection:
+            allowed_scope = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_runtime_allowed",
+                now=now,
+            )
+            denied_scope = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_runtime_denied",
+                now=now,
+            )
+            allowed_session = workbench_sessions_service.create_session(
+                connection,
+                scope_id=allowed_scope,
+                agent_backend="codex",
+                agent_name=agents["public"].name,
+                agent_id=agents["public"].id,
+            )
+            denied_session = workbench_sessions_service.create_session(
+                connection,
+                scope_id=denied_scope,
+                agent_backend="codex",
+                agent_name=agents["private"].name,
+                agent_id=agents["private"].id,
+            )
+    finally:
+        store.close()
+
+    harness = SQLiteBackgroundTaskStore()
+    try:
+        harness.upsert_scheduled_task(
+            {
+                "id": "task-allowed",
+                "name": "allowed task",
+                "prompt": "run allowed",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "session_id": allowed_session["id"],
+                "agent_name": agents["public"].name,
+                "agent_id": agents["public"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        harness.upsert_scheduled_task(
+            {
+                "id": "task-denied",
+                "name": "denied task",
+                "prompt": "run denied",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "session_id": denied_session["id"],
+                "agent_name": agents["private"].name,
+                "agent_id": agents["private"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        harness.upsert_watch(
+            {
+                "id": "watch-allowed",
+                "name": "allowed watch",
+                "shell_command": "true",
+                "enabled": True,
+                "session_id": allowed_session["id"],
+                "agent_name": agents["public"].name,
+                "agent_id": agents["public"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        harness.upsert_watch(
+            {
+                "id": "watch-denied",
+                "name": "denied watch",
+                "shell_command": "true",
+                "enabled": True,
+                "session_id": denied_session["id"],
+                "agent_name": agents["private"].name,
+                "agent_id": agents["private"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        harness.upsert_scheduled_task(
+            {
+                "id": "task-unbound-allowed",
+                "name": "unbound allowed task",
+                "prompt": "run unbound",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "agent_name": agents["public"].name,
+                "agent_id": agents["public"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        for index in range(3):
+            harness.upsert_scheduled_task(
+                {
+                    "id": f"task-denied-page-{index}",
+                    "name": f"denied page {index}",
+                    "prompt": "run denied page",
+                    "schedule_type": "cron",
+                    "cron": "0 * * * *",
+                    "enabled": True,
+                    "session_id": denied_session["id"],
+                    "agent_name": agents["private"].name,
+                    "agent_id": agents["private"].id,
+                    "created_at": f"2026-08-13T12:0{index}:00Z",
+                    "updated_at": f"2026-08-13T12:0{index}:00Z",
+                }
+            )
+        harness.upsert_scheduled_task(
+            {
+                "id": "task-missing-agent",
+                "name": "missing agent task",
+                "prompt": "run missing",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "agent_name": "deleted-legacy-agent",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    finally:
+        harness.close()
+
+    async def fake_list(**_kwargs):
+        return {
+            "status_code": 200,
+            "body": {
+                "agents": [
+                    {
+                        "session_id": allowed_session["id"],
+                        "agent_name": agents["public"].name,
+                        "agent_id": agents["public"].id,
+                        "backend": "codex",
+                        "state": "idle",
+                        "title": "allowed live",
+                    },
+                    {
+                        "session_id": denied_session["id"],
+                        "agent_name": agents["private"].name,
+                        "agent_id": agents["private"].id,
+                        "backend": "codex",
+                        "state": "active",
+                        "title": "denied live",
+                    },
+                ],
+                "counts": {
+                    "total": 2,
+                    "active": 1,
+                    "idle": 1,
+                    "orphan": 0,
+                    "by_backend": {"codex": 2},
+                },
+            },
+        }
+
+    ended: list[dict] = []
+
+    async def fake_end(payload):
+        ended.append(payload)
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "list_running_agents", fake_list)
+    monkeypatch.setattr(internal_client, "end_running_agent", fake_end)
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(
+            config,
+            subject="member-1",
+            groups=["group-engineering"],
+            instance_role="editor",
+        ),
+        domain="alex.avibe.bot",
+    )
+    remote = {"base_url": "https://alex.avibe.bot", "environ_base": _remote_peer()}
+
+    graph_payload = {
+        "nodes": [
+            {
+                "session_id": allowed_session["id"],
+                "agent_name": agents["public"].name,
+                "agent_id": agents["public"].id,
+                "status": "idle",
+                "live": False,
+                "visibility": "foreground",
+            },
+            {
+                "session_id": denied_session["id"],
+                "agent_name": agents["private"].name,
+                "agent_id": agents["private"].id,
+                "status": "idle",
+                "live": False,
+                "visibility": "foreground",
+            },
+        ],
+        "edges": [
+            {
+                "kind": "trigger",
+                "from": "def:task-allowed",
+                "to": allowed_session["id"],
+            },
+            {
+                "kind": "trigger",
+                "from": "def:task-denied",
+                "to": denied_session["id"],
+            },
+        ],
+        "trigger_nodes": [
+            {"definition_id": "task-allowed"},
+            {"definition_id": "task-denied"},
+        ],
+        "counts": {},
+    }
+    graph_body = ui_server._authorized_graph_payload(
+        _organization_context("member-1"),
+        graph_payload,
+    )
+    assert {node["session_id"] for node in graph_body["nodes"]} == {allowed_session["id"]}
+    assert graph_body["edges"] == [
+        {
+            "kind": "trigger",
+            "from": "def:task-allowed",
+            "to": allowed_session["id"],
+        }
+    ]
+    assert graph_body["trigger_nodes"] == [{"definition_id": "task-allowed"}]
+    assert graph_body["counts"] == agent_graph._counts(graph_body["nodes"])
+
+    running = client.get("/api/running-agents", **remote)
+    assert running.status_code == 200
+    running_body = running.get_json()
+    running_ids = {row.get("session_id") for row in running_body.get("agents") or []}
+    assert running_ids == {allowed_session["id"]}
+    assert running_body["counts"] == {
+        "total": 1,
+        "active": 0,
+        "idle": 1,
+        "orphan": 0,
+        "by_backend": {"codex": 1},
+    }
+
+    favorites = client.get("/api/browse/favorites", **remote)
+    assert favorites.status_code == 200
+    denied_browse = client.post(
+        "/api/browse",
+        json={"path": "~"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    assert denied_browse.status_code == 403
+
+    deny_end = client.post(
+        "/api/running-agents/end",
+        json={"session_id": denied_session["id"], "agent_name": agents["private"].name},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    assert deny_end.status_code == 404
+    assert ended == []
+
+    allow_end = client.post(
+        "/api/running-agents/end",
+        json={"session_id": allowed_session["id"], "agent_name": agents["public"].name},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    assert allow_end.status_code == 200
+    assert ended
+
+    tasks = client.get("/api/harness/tasks", **remote).get_json()["tasks"]
+    watches = client.get("/api/harness/watches", **remote).get_json()["watches"]
+    assert {row["id"] for row in tasks} == {
+        "task-allowed",
+        "task-denied",
+        "task-denied-page-0",
+        "task-denied-page-1",
+        "task-denied-page-2",
+        "task-missing-agent",
+        "task-unbound-allowed",
+    }
+    assert {row["id"] for row in watches} == {"watch-allowed", "watch-denied"}
+
+    paged = client.get("/api/harness/tasks?page=1&limit=1", **remote).get_json()
+    assert len(paged["tasks"]) == 1
+    assert paged["counts"]["total"] == 7
+    assert paged["has_more"] is True
+
+    patch_response = client.patch(
+        "/api/harness/tasks/task-denied",
+        json={"enabled": False},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    delete_response = client.delete(
+        "/api/harness/watches/watch-denied",
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    assert patch_response.status_code == 200
+    assert patch_response.get_json()["task"]["enabled"] is False
+    assert delete_response.status_code == 200
+
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(
+            config,
+            subject="viewer-1",
+            groups=["group-engineering"],
+            instance_role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+    assert client.get("/api/harness/tasks", **remote).status_code == 403

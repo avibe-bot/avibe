@@ -632,45 +632,44 @@ def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tm
     assert claude_policy is not None
 
 
-@pytest.mark.parametrize("operation", ["remove", "update"])
-@pytest.mark.parametrize(
-    "listing",
-    [
-        {"ok": False, "error": {"code": "list_failed"}},
-        {"ok": True, "skills": []},
-        {"ok": True, "skills": "invalid"},
-    ],
-)
-def test_non_member_skill_mutations_fail_closed_when_preflight_cannot_resolve_target(
+@pytest.mark.parametrize("operation", ["add", "remove", "update"])
+def test_viewer_skill_mutations_fail_before_cli(
     monkeypatch,
     tmp_path,
     operation: str,
-    listing: dict,
 ) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
-    recorder = _SequenceRecorder([listing])
+    recorder = _Recorder({"ok": True})
     monkeypatch.setattr(skills, "_run_askill", recorder)
     try:
-        if operation == "remove":
+        if operation == "add":
+            mutation = skills.add_skill(
+                "askill",
+                "gh:owner/repo",
+                scope="global",
+                skill="missing-skill",
+                user_context=_non_member_context(instance_role="viewer"),
+            )
+        elif operation == "remove":
             mutation = skills.remove_skill(
                 "askill",
                 "missing-skill",
                 scope="global",
-                user_context=_non_member_context(),
+                user_context=_non_member_context(instance_role="viewer"),
             )
         else:
             mutation = skills.update(
                 "askill",
                 "missing-skill",
                 scope="global",
-                user_context=_non_member_context(),
+                user_context=_non_member_context(instance_role="viewer"),
             )
         with pytest.raises(skills.SkillAccessError):
             _run(mutation)
     finally:
         engine.dispose()
 
-    assert [call["args"] for call in recorder.calls] == [["list", "-g"]]
+    assert recorder.calls == []
 
 
 def test_remote_skill_add_registers_private_policy(monkeypatch, tmp_path) -> None:
@@ -759,33 +758,38 @@ def test_active_org_member_can_replace_installed_legacy_skill(monkeypatch, tmp_p
     assert policy["owner_user_id"] == "member-1"
 
 
-def test_non_member_skill_add_fails_closed_for_unresolved_installed_backend(monkeypatch, tmp_path) -> None:
+def test_instance_owner_skill_add_does_not_require_organization_membership(
+    monkeypatch,
+    tmp_path,
+) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
-    recorder = _SequenceRecorder(
-        [
-            {
-                "ok": True,
-                "skills": [{**_skill_row("legacy-skill"), "agents": [{"id": "unknown"}]}],
-            }
-        ]
-    )
+    install_result = {
+        "ok": True,
+        "action": "install",
+        "summary": {"skills": 1},
+        "selectedAgents": ["codex"],
+        "results": [{"skill": "legacy-skill", "success": True}],
+    }
+    recorder = _Recorder(install_result)
     monkeypatch.setattr(skills, "_run_askill", recorder)
     try:
-        with pytest.raises(skills.SkillAccessError):
-            _run(
-                skills.add_skill(
-                    "askill",
-                    "gh:owner/repo",
-                    scope="global",
-                    skill="legacy-skill",
-                    backends=["codex"],
-                    user_context=_non_member_context(),
-                )
+        result = _run(
+            skills.add_skill(
+                "askill",
+                "gh:owner/repo",
+                scope="global",
+                skill="legacy-skill",
+                backends=["codex"],
+                user_context=_non_member_context(),
             )
+        )
     finally:
         engine.dispose()
 
-    assert [call["args"] for call in recorder.calls] == [["list", "-g", "-a", "codex"]]
+    assert result == install_result
+    assert [call["args"] for call in recorder.calls] == [
+        ["add", "gh:owner/repo", "-g", "-a", "codex", "--skill", "legacy-skill", "-y"]
+    ]
 
 
 def test_active_org_editor_can_upload_skill_zip(monkeypatch, tmp_path) -> None:
@@ -823,6 +827,24 @@ def test_active_org_editor_can_upload_skill_zip(monkeypatch, tmp_path) -> None:
     assert result["skills"] == [{"name": "uploaded-skill"}]
     assert unpack_dir.parent.parent == tmp_path
     assert (unpack_dir / "uploaded-skill" / "SKILL.md").read_text() == "# Uploaded Skill\n"
+
+
+def test_viewer_cannot_upload_skill_zip(monkeypatch) -> None:
+    from vibe import api
+    from vibe.authorization import InstanceAuthorizationError
+
+    async def unexpected_preview(_callback):
+        raise AssertionError("viewer upload must fail before inspecting the archive")
+
+    monkeypatch.setattr(api, "_skills_guarded", unexpected_preview)
+
+    with pytest.raises(InstanceAuthorizationError):
+        _run(
+            api.upload_skill_zip(
+                {"content_base64": "not-an-archive"},
+                user_context=_non_member_context(instance_role="viewer"),
+            )
+        )
 
 
 def test_invalid_backend_raises(monkeypatch):

@@ -277,13 +277,13 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
     from storage.resource_access_service import (
-        REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+        HARNESS_ACCESS_FORBIDDEN_CODE,
         ResourceAccessError,
     )
 
     if (
         isinstance(exc, ResourceAccessError)
-        and exc.code == REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE
+        and exc.code == HARNESS_ACCESS_FORBIDDEN_CODE
     ):
         try:
             lang = V2Config.load().language

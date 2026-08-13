@@ -32,8 +32,7 @@ from storage.models import (
 )
 from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
 from vibe.authorization import (
-    has_temporary_unrestricted_runtime_access,
-    trusted_local_context,
+    instance_owner_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -255,9 +254,14 @@ def ensure_agent_selection_access(
         )
     row = connection.execute(statement.limit(1)).mappings().first()
     if row is None:
-        if context.is_remote or missing_is_error:
+        if missing_is_error:
             raise LookupError("Agent not found")
-        return None
+        # Owners keep the pre-catalog fallback for historical backend names.
+        # Everyone else must resolve a real Agent row; a missing selector is
+        # not an authorization grant.
+        if context.is_instance_owner:
+            return None
+        raise VibeAgentAccessError("Agent access is not permitted.")
 
     agent = VibeAgentStore._from_row(row)
     if not resource_access_service.can_use_resource(
@@ -280,18 +284,24 @@ def ensure_agent_name_access(
     if not str(agent_name or "").strip():
         return
     context = resolve_resource_access_context(user_context)
-    if not context.is_remote:
-        return
     store = VibeAgentStore()
     try:
-        store.require_accessible(str(agent_name), user_context=context)
+        try:
+            store.require_accessible(str(agent_name), user_context=context)
+        except ValueError:
+            # Legacy local/Owner task definitions may refer to a backend name
+            # that predates the Vibe Agent catalog. Keep those internal flows
+            # intact; an Editor or Viewer must still resolve a real ACL row.
+            if context.is_instance_owner:
+                return
+            raise
     finally:
         store.close()
 
 
 def _require_agent_create_access(user_context: Any) -> None:
     context = resolve_resource_access_context(user_context)
-    if context.can_manage_agents or has_temporary_unrestricted_runtime_access(context):
+    if context.can_manage_agents:
         return
     raise VibeAgentAccessError("Agent access is not permitted.")
 
@@ -300,11 +310,7 @@ def _require_agent_onboarding_access(user_context: Any):
     """Require owner-equivalent access for Organization Agent publication."""
 
     context = resolve_resource_access_context(user_context)
-    if (
-        context.is_trusted_local
-        or context.is_instance_owner
-        or has_temporary_unrestricted_runtime_access(context)
-    ):
+    if context.is_instance_owner:
         return context
     raise VibeAgentAccessError("Agent access is not permitted.")
 
@@ -523,7 +529,7 @@ def ensure_default_agent_access(
     context = resolve_resource_access_context(user_context)
     agent = resolve_effective_default_agent(connection)
     if agent is None:
-        if context.is_remote or missing_is_error:
+        if missing_is_error:
             raise LookupError("Default Agent not found")
         return None
     if not resource_access_service.can_use_resource(
@@ -554,7 +560,7 @@ def ensure_session_agent_access(
         )
     if not session.get("agent_backend"):
         return ensure_default_agent_access(connection, user_context=context)
-    if context.is_remote and not has_temporary_unrestricted_runtime_access(context):
+    if not context.is_instance_owner:
         raise VibeAgentAccessError("Agent access is not permitted.")
     return None
 
@@ -914,7 +920,7 @@ class VibeAgentStore:
         try:
             with self.engine.begin() as conn:
                 conn.execute(agents.insert().values(**self._values(agent)))
-                if source != "builtin" and context.is_remote and context.is_active_organization_member and context.subject:
+                if source != "builtin" and context.is_active_organization_member and context.subject:
                     resource_access_service.ensure_resource_policy(
                         conn,
                         resource_kind="agent",
@@ -1525,7 +1531,7 @@ class VibeAgentStore:
     def ensure_default_agent(self, *, backend: str = "claude") -> VibeAgent:
         existing = self.get(DEFAULT_AGENT_NAME)
         if existing:
-            self.set_default_agent_name(existing.name, user_context=trusted_local_context())
+            self.set_default_agent_name(existing.name, user_context=instance_owner_context())
             return existing
         agent = self.create(
             name=DEFAULT_AGENT_NAME,
@@ -1535,7 +1541,7 @@ class VibeAgentStore:
             metadata={"builtin": True},
             enabled=True,
         )
-        self.set_default_agent_name(agent.name, user_context=trusted_local_context())
+        self.set_default_agent_name(agent.name, user_context=instance_owner_context())
         return agent
 
     def ensure_builtin_default_agent(self, *, backend: str, name: str | None = None) -> VibeAgent:
@@ -1557,7 +1563,7 @@ class VibeAgentStore:
                 return self.update(
                     existing.name,
                     metadata=merged,
-                    user_context=trusted_local_context(),
+                    user_context=instance_owner_context(),
                 )
             return existing
         return self.create(
@@ -1589,7 +1595,7 @@ class VibeAgentStore:
         if updates:
             return self.update(
                 agent.name,
-                user_context=trusted_local_context(),
+                user_context=instance_owner_context(),
                 **updates,
             )
         return agent
@@ -1625,7 +1631,7 @@ class VibeAgentStore:
         if (default_agent is None or not default_agent.enabled) and enabled_ensured:
             self.set_default_agent_name(
                 enabled_ensured[0].name,
-                user_context=trusted_local_context(),
+                user_context=instance_owner_context(),
             )
         return ensured
 

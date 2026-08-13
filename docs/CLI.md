@@ -173,11 +173,11 @@ Start the guided Avibe Cloud remote-access setup.
 vibe remote
 ```
 
-In the conservative Organization release, the remote Workbench remains
-available for Organization management and authorized Project, Session, message,
-and history reads. Agent turns and runtime controls, Harness definition changes and autonomous
-execution, terminal access, and file operations remain trusted-local only; open
-Avibe on the machine to perform those actions.
+The remote Workbench uses the same Instance role and Project/Agent/Show Page ACLs
+as the local UI. Viewers can read permitted resources, Editors can use runtime
+surfaces where their Project and Agent access allows it, and Owners can manage
+the Instance. Connection, Origin/CSRF, approval, and path-safety checks still
+apply independently.
 
 **Flow:**
 - The CLI explains what remote access does before asking for anything.

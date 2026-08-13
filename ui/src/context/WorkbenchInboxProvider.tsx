@@ -328,9 +328,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
       // Clearing unread is best-effort, so a failure must not raise an error
-      // toast. Active Organization members are admitted by the temporary
-      // runtime policy; other remote principals can still read a permitted
-      // session without being allowed to mutate its unread state.
+      // toast. Reading a permitted session and mutating its unread state are
+      // independent capabilities.
       const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
       const result = await api.markSessionRead(sessionId, untilMessageId, { handleError: false });
       if (

@@ -8,15 +8,6 @@ const platform = vi.hoisted(() => ({
 vi.mock('./platform', () => platform);
 
 import {
-  canAdministerMemory,
-  canArchiveProjects,
-  canEditAgentDefinitions,
-  canEditProjectDefaultAgent,
-  canEditProjectInstructions,
-  canManageSkills,
-  canManageVaultSecrets,
-  canRegisterWebPush,
-  canUseHarness,
   checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
   remoteLoginPath,
@@ -24,46 +15,6 @@ import {
   REMOTE_AUTH_REQUIRED_EVENT,
   shouldDeferRemoteAuthRedirect,
 } from './remoteAuth';
-
-describe('agent definition editing', () => {
-  it('keeps the Agent editor available on a local instance', () => {
-    expect(canEditAgentDefinitions({ remote: false })).toBe(true);
-  });
-
-  it('allows an active Organization member to edit on a remote instance', () => {
-    expect(canEditAgentDefinitions({ remote: true, temporaryUnrestrictedOrgAccess: true })).toBe(true);
-  });
-
-  it('keeps unauthenticated or non-member remote sessions denied', () => {
-    expect(canEditAgentDefinitions({ remote: true })).toBe(false);
-  });
-});
-
-// Runtime controls use the signed temporary Organization admission signal.
-describe('runtime-policy workbench controls', () => {
-  const predicates = {
-    canManageSkills,
-    canManageVaultSecrets,
-    canRegisterWebPush,
-    canUseHarness,
-    canArchiveProjects,
-    canEditProjectInstructions,
-    canEditProjectDefaultAgent,
-    canAdministerMemory,
-  };
-
-  it.each(Object.entries(predicates))('keeps %s available on a local instance', (_name, predicate) => {
-    expect(predicate({ remote: false })).toBe(true);
-  });
-
-  it.each(Object.entries(predicates))('allows %s for an active Organization member', (_name, predicate) => {
-    expect(predicate({ remote: true, temporaryUnrestrictedOrgAccess: true })).toBe(true);
-  });
-
-  it.each(Object.entries(predicates))('withholds %s for a remote non-member', (_name, predicate) => {
-    expect(predicate({ remote: true })).toBe(false);
-  });
-});
 
 describe('remote auth navigation', () => {
   beforeEach(() => {
@@ -140,20 +91,12 @@ describe('remote auth navigation', () => {
 });
 
 describe('setup bypass for remote runtime access', () => {
-  it('bypasses setup for an authenticated owner or active Organization member', () => {
+  it('bypasses setup only for an authenticated Instance Owner', () => {
     expect(
       shouldBypassSetupForRemoteOwner({
         remote: true,
         authenticated: true,
         capabilities: { can_manage_instance: true },
-      }),
-    ).toBe(true);
-    expect(
-      shouldBypassSetupForRemoteOwner({
-        remote: true,
-        authenticated: true,
-        capabilities: { can_manage_instance: false },
-        temporaryUnrestrictedOrgAccess: true,
       }),
     ).toBe(true);
     expect(

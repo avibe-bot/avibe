@@ -25,7 +25,6 @@ import type {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { memoryErrorMessage } from '../../lib/memoryRead';
-import { canAdministerMemory } from '../../lib/remoteAuth';
 
 type MemoryTab = 'processingRecord' | 'profile' | 'search' | 'settings';
 
@@ -37,11 +36,8 @@ export const SettingsMemoryPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
-  const canAdminister = canAdministerMemory({
-    remote,
-    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
-  });
+  const { capabilities } = useInstanceAuthorization();
+  const canAdminister = capabilities.can_manage_instance;
 
   const [tab, setTab] = useState<MemoryTab>('processingRecord');
   const [clearOpen, setClearOpen] = useState(false);

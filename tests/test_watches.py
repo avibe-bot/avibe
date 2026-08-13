@@ -291,7 +291,7 @@ def test_managed_watch_store_recovery_accepts_empty_command_arguments(tmp_path: 
     assert recovered[0].command == [sys.executable, "wait.py", ""]
 
 
-def test_remote_origin_watch_is_disabled_before_waiter_spawn(tmp_path: Path) -> None:
+def test_malformed_remote_context_disables_watch_before_waiter_spawn(tmp_path: Path) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     watch = store.add_watch(
         name="Legacy remote watch",
@@ -329,7 +329,7 @@ def test_remote_origin_watch_is_disabled_before_waiter_spawn(tmp_path: Path) -> 
     assert saved is not None
     assert saved.enabled is False
     assert saved.last_started_at is None
-    assert saved.last_error == "remote_autonomous_harness_disabled"
+    assert saved.last_error == "harness_access_forbidden"
 
 
 def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:

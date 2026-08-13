@@ -2578,20 +2578,43 @@ def test_workbench_events_filter_privileged_events_for_viewers(monkeypatch, tmp_
     assert "hidden-secret" not in body
 
 
-def test_workbench_events_allow_show_events_to_temporary_org_viewers() -> None:
+def test_workbench_events_allow_show_events_when_show_page_acl_allows(monkeypatch, tmp_path) -> None:
     from vibe.authorization import AuthorizationContext
     from vibe.sse_broker import broker
     from vibe.ui_compat import g
+    from storage import resource_access_service
+    from storage.db import create_sqlite_engine
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="show_page",
+            resource_id="show-session-1",
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="public",
+        )
+    engine.dispose()
 
     async def collect_show_event() -> str:
         with app.test_request_context("/api/events"):
             g.authorization_context = AuthorizationContext(
                 instance_role="viewer",
+                subject="viewer-1",
+                email="viewer@example.com",
                 instance_access_source="organization_group",
                 organization_id="org-1",
                 organization_member_id="member-1",
                 organization_role="member",
                 is_remote=True,
+            )
+            monkeypatch.setattr(
+                ui_server,
+                "_show_page_resource_access_allowed",
+                lambda context, session_id: session_id == "show-session-1",
             )
             response = await ui_server.workbench_events()
             iterator = response.body_iterator.__aiter__()
@@ -2610,6 +2633,7 @@ def test_workbench_events_allow_show_events_to_temporary_org_viewers() -> None:
                         },
                     },
                 )
+                await asyncio.sleep(0)
                 chunk = await asyncio.wait_for(iterator.__anext__(), timeout=1)
             finally:
                 await iterator.aclose()

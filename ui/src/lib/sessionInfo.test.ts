@@ -33,9 +33,8 @@ describe('normalizeSessionInfo', () => {
       authenticated: true,
       email: 'owner@example.com',
       sub: 'owner-1',
+      instance_kind: null,
       instance_role: 'owner',
-      temporary_unrestricted_org_access: false,
-      temporary_unrestricted_org_app_access: false,
       capabilities: OWNER_INSTANCE_CAPABILITIES,
     });
   });
@@ -45,9 +44,8 @@ describe('normalizeSessionInfo', () => {
       remote: true,
       authenticated: true,
       email: 'viewer@example.com',
+      instance_kind: null,
       instance_role: 'viewer',
-      temporary_unrestricted_org_access: false,
-      temporary_unrestricted_org_app_access: false,
       capabilities: {
         can_read_instance: true,
         can_use_show_pages: true,
@@ -58,9 +56,8 @@ describe('normalizeSessionInfo', () => {
       remote: true,
       authenticated: true,
       email: 'viewer@example.com',
+      instance_kind: null,
       instance_role: 'viewer',
-      temporary_unrestricted_org_access: false,
-      temporary_unrestricted_org_app_access: false,
       capabilities: {
         ...DENIED_INSTANCE_CAPABILITIES,
         can_read_instance: true,
@@ -69,24 +66,10 @@ describe('normalizeSessionInfo', () => {
     });
   });
 
-  it('preserves the temporary Organization policy signal without projecting a capability', () => {
-    const session = normalizeSessionInfo({
-      remote: true,
-      authenticated: true,
-      email: 'member@example.com',
-      instance_role: 'viewer',
-      temporary_unrestricted_org_app_access: true,
-      capabilities: { can_read_instance: true },
-    });
-
-    expect(session.temporary_unrestricted_org_app_access).toBe(true);
-    expect(session.temporary_unrestricted_org_access).toBe(true);
-    expect(session.capabilities.can_use_system).toBe(false);
-  });
-
   it('keeps local sessions owner-compatible when an older server omits capabilities', () => {
     expect(normalizeSessionInfo({ remote: false })).toEqual({
       remote: false,
+      instance_kind: null,
       instance_role: 'owner',
       capabilities: OWNER_INSTANCE_CAPABILITIES,
     });
@@ -94,5 +77,17 @@ describe('normalizeSessionInfo', () => {
 
   it('fails closed for malformed session payloads', () => {
     expect(normalizeSessionInfo(null)).toEqual({ remote: true, authenticated: false });
+  });
+
+  it.each([
+    ['personal', 'personal'],
+    ['organization', 'organization'],
+    ['enterprise', null],
+    ['', null],
+    [null, null],
+  ])('normalizes instance kind %j to %j', (rawKind, expectedKind) => {
+    expect(normalizeSessionInfo({ remote: false, instance_kind: rawKind })).toMatchObject({
+      instance_kind: expectedKind,
+    });
   });
 });

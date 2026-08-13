@@ -447,8 +447,9 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert payload["definition"]["retry_exit_codes"] == [75]
 
 
-def test_remote_watch_add_is_rejected_without_startup_or_persistence(
+def test_remote_editor_watch_add_starts_and_persists_authorization_context(
     tmp_path: Path,
+    capsys,
 ) -> None:
     store_path = tmp_path / "watches.json"
     runtime_path = tmp_path / "watch_runtime.json"
@@ -489,23 +490,26 @@ def test_remote_watch_add_is_rejected_without_startup_or_persistence(
 
     startup_calls: list[str] = []
 
-    def unexpected_startup(*args, **kwargs):
+    def successful_startup(*args, **kwargs):
         startup_calls.append(args[2])
-        raise AssertionError("remote Watch must not start")
+        return _startup_ok(store, runtime_store, args[2])
 
     with (
         patch.dict(os.environ, caller_env, clear=False),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
-        patch("vibe.cli._wait_for_watch_startup", side_effect=unexpected_startup),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=successful_startup),
     ):
-        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
+        result = cli.cmd_watch_add(args)
 
-    assert result == 1
-    assert payload["code"] == "remote_autonomous_harness_disabled"
-    assert ManagedWatchStore(store_path).list_watches() == []
-    assert startup_calls == []
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["definition"]["metadata"]["resource_user_context"][
+        "vibe_instance_role"
+    ] == "editor"
+    assert len(ManagedWatchStore(store_path).list_watches()) == 1
+    assert len(startup_calls) == 1
 
 
 def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:

@@ -2851,6 +2851,29 @@
       "definitions": "Definitions",
       "running": "Runs"
     },
+    "onboarding": {
+      "title": "Organization access",
+      "summary": "{{total}} Agents · {{custom}} custom · {{system}} system",
+      "inventory": "Agent inventory ({{count}})",
+      "notOnboardedCount": "{{count}} not onboarded",
+      "privateCount": "{{count}} private",
+      "publishedCount": "{{count}} published",
+      "conflictCount": "{{count}} unavailable",
+      "onboardPrivate": "Onboard privately",
+      "onboarded": "Onboarded",
+      "manageAccess": "Manage access",
+      "system": "system",
+      "custom": "custom",
+      "saved": "{{count}} Agents onboarded privately.",
+      "savedPending": "Agents are private locally; publication is pending.",
+      "failed": "Could not onboard Agents: {{error}}",
+      "status": {
+        "not_onboarded": "Not onboarded",
+        "private": "Private",
+        "published": "Published",
+        "managed_elsewhere": "Unavailable"
+      }
+    },
     "running": {
       "empty": "No agents are currently running.",
       "unreachableTitle": "Runtime unreachable",
@@ -3451,7 +3474,7 @@
       },
       "workspaceHelp": {
         "private": "Only the Show Page owner can open it through this access rule.",
-        "public": "All active Organization members may open it, subject to their Avibe and Project access.",
+        "public": "Anyone with the Show Page link may open it when it is public.",
         "scope": "Only active members of the selected groups may open it, subject to their Avibe and Project access."
       },
       "selectedGroups": "Selected groups",

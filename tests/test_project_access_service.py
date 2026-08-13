@@ -6,7 +6,7 @@ from storage import project_access_service, projects_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import project_access_bindings, project_access_policies
-from vibe.authorization import AuthorizationContext, trusted_local_context
+from vibe.authorization import AuthorizationContext, instance_owner_context
 
 
 def _context(
@@ -164,7 +164,7 @@ def test_restricted_empty_bindings_is_owner_only(tmp_path) -> None:
             _intent(project["id"], 1),
         )
         assert project_access_service.can_read_project(conn, _context("editor"), project["id"]) is False
-        assert project_access_service.can_read_project(conn, trusted_local_context(), project["id"]) is True
+        assert project_access_service.can_read_project(conn, instance_owner_context(), project["id"]) is True
         assert project_access_service.can_manage_project(conn, _context("owner"), project["id"]) is True
 
 
@@ -299,7 +299,7 @@ def test_archived_project_denies_non_owner_effective_roles(tmp_path) -> None:
         ) is False
         assert project_access_service.get_effective_project_role(
             conn,
-            trusted_local_context(),
+            instance_owner_context(),
             project["id"],
         ) == "owner"
 

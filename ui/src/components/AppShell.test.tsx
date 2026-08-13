@@ -26,22 +26,28 @@ vi.hoisted(() => {
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getMemorySettings: vi.fn(),
+  getVersion: vi.fn(),
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
 const instanceAuth = vi.hoisted(() => ({
   remote: true,
-  hasTemporaryUnrestrictedOrgAccess: true,
-  hasTemporaryUnrestrictedOrgAppAccess: true,
+  instanceKind: null as 'personal' | 'organization' | null,
   capabilities: {
     can_manage_instance: true,
-    can_use_system: false,
-    can_manage_agents: false,
-    can_manage_projects: false,
-    can_use_skills: false,
-    can_use_vault_secrets: false,
-    can_use_files: false,
-    can_use_terminal: false,
+    can_chat: true,
+    can_use_agents: true,
+    can_use_skills: true,
+    can_use_vault_secrets: true,
+    can_use_files: true,
+    can_use_terminal: true,
+    can_use_terminal_files: true,
+    can_use_system: true,
+    can_manage_agents: true,
+    can_manage_projects: true,
+    can_read_instance: true,
+    can_use_show_pages: true,
+    is_instance_owner: true,
   },
 }));
 
@@ -50,8 +56,6 @@ vi.mock('../context/StatusContext', () => ({ useStatus: () => ({ status }) }));
 vi.mock('../context/WorkbenchInboxContext', () => ({ useWorkbenchInbox: () => inbox }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => instanceAuth,
-  canUseAppsSurface: (remote: boolean, temporaryAccess: boolean | undefined) =>
-    !remote || temporaryAccess === true,
 }));
 vi.mock('../context/DockProvider', () => ({
   DockProvider: ({ children, enabled = true }: { children: ReactNode; enabled?: boolean }) => (
@@ -65,6 +69,10 @@ vi.mock('../context/ShowPageDragProvider', () => ({
   ShowPageDragProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 vi.mock('./AppsLauncher', () => ({ AppsLauncher: () => <div data-testid="apps-launcher" /> }));
+vi.mock('./AccountMenu', () => ({ AccountMenu: () => null }));
+vi.mock('./LanguageSwitcher', () => ({ LanguageSwitcher: () => null }));
+vi.mock('./ThemeToggle', () => ({ ThemeToggle: () => null }));
+vi.mock('./VersionBadge', () => ({ VersionBadge: () => null }));
 vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
 }));
@@ -75,18 +83,27 @@ vi.mock('./workbench/NewSessionSheet', () => ({
 vi.mock('./workbench/WorkbenchSidebar', () => ({ WorkbenchSidebar: () => <div /> }));
 vi.mock('./workbench/search/SearchPalette', () => ({ SearchPalette: () => null }));
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string) => key,
+    i18n: {
+      language: 'en',
+      options: { resources: { en: {}, zh: {} } },
+      changeLanguage: vi.fn(),
+    },
+  }),
 }));
 
 beforeEach(() => {
+  instanceAuth.instanceKind = null;
   instanceAuth.capabilities.can_manage_instance = true;
-  instanceAuth.hasTemporaryUnrestrictedOrgAccess = true;
-  instanceAuth.hasTemporaryUnrestrictedOrgAppAccess = true;
+  instanceAuth.capabilities.can_chat = true;
+  instanceAuth.capabilities.can_use_show_pages = true;
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getMemorySettings.mockResolvedValue({
     status: 'failed',
     error: 'memory_settings_remote_only',
   });
+  api.getVersion.mockResolvedValue({ version: 'test' });
 });
 
 afterEach(() => {
@@ -107,10 +124,32 @@ describe('AppShell setup recovery', () => {
     );
 
     expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe(
-      '/admin/dashboard',
-    );
+    expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/admin/dashboard');
     expect(screen.queryByTestId('wizard')).toBeNull();
+  });
+});
+
+describe('AppShell Organization navigation', () => {
+  it.each([
+    ['personal', 0],
+    [null, 0],
+    ['organization', 2],
+  ] as const)('shows Organization only for %s instances', async (instanceKind, expectedCount) => {
+    instanceAuth.instanceKind = instanceKind;
+
+    render(
+      <MemoryRouter initialEntries={['/admin/dashboard']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="admin/dashboard" element={<div data-testid="dashboard" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('dashboard')).toBeTruthy();
+    const organizationEntries = screen.queryAllByText('nav.organization');
+    expect(organizationEntries).toHaveLength(expectedCount);
   });
 });
 
@@ -120,6 +159,7 @@ describe('AppShell remote Apps access', () => {
     ['member', false],
   ])('mounts the Apps shell for an authenticated remote %s', async (_role, canManageInstance) => {
     instanceAuth.capabilities.can_manage_instance = canManageInstance;
+    instanceAuth.capabilities.can_chat = true;
 
     render(
       <MemoryRouter initialEntries={['/']}>
@@ -139,8 +179,7 @@ describe('AppShell remote Apps access', () => {
   });
 
   it('hides Apps surfaces and redirects App routes for non-Organization remote users', async () => {
-    instanceAuth.hasTemporaryUnrestrictedOrgAccess = false;
-    instanceAuth.hasTemporaryUnrestrictedOrgAppAccess = false;
+    instanceAuth.capabilities.can_chat = false;
 
     render(
       <MemoryRouter initialEntries={['/apps/library']}>
@@ -166,6 +205,7 @@ describe('AppShell remote Apps access', () => {
     ['member', false],
   ])('keeps App Library available to a remote %s', async (_role, canManageInstance) => {
     instanceAuth.capabilities.can_manage_instance = canManageInstance;
+    instanceAuth.capabilities.can_chat = true;
 
     render(
       <MemoryRouter initialEntries={['/apps/library']}>
@@ -190,6 +230,7 @@ describe('AppShell remote Apps access', () => {
     '/apps/show/session-1',
   ])('keeps the remote App route %s available when legacy capabilities are false', async (path) => {
     instanceAuth.capabilities.can_manage_instance = false;
+    instanceAuth.capabilities.can_chat = true;
 
     render(
       <MemoryRouter initialEntries={[path]}>
@@ -204,5 +245,45 @@ describe('AppShell remote Apps access', () => {
 
     expect(await screen.findByTestId('app-surface')).toBeTruthy();
     expect(screen.queryByTestId('redirected-workbench')).toBeNull();
+  });
+
+  it('lets a Viewer open an authorized Show Page app without the Editor Apps capability', async () => {
+    instanceAuth.capabilities.can_manage_instance = false;
+    instanceAuth.capabilities.can_chat = false;
+    instanceAuth.capabilities.can_use_show_pages = true;
+
+    render(
+      <MemoryRouter initialEntries={['/apps/show/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="apps/show/:sessionId" element={<div data-testid="show-page-surface" />} />
+            <Route index element={<div data-testid="redirected-workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('show-page-surface')).toBeTruthy();
+    expect(screen.queryByTestId('redirected-workbench')).toBeNull();
+  });
+
+  it('still withholds Editor-only Apps from a Viewer', async () => {
+    instanceAuth.capabilities.can_manage_instance = false;
+    instanceAuth.capabilities.can_chat = false;
+    instanceAuth.capabilities.can_use_show_pages = true;
+
+    render(
+      <MemoryRouter initialEntries={['/apps/library']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="apps/library" element={<div data-testid="library-surface" />} />
+            <Route index element={<div data-testid="workbench-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench-surface')).toBeTruthy();
+    expect(screen.queryByTestId('library-surface')).toBeNull();
   });
 });
