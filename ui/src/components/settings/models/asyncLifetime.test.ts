@@ -767,6 +767,11 @@ describe('pollFailureSettles — who speaks for a journey whose submit is outsta
     expect(pollFailureSettles(true, false)).toBe(false);
   });
 
+  it('keeps a named engine outage inconclusive so the held flow is polled again', () => {
+    expect(pollFailureSettles(false, true, 'engine_down')).toBe(false);
+    expect(pollFailureSettles(false, true, 'modelHub.errors.engine_down')).toBe(false);
+  });
+
   it('shows what latching one costs: the success right behind it is ignored', () => {
     // Interleaving 5 as a sequence. `flowStep` is right to ignore the second
     // arrival — the fix is upstream, at which arrival is allowed to be a verdict.
@@ -787,7 +792,7 @@ describe('pollFailureSettles — who speaks for a journey whose submit is outsta
     const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
 
     expect(dialog).toMatch(
-      /pollFailureSettles\(submittingRef\.current, failure\?\.serverNamed \?\? false\)/,
+      /pollFailureSettles\(submittingRef\.current, failure\?\.serverNamed \?\? false, failure\?\.code \?\? failure\?\.detail\)/,
     );
     expect(dialog).toMatch(/submittingRef\.current = submitting;/);
     // The second argument only exists if the failure is read BEFORE the question is

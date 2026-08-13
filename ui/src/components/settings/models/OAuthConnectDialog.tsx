@@ -137,6 +137,18 @@ export const OAuthConnectDialog: React.FC<{
   onCloseRef.current = onClose;
   const initializedOpenSubject = React.useRef<string | null>(null);
   const clientNonce = React.useRef<string | null>(null);
+  const providerWindow = React.useRef<Window | null>(null);
+  const heldFlowId = React.useRef<string | null>(null);
+  const rereadHeldFlow = React.useRef<(() => Promise<boolean>) | null>(null);
+
+  const preopenProviderWindow = React.useCallback(() => {
+    if (providerWindow.current && !providerWindow.current.closed) return;
+    try {
+      providerWindow.current = window.open('about:blank', '_blank');
+    } catch {
+      providerWindow.current = null;
+    }
+  }, []);
 
   const createClientNonce = React.useCallback(() => {
     const uuid = globalThis.crypto?.randomUUID?.();
@@ -367,7 +379,28 @@ export const OAuthConnectDialog: React.FC<{
       // could have written — unlike the two exits below.
       if (cancelled) return;
       const overdue = transition({ kind: 'tick', overdue: Date.now() > deadline });
-      if (isDone(overdue.action)) return;
+      if (isDone(overdue.action)) {
+        // Keep the just-expired flow addressable. Retry performs one authoritative
+        // status read before it is allowed to mint a fresh provider flow.
+        if (overdue.action === 'timeout' && openedFlowId) {
+          const timedOutFlowId = openedFlowId;
+          rereadHeldFlow.current = async () => {
+            try {
+              const result = await modelsApi.getOAuthStatus(timedOutFlowId);
+              if (cancelled || flowAuthorityRef.current !== authority) return true;
+              transition({ kind: 'reset' });
+              if (settle(result)) return true;
+              // The held flow is still pending. Let retryStart continue with a
+              // fresh acquisition; this status read was the required last chance
+              // to observe a near-deadline terminal result.
+              return false;
+            } catch {
+              return false;
+            }
+          };
+        }
+        return;
+      }
       try {
         const result = await modelsApi.getOAuthStatus(flowId);
         if (cancelled) {
@@ -399,7 +432,7 @@ export const OAuthConnectDialog: React.FC<{
         // about the flow at all — that same read is what materializes a
         // just-succeeded one. Keep reading instead of stopping; the deadline check
         // at the top of each poll bounds either.
-        if (!pollFailureSettles(submittingRef.current, failure?.serverNamed ?? false)) {
+        if (!pollFailureSettles(submittingRef.current, failure?.serverNamed ?? false, failure?.code ?? failure?.detail)) {
           pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
           return;
         }
@@ -469,6 +502,7 @@ export const OAuthConnectDialog: React.FC<{
         // to find a null. Earlier than this the abandoned-start branch above is the
         // owner, because cleanup has already run and already answered.
         openedFlowId = started.flow_id;
+        heldFlowId.current = started.flow_id;
         if (startNeedsStatusRead(started)) {
           await poll(started.flow_id);
           return;
@@ -533,6 +567,8 @@ export const OAuthConnectDialog: React.FC<{
       // first, and by then the attempt it belongs to is not merely settled but
       // GONE. Whatever gap report is on screen when it returns is somebody else's.
       const opened = openedFlowId;
+      if (heldFlowId.current === opened) heldFlowId.current = null;
+      rereadHeldFlow.current = null;
       void releaseFlow(authority, owner, {
         cancel: opened ? () => modelsApi.cancelOAuth(opened) : null,
         reusable: isReauth,
@@ -600,7 +636,7 @@ export const OAuthConnectDialog: React.FC<{
     }
   };
 
-  const retryStart = () => {
+  const retryStart = async () => {
     if (startFailureCode === NATIVE_SUBSCRIPTION_SLOT_FAILURE && !isReauth) {
       // The start route checked the current store under its mutation lock, so
       // this error is newer and more authoritative than the page snapshot.
@@ -609,6 +645,10 @@ export const OAuthConnectDialog: React.FC<{
       setStartFailureCode(null);
       setPhase('choose');
       return;
+    }
+    const timedOutFlow = view.errorKey === 'settings.models.oauth.error.timeout' ? heldFlowId.current : null;
+    if (timedOutFlow && rereadHeldFlow.current) {
+      if (await rereadHeldFlow.current()) return;
     }
     const freshAcquisition = startFailureCode === null;
     setStartFailureCode(null);
@@ -644,6 +684,18 @@ export const OAuthConnectDialog: React.FC<{
       ? 'settings.models.oauth.callback.hint'
       : 'settings.models.oauth.pasteCode.hint';
   const step2Label = serverText(t, presentation?.instructions_key, step2Fallback) ?? '';
+
+  React.useEffect(() => {
+    const target = providerWindow.current;
+    if (!target || !presentation?.auth_url || target.closed) return;
+    try {
+      target.location.href = presentation.auth_url;
+    } catch {
+      // A popup may become inaccessible after opening; the visible link remains
+      // the fallback in that case.
+    }
+    providerWindow.current = null;
+  }, [presentation?.auth_url]);
 
   const choosing = !isReauth && phase === 'choose';
   const vendorCopy = subscriptionVendorCopy(vendor);
@@ -779,7 +831,15 @@ export const OAuthConnectDialog: React.FC<{
             <Button variant="ghost" size="sm" className="model-hub-dialog-action" onClick={onClose}>
               {t('settings.models.addSub.cancel')}
             </Button>
-            <Button variant="brand" size="sm" className="model-hub-dialog-action" onClick={() => setPhase('flow')}>
+            <Button
+              variant="brand"
+              size="sm"
+              className="model-hub-dialog-action"
+              onClick={() => {
+                preopenProviderWindow();
+                setPhase('flow');
+              }}
+            >
               {t('settings.models.addSub.signIn')}
               <ArrowRight className="size-3.5" />
             </Button>
@@ -932,7 +992,15 @@ export const OAuthConnectDialog: React.FC<{
             )}
             <div className="flex items-center gap-2">
               {failed && !isReauth && (
-                <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={retryStart}>
+                <Button
+                  variant="brand"
+                  size="sm"
+                  className="h-10 sm:h-9"
+                  onClick={() => {
+                    preopenProviderWindow();
+                    void retryStart();
+                  }}
+                >
                   {t('settings.models.addSub.retry')}
                 </Button>
               )}
