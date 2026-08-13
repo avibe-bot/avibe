@@ -35,6 +35,7 @@ from core.session_turns import (
     SOURCE_SCHEDULED,
     TURN_LIFECYCLE_ADMISSION_KEY,
     DeliveryRequest,
+    DeliveryResult,
     SessionTurnManager,
     Turn,
     _scheduled_merge_key,
@@ -3346,7 +3347,71 @@ def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch)
     assert turn["state"] == "terminal"
     assert turn["terminal_outcome"] == "not_written"
     assert turn["settled_by"] == SETTLED_BY_STOPPED
-    assert _row(engine, delivery_id)["state"] == "retired"
+    retired = _row(engine, delivery_id)
+    assert retired["state"] == "retired"
+    history = json.loads(retired["delivery_history_json"])["events"]
+    assert history[-1]["outcome"] == "canceled"
+
+
+def test_prewrite_replacement_returns_the_successor_delivery_state(
+    managers,
+    monkeypatch,
+) -> None:
+    """A prewrite P0 replacement reports the state of its own successor."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    manager.controller.emit_agent_message = AsyncMock()
+    dispatch_entered = asyncio.Event()
+
+    async def blocked_prewrite_dispatch(_controller, dispatch_context, *_args, **_kwargs):
+        set_dispatch_phase(dispatch_context, DISPATCH_PHASE_PREWRITE)
+        dispatch_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return TurnDispatchOutcome(
+                error=None,
+                settled_by=None,
+                backend_dispatch_attempted=False,
+            )
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        blocked_prewrite_dispatch,
+    )
+
+    async def run() -> DeliveryResult:
+        admitted = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="replace before native write",
+            ),
+            context=_context(),
+        )
+        assert admitted.turn_id
+        await asyncio.wait_for(dispatch_entered.wait(), timeout=1.0)
+        manager._start_persisted_turn = AsyncMock(return_value=True)
+        return await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="replacement",
+            ),
+            context=_context(),
+        )
+
+    replacement = asyncio.run(run())
+
+    assert replacement.delivery_id is not None
+    assert replacement.state == "claimed"
+    assert replacement.admission == "started"
+    with engine.connect() as conn:
+        row = delivery_store.get_delivery(conn, replacement.delivery_id)
+    assert row is not None
+    assert row["state"] == replacement.state
+    assert row["turn_id"] == replacement.turn_id
 
 
 def test_empty_p0_terminal_race_still_resumes_the_queued_head(

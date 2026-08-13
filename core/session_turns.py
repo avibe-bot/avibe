@@ -1768,6 +1768,7 @@ class SessionTurnManager:
         delivery_id: str,
         *,
         attempted_turn_id: str | None = None,
+        reason: str | None = None,
     ) -> DeliveryResult:
         """Return the exact post-transition Delivery instead of a cached claim."""
 
@@ -1787,6 +1788,7 @@ class SessionTurnManager:
             str(delivery.get("message_id") or "").strip() or None,
             state,
             turn_id or None,
+            reason,
             # Every caller reaches here right after dispatching a Turn this
             # Delivery participates in, so an owned state means this input
             # started the work rather than joining a Turn already running.
@@ -3608,6 +3610,12 @@ class SessionTurnManager:
                 request.session_id,
                 interrupt_target_id,
             )
+            if delivery_id is not None:
+                return self._committed_delivery_result(
+                    delivery_id,
+                    attempted_turn_id=successor_id,
+                    reason=canceled.get("reason"),
+                )
             return DeliveryResult(
                 delivery_id,
                 None,
@@ -3684,6 +3692,7 @@ class SessionTurnManager:
             evidence_kind="user_stop_before_native_write",
             evidence={"reason": "prewrite_canceled"},
             retire_unwritten_delivery_ids=initial_delivery_ids,
+            retire_unwritten_attempt_outcome="canceled",
         )
         if not terminal.get("changed"):
             return {"state": "reconciling", "reason": "prewrite_terminal_cas_lost"}
@@ -4382,6 +4391,7 @@ class SessionTurnManager:
         replay_unknown_start: bool = False,
         abandon_unaccepted_start: bool = False,
         retire_unwritten_delivery_ids: set[str] | None = None,
+        retire_unwritten_attempt_outcome: str = "invalid_input",
         resume_successors: bool = True,
     ) -> dict[str, Any]:
         if not self._durable_schema_available():
@@ -4569,7 +4579,11 @@ class SessionTurnManager:
                                 str(initial["id"]),
                                 expected_version=int(initial["version"]),
                                 expected_states=("claimed",),
-                                outcome=("invalid_input" if retire_unwritten else "not_written"),
+                                outcome=(
+                                    retire_unwritten_attempt_outcome
+                                    if retire_unwritten
+                                    else "not_written"
+                                ),
                                 next_state=next_state,
                                 next_priority="p3",
                                 receipt={"kind": evidence_kind, **(evidence or {})},
@@ -5020,6 +5034,7 @@ class SessionTurnManager:
                         evidence_kind="user_stop_before_native_write",
                         evidence={"reason": "prewrite_canceled"},
                         retire_unwritten_delivery_ids=initial_delivery_ids,
+                        retire_unwritten_attempt_outcome="canceled",
                     )
                 return self._settle_durable_prewrite_failure(
                     turn_id,

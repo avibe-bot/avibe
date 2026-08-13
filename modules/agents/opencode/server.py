@@ -131,6 +131,9 @@ class OpenCodeServerManager:
         self._model_hub_overlay_transition: tuple[
             Optional[str], Optional[str], object
         ] | None = None
+        self._model_hub_overlay_reservations: dict[
+            object, tuple[Optional[str], Optional[str]]
+        ] = {}
         self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
         self._runtime_activation_retire: Callable[[bool], bool] | None = None
         self._runtime_generation_token: tuple[int, float | None] | None = None
@@ -454,8 +457,8 @@ class OpenCodeServerManager:
         active = info.get("active_run_sessions") if isinstance(info, dict) else None
         return isinstance(active, list) and bool(active)
 
-    async def configure_model_hub_overlay(self, overlay: Any | None) -> None:
-        """Apply a changed runtime-only overlay after active OpenCode work drains."""
+    async def configure_model_hub_overlay(self, overlay: Any | None) -> object:
+        """Select an overlay and reserve it until the caller registers its run."""
 
         desired_path = str(overlay.path) if overlay is not None else None
         desired_hash = str(overlay.content_hash) if overlay is not None else None
@@ -502,7 +505,11 @@ class OpenCodeServerManager:
                             self._model_hub_overlay_path = desired_path
                             self._model_hub_overlay_hash = desired_hash
                             self._model_hub_overlay_content = desired_content
-                            return
+                            self._model_hub_overlay_reservations[transition_owner] = (
+                                desired_path,
+                                desired_hash,
+                            )
+                            return transition_owner
 
                         if not owns_transition:
                             self._model_hub_overlay_transition = (
@@ -512,7 +519,11 @@ class OpenCodeServerManager:
                             )
                             owns_transition = True
 
-                        if self._active_requests > 0 or self._has_active_run_sessions():
+                        if (
+                            self._active_requests > 0
+                            or self._has_active_run_sessions()
+                            or self._model_hub_overlay_reservations
+                        ):
                             should_wait = True
                         else:
                             persisted_active = current_server and bool(
@@ -534,9 +545,12 @@ class OpenCodeServerManager:
                                         "Restarting OpenCode server after Model Hub overlay change"
                                     )
                                     await self._restart_for_auth_refresh_locked()
+                                self._model_hub_overlay_reservations[
+                                    transition_owner
+                                ] = (desired_path, desired_hash)
                                 self._model_hub_overlay_transition = None
                                 owns_transition = False
-                                return
+                                return transition_owner
                 if should_wait:
                     await asyncio.sleep(0.05)
         finally:
@@ -546,10 +560,44 @@ class OpenCodeServerManager:
                     if transition is not None and transition[2] is transition_owner:
                         self._model_hub_overlay_transition = None
 
-    async def mark_run_active(self, session_id: str) -> None:
+    async def release_model_hub_overlay_reservation(
+        self,
+        reservation: object,
+    ) -> None:
         async with self._get_lock():
+            self._model_hub_overlay_reservations.pop(reservation, None)
+
+    async def mark_run_active(
+        self,
+        session_id: str,
+        *,
+        overlay_reservation: object | None = None,
+    ) -> None:
+        async with self._get_lock():
+            reserved_overlay = None
+            if overlay_reservation is not None:
+                reserved_overlay = self._model_hub_overlay_reservations.get(
+                    overlay_reservation
+                )
+                if reserved_overlay is None:
+                    raise RuntimeError("OpenCode overlay reservation is no longer active")
+            run_was_active = session_id in self._active_run_sessions
             self._active_run_sessions.add(session_id)
-            self._write_active_run_sessions_to_pid_file()
+            if overlay_reservation is not None:
+                self._model_hub_overlay_reservations.pop(
+                    overlay_reservation,
+                    None,
+                )
+            try:
+                self._write_active_run_sessions_to_pid_file()
+            except Exception:
+                if not run_was_active:
+                    self._active_run_sessions.discard(session_id)
+                if overlay_reservation is not None and reserved_overlay is not None:
+                    self._model_hub_overlay_reservations[
+                        overlay_reservation
+                    ] = reserved_overlay
+                raise
 
     async def mark_run_inactive(self, session_id: str) -> None:
         async with self._get_lock():

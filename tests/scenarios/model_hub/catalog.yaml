@@ -111,6 +111,12 @@ scenarios:
     kind: concurrency
     layer: unit
     test: tests/test_opencode_server.py::test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay
+  - id: MH-RUNTIME-004
+    name: An OpenCode overlay selection remains reserved until its initiating Turn becomes active
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_opencode_server.py::test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
