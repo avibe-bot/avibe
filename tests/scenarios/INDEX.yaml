@@ -54,17 +54,24 @@ capabilities:
     unit_or_contract_tests:
       - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: model_hub
-    name: Model Hub source resolution and supply configuration
+    name: Model Hub configured routes and turn outcomes
     status: active
     catalog: tests/scenarios/model_hub/catalog.yaml
     observations: tests/scenarios/model_hub/observations.yaml
     scenario_tests:
+      - tests/scenarios/model_hub/test_model_hub_catalog.py
+      - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
+      - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
+      - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+    harness:
+      - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
       - tests/test_model_hub_api.py
       - tests/test_model_hub_config.py
       - tests/test_model_hub_resolution.py
+      - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery

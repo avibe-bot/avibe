@@ -1,25 +1,102 @@
-version: 1
+version: 2
 capability:
   id: model_hub
-  name: Model Hub source resolution and supply configuration
+  name: Model Hub configured routes and turn outcomes
   canonical_tests:
     - tests/test_model_hub_api.py
     - tests/test_model_hub_config.py
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
-    - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_catalog.py
+    - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
 status_legend:
-  covered: closed-loop scenario coverage exists
-  partial: unit or contract coverage exists but the cross-lane loop is incomplete
-  gap: owned by a later lane or integration pass
+  covered:
+    description: closed-loop coverage exists at the declared layer
+    test_required: true
+    expected_fail: false
+    priority: false
+  partial:
+    description: executable coverage exists at the declared layer, but the layer named in missing_layer is still unproved
+    test_required: true
+    expected_fail: false
+    priority: true
+  gap:
+    description: no executable coverage at any layer yet
+    test_required: false
+    expected_fail: false
+    priority: true
 scenarios:
+  - id: MH-CATALOG-001
+    name: Every scenario, observation, and canonical test resolves to discoverable executable evidence
+    status: covered
+    kind: contract
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_catalog.py::test_mh_catalog_001_scenario_catalog_is_complete_and_executable
+  - id: MH-S1-001
+    name: Live conditions never change the exact configured hop identity
+    status: covered
+    kind: determinism
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_s1_001_runtime_resolution_keeps_the_persisted_hop_identity
+  - id: MH-CONFIG-001
+    name: Persisted route configuration changes only through an explicit route edit
+    status: covered
+    kind: persistence
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_config_001_chain_is_the_persisted_artifact_until_explicit_edit
+  - id: MH-MATCH-001
+    name: Add-time matching persists each exact hop and returns its visible position
+    status: covered
+    kind: selection
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_001_add_source_persists_and_reports_each_exact_position
+  - id: MH-MATCH-002
+    name: Matching tie-break is deterministic across inventory processing order
+    status: covered
+    kind: determinism
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_002_matching_tie_break_is_independent_of_inventory_order
+  - id: MH-SRC-DELETE-001
+    name: Source deletion removes every reference while preserving survivor order
+    status: covered
+    kind: mutation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order
+  - id: MH-SUPPLY-GAP-001
+    name: Inventory loss leaves the affected menu model visibly unconfigured
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_supply_gap_001_empty_chain_remains_visible_after_inventory_loss
+  - id: MH-PROTOCOL-001
+    name: Source protocol is response-observed before persistence with no transient residue
+    status: covered
+    kind: observation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state_is_cleaned
+  - id: MH-PROTOCOL-002
+    name: Every protocol consumer shares the authoritative transport vocabulary
+    status: covered
+    kind: contract
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transports
+  - id: MH-AC29-001
+    name: A persisted import-shaped Source survives canonical serialization and reload
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_validator
   - id: MH-RUNTIME-001
     name: Service restart reports an installed engine as idle until first demand
     status: partial
     kind: recovery
     layer: unit
+    missing_layer: scenario
     test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
@@ -70,7 +147,7 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_unpinned_hub_projection_is_null_while_explicit_turn_resolves
   - id: MH-MIG-001
-    name: Migration copies without modifying native configuration
+    name: Native import copies without modifying native configuration
     status: covered
     kind: migration
     layer: scenario
@@ -81,6 +158,42 @@ scenarios:
     kind: migration
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_002_oauth_defaults_to_native_sources
+  - id: MH-TAKEOVER-001
+    name: Recoverable failures walk the configured route and exhaust only at its end
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop
+  - id: MH-ENGINE-001
+    name: Local engine loss is terminal without Source mutation or replay
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_engine_loss_is_terminal_without_source_mutation_or_replay
+  - id: MH-ENGINE-MIDTURN-001
+    name: Local engine loss after output starts never walks a later hop
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_mid_turn_engine_loss_never_replays_after_output_starts
+  - id: MH-CREDENTIAL-001
+    name: Credential rejection retries once only for a refreshable credential
+    status: covered
+    kind: authentication
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_static_credential_failure_does_not_retry_or_claim_takeover
+  - id: MH-TURN-RESULT-001
+    name: All terminal outcomes are closed schema-valid provenance products
+    status: covered
+    kind: turn_lifecycle
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_outcomes_and_cancel_are_closed_provenance_products
+  - id: MH-TURN-COPY-001
+    name: Every turn decision resolves to its authoritative backend copy key or silence
+    status: covered
+    kind: turn_lifecycle
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_copy_keys_cover_the_authoritative_outcome_matrix
   - id: MH-OAUTH-B-001
     name: Device-code OAuth happy path
     status: gap
@@ -98,22 +211,18 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_001_claude_paste_code_happy_path
   - id: MH-OAUTH-NATIVE-002
-    name: Codex native CLI device-code login self-completes and persists its account Source
+    name: Codex native CLI device-code login persists its account Source
     status: covered
     kind: oauth
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_002_codex_device_code_self_completes
   - id: MH-OAUTH-NATIVE-003
-    name: Native CLI OAuth cancel, timeout, and signed-out state terminate safely
+    name: Native CLI OAuth cancel and timeout terminate without residue
     status: covered
     kind: timeout_cancel
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly
 next_priority:
-  - MH-SEL-001
-  - MH-MIG-001
+  - MH-RUNTIME-001
   - MH-OAUTH-B-001
   - MH-OAUTH-C-001
-  - MH-OAUTH-NATIVE-001
-  - MH-OAUTH-NATIVE-002
-  - MH-OAUTH-NATIVE-003
