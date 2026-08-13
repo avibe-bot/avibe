@@ -54,6 +54,7 @@ const MEMORY_SOURCE_ERROR_REASONS = new Set([
   'memory_provider_response_invalid',
   'memory_processing_failed',
   'memory_clear_failed',
+  'memory_clear_legacy_abort_unsupported',
   'memory_restart_failed',
 ]);
 

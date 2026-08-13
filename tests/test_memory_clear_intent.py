@@ -157,6 +157,28 @@ def test_legacy_operation_token_is_accepted_by_new_marker_reader(tmp_path: Path)
     assert store.load() == intent
 
 
+def test_legacy_journal_without_started_at_is_unreadable(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, 1)",
+        ("legacy-one", "user-1", 2, 3, "deleting"),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(journal, 0o600)
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=2)
+
+    assert journal.exists()
+
+
 def test_legacy_abort_resolution_migrates_to_a_fenced_failed_intent(tmp_path: Path):
     journal = tmp_path / "state/memory/clear-journal.sqlite"
     journal.parent.mkdir(parents=True)

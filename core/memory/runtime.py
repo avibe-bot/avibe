@@ -954,12 +954,12 @@ class MemoryRuntime:
         if self._maintenance is not None and self._maintenance.is_open():
             lease = MemoryOperationLease(self._effective_home)
             try:
-                await run_blocking(lease.acquire)
-            except MemoryOperationBusy:
-                self.module.pause_claims()
-                self._runtime_error = "memory_operation_in_progress"
-                return {"ok": False, "error": self._runtime_error}
-            try:
+                try:
+                    await run_blocking(lease.acquire)
+                except MemoryOperationBusy:
+                    self.module.pause_claims()
+                    self._runtime_error = "memory_operation_in_progress"
+                    return {"ok": False, "error": self._runtime_error}
                 recovered = await self._maintenance.recover_boot(lease_held=True)
             finally:
                 await run_blocking(lease.release)

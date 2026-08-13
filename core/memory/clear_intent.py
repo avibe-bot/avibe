@@ -220,6 +220,9 @@ class ClearIntentStore:
             for candidate in rows:
                 state = candidate["state"]
                 open_slot = candidate["open_slot"]
+                started_at = candidate["started_at"]
+                if not isinstance(started_at, str) or not started_at.strip():
+                    raise ValueError("legacy clear timestamp is invalid")
                 if state in {"completed", "aborted"}:
                     if open_slot is not None:
                         raise ValueError("terminal legacy clear row has an open slot")
@@ -254,6 +257,9 @@ class ClearIntentStore:
             pre_epoch = pre_epoch_value
             columns = set(row.keys())
             resolution = row["resolution"] if "resolution" in columns else None
+            started_at = row["started_at"]
+            if not isinstance(started_at, str) or not started_at.strip():
+                raise ValueError("legacy clear timestamp is invalid")
             target_value = row["target_epoch"] if "target_epoch" in columns else None
             if target_value is None:
                 # Older released journals did not persist the target. Defer
@@ -313,7 +319,7 @@ class ClearIntentStore:
             target_epoch=target_epoch,
             state=migrated_state,
             error_code=migrated_error,
-            created_at=str(row["started_at"] or now),
+            created_at=started_at,
             updated_at=now,
         )
         self.write(intent)

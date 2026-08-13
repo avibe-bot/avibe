@@ -5821,6 +5821,51 @@ async def test_runtime_rebuild_reads_key_correction_after_admission_gap(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_cancelled_boot_reconcile_releases_lease_after_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    """A cancellation during boot lease admission must not strand the lease."""
+
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        effective_home=tmp_path,
+    )
+    maintenance = _maintenance(runtime)
+    store = runtime._store
+    assert store is not None
+    ClearIntentStore(tmp_path).write(
+        ClearIntent.new(operator_ref="boot", pre_epoch=store.ensure_meta().epoch).failed(
+            "memory_clear_failed"
+        )
+    )
+    entered = threading.Event()
+    release_acquire = threading.Event()
+
+    class _GatedLease(MemoryOperationLease):
+        def acquire(self) -> None:
+            entered.set()
+            assert release_acquire.wait(2)
+            super().acquire()
+
+    monkeypatch.setattr(memory_runtime, "MemoryOperationLease", _GatedLease)
+    reconciling = asyncio.create_task(runtime.reconcile(runtime._config))
+    assert await asyncio.to_thread(entered.wait, 2)
+    reconciling.cancel()
+    await asyncio.sleep(0)
+    release_acquire.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await reconciling
+
+    lease = MemoryOperationLease(tmp_path)
+    lease.acquire()
+    lease.release()
+    assert maintenance.is_open() is True
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_runtime_rebuild_maps_root_busy_without_settling(
     monkeypatch,
     tmp_path,
