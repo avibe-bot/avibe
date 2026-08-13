@@ -266,7 +266,7 @@ class MemoryMaintenance:
             self._runtime.enter_maintenance()
             try:
                 await self._run_maintenance_io(self._store.begin_clear_fence)
-                await self._runtime.quiesce(True)
+                await self._runtime.quiesce(False)
                 result = await self._run_clear_intent(intent, operator_ref=intent.operator_ref, boot=True)
                 return result.status == "completed"
             except asyncio.CancelledError:
@@ -336,12 +336,20 @@ class MemoryMaintenance:
                 await self._run_maintenance_io(self._intent.remove)
             except ClearIntentError:
                 # All surfaces are already terminal. Keep the deleting marker
-                # so the next reconcile retries only its removal.
+                # so the next reconcile retries only its removal. The marker
+                # may already be unlinked when its parent fsync fails, so
+                # rewrite a failed projection instead of treating that as done.
                 logger.warning("Memory Clear completed but intent removal failed", exc_info=True)
+                try:
+                    await self._run_maintenance_io(
+                        lambda: self._intent.write(intent.failed("memory_clear_failed"))
+                    )
+                except ClearIntentError:
+                    logger.exception("Memory Clear recovery marker could not be retained")
                 return ClearResult(
                     status="failed",
                     error="memory_clear_failed",
-                    clear_in_progress=_projection(intent),
+                    clear_in_progress=self._read_projection() or _projection(intent.failed("memory_clear_failed")),
                 )
         except asyncio.CancelledError:
             await self._record_failure(intent, "memory_clear_failed")

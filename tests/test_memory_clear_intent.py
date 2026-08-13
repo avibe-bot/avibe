@@ -46,6 +46,15 @@ def test_marker_schema_rejects_non_uuid4_and_extra_fields(tmp_path: Path):
         ClearIntentStore(tmp_path).load()
 
 
+def test_marker_reader_rejects_oversized_regular_file(tmp_path: Path):
+    marker = tmp_path / MARKER_RELATIVE_PATH
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(b"{" + b"x" * (16 * 1024) + b"}")
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).load()
+
+
 def test_legacy_open_journal_migrates_then_removes_journal(tmp_path: Path):
     journal = tmp_path / "state/memory/clear-journal.sqlite"
     journal.parent.mkdir(parents=True)

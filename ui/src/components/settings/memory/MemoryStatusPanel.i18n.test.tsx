@@ -5,7 +5,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { MemoryFailureLogEntry } from '../../../context/ApiContext';
+import type { MemoryClearInProgress, MemoryFailureLogEntry } from '../../../context/ApiContext';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { MemoryStatusPanel } from './MemoryStatusPanel';
@@ -79,6 +79,38 @@ const renderUnobservedSource = (language: 'en' | 'zh') => {
   );
 };
 
+const renderClearState = (language: 'en' | 'zh', errorCode: string) => {
+  const i18n = createInstance();
+  void i18n.use(initReactI18next).init({
+    lng: language,
+    fallbackLng: 'en',
+    resources: { en: { translation: en }, zh: { translation: zh } },
+    interpolation: { escapeValue: false },
+  });
+  const clearInProgress: MemoryClearInProgress = {
+    state: 'failed',
+    operation_id: 'clear-i18n',
+    occurred_at: '2026-08-09T12:00:00Z',
+    error_code: errorCode,
+  };
+  render(
+    <I18nextProvider i18n={i18n}>
+      <MemoryStatusPanel
+        status={null}
+        failures={[]}
+        clearInProgress={clearInProgress}
+        logSections={null}
+        statusLoading={false}
+        failuresLoading={false}
+        statusError={null}
+        failuresError={null}
+        refreshPending={false}
+        onRefresh={vi.fn()}
+      />
+    </I18nextProvider>,
+  );
+};
+
 afterEach(cleanup);
 
 describe('MemoryStatusPanel anomaly error localization', () => {
@@ -90,6 +122,15 @@ describe('MemoryStatusPanel anomaly error localization', () => {
     ['zh', 'future_provider_failure', 'future_provider_failure'],
   ] as const)('renders %s error %s as %s', (language, errorCode, expected) => {
     renderAnomaly(language, errorCode);
+
+    expect(screen.getByText(expected)).toBeTruthy();
+  });
+
+  it.each([
+    ['en', en.memory.processingRecord.clearInProgress.explicitRetryDescription],
+    ['zh', zh.memory.processingRecord.clearInProgress.explicitRetryDescription],
+  ] as const)('describes legacy abort recovery as an explicit retry in %s', (language, expected) => {
+    renderClearState(language, 'memory_clear_legacy_abort_unsupported');
 
     expect(screen.getByText(expected)).toBeTruthy();
   });

@@ -24,6 +24,8 @@ class _Port:
         self.home = home
         self.assert_clear_fenced = None
         self.fail_strict_quiesce = False
+        self.fail_quiesce = False
+        self.quiesce_modes: list[bool] = []
 
     def exclusive_fence(self):
         from contextlib import asynccontextmanager
@@ -53,7 +55,8 @@ class _Port:
         return None
 
     async def quiesce(self, _strict: bool):
-        if _strict and self.fail_strict_quiesce:
+        self.quiesce_modes.append(_strict)
+        if self.fail_quiesce or (_strict and self.fail_strict_quiesce):
             raise RuntimeError("quiesce failed")
         return None
 
@@ -153,13 +156,35 @@ async def test_marker_removal_failure_retries_after_surfaces_are_terminal(
     assert result.status == "failed"
     intent = ClearIntentStore(tmp_path).load()
     assert intent is not None
-    assert intent.state == "deleting"
+    assert intent.state == "failed"
     assert maintenance._store is not None
     assert maintenance._store.clear_in_progress() is False
 
     assert await maintenance.reconcile_pending() is True
     assert remove_calls == 2
     assert ClearIntentStore(tmp_path).load() is None
+
+
+@pytest.mark.asyncio
+async def test_marker_unlink_fsync_failure_retains_failed_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    maintenance, _port = _maintenance(tmp_path)
+    original_remove = maintenance._intent.remove
+
+    def unlink_then_fail() -> None:
+        original_remove()
+        raise ClearIntentError("marker fsync failed")
+
+    monkeypatch.setattr(maintenance._intent, "remove", unlink_then_fail)
+
+    result = await maintenance.clear(operator_ref="user-1")
+
+    assert result.status == "failed"
+    retained = ClearIntentStore(tmp_path).load()
+    assert retained is not None
+    assert retained.state == "failed"
 
 
 @pytest.mark.asyncio
@@ -216,13 +241,22 @@ async def test_boot_quiesce_failure_persists_failed_marker(tmp_path: Path):
     meta = maintenance._store.ensure_meta()  # type: ignore[union-attr]
     intent = ClearIntent.new(operator_ref="boot", pre_epoch=meta.epoch)
     ClearIntentStore(tmp_path).write(intent)
-    port.fail_strict_quiesce = True
+    port.fail_quiesce = True
 
     assert await maintenance.reconcile_pending() is False
     failed = ClearIntentStore(tmp_path).load()
     assert failed is not None
     assert failed.state == "failed"
     assert failed.error_code == "memory_clear_failed"
+
+
+@pytest.mark.asyncio
+async def test_boot_retry_requiesces_claims(tmp_path: Path):
+    maintenance, port = _maintenance(tmp_path)
+    meta = maintenance._store.ensure_meta()  # type: ignore[union-attr]
+    ClearIntentStore(tmp_path).write(ClearIntent.new(operator_ref="boot", pre_epoch=meta.epoch))
+    assert await maintenance.reconcile_pending() is True
+    assert port.quiesce_modes == [False]
 
 
 def test_corrupt_marker_is_fail_closed(tmp_path: Path):

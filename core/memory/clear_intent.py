@@ -38,6 +38,7 @@ BACKUP_JOURNAL_RELATIVE_PATH = "state/memory/backup-restore-journal.sqlite"
 BACKUP_ROOT_RELATIVE_PATH = "state/memory/backups"
 MARKER_SCHEMA_VERSION = 1
 LEGACY_ABORT_ERROR_CODE = "memory_clear_legacy_abort_unsupported"
+MAX_CLEAR_INTENT_BYTES = 16 * 1024
 _LEGACY_OPERATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
@@ -116,13 +117,17 @@ class ClearIntentStore:
         except (ConfinedFilesystemError, OSError) as error:
             raise ClearIntentUnreadable("Memory clear intent marker is unreadable") from error
         try:
-            chunks: list[bytes] = []
+            if os.fstat(descriptor).st_size > MAX_CLEAR_INTENT_BYTES:
+                raise ValueError("Memory clear intent marker is too large")
+            payload = bytearray()
             while True:
-                chunk = os.read(descriptor, 65536)
+                chunk = os.read(descriptor, MAX_CLEAR_INTENT_BYTES + 1 - len(payload))
                 if not chunk:
                     break
-                chunks.append(chunk)
-            return _decode(b"".join(chunks))
+                payload.extend(chunk)
+                if len(payload) > MAX_CLEAR_INTENT_BYTES:
+                    raise ValueError("Memory clear intent marker is too large")
+            return _decode(bytes(payload))
         except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as error:
             raise ClearIntentUnreadable("Memory clear intent marker is invalid") from error
         finally:
@@ -158,24 +163,30 @@ class ClearIntentStore:
 
     def remove(self) -> None:
         try:
+            os.lstat(self.path)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise ClearIntentError("Memory clear intent marker could not be read") from error
+        try:
             remove_confined_path(self.home, self.path)
         except (ConfinedFilesystemError, OSError) as error:
-            if os.path.lexists(self.path):
-                raise ClearIntentError("Memory clear intent marker could not be removed") from error
+            raise ClearIntentError("Memory clear intent marker could not be removed") from error
 
     def consume_legacy_clear_state(self) -> None:
         """Remove the released clear journal after an explicit replacement Clear."""
 
         legacy_path = self.home / LEGACY_JOURNAL_RELATIVE_PATH
         try:
-            remove_confined_path(self.home, legacy_path)
+            os.lstat(legacy_path)
         except FileNotFoundError:
             return
+        except OSError as error:
+            raise ClearIntentError("legacy Memory clear journal could not be read") from error
+        try:
+            remove_confined_path(self.home, legacy_path)
         except (ConfinedFilesystemError, OSError) as error:
-            if os.path.lexists(legacy_path):
-                raise ClearIntentError(
-                    "legacy Memory clear journal could not be removed"
-                ) from error
+            raise ClearIntentError("legacy Memory clear journal could not be removed") from error
 
     def migrate_legacy(self, *, current_epoch: int | None) -> ClearIntent | None:
         """Convert one released clear journal before deleting its old storage."""

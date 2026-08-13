@@ -153,7 +153,13 @@ const ClearInProgressCard: React.FC<{
         <Clock3 className="mt-0.5 size-4 shrink-0 text-gold" />
         <div className="min-w-0">
           <div className="text-[12.5px] font-semibold text-foreground">{t('memory.processingRecord.clearInProgress.title')}</div>
-          <div className="mt-0.5 text-[11px] text-muted">{t('memory.processingRecord.clearInProgress.description')}</div>
+          <div className="mt-0.5 text-[11px] text-muted">
+            {t(
+              clearInProgress.error_code === 'memory_clear_legacy_abort_unsupported'
+                ? 'memory.processingRecord.clearInProgress.explicitRetryDescription'
+                : 'memory.processingRecord.clearInProgress.description',
+            )}
+          </div>
         </div>
       </div>
       <div className="grid min-w-0 gap-1.5 text-[11px] sm:grid-cols-2">

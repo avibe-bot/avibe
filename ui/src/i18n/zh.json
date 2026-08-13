@@ -4187,6 +4187,7 @@
       "clearInProgress": {
         "title": "正在清除记忆数据",
         "description": "删除完成前，Memory 会保持隔离；操作会自动继续。",
+        "explicitRetryDescription": "旧版记忆恢复状态无法自动继续。请执行清除记忆数据以替换它。",
         "deleting": "正在删除记忆数据",
         "failed": "需要再次尝试清除",
         "loadFailed": "无法加载清除维护状态。"
