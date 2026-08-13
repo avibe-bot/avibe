@@ -1312,10 +1312,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started["flow"]["channel"], "native_cli")
         self.assertEqual(harness.agent_auth.start_calls, [("codex", False)])
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="AC-52: awaiting I7 service.py wiring for the Hub re-auth gate",
-    )
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.
 
@@ -1404,10 +1400,6 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent["sources"]["order"], [source.id])
         self.assertEqual(agent["supply_status"], "ok")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="AC-48: awaiting I7 service.py wiring for OAuth nonce coalescing",
-    )
     async def test_lost_model_hub_oauth_start_response_reuses_nonce_flow(self):
         """Scenario: AUTH-SETUP-210.
 

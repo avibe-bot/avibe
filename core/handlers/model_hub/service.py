@@ -478,8 +478,10 @@ def _oauth_payload(
     *,
     channel: str,
     intent: Literal["create", "reauth"] = "create",
+    client_nonce: str | None = None,
+    expires_at_iso: str | None = None,
 ) -> dict:
-    return {
+    payload = {
         "flow_id": flow.flow_id,
         "intent": intent,
         "source_id": flow.source_id,
@@ -493,8 +495,15 @@ def _oauth_payload(
             "instructions_key": flow.instructions_key,
         },
         "error_key": flow.error_key,
-        "expires_at": flow.expires_at_iso,
+        "expires_at": (
+            expires_at_iso
+            if client_nonce is not None
+            else flow.expires_at_iso
+        ),
     }
+    if client_nonce is not None:
+        payload["client_nonce"] = client_nonce
+    return payload
 
 
 def _runtime_payload(status: EngineStatus) -> dict:
@@ -544,7 +553,10 @@ class ModelHubService:
             paths.get_state_dir() / "model_hub_turn_provenance.json"
         )
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
-        self.oauth_flows = oauth_flows or OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json")
+        self.oauth_flows = oauth_flows or OAuthFlowRegistry(
+            paths.get_state_dir() / "model_hub_oauth_flows.json",
+            now=now,
+        )
         self.revocations = revocations or CredentialRevocationJournal(
             paths.get_state_dir() / "model_hub_pending_revocations.json"
         )
@@ -557,6 +569,9 @@ class ModelHubService:
             lambda _backend, _source: True
         )
         self._mutation_lock = asyncio.Lock()
+        self._oauth_start_tasks: dict[
+            tuple[str, str, OAuthChannel], asyncio.Task[dict]
+        ] = {}
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
@@ -850,6 +865,73 @@ class ModelHubService:
             self._oauth_adapter(channel).oauth_status(flow_id),
             flow_id=flow_id,
         )
+
+    @staticmethod
+    def _cancelled_oauth_flow(
+        flow_id: str,
+        binding: OAuthFlowBinding,
+    ) -> OAuthFlowState:
+        if binding.source_id is None or binding.vendor is None:
+            raise ModelHubError("flow_not_found", status=404)
+        return OAuthFlowState(
+            flow_id=flow_id,
+            source_id=binding.source_id,
+            vendor=binding.vendor,
+            state="cancelled",
+            auth_url=None,
+            device_code=None,
+            expects="none",
+            instructions_key=None,
+            error_key=None,
+            expires_at_iso=binding.expires_at_iso,
+            credential_ref=None,
+            channel=binding.channel,
+        )
+
+    @staticmethod
+    def _flow_payload(
+        flow: OAuthFlowState,
+        binding: OAuthFlowBinding,
+    ) -> dict:
+        return _oauth_payload(
+            flow,
+            channel=binding.channel,
+            intent=binding.intent,
+            client_nonce=binding.client_nonce,
+            expires_at_iso=binding.expires_at_iso,
+        )
+
+    async def _replay_nonce_flow(self, flow_id: str) -> dict:
+        binding = self._oauth_binding(flow_id)
+        if binding.terminal_state == "cancelled":
+            flow = self._cancelled_oauth_flow(flow_id, binding)
+        else:
+            flow = await self._oauth_status(flow_id, binding.channel)
+            self._raise_if_flow_expired(flow_id, flow)
+            flow, repair_result = await self._materialize_completed_oauth(
+                flow_id,
+                binding,
+                flow,
+            )
+            if repair_result is not None:
+                return {
+                    "flow": self._flow_payload(flow, binding),
+                    **repair_result,
+                }
+        return self._oauth_result(flow_id, flow)
+
+    async def _discard_started_oauth_flow(
+        self,
+        flow: OAuthFlowState,
+        channel: OAuthChannel,
+    ) -> None:
+        if channel == "hub":
+            await self._discard_unbound_hub_flow(flow)
+            return
+        try:
+            await self.native_oauth_adapter.cancel_oauth(flow.flow_id)
+        except Exception:
+            pass
 
     async def _discover(self, source: ModelHubSourceConfig) -> list[str]:
         if not source.credential_ref:
@@ -3518,10 +3600,7 @@ class ModelHubService:
         if (
             not isinstance(payload, dict)
             or set(payload) - {"acknowledge_irreversible"}
-            or (
-                "acknowledge_irreversible" in payload
-                and payload.get("acknowledge_irreversible") is not True
-            )
+            or payload.get("acknowledge_irreversible") is not True
         ):
             raise ModelHubError("reauth_confirmation_required", status=409)
 
@@ -3530,11 +3609,6 @@ class ModelHubService:
             source = self._source(config, source_id)
             if source.kind != "subscription":
                 raise ModelHubError("discovery_failed")
-            if (
-                source.supply_channel == "native_cli"
-                and payload.get("acknowledge_irreversible") is not True
-            ):
-                raise ModelHubError("reauth_confirmation_required", status=409)
 
             replace_pending_flow_id: str | None = None
             pending = self.oauth_flows.pending_reauth(source.id)
@@ -3659,7 +3733,19 @@ class ModelHubService:
     async def oauth_start(self, payload: dict) -> dict:
         vendor = payload.get("vendor") if isinstance(payload, dict) else None
         channel = payload.get("channel") if isinstance(payload, dict) else None
-        if not isinstance(vendor, str) or channel not in {"native_cli", "hub"}:
+        client_nonce = (
+            payload.get("client_nonce") if isinstance(payload, dict) else None
+        )
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(vendor, str)
+            or channel not in {"native_cli", "hub"}
+            or set(payload) - {"vendor", "channel", "client_nonce"}
+            or (
+                "client_nonce" in payload
+                and not isinstance(client_nonce, str)
+            )
+        ):
             raise ModelHubError("flow_not_found", status=400)
         try:
             vendor = normalize_model_hub_vendor_id(vendor)
@@ -3685,35 +3771,102 @@ class ModelHubService:
                         status=409,
                         data={"existing_source_id": existing.id},
                     )
-        pending_source_id = _source_id()
-        flow = await self._oauth_call(
-            self._oauth_adapter(oauth_channel).start_oauth(pending_source_id, vendor)
-        )
-        if flow.source_id != pending_source_id or flow.vendor != vendor:
-            raise ModelHubError("flow_not_found", status=502)
-        self.oauth_flows.remember(
-            flow.flow_id,
-            oauth_channel,
-            pending_source_id,
-            vendor,
-        )
-        return {"flow": _oauth_payload(flow, channel=channel)}
+
+        nonce_key: tuple[str, str, OAuthChannel] | None = None
+        if client_nonce is not None:
+            try:
+                nonce_claim = self.oauth_flows.claim_nonce(
+                    client_nonce,
+                    vendor,
+                    oauth_channel,
+                )
+            except ValueError:
+                raise ModelHubError("flow_not_found", status=400) from None
+            nonce_key = (client_nonce, vendor, oauth_channel)
+            if not nonce_claim.owner:
+                if nonce_claim.status == "committed":
+                    if nonce_claim.flow_id is None:
+                        raise ModelHubError("flow_not_found", status=404)
+                    return await self._replay_nonce_flow(nonce_claim.flow_id)
+                task = self._oauth_start_tasks.get(nonce_key)
+                if task is None:
+                    raise ModelHubError("engine_down", status=503)
+                return await asyncio.shield(task)
+
+        async def start_and_remember() -> dict:
+            pending_source_id = _source_id()
+            flow: OAuthFlowState | None = None
+            flow_cleanup_done = False
+            try:
+                flow = await self._oauth_call(
+                    self._oauth_adapter(oauth_channel).start_oauth(
+                        pending_source_id,
+                        vendor,
+                    )
+                )
+                if flow.source_id != pending_source_id or flow.vendor != vendor:
+                    await self._discard_started_oauth_flow(flow, oauth_channel)
+                    flow_cleanup_done = True
+                    raise ModelHubError("flow_not_found", status=502)
+                if client_nonce is not None and flow.expires_at_iso is None:
+                    await self._discard_started_oauth_flow(flow, oauth_channel)
+                    flow_cleanup_done = True
+                    raise ModelHubError("flow_not_found", status=502)
+                self.oauth_flows.remember(
+                    flow.flow_id,
+                    oauth_channel,
+                    pending_source_id,
+                    vendor,
+                    client_nonce=client_nonce,
+                    expires_at_iso=(
+                        flow.expires_at_iso if client_nonce is not None else None
+                    ),
+                )
+            except BaseException as error:
+                try:
+                    if flow is not None and not flow_cleanup_done:
+                        await self._discard_started_oauth_flow(
+                            flow,
+                            oauth_channel,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if not isinstance(error, asyncio.CancelledError):
+                        raise ModelHubError("engine_down", status=503) from None
+                finally:
+                    if client_nonce is not None:
+                        try:
+                            self.oauth_flows.release_nonce(
+                                client_nonce,
+                                vendor,
+                                oauth_channel,
+                            )
+                        except (OSError, ValueError):
+                            pass
+                raise
+            binding = self._oauth_binding(flow.flow_id)
+            return {"flow": self._flow_payload(flow, binding)}
+
+        if nonce_key is None:
+            return await start_and_remember()
+        task = asyncio.create_task(start_and_remember())
+        self._oauth_start_tasks[nonce_key] = task
+
+        def forget_settled_start(completed: asyncio.Task[dict]) -> None:
+            if self._oauth_start_tasks.get(nonce_key) is completed:
+                self._oauth_start_tasks.pop(nonce_key, None)
+
+        task.add_done_callback(forget_settled_start)
+        return await task
 
     def _oauth_result(
         self,
         flow_id: str,
         flow: OAuthFlowState,
-        *,
-        channel: OAuthChannel,
     ) -> dict:
         binding = self._oauth_binding(flow_id)
-        result = {
-            "flow": _oauth_payload(
-                flow,
-                channel=channel,
-                intent=binding.intent,
-            )
-        }
+        result = {"flow": self._flow_payload(flow, binding)}
         if flow.state != "success":
             return result
         source = self._completed_oauth_source(binding)
@@ -3733,13 +3886,14 @@ class ModelHubService:
 
     async def oauth_status(self, flow_id: str) -> dict:
         binding = self._oauth_binding(flow_id)
-        completed = self._completed_oauth_flow(flow_id, binding)
-        if completed is not None:
+        if binding.terminal_state == "cancelled":
             return self._oauth_result(
                 flow_id,
-                completed,
-                channel=binding.channel,
+                self._cancelled_oauth_flow(flow_id, binding),
             )
+        completed = self._completed_oauth_flow(flow_id, binding)
+        if completed is not None:
+            return self._oauth_result(flow_id, completed)
         flow = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, flow)
         flow, repair_result = await self._materialize_completed_oauth(
@@ -3749,14 +3903,10 @@ class ModelHubService:
         )
         if repair_result is not None:
             return {
-                "flow": _oauth_payload(
-                    flow,
-                    channel=binding.channel,
-                    intent="reauth",
-                ),
+                "flow": self._flow_payload(flow, binding),
                 **repair_result,
             }
-        return self._oauth_result(flow_id, flow, channel=binding.channel)
+        return self._oauth_result(flow_id, flow)
 
     async def oauth_submit(self, payload: dict) -> dict:
         flow_id = payload.get("flow_id") if isinstance(payload, dict) else None
@@ -3765,13 +3915,14 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=404)
         self._ensure_config_writable()
         binding = self._oauth_binding(flow_id)
-        completed = self._completed_oauth_flow(flow_id, binding)
-        if completed is not None:
+        if binding.terminal_state == "cancelled":
             return self._oauth_result(
                 flow_id,
-                completed,
-                channel=binding.channel,
+                self._cancelled_oauth_flow(flow_id, binding),
             )
+        completed = self._completed_oauth_flow(flow_id, binding)
+        if completed is not None:
+            return self._oauth_result(flow_id, completed)
         current = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, current)
         flow = await self._oauth_call(
@@ -3785,14 +3936,10 @@ class ModelHubService:
         )
         if repair_result is not None:
             return {
-                "flow": _oauth_payload(
-                    flow,
-                    channel=binding.channel,
-                    intent="reauth",
-                ),
+                "flow": self._flow_payload(flow, binding),
                 **repair_result,
             }
-        return self._oauth_result(flow_id, flow, channel=binding.channel)
+        return self._oauth_result(flow_id, flow)
 
     async def oauth_cancel(self, flow_id: object) -> None:
         if not isinstance(flow_id, str):
@@ -3800,6 +3947,8 @@ class ModelHubService:
         terminal: tuple[OAuthFlowBinding, OAuthFlowState] | None = None
         async with self._mutation_lock:
             binding = self._oauth_binding(flow_id)
+            if binding.terminal_state == "cancelled":
+                return
             completed = self._completed_oauth_flow(flow_id, binding)
             if completed is not None:
                 return
@@ -3831,7 +3980,10 @@ class ModelHubService:
                     else:
                         self.oauth_flows.forget(flow_id)
                 else:
-                    self.oauth_flows.forget(flow_id)
+                    if binding.client_nonce is not None:
+                        self.oauth_flows.retain_cancelled(flow_id)
+                    else:
+                        self.oauth_flows.forget(flow_id)
         if terminal is not None:
             binding, flow = terminal
             await self._materialize_completed_oauth(
@@ -3842,7 +3994,10 @@ class ModelHubService:
             if flow.state != "success":
                 async with self._mutation_lock:
                     try:
-                        self.oauth_flows.forget(flow_id)
+                        if binding.client_nonce is not None:
+                            self.oauth_flows.retain_cancelled(flow_id)
+                        else:
+                            self.oauth_flows.forget(flow_id)
                     except OSError:
                         raise ModelHubError("engine_down", status=503) from None
 
