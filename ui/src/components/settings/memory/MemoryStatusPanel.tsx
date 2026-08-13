@@ -156,6 +156,7 @@ const ClearInProgressCard: React.FC<{
           <div className="mt-0.5 text-[11px] text-muted">
             {t(
               clearInProgress.error_code === 'memory_clear_legacy_abort_unsupported'
+              || clearInProgress.error_code === 'memory_clear_marker_unreadable'
                 ? 'memory.processingRecord.clearInProgress.explicitRetryDescription'
                 : 'memory.processingRecord.clearInProgress.description',
             )}

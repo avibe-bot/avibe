@@ -490,3 +490,20 @@ def test_corrupt_marker_is_fail_closed(tmp_path: Path):
     assert observation is not None
     assert observation.state == "failed"
     assert observation.error_code == "memory_clear_marker_unreadable"
+
+
+def test_orphaned_queue_clear_fence_is_exposed_for_explicit_repair(tmp_path: Path):
+    maintenance, _port = _maintenance(tmp_path)
+    store = maintenance._store
+    assert store is not None
+    store.begin_clear_fence()
+
+    assert maintenance.is_open() is True
+    assert maintenance.has_readable_intent() is False
+    observation = maintenance._read_projection()
+    assert observation is not None
+    assert observation.state == "failed"
+    assert observation.operation_id == "orphaned-fence"
+    assert observation.error_code == "memory_clear_failed"
+    payload = asyncio.run(maintenance.observe())
+    assert payload.can_clear is True

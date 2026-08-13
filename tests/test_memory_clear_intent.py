@@ -71,7 +71,11 @@ def test_marker_schema_rejects_non_integer_versions(tmp_path: Path, schema_versi
 
 @pytest.mark.parametrize(
     ("state", "error_code"),
-    (("deleting", "memory_clear_failed"), ("deleting", "memory_clear_legacy_abort_unsupported")),
+    (
+        ("deleting", "memory_clear_failed"),
+        ("deleting", "memory_clear_legacy_abort_unsupported"),
+        ("failed", None),
+    ),
 )
 def test_marker_schema_rejects_contradictory_state_and_error(
     tmp_path: Path, state: str, error_code: str

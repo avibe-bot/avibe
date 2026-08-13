@@ -433,6 +433,8 @@ def _decode(payload: bytes) -> ClearIntent:
         raise ValueError("invalid clear intent error")
     if state == "deleting" and error_code is not None:
         raise ValueError("deleting clear intent cannot have an error")
+    if state == "failed" and (not isinstance(error_code, str) or not error_code):
+        raise ValueError("failed clear intent must have an error")
     if error_code == LEGACY_ABORT_ERROR_CODE and state != "failed":
         raise ValueError("legacy abort error requires a failed clear intent")
     for field in ("created_at", "updated_at"):

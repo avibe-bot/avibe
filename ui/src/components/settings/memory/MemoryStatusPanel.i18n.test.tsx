@@ -136,6 +136,15 @@ describe('MemoryStatusPanel anomaly error localization', () => {
   });
 
   it.each([
+    ['en', en.memory.processingRecord.clearInProgress.explicitRetryDescription],
+    ['zh', zh.memory.processingRecord.clearInProgress.explicitRetryDescription],
+  ] as const)('describes unreadable marker repair as an explicit retry in %s', (language, expected) => {
+    renderClearState(language, 'memory_clear_marker_unreadable');
+
+    expect(screen.getByText(expected)).toBeTruthy();
+  });
+
+  it.each([
     ['en', en.memory.processingRecord.sourceState.unknown, en.memory.processingRecord.sourceNotObserved],
     ['zh', zh.memory.processingRecord.sourceState.unknown, zh.memory.processingRecord.sourceNotObserved],
   ] as const)('localizes unobserved source evidence in %s', (language, state, timestamp) => {

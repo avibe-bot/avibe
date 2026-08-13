@@ -182,6 +182,15 @@ class MemoryMaintenance:
             or self._legacy_migration_deferred
         ):
             return True
+        if self._store is not None:
+            try:
+                if self._store.clear_in_progress():
+                    return True
+            except Exception:
+                self._initialization_error = ClearIntentError(
+                    "Memory Clear fence state could not be read"
+                )
+                return True
         try:
             return self._intent.load() is not None
         except ClearIntentUnreadable:
@@ -229,6 +238,22 @@ class MemoryMaintenance:
             )
         if intent is None:
             if self._intent_error is None:
+                if self._store is None:
+                    return None
+                try:
+                    orphaned_fence = self._store.clear_in_progress()
+                except Exception:
+                    self._initialization_error = ClearIntentError(
+                        "Memory Clear fence state could not be read"
+                    )
+                    orphaned_fence = True
+                if orphaned_fence:
+                    return ClearInProgressResult(
+                        state="failed",
+                        operation_id="orphaned-fence",
+                        occurred_at="",
+                        error_code="memory_clear_failed",
+                    )
                 return None
             return ClearInProgressResult(
                 state="failed",
