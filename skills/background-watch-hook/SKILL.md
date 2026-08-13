@@ -257,7 +257,7 @@ BRANCH="$(gh pr view 151 --repo avibe-bot/avibe --json headRefName --jq .headRef
 uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --repo avibe-bot/avibe --pr 151 \
   --sha "$HEAD_SHA" --branch "$BRANCH" \
-  --workflow CI --workflow Lint \
+  --workflow lint \
   --actionable-only \
   --state-file "$STATE_FILE" --seed-state
 
@@ -274,7 +274,7 @@ vibe watch add \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe --pr 151 \
     --sha "$HEAD_SHA" --branch "$BRANCH" \
-    --workflow CI --workflow Lint \
+    --workflow lint \
     --actionable-only --settle 20 --state-file "$STATE_FILE" --interval 60
 ```
 
