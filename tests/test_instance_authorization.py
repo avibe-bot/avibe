@@ -98,7 +98,6 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
         ("GET", "/api/harness/bootstrap"),
         ("PATCH", "/api/harness/tasks/task-1"),
         ("DELETE", "/api/harness/watches/watch-1"),
-        ("DELETE", "/api/terminal/term-1"),
         ("GET", "/api/browse/favorites"),
     )
     for method, path in editor_routes:
@@ -146,7 +145,6 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/vault/future-mutation"),
         ("POST", "/api/harness/tasks"),
         ("PATCH", "/api/harness/watches/watch-1"),
-        ("DELETE", "/api/terminal/term-1"),
         ("GET", "/api/files/list"),
         ("PUT", "/api/files/write"),
         ("POST", "/api/dock/pins"),
@@ -156,6 +154,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         assert http_authorization_policy(method, path).minimum_role == "editor", path
 
     viewer_examples = (
+        ("DELETE", "/api/terminal/term-1"),
         ("GET", "/api/web-push/status"),
         ("POST", "/api/web-push/status"),
         ("GET", "/api/web-push/vapid-public-key"),

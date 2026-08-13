@@ -366,6 +366,9 @@ _EDITOR_HTTP_NAMESPACES = (
     "/api/terminal",
 )
 _VIEWER_HTTP_NAMESPACES = ("/api/web-push",)
+_VIEWER_HTTP_MUTATION_RULES = (
+    ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
+)
 
 _EDITOR_HTTP_RULES = tuple(
     (method, re.compile(pattern))
@@ -431,6 +434,11 @@ def http_authorization_policy(
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
     if _path_in_namespaces(path, _VIEWER_HTTP_NAMESPACES):
+        return HttpAuthorizationPolicy("viewer")
+    if any(
+        rule_method == normalized_method and pattern.fullmatch(path)
+        for rule_method, pattern in _VIEWER_HTTP_MUTATION_RULES
+    ):
         return HttpAuthorizationPolicy("viewer")
     if _path_in_namespaces(path, _EDITOR_HTTP_NAMESPACES):
         return HttpAuthorizationPolicy("editor")

@@ -3193,7 +3193,11 @@ async def terminal_session_delete(session_id: str):
         return jsonify({"ok": False, "error": "terminal_origin_forbidden"}), 403
     if not _show_runtime_websocket_authorized(
         terminal_request,
-        minimum_role="editor",
+        # Closing a terminal session is allowed for any authenticated runtime
+        # viewer; the subject-scoped effective ID below prevents terminating a
+        # different user's session. Opening an interactive terminal remains an
+        # Editor-only operation in ``terminal_websocket``.
+        minimum_role="viewer",
     ):
         return jsonify({"ok": False, "error": "terminal_unauthorized"}), 403
 
