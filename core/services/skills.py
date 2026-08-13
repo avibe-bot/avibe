@@ -382,6 +382,7 @@ def _filter_skill_listing(
         return result
 
     raw_skills = [dict(skill) for skill in result["skills"] if isinstance(skill, dict)]
+    instance_editor = context.has_role("editor")
     descriptors = _skill_resource_descriptors(
         raw_skills,
         requested_scope=scope,
@@ -406,6 +407,9 @@ def _filter_skill_listing(
         allowed = {(item["skill_index"], item["agent_index"]) for item in accessible}
         filtered_skills = []
         for skill_index, skill in enumerate(raw_skills):
+            if instance_editor and _skill_scope(skill, scope) == "global":
+                filtered_skills.append(skill)
+                continue
             matching = [item for item in descriptors if item["skill_index"] == skill_index]
             if not matching or not any((item["skill_index"], item["agent_index"]) in allowed for item in matching):
                 continue

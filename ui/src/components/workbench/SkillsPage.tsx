@@ -54,7 +54,7 @@ export const SkillsPage: React.FC = () => {
   // the project-scope option, and browse installs land in global.
   const projectHasFolder = Boolean(activeProject?.capabilities?.has_folder ?? activeProject?.folder_path);
   const projectCanManage = canManage && (scope !== 'project' || Boolean(activeProject?.capabilities?.can_chat));
-  const addDialogProjectId = projectHasFolder ? activeProject?.id : undefined;
+  const addDialogProjectId = scope === 'project' && projectCanManage && projectHasFolder ? activeProject?.id : undefined;
   const browseScope: SkillScope = scope === 'project' && projectHasFolder ? 'project' : 'global';
   const browseProjectId = browseScope === 'project' ? activeProject?.id : undefined;
 

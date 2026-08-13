@@ -479,6 +479,10 @@ def test_effective_project_viewer_gets_safe_skill_payload_and_cannot_mutate(monk
         "summary": {"total": 3, "updateAvailable": 2, "upToDate": 1, "uncheckable": 0},
         "skills": [
             {
+                **_skill_row("global-skill"),
+                "path": "/global/skills/global-skill",
+            },
+            {
                 **_skill_row("project-skill"),
                 "scope": "project",
                 "path": str(project_dir / ".agents" / "skills" / "project-skill"),
@@ -533,7 +537,8 @@ def test_effective_project_viewer_gets_safe_skill_payload_and_cannot_mutate(monk
                 user_context=viewer,
             )
         )
-        assert safe["skills"][0]["path"] == ""
+        assert safe["skills"][0]["path"] == "/global/skills/global-skill"
+        assert safe["skills"][1]["path"] == ""
         checked = _run(
             skills.check(
                 "askill",
@@ -543,7 +548,7 @@ def test_effective_project_viewer_gets_safe_skill_payload_and_cannot_mutate(monk
                 user_context=viewer,
             )
         )
-        assert checked["summary"] == {"total": 1, "updateAvailable": 1, "upToDate": 0, "uncheckable": 0}
+        assert checked["summary"] == {"total": 2, "updateAvailable": 1, "upToDate": 0, "uncheckable": 0}
 
         with pytest.raises(skills.SkillAccessError):
             _run(
