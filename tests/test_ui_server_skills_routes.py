@@ -70,13 +70,13 @@ def test_resolve_project_dir_uses_request_authorization_context(monkeypatch):
         def connect(self):
             return self._Connection()
 
-    def fake_get_project(conn, project_id, *, authorization_context=None):
+    def fake_get_project_workdir(conn, project_id, *, authorization_context=None):
         seen["project_id"] = project_id
         seen["authorization_context"] = authorization_context
-        return {"folder_path": "/tmp/project"}
+        return "/tmp/project"
 
     monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
-    monkeypatch.setattr("storage.projects_service.get_project", fake_get_project)
+    monkeypatch.setattr("storage.projects_service.get_project_workdir", fake_get_project_workdir)
     remote_context = AuthorizationContext(instance_role="editor", is_remote=True, subject="user-1")
 
     with app.test_request_context("/api/skills?project_id=proj-restricted"):

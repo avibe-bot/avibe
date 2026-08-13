@@ -213,7 +213,8 @@ def _project_for_context(
         project_id,
     )
     payload["capabilities"] = {
-        "can_chat": project_access_service.role_allows(effective_role, "editor")
+        "can_chat": project_access_service.role_allows(effective_role, "editor"),
+        "has_folder": bool(payload.get("folder_path")),
     }
     if not project_access_service.role_allows(effective_role, "editor"):
         # Effective Viewers must not disclose host-local filesystem details.

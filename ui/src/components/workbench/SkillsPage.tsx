@@ -52,7 +52,7 @@ export const SkillsPage: React.FC = () => {
   // A folderless project can't hold project-scoped skills (askill needs a real
   // cwd), so the add/browse flows treat it as global-only: the add dialog drops
   // the project-scope option, and browse installs land in global.
-  const projectHasFolder = Boolean(activeProject?.folder_path);
+  const projectHasFolder = Boolean(activeProject?.capabilities?.has_folder ?? activeProject?.folder_path);
   const addDialogProjectId = projectHasFolder ? activeProject?.id : undefined;
   const browseScope: SkillScope = scope === 'project' && projectHasFolder ? 'project' : 'global';
   const browseProjectId = browseScope === 'project' ? activeProject?.id : undefined;

@@ -226,7 +226,7 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     project_a = next(row for row in project_rows if row["id"] == ids["project_a"])
     assert project_a["folder_path"] == str((tmp_path / "project-a").resolve())
     assert project_a["metadata"] == {"host_path_hint": "/private/host"}
-    assert project_a["capabilities"] == {"can_chat": True}
+    assert project_a["capabilities"] == {"can_chat": True, "has_folder": True}
     sessions = _get(client, "/api/sessions?status=active").get_json()["sessions"]
     assert {row["id"] for row in sessions} == {
         ids["session_a"],
@@ -345,7 +345,7 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     client = _remote_client(config, role="editor", email="alice@example.com")
 
     viewer_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
-    assert viewer_project["capabilities"] == {"can_chat": False}
+    assert viewer_project["capabilities"] == {"can_chat": False, "has_folder": True}
     assert viewer_project["folder_path"] == ""
     assert viewer_project["metadata"] == {}
 
@@ -415,7 +415,7 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, ids["session_a"])["text"] == "remote overwrite"
     editor_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
-    assert editor_project["capabilities"] == {"can_chat": True}
+    assert editor_project["capabilities"] == {"can_chat": True, "has_folder": True}
 
 
 def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path) -> None:

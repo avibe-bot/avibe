@@ -5060,14 +5060,32 @@ def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        effective_role = project_access_service.get_effective_session_role(
-            conn,
-            context,
-            str(payload.get("session_id") or ""),
-        )
+        return _show_page_payload_for_connection(payload, context, conn)
+
+
+def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) -> dict:
+    from storage import project_access_service
+
+    effective_role = project_access_service.get_effective_session_role(
+        conn,
+        context,
+        str(payload.get("session_id") or ""),
+    )
     if project_access_service.role_allows(effective_role, "editor"):
         return payload
     return {key: value for key, value in payload.items() if key != "path"}
+
+
+def _show_page_payloads_for_request(payloads: list[dict], context: Any = None) -> list[dict]:
+    context = _request_authorization_context(context)
+    if context is None or _has_runtime_owner_access(context):
+        return payloads
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        return [
+            _show_page_payload_for_connection(payload, context, conn)
+            for payload in payloads
+        ]
 
 
 @app.route("/api/show-pages", methods=["GET"])
@@ -5079,10 +5097,7 @@ def show_pages_list_get():
     payload = api.list_show_pages(user_context=resource_context)
     payload = {
         **payload,
-        "pages": [
-            _show_page_payload_for_request(page, context)
-            for page in payload.get("pages", [])
-        ],
+        "pages": _show_page_payloads_for_request(payload.get("pages", []), context),
     }
     return jsonify(payload)
 
@@ -8078,17 +8093,17 @@ def _resolve_project_dir(project_id):
     """
     if not project_id:
         return None
+    authorization_context = getattr(g, "authorization_context", None)
     from storage import projects_service
 
-    authorization_context = getattr(g, "authorization_context", None)
     engine = _projects_engine()
     with engine.connect() as conn:
-        project = projects_service.get_project(
+        folder = projects_service.get_project_workdir(
             conn,
             project_id,
             authorization_context=authorization_context,
         )
-    folder = (project.get("folder_path") or "").strip()
+    folder = str(folder or "").strip()
     if not folder:
         raise _ProjectNoFolder(project_id)
     return folder
