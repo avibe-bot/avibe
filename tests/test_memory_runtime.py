@@ -83,7 +83,7 @@ from config.v2_config import (
 )
 
 
-PROJECT = "p-22222222222222222222222222222222"
+PROJECT = "default"
 PRINCIPAL = "u-11111111111111111111111111111111"
 
 
@@ -1878,11 +1878,11 @@ async def test_multi_scope_session_lifecycle_holds_every_fence_through_operation
     )
     first_scope = (
         "u-11111111111111111111111111111111",
-        "p-11111111111111111111111111111111",
+        PROJECT,
     )
     second_scope = (
         "u-22222222222222222222222222222222",
-        "p-22222222222222222222222222222222",
+        PROJECT,
     )
     session_id = "multi-scope-lifecycle-session"
     operation_entered = asyncio.Event()
@@ -1952,11 +1952,11 @@ async def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fence
     scopes = (
         (
             "u-11111111111111111111111111111111",
-            "p-11111111111111111111111111111111",
+            PROJECT,
         ),
         (
             "u-22222222222222222222222222222222",
-            "p-22222222222222222222222222222222",
+            PROJECT,
         ),
     )
     session_id = "cancelled-multi-scope-lifecycle"
