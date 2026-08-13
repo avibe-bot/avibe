@@ -129,6 +129,12 @@ class MemoryMaintenance:
             self._intent.home / "state/memory/backups",
         )
         if not any(os.path.lexists(path) for path in legacy_paths):
+            self._legacy_migration_deferred = False
+            return
+        if store is None and os.path.lexists(
+            self._intent.home / "state/memory/clear-journal.sqlite"
+        ):
+            self._legacy_migration_deferred = True
             return
         lease = None
         if not lease_held:
@@ -148,7 +154,6 @@ class MemoryMaintenance:
                 logger.warning("Legacy Memory cleanup lease could not be acquired", exc_info=True)
                 return
         try:
-            self._legacy_migration_deferred = False
             try:
                 failures = cleanup_legacy_backup_storage(self._intent.home)
                 for relative in failures:
@@ -157,11 +162,14 @@ class MemoryMaintenance:
                 logger.warning("Legacy Memory backup cleanup could not complete", exc_info=True)
             current_epoch = store.ensure_meta().epoch if store is not None else None
             self._intent.migrate_legacy(current_epoch=current_epoch)
+            self._legacy_migration_deferred = False
         except ClearIntentUnreadable as error:
             self._intent_error = error
             logger.warning("Memory Clear state is unreadable; keeping Memory fenced")
         except Exception as error:
-            self._initialization_error = error
+            # The operation lease is held here, so a transient store read or
+            # durable journal-removal failure can be retried by boot recovery.
+            self._legacy_migration_deferred = True
             logger.exception("Memory Clear state migration failed")
         finally:
             if lease is not None:
@@ -429,9 +437,37 @@ class MemoryMaintenance:
         try:
             for surface in DEFAULT_CLEAR_SURFACES:
                 await self._runtime.delete_surface(surface, intent.target_epoch)
-            await self._run_maintenance_io(self._store.release_clear_fence)
+            final_cancellation: asyncio.CancelledError | None = None
+            release_outcome: dict[str, BaseException] = {}
+
+            def release_fence() -> None:
+                try:
+                    self._store.release_clear_fence()
+                except BaseException as error:
+                    release_outcome["error"] = error
+                    raise
+
             try:
-                await self._run_maintenance_io(self._intent.remove)
+                await self._run_maintenance_io(release_fence)
+            except asyncio.CancelledError as error:
+                if "error" in release_outcome:
+                    raise release_outcome["error"]
+                final_cancellation = error
+            try:
+                remove_outcome: dict[str, BaseException] = {}
+
+                def remove_marker() -> None:
+                    try:
+                        self._intent.remove()
+                    except BaseException as error:
+                        remove_outcome["error"] = error
+                        raise
+
+                await self._run_maintenance_io(remove_marker)
+            except asyncio.CancelledError as error:
+                if "error" in remove_outcome:
+                    raise remove_outcome["error"]
+                final_cancellation = final_cancellation or error
             except ClearIntentError:
                 # All surfaces are already terminal. Keep the deleting marker
                 # so the next reconcile retries only its removal. The marker
@@ -463,6 +499,8 @@ class MemoryMaintenance:
         if not boot:
             await self._runtime.resume()
         self._intent_error = None
+        if final_cancellation is not None:
+            logger.info("Memory Clear reached terminal state after final-stage cancellation")
         return ClearResult("completed", intent.operation_id, intent.target_epoch)
 
     async def _record_failure(self, intent: ClearIntent, error_code: str) -> None:

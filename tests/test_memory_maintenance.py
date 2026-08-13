@@ -341,6 +341,45 @@ def test_legacy_cleanup_lease_failure_fences_memory(tmp_path: Path, monkeypatch)
     assert (maintenance._initialization_error is not None)
 
 
+def test_legacy_migration_retries_after_transient_store_failure(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, 1)",
+        ("legacy-one", "user-1", 0, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+    journal.chmod(0o600)
+    maintenance = MemoryMaintenance(None, effective_home=tmp_path, runtime=_Port(tmp_path))
+    assert maintenance.is_open() is True
+
+    store = MemoryStore(tmp_path / "state/memory/memory.sqlite")
+    original_ensure_meta = store.ensure_meta
+    calls = 0
+
+    def fail_once():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("temporary store read failure")
+        return original_ensure_meta()
+
+    monkeypatch.setattr(store, "ensure_meta", fail_once)
+    maintenance.attach_store(store)
+
+    assert maintenance.is_open() is True
+    assert maintenance._legacy_migration_deferred is True
+    assert asyncio.run(maintenance.reconcile_pending()) is True
+    assert not journal.exists()
+
+
 def test_deferred_legacy_migration_is_retryable_after_lease_release(tmp_path: Path):
     journal = tmp_path / "state/memory/clear-journal.sqlite"
     journal.parent.mkdir(parents=True)
@@ -410,6 +449,34 @@ async def test_boot_retry_requiesces_claims(tmp_path: Path):
     ClearIntentStore(tmp_path).write(ClearIntent.new(operator_ref="boot", pre_epoch=meta.epoch))
     assert await maintenance.reconcile_pending() is True
     assert port.quiesce_modes == [False]
+
+
+@pytest.mark.asyncio
+async def test_terminal_marker_removal_cancellation_resumes_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import threading
+
+    maintenance, port = _maintenance(tmp_path)
+    original_remove = maintenance._intent.remove
+    started = threading.Event()
+    release = threading.Event()
+
+    def remove_then_cancel():
+        started.set()
+        release.wait()
+        original_remove()
+
+    monkeypatch.setattr(maintenance._intent, "remove", remove_then_cancel)
+    clear_task = asyncio.create_task(maintenance.clear(operator_ref="user-1"))
+    assert await asyncio.to_thread(started.wait, 1.0)
+    clear_task.cancel()
+    release.set()
+    result = await clear_task
+
+    assert result.status == "completed"
+    assert maintenance.is_open() is False
+    assert port.resumed == 1
 
 
 def test_corrupt_marker_is_fail_closed(tmp_path: Path):

@@ -115,6 +115,10 @@ class ClearIntentStore:
         try:
             descriptor = open_confined_regular_file(self.home, self.path)
         except (ConfinedFilesystemError, OSError) as error:
+            if not os.path.lexists(self.path):
+                # Another process may have completed the terminal clear after
+                # our lstat but before this anchored open.
+                return None
             raise ClearIntentUnreadable("Memory clear intent marker is unreadable") from error
         try:
             if os.fstat(descriptor).st_size > MAX_CLEAR_INTENT_BYTES:
@@ -205,20 +209,38 @@ class ClearIntentStore:
         connection = None
         try:
             connection = PrivateSqliteDatabase(self.home, journal_path).connect()
-            rows = connection.execute(
-                "SELECT * FROM clear_operation WHERE open_slot = 1"
-            ).fetchall()
+            rows = connection.execute("SELECT * FROM clear_operation").fetchall()
         except (ConfinedFilesystemError, sqlite3.Error, OSError) as error:
             raise ClearIntentUnreadable("legacy Memory clear journal is unreadable") from error
         finally:
             if connection is not None:
                 connection.close()
-        if not rows:
+        open_rows = []
+        try:
+            for candidate in rows:
+                state = candidate["state"]
+                open_slot = candidate["open_slot"]
+                if state in {"completed", "aborted"}:
+                    if open_slot is not None:
+                        raise ValueError("terminal legacy clear row has an open slot")
+                elif state in {"preparing", "prepared", "deleting", "recovery_needed"}:
+                    if (
+                        not isinstance(open_slot, int)
+                        or isinstance(open_slot, bool)
+                        or open_slot != 1
+                    ):
+                        raise ValueError("nonterminal legacy clear row has no open slot")
+                    open_rows.append(candidate)
+                else:
+                    raise ValueError("legacy Memory clear journal has an invalid state")
+        except (KeyError, TypeError, ValueError, IndexError) as error:
+            raise ClearIntentUnreadable("legacy Memory clear journal has invalid rows") from error
+        if not open_rows:
             _remove_required(self.home, journal_path, "legacy Memory clear journal")
             return None
-        if len(rows) != 1:
+        if len(open_rows) != 1:
             raise ClearIntentUnreadable("legacy Memory clear journal has multiple open operations")
-        row = rows[0]
+        row = open_rows[0]
         try:
             operation_id = str(row["operation_id"])
             operator_ref = str(row["operator_ref"])

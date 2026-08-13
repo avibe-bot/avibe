@@ -263,6 +263,46 @@ def test_legacy_journal_rejects_multiple_open_operations(tmp_path: Path):
     assert journal.exists()
 
 
+def test_legacy_journal_rejects_nonterminal_row_without_open_slot(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, NULL)",
+        ("legacy-one", "user-1", 2, 3, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(journal, 0o600)
+
+    with pytest.raises(ClearIntentUnreadable):
+        ClearIntentStore(tmp_path).migrate_legacy(current_epoch=2)
+
+    assert journal.exists()
+
+
+def test_marker_disappearance_during_open_is_treated_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from core.memory import clear_intent
+
+    store = ClearIntentStore(tmp_path)
+    store.write(ClearIntent.new(operator_ref="user-1", pre_epoch=1))
+    original_open = clear_intent.open_confined_regular_file
+
+    def unlink_before_open(home, path):
+        path.unlink()
+        return original_open(home, path)
+
+    monkeypatch.setattr(clear_intent, "open_confined_regular_file", unlink_before_open)
+
+    assert store.load() is None
+
+
 @pytest.mark.parametrize(
     ("pre_epoch", "target_epoch"),
     ((1.5, 2.5), ("1", 2), (1, 2.5)),
