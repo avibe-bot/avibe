@@ -544,6 +544,7 @@ class ModelHubService:
         named_agents_override: Optional[
             Callable[[BackendName], list[tuple[str, Optional[str]]]]
         ] = None,
+        cli_present_override: Optional[Callable[[BackendName], bool]] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -564,6 +565,7 @@ class ModelHubService:
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
+        self.cli_present_override = cli_present_override
         self.now = now
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
             lambda _backend, _source: True
@@ -2983,6 +2985,13 @@ class ModelHubService:
             "selected_by_agent": selected_by_agent,
             "selected_model_id": selected_model_id,
             "selected_model_explicit": selected_model_explicit,
+            # The UI must distinguish an installed backend CLI from a configured
+            # Model Hub route. Keep this host fact at the controller boundary.
+            "cli_present": (
+                bool(self.cli_present_override(backend))
+                if self.cli_present_override is not None
+                else False
+            ),
             "sources": sources,
             "supply_status": (
                 resolution.supply_status
@@ -4787,6 +4796,7 @@ def create_default_service(
     named_agents_override: Optional[
         Callable[[BackendName], list[tuple[str, Optional[str]]]]
     ] = None,
+    cli_present_override: Optional[Callable[[BackendName], bool]] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -4831,4 +4841,5 @@ def create_default_service(
         requested_model_override=requested_model_override,
         selected_agent_override=selected_agent_override,
         named_agents_override=named_agents_override,
+        cli_present_override=cli_present_override,
     )

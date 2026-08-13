@@ -382,10 +382,23 @@ class Controller:
                 if agent.backend == backend
             ]
 
+        def cli_present(backend: str) -> bool:
+            from config.v2_config import V2Config
+            from vibe.api import resolve_cli_path
+
+            try:
+                v2_config = V2Config.load()
+            except FileNotFoundError:
+                v2_config = None
+            backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
+            configured_path = getattr(backend_config, "cli_path", None) or backend
+            return resolve_cli_path(str(configured_path)) is not None
+
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
+            cli_present_override=cli_present,
         )
         self.model_hub_turn_gateway = ModelHubTurnGateway(
             self.model_hub_service,

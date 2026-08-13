@@ -728,6 +728,19 @@ def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
     assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
 
 
+def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    service.cli_present_override = lambda backend: backend in {"claude", "codex"}
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert {backend: agent["cli_present"] for backend, agent in agents.items()} == {
+        "claude": True,
+        "codex": True,
+        "opencode": False,
+    }
+
+
 def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.requested_model = lambda backend: {
