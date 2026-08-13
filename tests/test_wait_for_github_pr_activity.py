@@ -957,6 +957,68 @@ def test_fresh_combined_baseline_rejects_a_stale_sha(tmp_path) -> None:
     assert not state_file.exists()
 
 
+def test_resumed_combined_watch_rejects_a_stale_sha(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    baseline = _pr_state()
+    baseline["pull_request"]["head"] = {"sha": "new-sha"}
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_cursor": 0,
+                "review_comment_cursor": 0,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                "review_comment_since": "2026-08-04T09:00:00Z",
+                "issue_comment_since": "2026-08-04T09:00:00Z",
+                "viewer_login": "tester",
+                "token_fingerprint": module._token_fingerprint("token"),
+                **_complete_pr_baseline_fields(module, baseline),
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_state = state_file.read_text(encoding="utf-8")
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", return_value=(baseline, 1)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login") as fake_login,
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "old-sha",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert "does not match --sha old-sha" in stderr.getvalue()
+    assert stdout.getvalue() == ""
+    assert state_file.read_text(encoding="utf-8") == original_state
+    fake_login.assert_not_called()
+
+
 def test_combined_pr_waiter_reports_ci_completion(tmp_path) -> None:
     module = _load_module()
     state_file = tmp_path / "pr-153-combined.json"

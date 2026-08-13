@@ -1946,11 +1946,11 @@ def main() -> int:
         return 1
     selected_actions: dict[str, list[dict[str, Any]]] = {}
     state, requests_per_poll_count = initial_request.value
-    if args.pr is not None and ci_enabled and not initial_resume:
+    if args.pr is not None and ci_enabled:
         observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
         if observed_head_sha.casefold() != args.sha.casefold():
             print(
-                "Refusing to establish a combined baseline: PR head "
+                "Refusing to start a combined watch: PR head "
                 f"{observed_head_sha} does not match --sha {args.sha}. "
                 "Refresh the SHA and retry.",
                 file=sys.stderr,
