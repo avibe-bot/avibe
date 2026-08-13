@@ -1463,6 +1463,45 @@ def create_app(
             )
         return payload
 
+    @app.get("/internal/memory/projects")
+    async def _memory_projects(request: Request) -> Any:
+        try:
+            scope = _memory_read_scope(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        principal_id, _project_id = scope
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID, MEMORY_SEARCH_ALL_PROJECTS
+
+        try:
+            catalogued = runtime.list_memory_projects(principal_id)
+        except Exception:
+            logger.warning("internal memory project list failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        named = [item for item in catalogued if item != DEFAULT_MEMORY_PROJECT_ID]
+        projects = [
+            {"id": DEFAULT_MEMORY_PROJECT_ID, "kind": "default"},
+            *[{"id": item, "kind": "named"} for item in named],
+            {"id": MEMORY_SEARCH_ALL_PROJECTS, "kind": "all"},
+        ]
+        return {"status": "ok", "projects": projects}
+
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
         try:
@@ -1481,17 +1520,33 @@ def create_app(
         payload = await _safe_json(request)
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"query", "policy"}
+            or not {"query", "policy"}.issubset(payload)
+            or set(payload) - {"query", "policy", "project"}
             or not isinstance(payload.get("query"), str)
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        from core.memory.http_headers import CALLER_SESSION_HEADER
+        from core.memory.http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
+        from core.memory.project_ids import (
+            DEFAULT_MEMORY_PROJECT_ID,
+            omitted_project_to_default,
+            parse_agent_search_project,
+            parse_ui_search_project,
+        )
         from core.memory.types import RecallPolicy
 
         try:
             policy = RecallPolicy.from_payload(payload.get("policy"))
+            raw_project = omitted_project_to_default(payload.get("project"))
+            if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+                project_id = parse_ui_search_project(raw_project)
+            else:
+                project_id = parse_agent_search_project(raw_project)
         except (TypeError, ValueError):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        if project_id not in {DEFAULT_MEMORY_PROJECT_ID, "all"}:
+            catalog = runtime.list_memory_projects(principal_id)
+            if project_id not in catalog:
+                return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
         try:
             return await runtime.search_payload(
@@ -1517,11 +1572,20 @@ def create_app(
         payload = await _safe_json(request)
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"text"}
+            or not {"text"}.issubset(payload)
+            or set(payload) - {"text", "project"}
             or not isinstance(payload.get("text"), str)
             or not payload["text"].strip()
             or len(payload["text"]) > 4_000
         ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        from core.memory.project_ids import omitted_project_to_default, parse_writable_memory_project
+
+        try:
+            project_id = parse_writable_memory_project(
+                omitted_project_to_default(payload.get("project"))
+            )
+        except ValueError:
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
 
         from core.memory import CaptureRequest

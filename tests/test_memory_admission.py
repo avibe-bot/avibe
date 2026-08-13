@@ -136,7 +136,7 @@ def test_admitted_im_turn_becomes_a_namespaced_capture_request() -> None:
     assert request.source_message_id == f"im:telegram:{PRINCIPAL}:native-1"
     assert request.session_id == "stable-session"
     assert request.principal_id == PRINCIPAL
-    assert request.project_id == PROJECT
+    assert request.project_id == "default"
     assert request.provenance == "user_input"
     assert request.text == "ordinary text"
     assert request.attachments == ()
@@ -148,6 +148,13 @@ def test_workbench_turn_uses_its_own_source_namespace() -> None:
 
     assert isinstance(request, CaptureRequest)
     assert request.source_message_id == f"workbench:{PRINCIPAL}:native-1"
+
+
+def test_user_turns_capture_into_default_without_a_workdir() -> None:
+    request = _admission().decide(_facts(workdir=None))
+
+    assert isinstance(request, CaptureRequest)
+    assert request.project_id == "default"
 
 
 @pytest.mark.parametrize(

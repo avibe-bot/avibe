@@ -31,7 +31,7 @@ from modules.im.message_facts import (
 )
 
 
-PROJECT = "p-22222222222222222222222222222222"
+PROJECT = "default"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -442,14 +442,12 @@ def test_final_flush_memory_cli_session_uses_trusted_stored_scope() -> None:
     )
 
     assert result is True
-    assert controller.memory_runtime.final_flush_calls == [
-        {
-            "principal_id": principal_id,
-            "project_id": PROJECT,
-            "raw_session_id": "ses-workbench",
-            "deadline_seconds": 4.0,
-        }
-    ]
+    assert len(controller.memory_runtime.final_flush_calls) == 1
+    flush = controller.memory_runtime.final_flush_calls[0]
+    assert flush["principal_id"] == principal_id
+    assert flush["project_id"] == PROJECT
+    assert flush["raw_session_id"] == "ses-workbench"
+    assert 0 < flush["deadline_seconds"] <= 4.0
 
 
 def test_final_flush_memory_cli_session_swallows_runtime_failure() -> None:
@@ -474,20 +472,18 @@ def test_final_flush_memory_cli_session_recovers_scope_after_controller_restart(
     controller = _controller()
     principal_id = "u-" + ("2" * 32)
     controller._memory_scopes_by_session = {}
-    controller.memory_runtime.recovered_scope = (principal_id, PROJECT)
+    controller.memory_runtime.recovered_scopes = ((principal_id, PROJECT),)
 
     result = asyncio.run(controller.final_flush_memory_cli_session("ses-workbench"))
 
     assert result is True
-    assert controller.memory_runtime.scope_recovery_calls == ["ses-workbench"]
-    assert controller.memory_runtime.final_flush_calls == [
-        {
-            "principal_id": principal_id,
-            "project_id": PROJECT,
-            "raw_session_id": "ses-workbench",
-            "deadline_seconds": 5.0,
-        }
-    ]
+    assert controller.memory_runtime.scopes_recovery_calls == ["ses-workbench"]
+    assert len(controller.memory_runtime.final_flush_calls) == 1
+    flush = controller.memory_runtime.final_flush_calls[0]
+    assert flush["principal_id"] == principal_id
+    assert flush["project_id"] == PROJECT
+    assert flush["raw_session_id"] == "ses-workbench"
+    assert 0 < flush["deadline_seconds"] <= 5.0
 
 
 def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:
@@ -497,7 +493,7 @@ def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:
     result = asyncio.run(controller.final_flush_memory_cli_session("ses-absent"))
 
     assert result is False
-    assert controller.memory_runtime.scope_recovery_calls == ["ses-absent"]
+    assert controller.memory_runtime.scopes_recovery_calls == ["ses-absent"]
     assert controller.memory_runtime.final_flush_calls == []
 
 

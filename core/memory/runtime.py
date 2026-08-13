@@ -7,6 +7,7 @@ from copy import deepcopy
 import logging
 import os
 import stat
+import time
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -82,12 +83,18 @@ from core.memory.provider_root import (
     ProviderRootMetadata,
     ProviderRootRollback,
 )
+from core.memory.project_ids import (
+    DEFAULT_MEMORY_PROJECT_ID,
+    MEMORY_SEARCH_ALL_PROJECTS,
+)
 from core.memory.store import MemoryStore, is_principal_id, is_project_id
 from core.memory.snapshot import MemorySnapshot
 from core.memory.types import (
     MemoryFailureLogEntry,
+    MemoryItem,
     MemoryItems,
     MemoryResult,
+    MemoryWarningCode,
     OperationFailed,
     RecallItems,
     RecallPolicy,
@@ -1425,6 +1432,11 @@ class MemoryRuntime:
             "profile_warning": "empty" if empty else None,
         }
 
+    def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
+        if not self.available:
+            return (DEFAULT_MEMORY_PROJECT_ID,)
+        return self._store.list_memory_projects(principal_id)
+
     async def search_payload(
         self,
         query: str,
@@ -1436,14 +1448,87 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         if not self.available:
             return {"status": "failed", "error": "memory_store_unavailable"}
-        return _result_payload(
-            await self.module.recall(
+        if project_id == MEMORY_SEARCH_ALL_PROJECTS:
+            return _result_payload(
+                await self._recall_all_projects(
+                    query,
+                    policy=policy,
+                    principal_id=principal_id,
+                )
+            )
+        result = await self.module.recall(
+            query,
+            policy=policy,
+            principal_id=principal_id,
+            project_id=project_id,
+            current_session_id=current_session_id,
+        )
+        if isinstance(result, RecallItems):
+            result = replace(
+                result,
+                items=tuple(
+                    replace(item, project=project_id) for item in result.items
+                ),
+            )
+        return _result_payload(result)
+
+    async def _recall_all_projects(
+        self,
+        query: str,
+        *,
+        policy: RecallPolicy,
+        principal_id: str,
+    ) -> RecallResult:
+        if policy.mode == "agentic" or policy.include_current_session:
+            return OperationFailed(error="memory_invalid_input")
+        projects = self.list_memory_projects(principal_id)
+        if not projects:
+            projects = (DEFAULT_MEMORY_PROJECT_ID,)
+        deadline = time.monotonic() + 20.0
+        collected: list[MemoryItem] = []
+        warnings: list[MemoryWarningCode] = []
+        first_failure: OperationFailed | None = None
+        succeeded = False
+        effective_mode = policy.mode if policy.mode != "auto" else "keyword"
+        for index, project_id in enumerate(projects):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                warnings.append("memory_search_truncated")
+                break
+            scope_policy = replace(
+                policy,
+                include_current_session=False,
+                include_profile=bool(policy.include_profile and index == 0),
+            )
+            result = await self.module.recall(
                 query,
-                policy=policy,
+                policy=scope_policy,
                 principal_id=principal_id,
                 project_id=project_id,
-                current_session_id=current_session_id,
             )
+            if isinstance(result, OperationFailed):
+                if first_failure is None:
+                    first_failure = result
+                warnings.append("memory_search_partial")
+                continue
+            succeeded = True
+            effective_mode = result.effective_mode
+            collected.extend(
+                replace(item, project=project_id) for item in result.items
+            )
+        if not succeeded:
+            return first_failure or RecallItems(
+                items=(),
+                requested_mode=policy.mode,
+                effective_mode=effective_mode if effective_mode != "auto" else "keyword",
+            )
+        merged = _merge_search_items(collected, limit=policy.max_results)
+        unique_warnings = tuple(dict.fromkeys(warnings))
+        return RecallItems(
+            items=merged,
+            requested_mode=policy.mode,
+            effective_mode=effective_mode if effective_mode != "auto" else "keyword",
+            warnings=unique_warnings,
         )
 
     async def log_entries_payload(
@@ -3218,3 +3303,32 @@ def _result_payload(result: MemoryResult | RecallResult) -> dict[str, Any]:
             "freshness": result.freshness,
         }
     return {"status": "failed", "error": "memory_processing_failed"}
+
+
+def _merge_search_items(items: list[MemoryItem], *, limit: int) -> tuple[MemoryItem, ...]:
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            item.date is None,
+            item.date or "",
+            item.kind,
+            item.text,
+            item.project or "",
+        ),
+        reverse=False,
+    )
+    # date desc: invert the date key by sorting then reversing date-bearing first
+    dated = [item for item in ordered if item.date is not None]
+    undated = [item for item in ordered if item.date is None]
+    dated.sort(key=lambda item: item.date or "", reverse=True)
+    merged: list[MemoryItem] = []
+    seen: set[tuple[str, str, str | None, str | None]] = set()
+    for item in (*dated, *undated):
+        key = (item.kind, item.text, item.date, item.project)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+        if len(merged) >= limit:
+            break
+    return tuple(merged)

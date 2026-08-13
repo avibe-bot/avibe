@@ -1051,6 +1051,20 @@ def register_memory_routes(app) -> None:
 
         return await app.dispatch_native_request(starlette_request, handler)
 
+    @app.get("/api/memory/projects", include_in_schema=False)
+    async def memory_projects_get(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_projects(user_key=user_key)
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
     @app.post("/api/memory/search", include_in_schema=False)
     async def memory_search_post(starlette_request: FastAPIRequest):
         async def handler():
@@ -1061,7 +1075,11 @@ def register_memory_routes(app) -> None:
                 payload = await starlette_request.json()
             except Exception:
                 payload = None
-            if not isinstance(payload, dict) or set(payload) != {"query", "policy"}:
+            if (
+                not isinstance(payload, dict)
+                or not {"query", "policy"}.issubset(payload)
+                or set(payload) - {"query", "policy", "project"}
+            ):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
             query = payload.get("query")
             if not isinstance(query, str):
@@ -1072,6 +1090,9 @@ def register_memory_routes(app) -> None:
                 policy = RecallPolicy.from_payload(payload.get("policy"))
             except (TypeError, ValueError):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
+            project = payload.get("project")
+            if project is not None and not isinstance(project, str):
+                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
             from vibe import internal_client
 
             return await _memory_internal_response(
@@ -1079,6 +1100,7 @@ def register_memory_routes(app) -> None:
                     query,
                     policy.payload(),
                     user_key=user_key,
+                    project=project,
                 )
             )
 

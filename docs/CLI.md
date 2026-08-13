@@ -128,8 +128,8 @@ Read scoped local Memory or queue durable context to remember — facts the user
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
-vibe memory search <query> [--limit 1..20] [--json]
-vibe memory remember <text> [--json]
+vibe memory search <query> [--project <slug>] [--limit 1..20] [--json]
+vibe memory remember <text> [--project <slug>] [--json]
 ```
 
 ### `vibe doctor`

@@ -1926,17 +1926,11 @@ class Controller:
         return scope[1] if scope is not None else None
 
     def default_memory_project_id(self) -> str:
-        """Return the Memory project used by a default-cwd Agent Session."""
+        """Return the Memory project used by Settings and default Agent search."""
 
-        from core.services.agent_run_target import resolve_default_agent_workdir
+        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
 
-        workdir = resolve_default_agent_workdir(
-            self,
-            platform="avibe",
-            settings_key="memory-ui",
-            session_key="memory-ui",
-        )
-        return self.memory_runtime.project_for_workdir(workdir)
+        return DEFAULT_MEMORY_PROJECT_ID
 
     async def final_flush_memory_session(
         self,
@@ -2039,24 +2033,56 @@ class Controller:
 
         if not isinstance(raw_session_id, str) or not raw_session_id:
             return False
-        scope = self.memory_scope_for_cli_session(raw_session_id)
-        if scope is None:
-            runtime = getattr(self, "memory_runtime", None)
-            resolve = getattr(runtime, "resolve_current_session_scope", None)
-            if callable(resolve):
-                try:
-                    scope = await resolve(raw_session_id)
-                except Exception:
-                    logger.debug("Memory session scope recovery failed", exc_info=True)
-                    return False
-        if scope is None:
-            return False
-        return await self._final_flush_memory_scope(
-            raw_session_id,
-            scope[0],
-            scope[1],
-            deadline_seconds=deadline_seconds,
+        from core.memory.project_ids import (
+            DEFAULT_MEMORY_PROJECT_ID,
+            is_persisted_memory_project_id,
         )
+        from core.memory.store import is_principal_id
+
+        live_scope = self.memory_scope_for_cli_session(raw_session_id)
+        runtime = getattr(self, "memory_runtime", None)
+        resolve_scopes = getattr(runtime, "resolve_current_session_scopes", None)
+        durable_scopes: tuple[tuple[str, str], ...] | None = ()
+        if callable(resolve_scopes):
+            try:
+                durable_scopes = await resolve_scopes(raw_session_id)
+            except Exception:
+                logger.debug("Memory session scope recovery failed", exc_info=True)
+                durable_scopes = None
+        if durable_scopes is None:
+            return False
+        scopes = set(durable_scopes)
+        if live_scope is not None:
+            scopes.add(live_scope)
+        if not scopes:
+            return False
+        ordered = sorted(
+            scopes,
+            key=lambda scope: (scope[1] != DEFAULT_MEMORY_PROJECT_ID, scope),
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(deadline_seconds, 0.001)
+        flushed_any = False
+        failed = False
+        for principal_id, project_id in ordered:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            if not is_principal_id(principal_id) or not is_persisted_memory_project_id(
+                project_id
+            ):
+                failed = True
+                continue
+            ok = await self._final_flush_memory_scope(
+                raw_session_id,
+                principal_id,
+                project_id,
+                deadline_seconds=remaining,
+            )
+            flushed_any = flushed_any or ok
+            if not ok:
+                failed = True
+        return flushed_any and not failed
 
     async def archive_memory_cli_session(
         self,

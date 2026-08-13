@@ -4221,14 +4221,19 @@
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {
-      "description": "搜索你的画像、事件和事实。",
+      "description": "搜索你的记忆。对话默认写入 Default；只有 Agent 显式指定时才会进命名项目。",
       "placeholder": "搜索你的记忆…",
       "button": "搜索",
       "searching": "搜索中…",
       "empty": "没有结果。",
       "searchFailed": "搜索失败。",
       "disabledHint": "启用记忆后即可搜索。",
-      "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
+      "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。",
+      "projectLabel": "记忆项目",
+      "projectDefault": "默认",
+      "projectAll": "我的全部项目",
+      "partial": "部分项目未能搜索，结果可能不完整。",
+      "truncated": "搜索在查完所有项目前停止，结果可能不完整。"
     },
     "log": {
       "description": "查看本安装中所有用户和项目的已创建记忆条目的处理记录。",

@@ -17,6 +17,10 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from core.memory.artifact import EVEROS_VERSION
+from core.memory.project_ids import (
+    is_new_stored_memory_project_id,
+    is_persisted_memory_project_id,
+)
 from core.memory.everos_insight import install_error_scrubbers, prepare_call_recorder
 from core.memory.everos_insight.patches import boundary_request
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
@@ -25,7 +29,6 @@ from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
 _PRINCIPAL_PATTERN = re.compile(r"u-[0-9a-f]{32}\Z")
-_PROJECT_PATTERN = re.compile(r"p-[0-9a-f]{32}\Z")
 _SESSION_PATTERN = re.compile(r"src--[0-9a-f]{64}--e(?:0|[1-9][0-9]*)\Z")
 logger = logging.getLogger(__name__)
 
@@ -201,13 +204,14 @@ def _request_rejection(
     return _validate_get(payload)
 
 
-def _valid_scope(payload: dict[str, Any]) -> bool:
+def _valid_write_scope(payload: dict[str, Any]) -> bool:
     project_id = payload.get("project_id")
-    return (
-        payload.get("app_id") == _APP_ID
-        and isinstance(project_id, str)
-        and _PROJECT_PATTERN.fullmatch(project_id) is not None
-    )
+    return payload.get("app_id") == _APP_ID and is_persisted_memory_project_id(project_id)
+
+
+def _valid_search_scope(payload: dict[str, Any]) -> bool:
+    project_id = payload.get("project_id")
+    return payload.get("app_id") == _APP_ID and is_new_stored_memory_project_id(project_id)
 
 
 def _exact_keys(payload: dict[str, Any], keys: set[str]) -> bool:
@@ -219,7 +223,7 @@ def _validate_add(
     *,
     attachments_root: Path | None,
 ) -> str | None:
-    if not _exact_keys(payload, {"session_id", "app_id", "project_id", "messages"}) or not _valid_scope(payload):
+    if not _exact_keys(payload, {"session_id", "app_id", "project_id", "messages"}) or not _valid_write_scope(payload):
         return "add"
     messages = payload.get("messages")
     if not _valid_session(payload.get("session_id")) or not isinstance(messages, list) or len(messages) != 1:
@@ -289,7 +293,7 @@ def _valid_workbench_attachment(item: dict[str, Any], attachments_root: Path | N
 
 
 def _validate_flush(payload: dict[str, Any]) -> str | None:
-    if not _exact_keys(payload, {"session_id", "app_id", "project_id"}) or not _valid_scope(payload):
+    if not _exact_keys(payload, {"session_id", "app_id", "project_id"}) or not _valid_write_scope(payload):
         return "flush"
     return None if _valid_session(payload.get("session_id")) else "flush"
 
@@ -307,7 +311,7 @@ def _validate_search(payload: dict[str, Any]) -> str | None:
     }
     if frozenset(payload) not in {frozenset(required), frozenset((*required, "filters"))}:
         return "search"
-    if not _valid_scope(payload):
+    if not _valid_search_scope(payload):
         return "search"
     if (
         not _valid_principal(payload.get("user_id"))

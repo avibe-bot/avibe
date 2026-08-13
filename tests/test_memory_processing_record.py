@@ -1208,7 +1208,7 @@ def _enqueue(runtime: MemoryRuntime, source: str) -> None:
         source_message_id=source,
         session_id="session",
         principal_id="u-11111111111111111111111111111111",
-        project_ref="p-22222222222222222222222222222222",
+        project_ref="default",
         provenance="user_input",
         payload_text="private payload",
         occurred_at_ms=1,

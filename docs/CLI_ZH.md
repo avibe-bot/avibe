@@ -109,8 +109,8 @@ vibe status
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
-vibe memory search <查询> [--limit 1..20] [--json]
-vibe memory remember <文本> [--json]
+vibe memory search <查询> [--project <slug>] [--limit 1..20] [--json]
+vibe memory remember <文本> [--project <slug>] [--json]
 ```
 
 ### `vibe doctor`

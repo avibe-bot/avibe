@@ -42,6 +42,17 @@ capabilities:
       - ui/src/components/settings/SettingsDependenciesPage.test.tsx
       - ui/src/components/settings/SettingsMemoryPage.test.tsx
       - ui/src/components/settings/memory/MemorySettingsPanel.test.tsx
+  - id: memory_search
+    name: Default Memory project and explicit named projects
+    status: active
+    catalog: tests/scenarios/memory_search/catalog.yaml
+    scenario_tests:
+      - tests/test_memory_admission.py
+      - tests/test_memory_store.py
+    unit_or_contract_tests:
+      - tests/test_memory_project_ids.py
+      - tests/test_memory_sidecar.py
+      - tests/test_ui_memory_routes.py
   - id: memory_repair
     name: Live Memory index repair via admitted artifact sync
     status: active

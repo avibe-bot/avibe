@@ -565,7 +565,8 @@ export type ApiContextType = {
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryMaintenance: () => Promise<MemoryMaintenanceResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
-  searchMemory: (query: string, limit?: number) => Promise<MemoryRecallResult>;
+  searchMemory: (query: string, limit?: number, project?: string) => Promise<MemoryRecallResult>;
+  listMemoryProjects: () => Promise<{ status: 'ok'; projects: Array<{ id: string; kind: 'default' | 'named' | 'all' }> } | { status: 'failed'; error?: string }>;
   getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
   getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
   clearMemory: () => Promise<MemoryClearResult>;
@@ -2003,11 +2004,14 @@ export type MemoryProfile = {
   updated_at: string | null;
 };
 
+export type MemorySearchWarning = 'memory_search_partial' | 'memory_search_truncated';
+
 export type MemoryItem = {
   kind: MemoryItemKind;
   text: string;
   date: string | null;
   profile?: MemoryProfile;
+  project?: string;
 };
 
 export type MemoryItemsResult =
@@ -2018,7 +2022,7 @@ export type MemoryRecallResult =
   | {
       status: 'ok';
       items: MemoryItem[];
-      warnings: string[];
+      warnings: MemorySearchWarning[];
       requested_mode: 'auto' | 'keyword' | 'vector' | 'hybrid' | 'agentic';
       effective_mode: 'keyword' | 'vector' | 'hybrid' | 'agentic';
       source: 'everos';
@@ -3321,7 +3325,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryMaintenance: () => getJson('/api/memory/maintenance', { handleError: false }),
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
-    searchMemory: (query, limit = 20) => postJson('/api/memory/search', {
+    searchMemory: (query, limit = 20, project) => postJson('/api/memory/search', {
       query,
       policy: {
         mode: 'hybrid',
@@ -3329,7 +3333,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         include_profile: true,
         include_current_session: false,
       },
+      ...(project ? { project } : {}),
     }, { handleError: false }),
+    listMemoryProjects: () => getJson('/api/memory/projects', { handleError: false }),
     getMemoryLog: (cursor = null, limit = 20) => {
       const query = new URLSearchParams({ limit: String(limit) });
       if (cursor) query.set('cursor', cursor);

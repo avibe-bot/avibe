@@ -119,7 +119,9 @@ describe('Memory UI copy contracts', () => {
 
   it.each(['en', 'zh'] as const)('keeps Search, source timestamps, and processing-log scope accurate in %s', (language) => {
     if (language === 'en') {
-      expect(en.memory.search.description).toBe('Search your profile, episodes, and facts.');
+      expect(en.memory.search.description).toContain('Default');
+      expect(en.memory.search.projectAll).toBe('All my projects');
+      expect(en.memory.search.partial).toContain('incomplete');
       expect(en.memory.processingRecord.sources.help).toContain('last checked');
       expect(en.memory.processingRecord.sources.help).not.toContain('last updated');
       expect(en.memory.log.description).toBe(
@@ -127,7 +129,9 @@ describe('Memory UI copy contracts', () => {
       );
       expect(en.memory.clear.confirmDescription).toContain('Avibe-managed Memory data');
     } else {
-      expect(zh.memory.search.description).toBe('搜索你的画像、事件和事实。');
+      expect(zh.memory.search.description).toContain('Default');
+      expect(zh.memory.search.projectAll).toBe('我的全部项目');
+      expect(zh.memory.search.partial).toContain('不完整');
       expect(zh.memory.processingRecord.sources.help).toContain('最近一次检查');
       expect(zh.memory.processingRecord.sources.help).not.toContain('上次更新');
       expect(zh.memory.log.description).toBe('查看本安装中所有用户和项目的已创建记忆条目的处理记录。');

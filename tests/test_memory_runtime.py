@@ -83,7 +83,7 @@ from config.v2_config import (
 )
 
 
-PROJECT = "p-22222222222222222222222222222222"
+PROJECT = "default"
 
 
 def _maintenance(runtime: MemoryRuntime) -> MemoryMaintenance:
@@ -1970,11 +1970,11 @@ async def test_multi_scope_session_lifecycle_holds_every_fence_through_operation
     )
     first_scope = (
         "u-11111111111111111111111111111111",
-        "p-11111111111111111111111111111111",
+        "default",
     )
     second_scope = (
         "u-22222222222222222222222222222222",
-        "p-22222222222222222222222222222222",
+        "billing",
     )
     session_id = "multi-scope-lifecycle-session"
     operation_entered = asyncio.Event()
