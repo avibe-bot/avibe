@@ -73,6 +73,34 @@ def test_legacy_open_journal_migrates_then_removes_journal(tmp_path: Path):
     assert not journal.exists()
 
 
+def test_legacy_open_journal_without_target_epoch_defers_until_store_epoch(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    operation_id = "2f7e31f4-ecf6-4c11-a3ed-e6e4e30e5b0f"
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, 1)",
+        (operation_id, "user-1", 2, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(journal, 0o600)
+
+    store = ClearIntentStore(tmp_path)
+    assert store.migrate_legacy(current_epoch=None) is None
+    assert journal.exists()
+
+    intent = store.migrate_legacy(current_epoch=3)
+    assert intent is not None
+    assert intent.pre_epoch == 2
+    assert intent.target_epoch == 3
+    assert not journal.exists()
+
+
 def test_legacy_journal_symlink_is_unreadable(tmp_path: Path):
     journal = tmp_path / "state/memory/clear-journal.sqlite"
     journal.parent.mkdir(parents=True)

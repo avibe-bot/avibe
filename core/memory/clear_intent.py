@@ -160,7 +160,7 @@ class ClearIntentStore:
             if os.path.lexists(self.path):
                 raise ClearIntentError("Memory clear intent marker could not be removed") from error
 
-    def migrate_legacy(self, *, current_epoch: int) -> ClearIntent | None:
+    def migrate_legacy(self, *, current_epoch: int | None) -> ClearIntent | None:
         """Convert one released clear journal before deleting its old storage."""
 
         existing = self.load()
@@ -188,7 +188,20 @@ class ClearIntentStore:
             operation_id = str(row["operation_id"])
             operator_ref = str(row["operator_ref"])
             pre_epoch = int(row["pre_epoch"])
-            target_epoch = int(row["target_epoch"])
+            columns = set(row.keys())
+            target_value = row["target_epoch"] if "target_epoch" in columns else None
+            if target_value is None:
+                # Older released journals did not persist the target. Defer
+                # until the Memory store is attached so the two-state replay
+                # rule can distinguish a queue clear that already advanced the
+                # epoch from one that did not.
+                if current_epoch is None:
+                    return None
+                target_epoch = pre_epoch + 1
+                if current_epoch not in {pre_epoch, target_epoch}:
+                    raise ValueError("legacy clear epoch is not replay-safe")
+            else:
+                target_epoch = int(target_value)
             if target_epoch != pre_epoch + 1:
                 raise ValueError("legacy clear target epoch is invalid")
             state = str(row["state"])

@@ -2876,7 +2876,7 @@ class MemoryStore:
             return refreshed
 
     def release_clear_fence(self) -> MemoryMeta:
-        """Release admission after an abort restored the pre-clear surfaces."""
+        """Release admission after the marker-owned clear sweep completes."""
 
         now = utc_now_iso()
         with self._transaction() as conn:
@@ -2894,8 +2894,21 @@ class MemoryStore:
                 raise RuntimeError("Memory metadata disappeared while releasing clear")
             return refreshed
 
-    def reset_for_clear(self, *, target_epoch: int | None = None) -> MemoryMeta:
-        """Clear SQLite state at an exact, replay-safe target epoch."""
+    def reset_for_clear(
+        self,
+        *,
+        target_epoch: int | None = None,
+        release_clear_fence: bool = True,
+    ) -> MemoryMeta:
+        """Clear SQLite state at an exact, replay-safe target epoch.
+
+        ``release_clear_fence=False`` is used by the marker-owned multi-surface
+        sweep so queue reset cannot reopen admission before the other surfaces
+        have reached their terminal state.
+        """
+
+        if not isinstance(release_clear_fence, bool):
+            raise TypeError("release_clear_fence must be a bool")
 
         with self._transaction() as conn:
             meta = self._ensure_meta_in_connection(conn)
@@ -2923,7 +2936,7 @@ class MemoryStore:
             conn.execute(
                 """
                 UPDATE memory_meta
-                SET epoch = ?, clear_in_progress = 0,
+                SET epoch = ?, clear_in_progress = ?,
                     last_provider_timestamp_ms = 0, missed_count = 0,
                     last_success_at = NULL, last_error = NULL, last_error_at = NULL,
                     processing_fault_kind = NULL, processing_fault_since = NULL,
@@ -2932,7 +2945,7 @@ class MemoryStore:
                     processing_recovery_generation = NULL, updated_at = ?
                 WHERE singleton = 1
                 """,
-                (epoch, now),
+                (epoch, 0 if release_clear_fence else 1, now),
             )
             refreshed = self._meta_in_connection(conn)
             if refreshed is None:

@@ -1543,6 +1543,7 @@ class MemoryRuntime:
             await run_blocking(
                 self._store.reset_for_clear,
                 target_epoch=target_epoch,
+                release_clear_fence=False,
             )
             return
         if surface.surface == "provider":

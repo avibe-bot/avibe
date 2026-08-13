@@ -118,7 +118,7 @@ class MemoryMaintenance:
         if self._intent_error is not None:
             return
         try:
-            current_epoch = store.ensure_meta().epoch if store is not None else 0
+            current_epoch = store.ensure_meta().epoch if store is not None else None
             self._intent.migrate_legacy(current_epoch=current_epoch)
         except ClearIntentUnreadable as error:
             self._intent_error = error
@@ -182,10 +182,15 @@ class MemoryMaintenance:
             block_reason = clear_in_progress.error_code or "memory_clear_failed"
         else:
             block_reason = "busy"
+        can_clear = self.ready and (
+            block_reason is None
+            or self._intent_error is not None
+            or (clear_in_progress is not None and clear_in_progress.state == "failed")
+        )
         return MaintenanceObservation(
             block_reason=block_reason,
             clear_in_progress=clear_in_progress,
-            can_clear=self.ready and block_reason is None,
+            can_clear=can_clear,
         )
 
     async def maintenance_payload(
@@ -239,9 +244,16 @@ class MemoryMaintenance:
         async with self._runtime.boot_recovery_fence():
             self._runtime.enter_maintenance()
             try:
+                await self._run_maintenance_io(self._store.begin_clear_fence)
                 await self._runtime.quiesce(True)
                 result = await self._run_clear_intent(intent, operator_ref=intent.operator_ref, boot=True)
                 return result.status == "completed"
+            except asyncio.CancelledError:
+                await self._record_failure(intent, "memory_clear_failed")
+                raise
+            except Exception:
+                await self._record_failure(intent, "memory_clear_failed")
+                return False
             finally:
                 self._runtime.leave_maintenance()
 
@@ -261,10 +273,13 @@ class MemoryMaintenance:
                     meta = await self._run_maintenance_io(self._store.ensure_meta)
                     intent = ClearIntent.new(operator_ref=operator_ref, pre_epoch=meta.epoch)
                     await self._run_maintenance_io(lambda: self._intent.write(intent))
+                    self._intent_error = None
                 elif intent.state == "failed":
                     intent = intent.deleting()
                     await self._run_maintenance_io(lambda: self._intent.write(intent))
+                    self._intent_error = None
                 try:
+                    await self._run_maintenance_io(self._store.begin_clear_fence)
                     await self._runtime.pause_claims()
                     await self._runtime.quiesce(False)
                 except asyncio.CancelledError:
@@ -288,9 +303,9 @@ class MemoryMaintenance:
     ) -> ClearResult:
         assert self._store is not None
         try:
-            await self._run_maintenance_io(self._store.begin_clear_fence)
             for surface in DEFAULT_CLEAR_SURFACES:
                 await self._runtime.delete_surface(surface, intent.target_epoch)
+            await self._run_maintenance_io(self._store.release_clear_fence)
             try:
                 await self._run_maintenance_io(self._intent.remove)
             except ClearIntentError:
@@ -311,6 +326,7 @@ class MemoryMaintenance:
             return self._failed_result()
         self._runtime.restore_completed()
         await self._runtime.resume()
+        self._intent_error = None
         return ClearResult("completed", intent.operation_id, intent.target_epoch)
 
     async def _record_failure(self, intent: ClearIntent, error_code: str) -> None:
