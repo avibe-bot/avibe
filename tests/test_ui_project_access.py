@@ -747,30 +747,37 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
 
 def test_show_page_payload_redacts_path_for_viewers(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config, _ids = _setup_state(tmp_path)
+    config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                **_intent(ids["project_a"], "alice@example.com", role="viewer"),
+                "revision": 2,
+            },
+        )
     monkeypatch.setattr(
         api,
         "list_show_pages",
         lambda **_kwargs: {
             "ok": True,
             "count": 1,
-            "pages": [{"session_id": "ses-page", "path": "/private/show-page"}],
+            "pages": [{"session_id": ids["session_a"], "path": "/private/show-page"}],
         },
     )
 
     viewer = _remote_client(config, role="viewer", email="alice@example.com")
-    viewer_page = next(
-        page for page in _get(viewer, "/api/show-pages").get_json()["pages"]
-        if page["session_id"] == "ses-page"
-    )
+    viewer_page = _get(viewer, "/api/show-pages").get_json()["pages"][0]
     assert "path" not in viewer_page
 
     editor = _remote_client(config, role="editor", email="alice@example.com")
-    editor_page = next(
-        page for page in _get(editor, "/api/show-pages").get_json()["pages"]
-        if page["session_id"] == "ses-page"
-    )
-    assert editor_page["path"] == "/private/show-page"
+    editor_page = _get(editor, "/api/show-pages").get_json()["pages"][0]
+    assert "path" not in editor_page
+
+    owner = _remote_client(config, role="owner", email="owner@example.com")
+    owner_page = _get(owner, "/api/show-pages").get_json()["pages"][0]
+    assert owner_page["path"] == "/private/show-page"
 
 
 def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) -> None:

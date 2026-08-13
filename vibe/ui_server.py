@@ -5054,7 +5054,18 @@ def _is_remote_show_page_request() -> bool:
 
 def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
     context = _request_authorization_context(context)
-    if context is None or context.has_role("editor"):
+    if context is None or _has_runtime_owner_access(context):
+        return payload
+    from storage import project_access_service
+
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        effective_role = project_access_service.get_effective_session_role(
+            conn,
+            context,
+            str(payload.get("session_id") or ""),
+        )
+    if project_access_service.role_allows(effective_role, "editor"):
         return payload
     return {key: value for key, value in payload.items() if key != "path"}
 

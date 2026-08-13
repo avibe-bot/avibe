@@ -213,11 +213,7 @@ def _project_for_context(
         project_id,
     )
     payload["capabilities"] = {
-        "can_chat": project_access_service.can_chat_project(
-            conn,
-            context,
-            project_id,
-        )
+        "can_chat": project_access_service.role_allows(effective_role, "editor")
     }
     if not project_access_service.role_allows(effective_role, "editor"):
         # Effective Viewers must not disclose host-local filesystem details.
