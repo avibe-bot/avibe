@@ -32,12 +32,14 @@ from core.memory.store import (
 from core.memory.types import ProviderSessionRef
 
 
-PROJECT = "p-22222222222222222222222222222222"
+PROJECT = "default"
+LEGACY_PROJECT = "p-22222222222222222222222222222222"
 FOUNDATION_SCHEMAS = (
     Path(__file__).with_name("fixtures") / "memory_initial_foundation_v0.sql",
     Path(__file__).with_name("fixtures") / "memory_foundation_v0.sql",
 )
 V1_SCHEMA = Path(__file__).with_name("fixtures") / "memory_foundation_v1.sql"
+V2_SCHEMA = Path(__file__).with_name("fixtures") / "memory_foundation_v2.sql"
 
 
 def _dt(value: str) -> datetime:
@@ -185,6 +187,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "memory_capture_queue",
             "memory_session_flush_state",
             "memory_flush_settlements",
+            "memory_projects",
         }.issubset(tables)
         assert "ix_memory_capture_due" in indexes
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
@@ -282,7 +285,7 @@ def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
         provider_ref = ProviderSessionRef(
             principal_id=principal_id,
             epoch=0,
-            project_ref=PROJECT,
+            project_ref=LEGACY_PROJECT,
             session_id="src--4f619a27f96acb8854d2c1f4d2b301263832544740e2c0b176d1a1a05f5b997d--e0",
         ).serialize()
         provider_column = (
@@ -298,9 +301,9 @@ def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
             ) VALUES (?, 0, 'legacy-session'{provider_value}, ?, ?,
                       'user_input', 'legacy payload', 1, 1, 'pending', 'now')
             """,
-            ("legacy-digest", provider_ref, principal_id, PROJECT)
+            ("legacy-digest", provider_ref, principal_id, LEGACY_PROJECT)
             if provider_column
-            else ("legacy-digest", principal_id, PROJECT),
+            else ("legacy-digest", principal_id, LEGACY_PROJECT),
         )
         receipt_columns = (
             ", flush_observation, flush_status, flush_request_id, flush_observed_at, completed_at"
@@ -318,9 +321,9 @@ def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
                       'agent', 2, 2, 'delivered', 1, 'add-legacy', 'now',
                       'succeeded', 'extracted', 'flush-legacy', 'now', 'now')
             """,
-            ("legacy-delivered", provider_ref, principal_id, PROJECT)
+            ("legacy-delivered", provider_ref, principal_id, LEGACY_PROJECT)
             if provider_column
-            else ("legacy-delivered", principal_id, PROJECT),
+            else ("legacy-delivered", principal_id, LEGACY_PROJECT),
         )
 
     store = MemoryStore(database)
@@ -449,10 +452,10 @@ def _install_representative_v1_database(database: Path) -> None:
                 ProviderSessionRef(
                     principal_id="u-11111111111111111111111111111111",
                     epoch=4,
-                    project_ref=PROJECT,
+                    project_ref=LEGACY_PROJECT,
                     session_id="preserved-provider-session",
                 ).serialize(),
-                PROJECT,
+                LEGACY_PROJECT,
             ),
         )
 
@@ -464,7 +467,7 @@ def test_store_migrates_v1_metadata_and_preserves_existing_data(tmp_path: Path) 
     store = MemoryStore(database)
 
     with sqlite3.connect(database) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == MEMORY_STORE_SCHEMA_VERSION
         columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
         assert {
             "processing_fault_generation",
@@ -513,10 +516,102 @@ def test_store_rolls_back_failed_v1_migration_without_changing_data(
         ).fetchone()[0] == "preserved payload"
 
 
+def test_named_project_cap_is_invalid_input_not_store_failure(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path / "named-cap"))
+    principal = "u-11111111111111111111111111111111"
+    for index in range(16):
+        accepted = store.enqueue_request(
+            source_message_id=f"named-{index}",
+            session_id=f"ses-{index}",
+            principal_id=principal,
+            project_ref=f"proj{index:02d}",
+            provenance="agent",
+            payload_text="named",
+            occurred_at_ms=index + 1,
+            max_provider_timestamp_ms=4_102_444_800_000,
+        )
+        assert accepted.outcome == "accepted"
+    limited = store.enqueue_request(
+        source_message_id="named-overflow",
+        session_id="ses-overflow",
+        principal_id=principal,
+        project_ref="proj16",
+        provenance="agent",
+        payload_text="overflow",
+        occurred_at_ms=100,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert limited.outcome == "project_limit"
+    reuse = store.enqueue_request(
+        source_message_id="named-reuse",
+        session_id="ses-reuse",
+        principal_id=principal,
+        project_ref="proj00",
+        provenance="agent",
+        payload_text="reuse",
+        occurred_at_ms=101,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert reuse.outcome == "accepted"
+
+
+def test_store_migrates_v2_queue_and_accepts_default_project(tmp_path: Path) -> None:
+    """Scenario: MEMORY-SEARCH-005"""
+    database = _store_path(tmp_path / "schema-v2")
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as conn:
+        conn.executescript(V2_SCHEMA.read_text(encoding="utf-8"))
+        conn.execute("PRAGMA user_version = 2")
+        conn.execute(
+            """
+            INSERT INTO memory_meta (
+                singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                last_provider_timestamp_ms, missed_count, processing_fault_generation,
+                processing_alert_active, updated_at
+            ) VALUES (1, 1, 0, ?, 'v2-root', 0, 0, 0, 0, 'now')
+            """,
+            (bytes.fromhex("11" * 32),),
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id, provider_session_ref,
+                generation, principal_id, project_ref, provenance, payload_text,
+                occurred_at_ms, provider_timestamp_ms, state, attempts,
+                lease_token, created_at
+            ) VALUES (
+                'legacy-pending', 1, 'ses', 'ref', 1,
+                'u-11111111111111111111111111111111', ?,
+                'user_input', 'old payload', 1, 1, 'pending', 0, 0, 'now'
+            )
+            """,
+            (LEGACY_PROJECT,),
+        )
+
+    store = MemoryStore(database)
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute(
+            "SELECT project_ref FROM memory_capture_queue WHERE source_message_digest = 'legacy-pending'"
+        ).fetchone()[0] == LEGACY_PROJECT
+    accepted = store.enqueue_request(
+        source_message_id="new-default",
+        session_id="ses-new",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref="default",
+        provenance="user_input",
+        payload_text="new payload",
+        occurred_at_ms=2,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert accepted.outcome == "accepted"
+    assert store.list_memory_projects("u-11111111111111111111111111111111") == ("default",)
+
+
 def test_store_rejects_unknown_nonzero_schema_without_rebuilding(
     tmp_path: Path,
 ) -> None:
-    version = 3
+    version = 4
     database = _store_path(tmp_path / f"schema-v{version}")
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:
@@ -536,11 +631,12 @@ def test_store_rejects_unknown_nonzero_schema_without_rebuilding(
 
 
 def test_session_scope_recovery_survives_store_reopen_and_separates_sessions(tmp_path: Path) -> None:
+    """Scenario: MEMORY-SEARCH-006"""
     store_path = _store_path(tmp_path)
     first_scope = ("u-11111111111111111111111111111111", PROJECT)
     second_scope = (
         "u-22222222222222222222222222222222",
-        "p-33333333333333333333333333333333",
+        "billing",
     )
     store = MemoryStore(store_path)
     _enqueue_for_scope(store, "source-a", "session-a", *first_scope)
@@ -572,7 +668,7 @@ def test_session_scope_recovery_fails_closed_when_raw_session_is_ambiguous(tmp_p
         "source-b",
         "shared-session",
         "u-22222222222222222222222222222222",
-        "p-33333333333333333333333333333333",
+        "billing",
     )
 
     assert store.resolve_current_session_scope("shared-session") is None
@@ -583,7 +679,7 @@ def test_session_scope_recovery_fails_closed_when_raw_session_is_ambiguous(tmp_p
         ),
         (
             "u-22222222222222222222222222222222",
-            "p-33333333333333333333333333333333",
+            "billing",
         ),
     )
 
@@ -595,7 +691,7 @@ def test_session_scope_recovery_fails_closed_when_raw_session_is_ambiguous(tmp_p
         ),
         (
             "u-22222222222222222222222222222222",
-            "p-33333333333333333333333333333333",
+            "billing",
         ),
     )
 
@@ -1426,7 +1522,7 @@ def test_reused_memory_session_anchor_is_namespaced_by_project(tmp_path: Path) -
         source_message_id="second",
         session_id="session",
         principal_id="u-11111111111111111111111111111111",
-        project_ref="p-33333333333333333333333333333333",
+        project_ref="billing",
         provenance="user_input",
         payload_text="queued payload",
         occurred_at_ms=1_001,

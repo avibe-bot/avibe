@@ -699,6 +699,7 @@
         "search": "搜索本地记忆",
         "remember": "将长期个人信息加入队列",
         "query": "搜索内容",
+        "project": "记忆项目：default，或 billing 这类小写 slug",
         "limit": "最大结果数（1-20）",
         "text": "要记住的文本（最多 4,000 个字符）",
         "json": "输出机器可读格式"

@@ -534,13 +534,17 @@ def memory_remember_sync(
     text: str,
     *,
     caller_session_id: str | None = None,
+    project: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
+    payload: dict[str, object] = {"text": text}
+    if project is not None:
+        payload["project"] = project
     return _memory_request_sync(
         "POST",
         "/internal/memory/remember",
-        payload={"text": text},
+        payload=payload,
         headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,
@@ -866,18 +870,41 @@ async def memory_profile(
     )
 
 
+async def memory_projects(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "GET",
+        "/internal/memory/projects",
+        headers=_memory_user_key_headers(
+            "GET",
+            "/internal/memory/projects",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_search(
     query: str,
     policy: dict[str, object],
     *,
     user_key: str,
+    project: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_SEARCH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    payload: dict[str, object] = {"query": query, "policy": policy}
+    if project is not None:
+        payload["project"] = project
     return await _memory_request(
         "POST",
         "/internal/memory/search",
-        payload={"query": query, "policy": policy},
+        payload=payload,
         headers=_memory_user_key_headers(
             "POST",
             "/internal/memory/search",
@@ -984,21 +1011,25 @@ def memory_search_sync(
     limit: int,
     *,
     caller_session_id: str | None = None,
+    project: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_SEARCH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    payload: dict[str, object] = {
+        "query": query,
+        "policy": {
+            "mode": "hybrid",
+            "max_results": limit,
+            "include_profile": True,
+            "include_current_session": False,
+        },
+    }
+    if project is not None:
+        payload["project"] = project
     return _memory_request_sync(
         "POST",
         "/internal/memory/search",
-        payload={
-            "query": query,
-            "policy": {
-                "mode": "hybrid",
-                "max_results": limit,
-                "include_profile": True,
-                "include_current_session": False,
-            },
-        },
+        payload=payload,
         headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,
@@ -1009,13 +1040,17 @@ def memory_remember_sync(
     text: str,
     *,
     caller_session_id: str | None = None,
+    project: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
+    payload: dict[str, object] = {"text": text}
+    if project is not None:
+        payload["project"] = project
     return _memory_request_sync(
         "POST",
         "/internal/memory/remember",
-        payload={"text": text},
+        payload=payload,
         headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,

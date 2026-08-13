@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeAlias
 
+from core.memory.project_ids import (
+    is_new_stored_memory_project_id,
+    is_persisted_memory_project_id,
+)
 from core.memory.processing_record import (
     ProcessingSourceObservations,
     SourceObservation,
@@ -1358,7 +1362,7 @@ def _validated_scope(scope: MemoryReadScope) -> MemoryReadScope:
     principal_id, project_id = scope
     if not isinstance(principal_id, str) or not _PRINCIPAL_RE.fullmatch(principal_id):
         raise ValueError("invalid memory principal")
-    if not isinstance(project_id, str) or not _PROJECT_RE.fullmatch(project_id):
+    if not isinstance(project_id, str) or not is_new_stored_memory_project_id(project_id):
         raise ValueError("invalid memory project")
     return principal_id, project_id
 
@@ -1374,7 +1378,12 @@ def _memcell_scope_sql(
         )
     if isinstance(query_filter, _AdminMemcellFilter):
         return (
-            "project_id GLOB ?",
+            "(project_id = 'default' OR project_id GLOB ? OR ("
+            "length(project_id) BETWEEN 1 AND 63 "
+            "AND substr(project_id, 1, 1) GLOB '[a-z]' "
+            "AND project_id NOT GLOB '*[^a-z0-9_-]*' "
+            "AND project_id NOT IN ('all', 'personal') "
+            "AND substr(project_id, 1, 2) NOT IN ('p-', 'u-')))",
             "json_extract(sender_ids_json, '$[0]') GLOB ?",
             (_PROJECT_GLOB, _PRINCIPAL_GLOB),
         )
@@ -1398,7 +1407,7 @@ def _memcell_scope(row: sqlite3.Row) -> MemoryReadScope | None:
     if row["app_id"] != _APP_ID or not isinstance(row["project_id"], str):
         return None
     project_id = row["project_id"]
-    if _PROJECT_RE.fullmatch(project_id) is None:
+    if not is_persisted_memory_project_id(project_id):
         return None
     senders = _decode_json(row["sender_ids_json"])
     if (

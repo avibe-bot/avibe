@@ -292,12 +292,23 @@ class MemoryProfile:
     updated_at: str | None = None
 
 
+MemoryWarningCode = Literal["memory_search_partial", "memory_search_truncated"]
+CLOSED_MEMORY_WARNING_CODES = frozenset(
+    {"memory_search_partial", "memory_search_truncated"}
+)
+
+
+def is_memory_warning_code(value: object) -> bool:
+    return isinstance(value, str) and value in CLOSED_MEMORY_WARNING_CODES
+
+
 @dataclass(frozen=True)
 class MemoryItem:
     kind: MemoryKind
     text: str
     date: str | None = None
     profile: MemoryProfile | None = None
+    project: str | None = None
 
 
 def memory_profile_payload(profile: MemoryProfile) -> dict[str, Any]:
@@ -336,13 +347,15 @@ def memory_item_payload(item: MemoryItem) -> dict[str, Any]:
     }
     if item.profile is not None:
         payload["profile"] = memory_profile_payload(item.profile)
+    if item.project is not None:
+        payload["project"] = item.project
     return payload
 
 
 @dataclass(frozen=True)
 class MemoryItems:
     items: tuple[MemoryItem, ...] = ()
-    warnings: tuple[MemoryErrorCode, ...] = ()
+    warnings: tuple[MemoryErrorCode | MemoryWarningCode, ...] = ()
     status: Literal["ok"] = "ok"
 
 
@@ -458,7 +471,7 @@ class RecallItems:
     current_session_overlay: bool = False
     watermark_ms: int | None = None
     freshness: Literal["unknown"] = "unknown"
-    warnings: tuple[MemoryErrorCode, ...] = ()
+    warnings: tuple[MemoryErrorCode | MemoryWarningCode, ...] = ()
     status: Literal["ok"] = "ok"
 
 

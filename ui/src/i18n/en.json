@@ -4214,14 +4214,19 @@
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
-      "description": "Search your profile, episodes, and facts.",
+      "description": "Search your Memory. Conversations are stored in Default unless an Agent saved a fact to a named project.",
       "placeholder": "Search your memory…",
       "button": "Search",
       "searching": "Searching…",
       "empty": "No results.",
       "searchFailed": "Search failed.",
       "disabledHint": "Enable Memory to search.",
-      "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
+      "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded.",
+      "projectLabel": "Memory project",
+      "projectDefault": "Default",
+      "projectAll": "All my projects",
+      "partial": "Some projects could not be searched. These results may be incomplete.",
+      "truncated": "Search stopped before every project was checked. These results may be incomplete."
     },
     "log": {
       "description": "See the processing history for created Memory entries across every user and project on this installation.",

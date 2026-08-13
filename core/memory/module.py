@@ -24,11 +24,15 @@ from core.memory.attachments import (
 )
 from core.memory.provider_root import ProviderRoot
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
+from core.memory.project_ids import (
+    is_new_stored_memory_project_id,
+    is_persisted_memory_project_id,
+    is_writable_memory_project_id,
+)
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryStore,
     is_principal_id,
-    is_project_id,
 )
 from core.memory.types import (
     CaptureAccepted,
@@ -336,13 +340,13 @@ class MemoryModule:
     ) -> _SessionLifecycleResult:
         """Flush all session scopes and run one transition under every fence."""
 
-        canonical_scopes = tuple(sorted(set(scopes)))
+        canonical_scopes = tuple(dict.fromkeys(scopes))
         if (
             not canonical_scopes
             or not isinstance(raw_session_id, str)
             or not raw_session_id
             or any(
-                not is_principal_id(principal_id) or not is_project_id(project_id)
+                not is_principal_id(principal_id) or not is_persisted_memory_project_id(project_id)
                 for principal_id, project_id in canonical_scopes
             )
         ):
@@ -383,14 +387,21 @@ class MemoryModule:
             raise
 
         try:
+            flush_succeeded = True
             for principal_id, project_id in canonical_scopes:
-                await self._final_flush_under_admission(
+                flush_succeeded = (
+                    await self._final_flush_under_admission(
                     principal_id=principal_id,
                     project_id=project_id,
                     raw_session_id=raw_session_id,
                     deadline=deadline,
+                    )
+                    and flush_succeeded
                 )
-            return await operation()
+            result = await operation()
+            if isinstance(result, bool):
+                return result and flush_succeeded
+            return result
         finally:
             for admission_lock in reversed(acquired):
                 admission_lock.release()
@@ -546,6 +557,8 @@ class MemoryModule:
             return CaptureSkipped(reason="memory_queue_full")
         if result.outcome == "timestamp_invalid":
             return CaptureSkipped(reason="memory_invalid_input")
+        if result.outcome == "project_limit":
+            return CaptureSkipped(reason="memory_invalid_input")
         return CaptureSkipped(reason="memory_clear_failed")
 
     async def _capture_pin_failure(self, error: MemoryErrorCode) -> CaptureReceipt:
@@ -598,6 +611,7 @@ class MemoryModule:
         principal_id: str,
         project_id: str,
         current_session_id: str | None = None,
+        effective_mode: Literal["keyword", "vector", "hybrid", "agentic"] | None = None,
     ) -> RecallResult:
         """Execute one capability-gated recall decision and at most one search."""
 
@@ -611,7 +625,7 @@ class MemoryModule:
             return OperationFailed(error="memory_invalid_input")
         if not is_principal_id(principal_id):
             return OperationFailed(error="memory_access_denied")
-        if not is_project_id(project_id):
+        if not is_new_stored_memory_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
         if len(query_bytes) > MAX_QUERY_BYTES:
             return OperationFailed(error="memory_input_too_large")
@@ -645,29 +659,15 @@ class MemoryModule:
                     return OperationFailed(error="memory_store_unavailable")
 
             requested_mode = policy.mode
-            if requested_mode == "agentic":
+            if effective_mode is None:
+                effective_mode = await self.resolve_recall_mode(policy)
+                if isinstance(effective_mode, OperationFailed):
+                    return effective_mode
+            if effective_mode == "agentic":
                 # EverOS 1.2.3 has no public model-call/token budget contract.
                 # A local timeout alone cannot make this policy enforceable.
                 if not bool(getattr(self._provider, "agentic_budget_enforced", False)):
                     return OperationFailed(error="memory_capability_unavailable")
-                effective_mode: Literal["keyword", "vector", "hybrid", "agentic"] = "agentic"
-            elif requested_mode == "keyword":
-                effective_mode = "keyword"
-            else:
-                try:
-                    health = await asyncio.wait_for(
-                        self._provider.health_snapshot(),
-                        timeout=PROVIDER_READ_TIMEOUT_SECONDS,
-                    )
-                    embed_available = health.capabilities.get("embed") is True
-                except Exception:
-                    embed_available = False
-                if requested_mode == "auto":
-                    effective_mode = "hybrid" if embed_available else "keyword"
-                elif not embed_available:
-                    return OperationFailed(error="memory_capability_unavailable")
-                else:
-                    effective_mode = requested_mode
             result = await self._provider_read(
                 lambda: self._provider.search(
                     principal_id,
@@ -691,6 +691,30 @@ class MemoryModule:
             current_session_overlay=session_ref is not None,
         )
 
+    async def resolve_recall_mode(
+        self,
+        policy: RecallPolicy,
+    ) -> Literal["keyword", "vector", "hybrid", "agentic"] | OperationFailed:
+        if policy.mode == "agentic":
+            if not bool(getattr(self._provider, "agentic_budget_enforced", False)):
+                return OperationFailed(error="memory_capability_unavailable")
+            return "agentic"
+        if policy.mode == "keyword":
+            return "keyword"
+        try:
+            health = await asyncio.wait_for(
+                self._provider.health_snapshot(),
+                timeout=PROVIDER_READ_TIMEOUT_SECONDS,
+            )
+            embed_available = health.capabilities.get("embed") is True
+        except Exception:
+            embed_available = False
+        if policy.mode == "auto":
+            return "hybrid" if embed_available else "keyword"
+        if not embed_available:
+            return OperationFailed(error="memory_capability_unavailable")
+        return policy.mode
+
     async def profile(self, *, principal_id: str, project_id: str) -> MemoryResult:
         """Return a bounded provider profile result or one closed error category."""
 
@@ -698,7 +722,7 @@ class MemoryModule:
             return OperationFailed(error="memory_disabled")
         if not is_principal_id(principal_id):
             return OperationFailed(error="memory_access_denied")
-        if not is_project_id(project_id):
+        if not is_new_stored_memory_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
         if self._clear_active or self._is_maintenance_open():
             return OperationFailed(error="memory_clear_failed")
@@ -793,7 +817,7 @@ class MemoryModule:
             return "memory_invalid_input"
         if (
             not is_principal_id(request.principal_id)
-            or not is_project_id(request.project_id)
+            or not is_writable_memory_project_id(request.project_id)
             or request.provenance not in {"user_input", "agent"}
         ):
             return "memory_invalid_input"
