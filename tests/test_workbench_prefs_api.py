@@ -7,7 +7,7 @@ Mutations run at the ``vibe.api`` layer (like the Dock tests); the GET routes an
 the session filter are exercised through the Flask-compat test client.
 """
 
-from tests.test_ui_remote_access_auth import _save_config
+from tests.ui_server_test_helpers import save_config
 from vibe import api
 from vibe.ui_server import app
 
@@ -17,7 +17,7 @@ _NOW = "2026-07-16T00:00:00Z"
 
 def test_banner_pref_api_round_trip(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     from storage.importer import ensure_sqlite_state
 
     ensure_sqlite_state()
@@ -36,7 +36,7 @@ def test_banner_pref_api_round_trip(monkeypatch, tmp_path):
 
 def test_banner_pref_get_route_defaults_on(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     from storage.importer import ensure_sqlite_state
 
     ensure_sqlite_state()
@@ -67,7 +67,7 @@ def _seed_watch(engine, watch_id: str, session_id: str) -> None:
 
 def test_harness_bootstrap_scopes_watches_by_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
 

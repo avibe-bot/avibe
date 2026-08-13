@@ -277,26 +277,6 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     )
     assert mark_read.status_code == 200
 
-    allowed_action = client.post(
-        f"/api/sessions/{ids['session_a']}/attachments",
-        base_url=REMOTE_ORIGIN,
-        environ_base=REMOTE_PEER,
-        headers=headers,
-        json={},
-    )
-    hidden_action = client.post(
-        f"/api/sessions/{ids['session_b']}/attachments",
-        base_url=REMOTE_ORIGIN,
-        environ_base=REMOTE_PEER,
-        headers=headers,
-        json={},
-    )
-    # Empty JSON is rejected by the upload parser, but the request must reach
-    # the endpoint rather than being stopped by the remote execution gate.
-    assert allowed_action.status_code != 403 or allowed_action.get_json().get("code") != "remote_execution_disabled"
-    assert hidden_action.status_code != 403 or hidden_action.get_json().get("code") != "remote_execution_disabled"
-
-
 def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
@@ -454,16 +434,6 @@ def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path
     assert _get(client, "/api/show-pages").get_json()["pages"] == [
         {"session_id": ids["session_a"]}
     ]
-
-    response = client.post(
-        f"/api/sessions/{ids['session_a']}/attachments",
-        base_url=REMOTE_ORIGIN,
-        environ_base=REMOTE_PEER,
-        headers=csrf_headers(client, REMOTE_ORIGIN),
-        json={},
-    )
-    assert response.status_code != 403 or response.get_json().get("code") != "remote_execution_disabled"
-
 
 def test_legacy_media_token_uses_all_migrated_session_references(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -639,9 +609,9 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
         email="guest@example.net",
         active_org=False,
     )
-    assert _get(no_match, "/api/projects").status_code == 403
-    assert _get(no_match, "/api/sessions").status_code == 403
-    assert _get(no_match, f"/api/sessions/{ids['session_a']}").status_code == 403
+    assert _get(no_match, "/api/projects").status_code == 200
+    assert _get(no_match, "/api/sessions").status_code == 200
+    assert _get(no_match, f"/api/sessions/{ids['session_a']}").status_code == 404
     no_match_headers = csrf_headers(no_match, REMOTE_ORIGIN)
     denied = no_match.post(
         "/api/sessions",
@@ -651,7 +621,7 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
         json={"project_id": ids["project_a"]},
     )
     assert denied.status_code == 403
-    assert denied.get_json()["code"] == "remote_execution_disabled"
+    assert denied.get_json()["code"] == "project_access_denied"
 
     organization_member = app.test_client()
     organization_member.set_cookie(

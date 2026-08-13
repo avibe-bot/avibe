@@ -1566,21 +1566,6 @@ def _is_ui_static_request() -> bool:
     return getattr(endpoint, "__name__", "") == "serve_static_compat_endpoint"
 
 
-_PROJECT_RESOURCE_POLICY_WRITE = re.compile(r"^/api/resource-policies/[^/]+/[^/]+$")
-
-
-def _project_resource_policy_write_path(path: str) -> bool:
-    """Resource policy write endpoints surface not_found for non-members.
-
-    These routes stay classified ``local_only`` so the boundary still refuses
-    trusted-local writes from arbitrary remote callers, but active members and
-    owners pass through to the handler, which returns 404 to non-members so the
-    existence of an unrelated Organization's policy is not leaked.
-    """
-
-    return bool(_PROJECT_RESOURCE_POLICY_WRITE.match(path))
-
-
 def _oauth_cookie_signature(secret: str, payload: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -2444,9 +2429,6 @@ def enforce_instance_role_capabilities():
         return None
     from vibe.authorization import (
         InstanceAuthorizationError,
-        REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
-        REMOTE_HTTP_LOCAL_ONLY,
-        has_temporary_unrestricted_org_access,
         http_authorization_policy,
         require_instance_role,
     )
@@ -2475,30 +2457,6 @@ def enforce_instance_role_capabilities():
     try:
         if context is None:
             raise InstanceAuthorizationError(minimum_role)
-        # The temporary Organization rollout admits active members. Other remote
-        # principals on API runtime routes fail the active-Organization admission
-        # check here, before role rank. Viewer-allowed reads already have
-        # origin/org admission and are not subject to this gate.
-        if (
-            context.is_remote
-            and minimum_role == "owner"
-            and request.path.startswith("/api/")
-            and not has_temporary_unrestricted_org_access(context)
-        ):
-            # Routes classified for the temporary rollout and existing
-            # trusted-local routes retain the remote-execution error contract.
-            # Ordinary remotely exposed runtime APIs instead fail the active
-            # Organization membership admission check here, before role rank.
-            # Resource policy write endpoints defer to the handler so non-members
-            # get not_found (no existence leak).
-            if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
-                if _project_resource_policy_write_path(request.path):
-                    return None
-                return _remote_execution_disabled_response()
-            if policy.remote_access != REMOTE_HTTP_LOCAL_ONLY:
-                if _project_resource_policy_write_path(request.path):
-                    return None
-                raise InstanceAuthorizationError(minimum_role)
         require_instance_role(context, minimum_role)
     except InstanceAuthorizationError:
         return jsonify(
@@ -2508,204 +2466,6 @@ def enforce_instance_role_capabilities():
                 "required_role": minimum_role,
             }
         ), 403
-    return None
-
-
-_REMOTE_CONFIG_MUTABLE_FIELDS = frozenset(
-    {
-        "ack_mode",
-        # Remote owners may choose how progress is presented, but the heartbeat
-        # cadence stays trusted-local because it directly controls edit timing.
-        "agent_progress_style",
-        "agent_status_no_output_ms",
-        "include_time_info",
-        "include_user_info",
-        "language",
-        "reply_enhancements",
-        "show_duration",
-    }
-)
-_REMOTE_UI_CONFIG_MUTABLE_FIELDS = frozenset(
-    {
-        "chat_message_font_size",
-        "instance_name",
-        "show_agent_activity",
-        "show_tool_calls",
-    }
-)
-
-
-def _payload_has_only_fields(payload: Any, fields: frozenset[str] | set[str]) -> bool:
-    return isinstance(payload, dict) and set(payload).issubset(fields)
-
-
-def _payload_changes_values(payload: Any, current: Any) -> bool:
-    """Return whether supplied values differ from the persisted projection.
-
-    Config saves accept both complete UI round-trips and partial updates. Comparing
-    only supplied leaves lets an unchanged complete payload pass while still
-    rejecting a remote caller that changes any protected value.
-    """
-
-    if isinstance(payload, dict):
-        if not isinstance(current, dict):
-            return True
-        return any(
-            key not in current or _payload_changes_values(value, current[key])
-            for key, value in payload.items()
-        )
-    return payload != current
-
-
-def _remote_config_payload_is_allowed(payload: Any) -> bool:
-    """Allow explicit UI/message preferences and unchanged config round-trips.
-
-    Every other current or future config field is protected. A full payload from
-    GET /api/config remains valid only while all protected values are unchanged.
-    """
-
-    if not isinstance(payload, dict):
-        return False
-    from vibe import api
-
-    current = _load_remote_access_config()
-    if current is None:
-        return False
-    # Compare the request with the same JSON representation the browser received;
-    # catalog tuples become arrays on the wire and must not look like mutations.
-    current_payload = json.loads(json.dumps(api.config_to_payload(current)))
-    for field, value in payload.items():
-        if field in _REMOTE_CONFIG_MUTABLE_FIELDS:
-            continue
-        if field == "ui":
-            if not isinstance(value, dict):
-                return False
-            current_ui = current_payload.get("ui")
-            if not isinstance(current_ui, dict):
-                return False
-            if any(
-                ui_field not in _REMOTE_UI_CONFIG_MUTABLE_FIELDS
-                and (
-                    ui_field not in current_ui
-                    or _payload_changes_values(ui_value, current_ui[ui_field])
-                )
-                for ui_field, ui_value in value.items()
-            ):
-                return False
-            continue
-        if field not in current_payload or _payload_changes_values(
-            value,
-            current_payload[field],
-        ):
-            return False
-    return True
-
-
-def _remote_mutable_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Strip unchanged protected config fields before the persistence boundary."""
-
-    mutable = {
-        field: value
-        for field, value in payload.items()
-        if field in _REMOTE_CONFIG_MUTABLE_FIELDS
-    }
-    ui = payload.get("ui")
-    if isinstance(ui, dict):
-        mutable_ui = {
-            field: value
-            for field, value in ui.items()
-            if field in _REMOTE_UI_CONFIG_MUTABLE_FIELDS
-        }
-        if mutable_ui:
-            mutable["ui"] = mutable_ui
-    return mutable
-
-
-def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
-    normalized_method = method.upper()
-    if normalized_method == "POST" and path == "/api/config":
-        return _remote_config_payload_is_allowed(payload)
-    if normalized_method == "POST" and path == "/api/sessions":
-        return _payload_has_only_fields(payload, {"project_id", "title"})
-    if normalized_method == "PATCH" and re.fullmatch(r"/api/sessions/[^/]+", path):
-        return _payload_has_only_fields(payload, {"title"})
-    if normalized_method == "PATCH" and re.fullmatch(r"/api/projects/[^/]+", path):
-        return _payload_has_only_fields(payload, {"display_name"})
-    return False
-
-
-def _is_remote_local_execution_request(method: str, path: str, payload: Any = None) -> bool:
-    from vibe.authorization import (
-        REMOTE_HTTP_LOCAL_ONLY,
-        REMOTE_HTTP_PAYLOAD_FILTERED,
-        http_authorization_policy,
-    )
-
-    remote_access = http_authorization_policy(
-        method,
-        path,
-    ).remote_access
-    if remote_access == REMOTE_HTTP_LOCAL_ONLY:
-        return True
-    if remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
-        return False
-    return not _remote_payload_is_allowed(method, path, payload)
-
-
-@app.before_request
-async def enforce_remote_local_execution_boundary():
-    """Keep unapproved local-machine capabilities on the trusted-local origin."""
-
-    try:
-        context = getattr(g, "authorization_context", None)
-    except (LookupError, RuntimeError):
-        context = None
-    if context is None or not context.is_remote:
-        return None
-    from vibe.authorization import (
-        REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
-        REMOTE_HTTP_LOCAL_ONLY,
-        REMOTE_HTTP_PAYLOAD_FILTERED,
-        has_temporary_unrestricted_org_access,
-        http_authorization_policy,
-    )
-
-    policy = getattr(g, "http_authorization_policy", None)
-    if policy is None:
-        policy = http_authorization_policy(
-            request.method,
-            request.path,
-        )
-    if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
-        if has_temporary_unrestricted_org_access(context):
-            if request.method == "POST" and request.path == "/api/config":
-                # Runtime configuration is temporarily writable for active
-                # Organization members, but remote access identity/tunnel
-                # settings remain control-plane owned. Drop that block before
-                # it reaches the generic config merge/save path.
-                payload = await request.load_json()
-                if isinstance(payload, dict):
-                    payload = dict(payload)
-                    payload.pop("remote_access", None)
-                g.remote_unrestricted_config_payload = payload
-            return None
-        # Org resource policy writes keep the local-only classification but the
-        # handler returns 404 for non-members (no existence leak). Defer to the
-        # handler so callers learn not_found instead of remote_execution_disabled.
-        if _project_resource_policy_write_path(request.path):
-            return None
-        return _remote_execution_disabled_response()
-    if policy.remote_access == REMOTE_HTTP_LOCAL_ONLY:
-        if _project_resource_policy_write_path(request.path):
-            return None
-        return _remote_execution_disabled_response()
-    if policy.remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
-        return None
-    payload = await request.load_json()
-    if _is_remote_local_execution_request(request.method, request.path, payload):
-        return _remote_execution_disabled_response()
-    if request.method == "POST" and request.path == "/api/config":
-        g.remote_mutable_config_payload = _remote_mutable_config_payload(payload)
     return None
 
 
@@ -5940,15 +5700,7 @@ async def config_post():
     from vibe import internal_client
     from vibe import remote_access
 
-    remote_mutable_payload = getattr(g, "remote_mutable_config_payload", None)
-    unrestricted_payload = getattr(g, "remote_unrestricted_config_payload", None)
-    payload = (
-        unrestricted_payload
-        if unrestricted_payload is not None
-        else remote_mutable_payload
-        if remote_mutable_payload is not None
-        else request.json or {}
-    )
+    payload = request.json or {}
     remote_access_runtime = None
     try:
         (
@@ -9089,9 +8841,6 @@ RESERVED_SESSION_PROTECTED_I18N_KEY = "harness.notice.workspaceSessionProtected"
 #: is not an answer to "why did my message not send", and the composer's own inert-state
 #: notice has to say the same thing this body says.
 RESERVED_SESSION_READ_ONLY_I18N_KEY = "harness.notice.workspaceSessionReadOnly"
-REMOTE_EXECUTION_DISABLED_I18N_KEY = "harness.notice.remoteExecutionDisabled"
-
-
 def _reserved_session_response(i18n_key: str, *, code: str = "reserved_session"):
     """Shared 403 payload for a write refused because the RUNTIME reserves the session.
 
@@ -9110,18 +8859,6 @@ def _reserved_session_response(i18n_key: str, *, code: str = "reserved_session")
 
     lang = settings_service.load_config_or_default().language
     return _coded_error_response(code, t(i18n_key, lang), 403)
-
-
-def _remote_execution_disabled_response():
-    from core.services import settings as settings_service
-
-    lang = settings_service.load_config_or_default().language
-    return _coded_error_response(
-        "remote_execution_disabled",
-        t(REMOTE_EXECUTION_DISABLED_I18N_KEY, lang),
-        403,
-    )
-
 
 def _backend_locked_response(err):
     """Shared 409 payload for a rejected cross-backend session change.
@@ -12871,12 +12608,6 @@ async def _show_event_response_from_payload(
 ):
     context = getattr(g, "authorization_context", None)
     is_remote_caller = context is not None and context.is_remote
-    if (
-        is_remote_caller
-        and show_event_request_requests_dispatch(payload)
-        and not _has_temporary_runtime_access(context)
-    ):
-        return _remote_execution_disabled_response()
     if is_remote_caller or public:
         # A remote caller — whether an authenticated editor on the HTML route or
         # a public share visitor — may only author human input: a typed intent or

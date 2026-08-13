@@ -13,8 +13,7 @@ from storage import resource_access_service, workbench_sessions_service
 from storage.db import get_cached_sqlite_engine
 from storage.models import resource_access_groups, resource_access_policies
 from storage.settings_service import upsert_scope
-from tests.test_ui_remote_access_auth import _remote_peer, _save_config
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
 from vibe import remote_access
 from vibe.ui_server import app
 
@@ -159,7 +158,7 @@ def test_agent_removal_deletes_resource_policy_and_groups(monkeypatch, tmp_path)
 
 def test_active_org_agent_creation_is_allowed_without_trusted_local_identity(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -177,7 +176,7 @@ def test_active_org_agent_creation_is_allowed_without_trusted_local_identity(mon
         json={"name": "remote-private", "backend": "codex"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
 
     assert response.status_code in {200, 201}
@@ -277,7 +276,7 @@ def test_remote_partial_agent_updates_persist_canonical_selector_pair(monkeypatc
 
 def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     store = VibeAgentStore()
     try:
         agent = store.create(
@@ -309,7 +308,7 @@ def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_p
     remote_response = remote.get(
         "/api/agents/imported-agent",
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     local_response = app.test_client().get("/api/agents/imported-agent")
 
@@ -325,7 +324,7 @@ def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_p
 
 def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     store, agents = _seed_agents_with_policies()
     private_agent = agents["private"]
     store.set_default_agent_name(private_agent.name)
@@ -344,10 +343,10 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
     response = client.get(
         "/api/agents/private-agent",
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     assert response.status_code == 200
-    catalog = client.get("/api/agents", base_url="https://alex.avibe.bot", environ_base=_remote_peer())
+    catalog = client.get("/api/agents", base_url="https://alex.avibe.bot", environ_base=remote_peer())
     assert catalog.status_code == 200
     assert {"private-agent", "public-agent", "scope-agent"}.issubset(
         {agent["name"] for agent in catalog.get_json()["agents"]}
@@ -359,7 +358,7 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
         json={"description": "member update"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     assert denied_mutation.status_code == 403
     # An active Organization admin/owner can manage.
@@ -379,7 +378,7 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
         json={"description": "admin update"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     assert mutation.status_code == 200
     default_mutation = client.post(
@@ -387,7 +386,7 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
         json={"name": private_agent.name},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
     assert default_mutation.status_code == 200
 

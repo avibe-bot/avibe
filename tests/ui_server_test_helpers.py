@@ -2,7 +2,44 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from config.v2_config import (
+    AgentsConfig,
+    PlatformsConfig,
+    RemoteAccessConfig,
+    RuntimeConfig,
+    SlackConfig,
+    UiConfig,
+    V2Config,
+)
 from vibe import remote_access
+
+
+def save_config(tmp_path) -> V2Config:
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        platform="slack",
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        ui=UiConfig(),
+        remote_access=RemoteAccessConfig(),
+    )
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.public_url = "https://alex.avibe.bot"
+    cloud.client_id = "vr_client_123"
+    cloud.instance_id = "inst_123"
+    cloud.session_secret = "session-secret"
+    cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
+    cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
+    config.save()
+    return config
+
+
+def remote_peer() -> dict[str, str]:
+    return {"REMOTE_ADDR": "203.0.113.10"}
 
 
 def remote_session_cookie(

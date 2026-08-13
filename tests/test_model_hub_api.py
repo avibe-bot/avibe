@@ -39,8 +39,7 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     create_default_service,
 )
-from tests.test_ui_remote_access_auth import _remote_peer, _save_config
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
 from vibe import ui_server
 from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.ui_server import app
@@ -3558,12 +3557,12 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
 
 def test_runtime_start_route_requires_remote_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    save_config(tmp_path)
 
     response = app.test_client().post(
         "/api/models/runtime/start",
         base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+        environ_base=remote_peer(),
     )
 
     assert response.status_code == 401

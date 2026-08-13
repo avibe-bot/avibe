@@ -4,8 +4,7 @@ from config import paths
 from storage import resource_access_service
 from storage.db import get_cached_sqlite_engine
 from storage.migrations import run_migrations
-from tests.test_ui_remote_access_auth import _save_config
-from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie, save_config
 from vibe import remote_access
 from vibe.ui_server import app
 
@@ -61,7 +60,7 @@ def _seed_organization_policy() -> None:
 
 def test_organization_context_and_policy_routes_use_signed_cookie_claims(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     _seed_organization_policy()
     client = app.test_client()
     client.set_cookie(
@@ -103,7 +102,7 @@ def test_organization_context_and_policy_routes_use_signed_cookie_claims(monkeyp
 
 def test_organization_policy_put_does_not_create_local_revision(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     _seed_organization_policy()
     client = app.test_client()
     client.set_cookie(
@@ -136,7 +135,7 @@ def test_organization_policy_put_does_not_create_local_revision(monkeypatch, tmp
 
 def test_external_guest_cannot_update_an_organization_policy(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = save_config(tmp_path)
     _seed_organization_policy()
     client = app.test_client()
     client.set_cookie(
