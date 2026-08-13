@@ -186,16 +186,21 @@ turn ends because you armed a watch and are waiting, say exactly that.
   the fact — look for a current-head verdict instead.
 - Liveness invariant: at every pause there is either a pending bot review of
   the current head, or one you just triggered. Never wait on nothing.
-- Use `background-watch-hook` to create a one-shot PR watch for each review
-  phase; never use `--forever` for a delivery loop. Re-arm after every round.
-  When CI is the only remaining gate, replace the PR-activity watch with an
-  exact-head Actions watch because PR activity cannot wake on a check-only
-  transition.
+- Use `background-watch-hook` to create one one-shot combined PR watch for each
+  review phase; never use `--forever` for a delivery loop. Prefer the bundled
+  `wait_pr.py` with the current `--sha` and each required `--workflow`, plus the
+  optional `--branch`, so one waiter observes PR activity and exact-head Actions
+  transitions with one state file and one follow-up Agent Run. Re-arm after every
+  round and update `--sha` when the PR head changes. Use `wait_pr.py` without CI
+  arguments for a PR-only loop, and reserve `wait_action.py` for Actions targets
+  that are not attached to a PR.
 - The one-watch invariant is scoped by owner and concern: one live lane/fix
   watch per PR, plus one independent orchestrator gate watch when work is
-  delegated. Each concern needs independent waiter state. Never share cursor
-  state between concurrent watches or count unrelated global monitors as the
-  lane watch.
+  delegated. Review activity and the PR's exact-head CI are one lane concern
+  and should use the combined `wait_pr.py` watch rather than two sibling
+  waiters. Each genuinely independent concern needs its own state; never share
+  cursor state between concurrent watches or count unrelated global monitors as
+  the lane watch.
 - Follow `background-watch-hook` for waiter commands, state, baseline seeding,
   catch-up,
   filtering, settling, retries, and delivery acknowledgement. Those mechanics

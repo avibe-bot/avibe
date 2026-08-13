@@ -48,6 +48,13 @@ from _github_wait_common import (  # noqa: E402
     squash,
     WATCH_ID_ENV,
 )
+from _github_actions_wait import (  # noqa: E402
+    DEFAULT_SUCCESS_CONCLUSIONS,
+    fetch_workflow_runs,
+    normalize_selected_runs,
+    render_actions_result,
+    select_matching_runs,
+)
 
 CODEX_REVIEW_PASS_REACTION_USERS = {
     "chatgpt-codex-connector",
@@ -87,6 +94,7 @@ REVIEW_COMMENT_FINGERPRINTS_KEY = "review_comment_fingerprints"
 ISSUE_COMMENT_FINGERPRINTS_KEY = "issue_comment_fingerprints"
 REVIEW_THREAD_STATES_KEY = "review_thread_states"
 PR_SNAPSHOT_KEY = "snapshot"
+ACTIONS_SNAPSHOT_KEY = "actions"
 PR_FINGERPRINT_KEYS = (
     REVIEW_FINGERPRINTS_KEY,
     REVIEW_COMMENT_FINGERPRINTS_KEY,
@@ -554,6 +562,10 @@ def _fetch_state(
     cache: ResponseCache | None = None,
     review_comment_since: str | None = None,
     issue_comment_since: str | None = None,
+    ci_sha: str | None = None,
+    ci_branch: str | None = None,
+    ci_workflows: list[str] | None = None,
+    ci_max_pages: int = 3,
 ) -> tuple[dict[str, list[dict[str, Any]]], int]:
     encoded_repo = urllib.parse.quote(repo, safe="/")
     base_url = f"https://api.github.com/repos/{encoded_repo}"
@@ -589,6 +601,17 @@ def _fetch_state(
         cache=cache,
     )
     review_threads, review_thread_requests = _fetch_review_threads(repo, pr_number, token)
+    actions: list[dict[str, Any]] = []
+    action_requests = 0
+    if ci_sha and ci_workflows:
+        actions, action_requests = fetch_workflow_runs(
+            repo,
+            token,
+            branch=ci_branch,
+            head_sha=ci_sha,
+            max_pages=ci_max_pages,
+            cache=cache,
+        )
     return (
         {
             "pull_request": pull_request,
@@ -597,6 +620,7 @@ def _fetch_state(
             "issue_comments": issue_comments,
             "reactions": reactions,
             "review_threads": review_threads,
+            "actions": actions,
         },
         (
             1
@@ -605,6 +629,7 @@ def _fetch_state(
             + issue_comment_requests
             + reaction_requests
             + review_thread_requests
+            + action_requests
         ),
     )
 
@@ -888,6 +913,10 @@ def _watch_identity(args: argparse.Namespace) -> str:
             "include_self_comments": bool(args.include_self_comments),
             "ignore_authors": sorted(_normalize_authors(args.ignore_author)),
             "ignore_comment_patterns": sorted(set(args.ignore_comment_pattern or [])),
+            "ci_sha": args.sha,
+            "ci_branch": args.branch,
+            "ci_workflows": list(args.workflow or []),
+            "ci_success_conclusions": sorted(_parse_success_conclusions(args.success_conclusion)),
         },
         sort_keys=True,
     )
@@ -1418,6 +1447,41 @@ def _saved_snapshot(saved: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _saved_actions_snapshot(saved: dict[str, Any]) -> dict[str, Any]:
+    value = saved.get(ACTIONS_SNAPSHOT_KEY)
+    return value if isinstance(value, dict) else {}
+
+
+def _ci_enabled(args: argparse.Namespace) -> bool:
+    return bool(args.sha or args.branch or args.workflow or args.success_conclusion)
+
+
+def _validate_ci_args(args: argparse.Namespace) -> str | None:
+    provided = _ci_enabled(args)
+    if not provided:
+        return None
+    if args.pr is None:
+        return "CI monitoring requires --pr; --new-prs cannot be combined with --sha or --workflow"
+    if not args.sha:
+        return "CI monitoring requires --sha"
+    if not args.workflow:
+        return "CI monitoring requires at least one --workflow when --sha is provided"
+    if args.max_pages < 1:
+        return "--max-pages must be at least 1"
+    if len(set(args.workflow)) != len(args.workflow):
+        return "--workflow values must be unique"
+    return None
+
+
+def _parse_success_conclusions(values: list[str] | None) -> set[str]:
+    if not values:
+        return set(DEFAULT_SUCCESS_CONCLUSIONS)
+    result: set[str] = set()
+    for value in values:
+        result.update(item.strip() for item in value.split(",") if item.strip())
+    return result
+
+
 def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
     missing: list[str] = []
     if _saved_str(saved, "head_sha") is None:
@@ -1432,6 +1496,15 @@ def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
     if not isinstance(saved.get(PR_SNAPSHOT_KEY), dict):
         missing.append(PR_SNAPSHOT_KEY)
     return missing
+
+
+def _missing_actions_baselines(saved: dict[str, Any], workflows: list[str]) -> list[str]:
+    value = saved.get(ACTIONS_SNAPSHOT_KEY)
+    if not isinstance(value, dict) or set(value) != set(workflows):
+        return [ACTIONS_SNAPSHOT_KEY]
+    if any(not isinstance(runs, list) for runs in value.values()):
+        return [ACTIONS_SNAPSHOT_KEY]
+    return []
 
 
 def _last_delivery() -> str | None:
@@ -1613,6 +1686,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write a complete current baseline to --state-file and exit without waiting",
     )
     parser.add_argument(
+        "--sha",
+        help=(
+            "Exact PR head SHA whose Actions runs should be monitored together with PR activity; "
+            "requires at least one --workflow"
+        ),
+    )
+    parser.add_argument(
+        "--branch",
+        help="Optional Actions head branch constraint used with --sha and --workflow",
+    )
+    parser.add_argument(
+        "--workflow",
+        action="append",
+        help="Actions workflow name to monitor at --sha; repeatable and enables combined CI mode",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=3,
+        help="Maximum Actions run-list pages to inspect per poll in combined CI mode",
+    )
+    parser.add_argument(
+        "--success-conclusion",
+        action="append",
+        help=(
+            "Actions conclusion treated as successful in combined CI mode; repeatable or comma-separated. "
+            "Defaults to success,skipped,neutral."
+        ),
+    )
+    parser.add_argument(
         "--allow-unauthenticated",
         action="store_true",
         help="Allow polling without GitHub auth; the interval will be clamped to a safer minimum",
@@ -1622,6 +1725,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
+
+    ci_error = _validate_ci_args(args)
+    if ci_error is not None:
+        print(ci_error, file=sys.stderr)
+        return 2
+    ci_enabled = _ci_enabled(args)
+    success_conclusions = _parse_success_conclusions(args.success_conclusion)
 
     cache = ResponseCache()
     # Everything that can reject the arguments runs BEFORE any state is claimed. A
@@ -1737,6 +1847,10 @@ def main() -> int:
                 cache=cache,
                 review_comment_since=initial_review_comment_since,
                 issue_comment_since=initial_issue_comment_since,
+                ci_sha=args.sha if ci_enabled else None,
+                ci_branch=args.branch if ci_enabled else None,
+                ci_workflows=args.workflow if ci_enabled else None,
+                ci_max_pages=args.max_pages,
             )
         initial_pr_stop_after_id = None
         initial_pr_max_pages = None
@@ -1763,7 +1877,15 @@ def main() -> int:
     if initial_request.value is None:
         print("Initial GitHub PR state request completed without a result", file=sys.stderr)
         return 1
+    selected_actions: dict[str, list[dict[str, Any]]] = {}
     state, requests_per_poll_count = initial_request.value
+    if ci_enabled:
+        selected_actions = select_matching_runs(
+            state.get("actions", []),
+            workflows=args.workflow or [],
+            branch=args.branch,
+            head_sha=args.sha,
+        )
 
     # The remote target is now proven valid. Only now may this run create or adopt
     # its state path; a typo or inaccessible PR must leave no ownership claim.
@@ -1808,6 +1930,8 @@ def main() -> int:
         )
     )
     missing_baselines = _missing_pr_baselines(saved) if resumed and args.pr is not None else []
+    if ci_enabled and resumed and args.pr is not None:
+        missing_baselines.extend(_missing_actions_baselines(saved, args.workflow or []))
     if missing_baselines and not explicit_replay:
         print(
             "Saved PR state lacks required baseline(s): %s; use --catch-up, or remove "
@@ -1837,6 +1961,21 @@ def main() -> int:
     # they never decide independently whether to wake. Explicit replay/catch-up is
     # the deliberate exception: there the requested cursor streams are the contract.
     snapshot = None if args.catch_up or explicit_replay else (_saved_snapshot(saved) if resumed else None)
+    if not ci_enabled:
+        actions_snapshot = None
+    elif args.catch_up:
+        actions_snapshot = None
+    elif explicit_replay:
+        # Explicit cursor replay is a PR activity request, not a request to
+        # replay an already observed terminal Actions result.
+        actions_snapshot = normalize_selected_runs(selected_actions)
+    elif resumed:
+        actions_snapshot = _saved_actions_snapshot(saved)
+    else:
+        # Explicit PR cursor replay does not replay an unrelated already-terminal
+        # Actions result. A fresh normal watch still needs the current CI snapshot
+        # as its baseline to avoid waking on the seed itself.
+        actions_snapshot = normalize_selected_runs(selected_actions)
     review_comment_since = (
         _saved_str(saved, "review_comment_since")
         if resumed and args.since_review_comment_id is None
@@ -1869,6 +2008,7 @@ def main() -> int:
             ignore_patterns=ignore_patterns,
             review_threads_available=token is not None,
         )
+        actions_snapshot = normalize_selected_runs(selected_actions) if ci_enabled else None
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -1957,13 +2097,46 @@ def main() -> int:
                 ignore_patterns=ignore_patterns,
             )
 
+        def _render_combined(
+            cursors: tuple[int, int, int, int, str],
+        ) -> tuple[str | None, int, int, int, int, str]:
+            pr_result = _render(cursors)
+            if not ci_enabled:
+                return pr_result
+
+            current_actions = normalize_selected_runs(selected_actions)
+            actions_output = None
+            if actions_snapshot is None or current_actions != actions_snapshot:
+                actions_output, _failed = render_actions_result(
+                    repo=args.repo,
+                    branch=args.branch,
+                    head_sha=args.sha,
+                    selected=selected_actions,
+                    success_conclusions=success_conclusions,
+                )
+            if actions_output is None:
+                return pr_result
+            if pr_result[0] is None:
+                return (actions_output, *pr_result[1:])
+            return (f"{pr_result[0]}\n{actions_output}", *pr_result[1:])
+
+        def _refresh_actions() -> None:
+            nonlocal selected_actions
+            if ci_enabled:
+                selected_actions = select_matching_runs(
+                    state.get("actions", []),
+                    workflows=args.workflow or [],
+                    branch=args.branch,
+                    head_sha=args.sha,
+                )
+
         def _advance_since() -> None:
             nonlocal review_comment_since, issue_comment_since
             review_comment_since = later_since(review_comment_since, state["review_comments"])
             issue_comment_since = later_since(issue_comment_since, state["issue_comments"])
 
         def _pr_state_fields() -> dict[str, Any]:
-            return {
+            fields = {
                 "review_cursor": review_cursor,
                 "review_comment_cursor": review_comment_cursor,
                 "issue_comment_cursor": issue_comment_cursor,
@@ -1980,6 +2153,9 @@ def main() -> int:
                 REVIEW_THREAD_STATES_KEY: dict(review_thread_states),
                 PR_SNAPSHOT_KEY: snapshot or {},
             }
+            if ci_enabled:
+                fields[ACTIONS_SNAPSHOT_KEY] = normalize_selected_runs(selected_actions)
+            return fields
 
         def _persist_pr_state(
             *,
@@ -2059,6 +2235,10 @@ def main() -> int:
                         args.pr,
                         token,
                         cache=cache,
+                        ci_sha=args.sha if ci_enabled else None,
+                        ci_branch=args.branch if ci_enabled else None,
+                        ci_workflows=args.workflow if ci_enabled else None,
+                        ci_max_pages=args.max_pages,
                     ),
                     unauthenticated=token is None,
                 )
@@ -2078,9 +2258,10 @@ def main() -> int:
                     )
                     return best
                 state, _count = settle_request.value
+                _refresh_actions()
                 # Rendered from the same cursors as the first hit, so the result is a
                 # superset rather than a second, partial report.
-                candidate = _render(pending)
+                candidate = _render_combined(pending)
                 if candidate[0] is None:
                     return best
                 if candidate[1:] == best[1:]:
@@ -2099,7 +2280,7 @@ def main() -> int:
         initial_result = (
             (None, *pending_cursors)
             if args.seed_state
-            else _render(pending_cursors)
+            else _render_combined(pending_cursors)
         )
         if initial_result[0] is not None and not args.catch_up:
             initial_result = _settle(initial_result, pending_cursors)
@@ -2226,6 +2407,10 @@ def main() -> int:
                     args.pr,
                     token,
                     cache=cache,
+                    ci_sha=args.sha if ci_enabled else None,
+                    ci_branch=args.branch if ci_enabled else None,
+                    ci_workflows=args.workflow if ci_enabled else None,
+                    ci_max_pages=args.max_pages,
                 ),
                 unauthenticated=token is None,
             )
@@ -2278,6 +2463,7 @@ def main() -> int:
                 effective_interval = target_interval
 
         if args.pr is not None:
+            _refresh_actions()
             observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
             pending_cursors = (
                 review_cursor,
@@ -2287,7 +2473,7 @@ def main() -> int:
                 pr_status,
             )
             pre_event_fields = _pr_state_fields()
-            result = _render(pending_cursors)
+            result = _render_combined(pending_cursors)
             if result[0] is not None:
                 result = _settle(result, pending_cursors)
             (
@@ -2318,6 +2504,8 @@ def main() -> int:
                 committed_snapshot=snapshot,
                 review_threads_available=token is not None,
             )
+            if ci_enabled:
+                actions_snapshot = normalize_selected_runs(selected_actions)
             if output is None:
                 # Cursors also move when everything new was filtered out, and that
                 # progress has to survive the cycle or the next one re-examines it.

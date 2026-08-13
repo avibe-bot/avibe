@@ -797,6 +797,85 @@ def test_main_detects_pr_status_change_during_polling() -> None:
     assert "pr_status #153 open -> merged" in stdout.getvalue()
 
 
+def test_combined_ci_mode_requires_exact_sha_and_workflow() -> None:
+    module = _load_module()
+
+    valid = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--sha", "abc123", "--workflow", "CI"]
+    )
+    assert module._validate_ci_args(valid) is None
+
+    missing_sha = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI"]
+    )
+    assert "--sha" in (module._validate_ci_args(missing_sha) or "")
+
+    new_pr_mode = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--new-prs", "--sha", "abc123", "--workflow", "CI"]
+    )
+    assert "--new-prs" in (module._validate_ci_args(new_pr_mode) or "")
+
+
+def test_combined_pr_waiter_reports_ci_completion(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    fetch_calls = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert kwargs["ci_sha"] == "abc123"
+        assert kwargs["ci_workflows"] == ["CI"]
+        action = {
+            "id": 7,
+            "name": "CI",
+            "head_sha": "abc123",
+            "head_branch": "feature",
+            "status": "in_progress" if fetch_calls == 1 else "completed",
+            "conclusion": None if fetch_calls == 1 else "success",
+            "html_url": "https://github.com/example/actions/runs/7",
+        }
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": "abc123"}
+        state["actions"] = [action]
+        return state, 2
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "abc123",
+                "--branch",
+                "feature",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+                "--interval",
+                "1",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert fetch_calls == 2
+    assert "GitHub Actions success for avibe-bot/avibe@abc123 on feature" in stdout.getvalue()
+    assert "CI: status=completed conclusion=success" in stdout.getvalue()
+
+
 def test_main_reduces_unauthenticated_new_pr_interval_after_bootstrap() -> None:
     module = _load_module()
     fetch_calls: list[int | None] = []
@@ -1563,6 +1642,43 @@ def test_fetch_state_narrows_comments_and_filters_reactions_server_side() -> Non
     assert "since=" not in issue_comments_url
     # Only the Codex pass reaction is ever reported, so the rest never travel.
     assert "content=%2B1" in reactions_url
+
+
+def test_fetch_state_includes_combined_actions_and_request_count() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(
+            module,
+            "fetch_workflow_runs",
+            return_value=(
+                [{"id": 7, "name": "CI", "head_sha": "abc123", "status": "in_progress"}],
+                2,
+            ),
+        ) as fetch_actions,
+    ):
+        state, request_count = module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_sha="abc123",
+            ci_branch="feature",
+            ci_workflows=["CI"],
+            ci_max_pages=4,
+        )
+
+    fetch_actions.assert_called_once_with(
+        "avibe-bot/avibe",
+        "token",
+        branch="feature",
+        head_sha="abc123",
+        max_pages=4,
+        cache=fetch_actions.call_args.kwargs["cache"],
+    )
+    assert state["actions"][0]["id"] == 7
+    assert request_count == 1 + 5 + 2
 
 
 def test_fetch_state_omits_since_when_no_cursor_is_known() -> None:

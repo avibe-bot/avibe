@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.14.0
+version: 0.15.0
 ---
 
 # Background Watch Hook
@@ -30,7 +30,7 @@ Prefer `vibe watch` when the wait should be inspectable, pausable, resumable, or
 - `vibe watch list`, `vibe watch show`, `vibe watch update`, `vibe watch pause`, `vibe watch resume`, `vibe watch remove`
   Use these to inspect and manage the watch after creation.
 - `scripts/wait_pr.py`
-  Bundled waiter example for one common case: GitHub PR review activity.
+  Bundled GitHub waiter for PR activity, with optional exact-head Actions monitoring.
 
 ## Use `vibe watch` First
 
@@ -183,10 +183,15 @@ This skill ships bundled GitHub waiters:
 
 - `scripts/wait_pr.py`
   Waits for GitHub PR review activity, including reviews, inline review comments, PR conversation comments, PR status transitions such as `draft -> open`, `open -> merged`, or `open -> closed`, and the special Codex `+1` reaction on the PR body. It can also wait for newly opened PRs in a repository.
+  When `--sha` and one or more `--workflow` values are provided for a specific PR,
+  the same waiter also waits for every matching Actions run at that exact SHA and
+  optional branch.
 - `scripts/wait_issue.py`
   Waits for GitHub issue activity, either newly opened issues in a repository or new comments on a single issue.
 - `scripts/wait_action.py`
-  Waits for selected GitHub Actions workflow runs on a specific commit SHA to finish. Workflow failures are reported as an event so the follow-up turn can inspect and handle them.
+  Waits for selected GitHub Actions workflow runs on a specific commit SHA to finish
+  when there is no PR activity stream to combine with them. Workflow failures are
+  reported as an event so the follow-up turn can inspect and handle them.
 
 Use bundled waiters as examples or as ready-to-run building blocks. The main skill is still `vibe watch`; the waiter is only the thing that blocks until the condition is met.
 When running a bundled script through `uv`, prefer `uv run --no-project ...` so the script does not accidentally attach itself to an unrelated parent project.
@@ -227,7 +232,48 @@ BACKGROUND_WATCH_HOOK_DIR="$(dirname "$BACKGROUND_WATCH_HOOK_SKILL_FILE")"
 
 ## GitHub Example Waiter
 
-Use the bundled GitHub waiter only when the watched thing is PR review activity.
+For a PR delivery loop, prefer one combined `wait_pr.py` watch. It observes PR review,
+comment, reaction, thread, lifecycle, and head-change events together with selected
+Actions workflows for one exact commit. This keeps one cursor/state file and one
+follow-up Agent Run for the whole PR concern. Use `wait_pr.py` without CI arguments
+for PR-only monitoring. Use `wait_action.py` only for an Actions wait that is not
+attached to a PR.
+
+### Preferred PR + CI watch
+
+The CI arguments are one group: `--sha` and at least one repeatable `--workflow` are
+required, while `--branch`, `--max-pages`, and `--success-conclusion` are optional.
+The waiter stays quiet while a requested run is missing or still running, then reports
+the complete exact-head result when every requested workflow has terminal runs. Every
+distinct matching run ID is included, so an earlier failed rerun remains visible to
+the follow-up turn. If the PR head changes, the waiter reports that event; fetch the
+new head and re-arm with a new `--sha` rather than continuing to gate the old commit.
+
+```bash
+STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-review.json"
+HEAD_SHA="$(gh pr view 151 --repo avibe-bot/avibe --json headRefOid --jq .headRefOid)"
+BRANCH="$(gh pr view 151 --repo avibe-bot/avibe --json headRefName --jq .headRefName)"
+
+uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
+  --repo avibe-bot/avibe --pr 151 \
+  --sha "$HEAD_SHA" --branch "$BRANCH" \
+  --workflow CI --workflow Lint \
+  --state-file "$STATE_FILE" --seed-state
+
+# Push or post the review trigger only after the combined baseline is durable.
+vibe watch add \
+  --name "Watch PR 151 review and CI" \
+  --message "PR #151 has new review activity, a head change, or exact-head CI activity. Fetch the latest PR and Actions state, resolve actionable findings, and re-arm the combined waiter for any new head. Summarise the round here in one or two lines; do not post that summary as a PR comment." \
+  -- \
+  uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
+    --repo avibe-bot/avibe --pr 151 \
+    --sha "$HEAD_SHA" --branch "$BRANCH" \
+    --workflow CI --workflow Lint \
+    --actionable-only --settle 20 --state-file "$STATE_FILE" --interval 60
+```
+
+Do not combine `--new-prs` with CI arguments. A new PR has no stable exact-head
+gate until the follow-up turn resolves its head and workflow set.
 
 One-shot watch:
 
@@ -430,7 +476,7 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_issue.py" --repo av
 uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_issue.py" --repo avibe-bot/avibe --issue 157 --interval 60
 ```
 
-GitHub Actions for a pushed commit:
+Standalone GitHub Actions for a pushed commit that is not being monitored through a PR:
 
 ```bash
 vibe watch add \
