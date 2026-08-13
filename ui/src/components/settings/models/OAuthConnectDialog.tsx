@@ -38,7 +38,7 @@ import {
 } from './asyncLifetime';
 import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
-import { oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
+import { NATIVE_SUBSCRIPTION_SLOT_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
@@ -489,9 +489,9 @@ export const OAuthConnectDialog: React.FC<{
         // position moves.
         const step = transition({
           kind: 'error',
-          errorKey: isReauth ? 'settings.models.oauth.error.start' : oauthStartFailureKey(failure?.code),
+          errorKey: isReauth ? 'settings.models.oauth.error.start' : oauthStartFailureKey(failure?.detail ?? failure?.code),
         });
-        if (!isReauth) setStartFailureCode(failure?.code ?? 'start_failed');
+        if (!isReauth) setStartFailureCode(failure?.detail ?? failure?.code ?? 'start_failed');
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     })();
@@ -594,7 +594,7 @@ export const OAuthConnectDialog: React.FC<{
   };
 
   const retryStart = () => {
-    if (startFailureCode === 'native_source_already_exists' && !isReauth) {
+    if (startFailureCode === NATIVE_SUBSCRIPTION_SLOT_FAILURE && !isReauth) {
       // The start route checked the current store under its mutation lock, so
       // this error is newer and more authoritative than the page snapshot.
       setNativeSlotTaken(true);
@@ -603,7 +603,9 @@ export const OAuthConnectDialog: React.FC<{
       setPhase('choose');
       return;
     }
+    const freshAcquisition = startFailureCode === null;
     setStartFailureCode(null);
+    if (freshAcquisition) clientNonce.current = null;
     setStartAttempt((attempt) => attempt + 1);
     setPhase('flow');
   };
@@ -800,11 +802,13 @@ export const OAuthConnectDialog: React.FC<{
                     an unknown one degrades to 连接失败 rather than rendering itself. */}
                 <span>{serverText(t, errorKey, 'settings.models.oauth.error.generic')}</span>
               </div>
+              {isReauth && stranded.length > 0 && <>
               {/* Past tense (`gapsDone`), because this is not a confirm: the
                   credential change these pairs are the cost of has already
                   happened. Self-hides when the failure stranded nobody. */}
               <p className="text-[12px] font-semibold text-foreground">{t('settings.models.repair.gapsDone')}</p>
               <GuardGapList gaps={stranded} />
+              </>}
             </div>
           )}
 
@@ -914,7 +918,7 @@ export const OAuthConnectDialog: React.FC<{
               <span />
             )}
             <div className="flex items-center gap-2">
-              {failed && !isReauth && startFailureCode && (
+              {failed && !isReauth && (
                 <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={retryStart}>
                   {t('settings.models.addSub.retry')}
                 </Button>

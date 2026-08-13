@@ -3812,6 +3812,7 @@ class ModelHubService:
                     raise ModelHubError(
                         "native_source_already_exists",
                         status=409,
+                        detail="modelHub.errors.native_subscription_slot_taken",
                         data={"existing_source_id": existing.id},
                     )
 

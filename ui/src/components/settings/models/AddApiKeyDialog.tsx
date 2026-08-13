@@ -62,6 +62,7 @@ const failureCopy = (cause: AddApiKeyFailure): string => {
   switch (cause) {
     case 'auth': return 'settings.models.addKey.fail.auth';
     case 'network': return 'settings.models.addKey.fail.network';
+    case 'interface': return 'settings.models.addKey.fail.undetermined';
     case 'engineDown': return 'settings.models.addKey.fail.engineDown';
     case 'unclassified': return 'settings.models.addKey.fail.unclassified';
   }

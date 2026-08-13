@@ -797,6 +797,7 @@
       "authentication_failed": "鉴权失败，请检查 API Key 是否有效。",
       "observation_failed": "已连接，但无法确认服务返回的是有效模型接口。",
       "adapter_error": "无法确认服务是否可连接，请重试。",
+      "native_subscription_slot_taken": "这个订阅的原生登录位已经被占用。",
       "source_timeout": "连接超时，请检查网络后重试。",
       "invalid_source_order": "来源顺序包含不可用、不适用或重复的来源。",
       "mode_switch_blocked": "当前供给模式或选择阻止了此操作。",

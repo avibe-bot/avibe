@@ -88,7 +88,11 @@ export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney)
     : 'settings.models.oauth.error.generic';
 
 /** Start-route failures have not reached provider authorization yet. */
+export const NATIVE_SUBSCRIPTION_SLOT_FAILURE = 'modelHub.errors.native_subscription_slot_taken';
+
 export const oauthStartFailureKey = (code: string | undefined): string =>
-  code === 'native_source_already_exists'
+  code === NATIVE_SUBSCRIPTION_SLOT_FAILURE
     ? 'settings.models.addSub.error.alreadyBound'
-    : 'settings.models.addSub.error.startFailed';
+    : code === 'engine_down' || code === 'modelHub.errors.engine_down'
+      ? 'settings.models.addSub.error.engineDown'
+      : 'settings.models.addSub.error.startFailed';
