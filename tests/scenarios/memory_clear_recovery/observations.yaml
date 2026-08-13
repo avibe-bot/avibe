@@ -1,15 +1,16 @@
 version: 1
-capability: memory_clear_recovery
+capability: memory_clear_intent
 observations:
   - id: OBS-MEMORY-CLEAR-001
-    source: issue_1374_runtime_reproduction
+    source: issue_1392_rev2
     related_scenarios:
       - MEMORY-CLEAR-201
-    summary: An ordinary provider add timeout is conservatively retained as manual_required, but that local fence must not disable journaled Clear.
+    summary: An ordinary provider add timeout is conservatively retained as manual_required, but that local fence must not disable marker-owned Clear.
     previous_assumption: Unknown provider outcomes had to block Clear to preserve their evidence.
-    observed_behavior: Clear already snapshots the queue and attachment tree before deletion, can restore them on Abort, and resets the queue at a new epoch on completion.
+    observed_behavior: Clear records an atomic intent marker, resets the queue at a new epoch, and retries the four idempotent deletion primitives after interruption.
     required_updates:
       - keep automatic replay forbidden for unknown outcomes
       - allow Clear to discard retained local evidence and release pinned attachments
-      - preserve the existing Resume Clear and Abort and restore recovery contract
+      - remove the obsolete snapshot/Resume/Abort contract
+      - project failed marker state without blocking service startup
       - prove a later capture in the same logical session can deliver

@@ -56,7 +56,6 @@ export const SettingsMemoryPage: React.FC = () => {
   const [repairHealth, setRepairHealth] = useState<MemoryCascadeHealth | null>(null);
   const [logGeneration, setLogGeneration] = useState(0);
   const [logRefreshToken, setLogRefreshToken] = useState(0);
-  const [recoveryAction, setRecoveryAction] = useState<'resume' | 'abort' | null>(null);
 
   const settingsRead = useMemoryResource<MemorySettingsOk>({
     read: api.getMemorySettings,
@@ -81,15 +80,12 @@ export const SettingsMemoryPage: React.FC = () => {
     source: processingRecord.runtime.source,
     health: processingRecord.runtime.health,
   } : null;
-  const reloadRecoveryState = useCallback(async () => {
-    await Promise.all([loadProcessingRecord(), loadMaintenance()]);
-  }, [loadMaintenance, loadProcessingRecord]);
   // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
   // sticky per resource, so the static state never flickers away on a later request.
   const remoteUnavailable =
     settingsRead.forbidden || processingRecordRead.forbidden || maintenanceRead.forbidden;
   const repairMutationBusy =
-    restarting || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving || settings?.factory_reset_required === true;
+    restarting || rebuildBusy || clearing || clearOpen || settingsSaving || settings?.factory_reset_required === true;
 
   // Dependency readiness comes from the authoritative Dependencies source. Processing Record
   // health is observational and never doubles as installation or enablement state.
@@ -120,7 +116,7 @@ export const SettingsMemoryPage: React.FC = () => {
   }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
 
   const confirmClear = async () => {
-    if (repairBusy || restarting || rebuildBusy || clearing || recoveryAction !== null || settingsSaving) return;
+    if (repairBusy || restarting || rebuildBusy || clearing || settingsSaving) return;
     setClearing(true);
     // Clear can delete provider payloads before a failed receipt or a lost
     // response, so purge cached payloads for every confirmed attempt.
@@ -153,33 +149,9 @@ export const SettingsMemoryPage: React.FC = () => {
     setLogRefreshToken((token) => token + 1);
   };
 
-  const runClearRecovery = async (action: 'resume' | 'abort', operationId: string) => {
-    if (repairBusy || restarting || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving) return;
-    setRecoveryAction(action);
-    try {
-      const res = action === 'resume'
-        ? await api.resumeMemoryClear(operationId)
-        : await api.abortMemoryClear(operationId);
-      if (res.status === 'completed' || res.status === 'aborted') {
-        showToast(t(`memory.processingRecord.clearRecovery.${action}Success`), 'success');
-        setLogGeneration((generation) => generation + 1);
-        void loadProcessingRecord();
-        void loadMaintenance();
-        void loadSettings();
-      } else {
-        await reloadRecoveryState();
-        showToast(memoryErrorMessage(t, 'error' in res ? res.error : undefined), 'error');
-      }
-    } catch {
-      await reloadRecoveryState();
-      showToast(t('memory.processingRecord.clearRecovery.actionFailed'), 'error');
-    } finally {
-      setRecoveryAction(null);
-    }
-  };
 
   const restartEngine = async () => {
-    if (repairBusy || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving) return;
+    if (repairBusy || rebuildBusy || clearing || clearOpen || settingsSaving) return;
     setRestarting(true);
     try {
       const res = await api.restartMemoryRuntime();
@@ -246,7 +218,7 @@ export const SettingsMemoryPage: React.FC = () => {
       dependencyReady={dependencyReady}
       rebuildBusy={rebuildBusy}
       repairBusy={repairBusy}
-      mutationBusy={restarting || recoveryAction !== null}
+      mutationBusy={restarting}
       onRebuildBusyChange={setRebuildBusy}
       onSavingChange={setSettingsSaving}
       onSaved={(next) => {
@@ -332,7 +304,7 @@ export const SettingsMemoryPage: React.FC = () => {
               <MemoryStatusPanel
                 status={status}
                 failures={processingRecord?.anomalies.items ?? []}
-                recovery={processingRecord?.maintenance.clear_recovery ?? null}
+                clearInProgress={processingRecord?.maintenance.clear_in_progress ?? null}
                 logSections={processingRecord?.sources ?? null}
                 providerChecks={processingRecord?.provider_checks?.items ?? []}
                 providerChecksSource={processingRecord?.provider_checks?.source ?? null}
@@ -345,14 +317,7 @@ export const SettingsMemoryPage: React.FC = () => {
                     : processingRecordRead.error
                 }
                 refreshPending={processingRecordRead.loading}
-                recoveryAction={recoveryAction}
                 onRefresh={refreshProcessingRecord}
-                onResumeClear={(operationId) => {
-                  if (canAdminister) void runClearRecovery('resume', operationId);
-                }}
-                onAbortClear={(operationId) => {
-                  if (canAdminister) void runClearRecovery('abort', operationId);
-                }}
                 repairSupported={canAdminister && settings.enabled === true && settings.repair_available === true}
                 repairBusy={repairBusy}
                 mutationBusy={repairMutationBusy}

@@ -1,7 +1,7 @@
 version: 1
 capability:
-  id: memory_clear_recovery
-  name: Journaled Memory Clear recovery
+  id: memory_clear_intent
+  name: Durable Memory Clear intent
   canonical_tests:
     - tests/test_memory_maintenance.py
 status_legend:
@@ -11,18 +11,29 @@ status_legend:
   gap: not covered yet
 scenarios:
   - id: MEMORY-CLEAR-201
-    name: Clear discards an unknown add and restores session delivery
+    name: Clear discards retained local evidence and converges after interruption
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_maintenance.py::test_clear_discards_manual_required_fence_and_allows_new_delivery
+    test: tests/test_memory_maintenance.py::test_clear_writes_marker_and_repeats_four_surfaces
     actor: Memory Settings user
     trigger: A provider add times out after submission and fences its session as manual_required
     given: The queue retains the ambiguous payload and pinned attachment bundle without replaying it
     when: The user confirms Clear Memory Data
-    then: The journaled Clear removes the retained evidence, advances the epoch, and a later capture in the same logical session delivers normally
+    then: Marker-owned Clear removes retained evidence, advances the epoch, and a later capture can deliver normally
     expected_outputs:
       - Maintenance advertises can_clear while the manual_required fence exists
-      - Clear completes through the existing snapshot and journal surfaces
+      - Clear completes through the four existing idempotent deletion primitives
       - The ambiguous payload and attachment bundle are removed without another provider add
       - The session is unfenced and a subsequent capture reaches the provider
+  - id: MEMORY-CLEAR-202
+    name: Failed marker is retried automatically on boot
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_memory_maintenance.py::test_failed_clear_persists_failed_projection_and_boot_retries
+    actor: Memory runtime
+    trigger: A clear primitive fails after the marker is durable
+    given: Processing Record projects a failed clear marker and Memory remains fenced
+    when: The next runtime reconcile runs
+    then: The marker returns to deleting, all four primitives are retried idempotently, and the marker is removed on success

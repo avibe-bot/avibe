@@ -100,8 +100,8 @@ finish before starting another one.
 
 Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data or the
 call-log database is corrupt. Clear Memory Data creates and verifies a private snapshot
-of the queue, provider data, call log, and pinned attachments, then removes only
-those four Avibe-owned surfaces under a maintenance journal. It does not delete
+ of the queue, provider data, call log, and pinned attachments, then removes only
+ those four Avibe-owned surfaces under a durable clear-intent marker. It does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs,
 backups, and user-created snapshots); it is not a secure wipe.
@@ -112,12 +112,10 @@ and pinned attachment bundle, clears that session's local fence, and never
 replays the ambiguous add. Because the provider outcome is unknown, Clear cannot
 remove a copy that may already have reached the provider.
 
-If Clear Memory Data is interrupted, Processing Record shows explicit **Resume Clear**
-and **Abort and restore** actions for that operation. **Resume Clear** continues
-the journaled deletion; **Abort and restore** restores every surface from the
-verified snapshot and is available only after the initial snapshot is complete.
-Nothing resumes automatically, and Memory remains fenced until one action
-reaches a terminal result.
+If Clear Memory Data is interrupted, the marker remains durable and Processing Record
+shows its operation, deleting/failed state, timestamp, and error code. Boot automatically
+retries the four idempotent deletion primitives; Memory remains fenced until the marker
+is removed after all surfaces finish. A failed marker can be retried by Clear Memory Data.
 
 4. **Reinitialize Memory**: Use it only as a last resort when the earlier actions
    cannot recover Memory. It is available on the Memory Runtime card under

@@ -83,7 +83,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         mutationBusy
@@ -103,7 +103,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={{ ...legacySettings, factory_reset_required: true }}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -213,7 +213,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -329,7 +329,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={firstSetupSettings}
-        maintenance={{ status: 'ok', data_exists: false, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: false, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -399,7 +399,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={{ ...legacySettings, rebuild_required: true }}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -599,7 +599,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: dataExists, can_clear: false, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: dataExists, can_clear: false, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -663,7 +663,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}

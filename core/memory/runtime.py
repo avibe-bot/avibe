@@ -33,7 +33,7 @@ from core.memory.artifact import (
     get_memory_artifact_manager,
 )
 from core.memory.blocking import run_blocking
-from core.memory.clear_journal import ClearSurface
+from core.memory.clear_intent import ClearSurface
 from core.memory.confined_filesystem import required_no_follow_flag
 from core.memory.everos import (
     EverOSPort,
@@ -45,7 +45,7 @@ from core.memory.everos_insight.recorder import clear_call_log, maintain_call_lo
 from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.maintenance import (
-    ClearRecoveryResult,
+    ClearInProgressResult,
     ClearResult,
     MaintenanceObservation,
     MaintenanceResult,
@@ -83,7 +83,6 @@ from core.memory.provider_root import (
     ProviderRootRollback,
 )
 from core.memory.store import MemoryStore, is_principal_id, is_project_id
-from core.memory.snapshot import MemorySnapshot
 from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItems,
@@ -191,8 +190,8 @@ class _LifecycleGenerationLock:
         self.release()
 
 
-def _clear_recovery_payload(
-    recovery: ClearRecoveryResult | None,
+def _clear_in_progress_payload(
+    recovery: ClearInProgressResult | None,
 ) -> dict[str, Any] | None:
     if recovery is None:
         return None
@@ -201,8 +200,6 @@ def _clear_recovery_payload(
         "operation_id": recovery.operation_id,
         "occurred_at": recovery.occurred_at,
         "error_code": recovery.error_code,
-        "can_resume": recovery.can_resume,
-        "can_abort": recovery.can_abort,
     }
 
 
@@ -211,7 +208,7 @@ def _clear_result_payload(result: ClearResult) -> dict[str, Any]:
         return {
             "status": "failed",
             "error": result.error,
-            "recovery": _clear_recovery_payload(result.recovery),
+            "clear_in_progress": _clear_in_progress_payload(result.clear_in_progress),
         }
     return {
         "status": result.status,
@@ -253,7 +250,7 @@ def _maintenance_projection_payload(
         "source": _source_observation_payload(result.source),
         "data_exists": result.data_exists,
         "can_clear": result.can_clear,
-        "clear_recovery": _clear_recovery_payload(result.clear_recovery),
+        "clear_in_progress": _clear_in_progress_payload(result.clear_in_progress),
     }
 
 
@@ -903,20 +900,13 @@ class MemoryRuntime:
             # save cannot race a root wipe or replace sidecar credentials halfway
             # through an active provider call.
             async with self.module.lifecycle():
-                restore_operation_open = (
-                    self._maintenance is not None
-                    and self._maintenance.has_open_restore()
-                )
                 maintenance_open = self._maintenance_open()
                 if (
                     maintenance_open
                     and self._can_disable_without_maintenance_authority(config)
                 ):
                     result = await self._disable_locked(config)
-                elif restore_operation_open and not recorded_sidecar_reaped:
-                    self.module.pause_claims()
-                    return {"ok": False, "error": "memory_clear_failed"}
-                elif maintenance_open and not restore_operation_open:
+                elif maintenance_open:
                     self.module.pause_claims()
                     return {"ok": False, "error": "memory_clear_failed"}
                 else:
@@ -955,7 +945,7 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Reconcile while both controller and module lifecycle locks are held."""
 
-        if self._maintenance is not None and self._maintenance.has_open_restore():
+        if self._maintenance is not None and self._maintenance.is_open():
             recovered = await self._maintenance.recover_boot()
             if not recovered:
                 self.module.pause_claims()
@@ -1111,7 +1101,7 @@ class MemoryRuntime:
         if maintenance is None:
             return MaintenanceObservation(
                 block_reason="memory_store_unavailable",
-                clear_recovery=None,
+                clear_in_progress=None,
                 can_clear=False,
             )
         return await maintenance.observe(operator_ref=operator_ref)
@@ -1284,11 +1274,13 @@ class MemoryRuntime:
         anomalies, maintenance = projection
         if anomalies.source.status == "unavailable":
             raise self._unavailable()
-        return {
+        payload: dict[str, Any] = {
             "status": "ok",
             "items": [asdict(entry) for entry in anomalies.items],
-            "recovery": _clear_recovery_payload(maintenance.clear_recovery),
         }
+        if maintenance.clear_in_progress is not None and maintenance.clear_in_progress.state == "failed":
+            payload["clear_in_progress"] = _clear_in_progress_payload(maintenance.clear_in_progress)
+        return payload
 
     async def maintenance_payload(
         self,
@@ -1306,7 +1298,7 @@ class MemoryRuntime:
             "status": "ok",
             "data_exists": result.data_exists,
             "can_clear": result.can_clear,
-            "clear_recovery": _clear_recovery_payload(result.clear_recovery),
+            "clear_in_progress": _clear_in_progress_payload(result.clear_in_progress),
         }
 
     def principal_for_user_key(self, user_key: str) -> str:
@@ -1500,30 +1492,6 @@ class MemoryRuntime:
         async with self.module.lifecycle():
             return await run_blocking(operation)
 
-    async def create_backup(self, backup_id: str | None = None) -> MemorySnapshot:
-        """Create one ordinary Memory backup under the full maintenance fence."""
-
-        if not self.available:
-            raise self._unavailable()
-        return await self._require_maintenance().create_backup(backup_id)
-
-    async def restore_backup(
-        self,
-        backup_id: str,
-        *,
-        expected_manifest_sha256: str,
-        expected_surface_digests: Mapping[str, str | None],
-    ) -> MemorySnapshot:
-        """Restore one verified ordinary Memory backup under the same fence."""
-
-        if not self.available:
-            raise self._unavailable()
-        return await self._require_maintenance().restore_backup(
-            backup_id,
-            expected_manifest_sha256=expected_manifest_sha256,
-            expected_surface_digests=expected_surface_digests,
-        )
-
     async def clear(self, *, operator_ref: str) -> dict[str, Any]:
         if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
             return {"status": "failed", "error": "memory_operation_in_progress"}
@@ -1532,42 +1500,6 @@ class MemoryRuntime:
         maintenance = self._require_maintenance()
         return await self._run_clear_with_operation_lease(
             lambda: maintenance.clear(operator_ref=operator_ref)
-        )
-
-    async def resume_clear(
-        self,
-        operation_id: str,
-        *,
-        operator_ref: str,
-    ) -> dict[str, Any]:
-        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
-            return {"status": "failed", "error": "memory_operation_in_progress"}
-        if not self.available:
-            raise self._unavailable()
-        maintenance = self._require_maintenance()
-        return await self._run_clear_with_operation_lease(
-            lambda: maintenance.resume_clear(
-                operation_id,
-                operator_ref=operator_ref,
-            )
-        )
-
-    async def abort_clear(
-        self,
-        operation_id: str,
-        *,
-        operator_ref: str,
-    ) -> dict[str, Any]:
-        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
-            return {"status": "failed", "error": "memory_operation_in_progress"}
-        if not self.available:
-            raise self._unavailable()
-        maintenance = self._require_maintenance()
-        return await self._run_clear_with_operation_lease(
-            lambda: maintenance.abort_clear(
-                operation_id,
-                operator_ref=operator_ref,
-            )
         )
 
     async def _run_clear_with_operation_lease(

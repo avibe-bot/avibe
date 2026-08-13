@@ -42,16 +42,7 @@ from config.v2_config import MemoryConfig
 from core.memory.artifact import MemoryArtifactManager
 from core.memory.runtime import create_memory_runtime
 from core.memory.provider_root import ProviderRoot, ProviderRootError, ProviderRootMetadata
-from core.memory.snapshot import MemorySnapshotManager, MemorySnapshotUnsafePathError
-
 home = Path(sys.argv[1])
-snapshot_manager = MemorySnapshotManager(home)
-try:
-    snapshot_manager.create("unsupported")
-except MemorySnapshotUnsafePathError:
-    pass
-else:
-    raise AssertionError("Memory snapshots accepted a host without O_NOFOLLOW")
 try:
     AttachmentPinStore(effective_home=home, source_root=home / "source")
 except AttachmentPinError:

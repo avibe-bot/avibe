@@ -39,12 +39,6 @@ const ANOMALY_LABEL_KEYS = {
   },
 } as const;
 
-const CLEAR_RECOVERY_STATE_LABEL_KEYS = {
-  preparing: 'memory.processingRecord.clearRecovery.state.preparing',
-  prepared: 'memory.processingRecord.clearRecovery.state.prepared',
-  deleting: 'memory.processingRecord.clearRecovery.state.deleting',
-  recovery_needed: 'memory.processingRecord.clearRecovery.state.recoveryNeeded',
-} as const;
 
 const HEALTH_STATUS_LABEL_KEYS = {
   ok: 'memory.processingRecord.runtime.healthStatus.ok',
@@ -134,10 +128,6 @@ export const memoryStatusAnomalyLabel = (
   group: AnomalyLabelGroup,
   value: string,
 ): string => knownLabel(t, ANOMALY_LABEL_KEYS[group] as Record<string, string>, value);
-
-export const memoryStatusClearRecoveryStateLabel = (t: TFunction, value: string): string => (
-  knownLabel(t, CLEAR_RECOVERY_STATE_LABEL_KEYS, value)
-);
 
 export const memoryStatusHealthLabel = (t: TFunction, value: string): string => (
   knownLabel(t, HEALTH_STATUS_LABEL_KEYS, value)

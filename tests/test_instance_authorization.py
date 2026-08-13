@@ -3,7 +3,9 @@ import pytest
 from vibe.authorization import (
     AuthorizationContext,
     InstanceAuthorizationError,
+    REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
     REMOTE_HTTP_ALLOWED,
+    REMOTE_HTTP_LOCAL_ONLY,
     can_receive_workbench_event,
     context_from_session_payload,
     has_temporary_unrestricted_org_access,
@@ -212,20 +214,71 @@ def test_show_page_email_context_requires_and_matches_one_exact_target() -> None
     assert elevated_role.can_use_show_page("session-one") is False
 
 
-def test_http_policy_uses_role_authorization_without_local_only_transport_gates() -> None:
-    for method, path in (
-        ("GET", "/api/projects"),
-        ("GET", "/api/workbench/projects-bootstrap"),
-        ("GET", "/api/sessions"),
+def test_http_policy_keeps_unknown_routes_fail_closed_and_runtime_matrix_explicit() -> None:
+    runtime_routes = (
+        ("GET", "/api/harness/bootstrap"),
+        ("PATCH", "/api/harness/tasks/task-1"),
+        ("POST", "/api/agents"),
+        ("POST", "/api/skills"),
+        ("PATCH", "/api/vault/secrets/secret-1"),
+        ("PATCH", "/api/memory/settings"),
+        ("GET", "/api/memory/processing-record"),
+        ("GET", "/api/memory/maintenance"),
+        ("POST", "/api/memory/runtime/rebuild"),
+        ("POST", "/api/memory/runtime/factory-reset"),
+        ("POST", "/api/memory/runtime/repair"),
+        ("POST", "/api/control"),
         ("POST", "/api/config"),
+        ("GET", "/api/models/sources"),
+        ("POST", "/api/models/runtime/start"),
+        ("POST", "/api/backend/codex/restart"),
+        ("POST", "/api/backend/claude/auth/oauth/start"),
+        ("GET", "/api/dependencies"),
+        ("POST", "/api/dependencies/avault/install"),
+        ("PUT", "/api/projects/proj-1/agents-md"),
         ("POST", "/api/files/upload"),
-        ("POST", "/api/remote-access/vibe-cloud/pair"),
+        ("DELETE", "/api/terminal/term-1"),
+        ("POST", "/api/show-pages/ses-1/icon"),
+        ("POST", "/show/ses-1/api/action"),
+        ("GET", "/api/users"),
+        ("POST", "/api/users/user-1/admin"),
+        ("DELETE", "/api/users/user-1"),
+        ("GET", "/api/bind-codes"),
+        ("POST", "/api/bind-codes"),
+        ("DELETE", "/api/bind-codes/code-1"),
+        ("GET", "/api/setup/first-bind-code"),
+        ("GET", "/status"),
+    )
+    for method, path in runtime_routes:
+        policy = http_authorization_policy(method, path)
+        assert policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER, (method, path)
+
+    for method, path in (
         ("GET", "/api/future-owner-capability"),
+        ("POST", "/api/harness/future-capability"),
+        ("GET", "/api/opencode/future-capability"),
+        ("GET", "/api/backend/future/runtime"),
+        ("GET", "/api/users/user-1"),
+        ("POST", "/api/bind-codes/code-1"),
     ):
-        assert http_authorization_policy(method, path).remote_access == REMOTE_HTTP_ALLOWED
+        policy = http_authorization_policy(method, path)
+        assert policy.minimum_role == "owner"
+        assert policy.remote_access == REMOTE_HTTP_LOCAL_ONLY
+
+    for method, path in (
+        ("POST", "/api/remote-access/vibe-cloud/pair"),
+        ("POST", "/api/remote-access/start"),
+        ("POST", "/api/remote-access/stop"),
+        ("POST", "/api/remote-access/optimize-route"),
+        ("POST", "/api/remote-access/settings"),
+        ("POST", "/api/remote-access/diagnostics"),
+        ("GET", "/api/remote-access/network-interfaces"),
+    ):
+        assert http_authorization_policy(method, path).remote_access == REMOTE_HTTP_LOCAL_ONLY
 
 
 def test_http_policy_preserves_safe_remote_reads_and_show_routes() -> None:
+    assert http_authorization_policy("GET", "/api/projects").remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER
     assert http_authorization_policy("GET", "/api/org/context").remote_access == REMOTE_HTTP_ALLOWED
     assert http_authorization_policy("GET", "/api/cloud-management/session").remote_access == REMOTE_HTTP_ALLOWED
     assert http_authorization_policy("GET", "/show/ses-1/").remote_access == REMOTE_HTTP_ALLOWED

@@ -4182,21 +4182,11 @@
         "generation": "数据版本",
         "requestId": "请求 ID"
       },
-      "clearRecovery": {
-        "title": "有一次未完成的清除操作",
-        "description": "上次清除中途被打断。你可以继续完成删除，或中止并恢复到清除前的状态。",
-        "state": {
-          "preparing": "正在准备快照",
-          "prepared": "快照已准备完成",
-          "deleting": "正在删除记忆数据",
-          "recoveryNeeded": "需要恢复处理"
-        },
-        "resume": "继续清除",
-        "abort": "中止并恢复",
-        "abortUnavailable": "初始快照完整后才能中止并恢复。",
-        "resumeSuccess": "清除操作已继续并完成。",
-        "abortSuccess": "清除操作已中止，快照已恢复。",
-        "actionFailed": "无法更新清除恢复状态。",
+      "clearInProgress": {
+        "title": "正在清除记忆数据",
+        "description": "删除完成前，Memory 会保持隔离；操作会自动继续。",
+        "deleting": "正在删除记忆数据",
+        "failed": "需要再次尝试清除",
         "loadFailed": "无法加载清除维护状态。"
       },
       "timeline": {

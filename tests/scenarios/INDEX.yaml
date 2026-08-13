@@ -8,8 +8,8 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
-  - id: memory_clear_recovery
-    name: Journaled Memory Clear recovery
+  - id: memory_clear_intent
+    name: Durable Memory Clear intent
     status: active
     catalog: tests/scenarios/memory_clear_recovery/catalog.yaml
     observations: tests/scenarios/memory_clear_recovery/observations.yaml
@@ -17,8 +17,7 @@ capabilities:
       - tests/test_memory_maintenance.py
     unit_or_contract_tests:
       - tests/test_memory_store.py
-      - tests/test_memory_clear_journal.py
-      - tests/test_memory_clear_snapshot_storage.py
+      - tests/test_memory_clear_intent.py
   - id: memory_rebuild_recovery
     name: Confirmed Memory embedding rebuild recovery
     status: active

@@ -607,7 +607,7 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
                 "status": "ok",
                 "data_exists": False,
                 "can_clear": True,
-                "clear_recovery": None,
+                "clear_in_progress": None,
             }
 
     controller = _build_controller_double()
@@ -1072,7 +1072,7 @@ def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
                 "maintenance": {
                     "source": {"status": "unavailable"},
                     "can_clear": False,
-                    "clear_recovery": None,
+                    "clear_in_progress": None,
                 },
             }
 

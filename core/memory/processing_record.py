@@ -13,7 +13,7 @@ from typing import Any, Literal, TypeVar
 from core.memory.everos import ProviderHealthSnapshot
 from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
 from core.memory.maintenance import (
-    ClearRecoveryResult,
+    ClearInProgressResult,
     MaintenanceObservation,
     MaintenanceResult,
 )
@@ -95,7 +95,7 @@ class MaintenanceProjection:
     source: SourceObservation
     data_exists: bool
     can_clear: bool
-    clear_recovery: ClearRecoveryResult | None
+    clear_in_progress: ClearInProgressResult | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,7 +374,7 @@ class MemoryProcessingRecord:
         except Exception:
             return MaintenanceObservation(
                 block_reason="memory_store_unavailable",
-                clear_recovery=None,
+                clear_in_progress=None,
                 can_clear=False,
             )
 
@@ -495,7 +495,7 @@ class MemoryProcessingRecord:
                 ),
                 data_exists=True,
                 can_clear=False,
-                clear_recovery=None,
+                clear_in_progress=None,
             )
         unavailable_reason = result.error
         if (
@@ -512,7 +512,7 @@ class MemoryProcessingRecord:
             source=source,
             data_exists=result.data_exists,
             can_clear=result.can_clear,
-            clear_recovery=result.clear_recovery,
+            clear_in_progress=result.clear_in_progress,
         )
 
     def observe_recorder(

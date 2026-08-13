@@ -57,6 +57,9 @@ _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset(
 )
 
 REMOTE_HTTP_ALLOWED = "allowed"
+REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER = "active_organization_member"
+REMOTE_HTTP_LOCAL_ONLY = "local_only"
+REMOTE_HTTP_PAYLOAD_FILTERED = "payload_filtered"
 
 
 @dataclass(frozen=True)
@@ -494,12 +497,264 @@ _EDITOR_HTTP_RULES = tuple(
     )
 )
 
+_REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("DELETE", r"^/api/sessions/[^/]+(?:/queue/[^/]+)?$"),
+        ("POST", r"^/api/sessions/[^/]+/fork$"),
+        ("GET", r"^/api/sessions/[^/]+/draft$"),
+        ("PUT", r"^/api/sessions/[^/]+/draft$"),
+        ("POST", r"^/api/sessions/[^/]+/mark-read$"),
+        (
+            "POST",
+            r"^/api/sessions/[^/]+/(?:attachments|cancel|queue/[^/]+/send-now)$",
+        ),
+        ("POST", r"^/api/projects$"),
+        ("POST", r"^/api/asr/transcribe$"),
+        ("POST", r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),
+        ("GET", r"^/api/settings$"),
+        ("HEAD", r"^/api/settings$"),
+        ("POST", r"^/api/settings$"),
+        ("POST", r"^/api/settings/thread$"),
+        ("DELETE", r"^/api/settings/thread$"),
+        ("GET", r"^/api/bind-codes$"),
+        ("DELETE", r"^/api/projects/[^/]+$"),
+        ("GET", r"^/api/harness/(?:runs|bootstrap|runs/[^/]+)$"),
+        ("GET", r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|vmk)$"),
+        ("GET", r"^/api/global-prompts$"),
+        # Baseline for remote identities outside the temporary active-member
+        # rollout. The explicit matrix below admits the same Model Hub metadata
+        # and mutations for active Organization members.
+        ("GET", r"^/api/models/sources$"),
+        ("HEAD", r"^/api/models/sources$"),
+        ("GET", r"^/api/skills/(?:check|find)$"),
+        ("HEAD", r"^/api/skills/(?:check|find)$"),
+        ("POST", r"^/api/vault/requests/(?:access|sign)$"),
+        ("GET", r"^/api/users$"),
+        ("HEAD", r"^/api/users$"),
+    )
+)
+
+_REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("POST", r"^/api/(?:config|sessions)$"),
+        ("PATCH", r"^/api/(?:projects|sessions)/[^/]+$"),
+    )
+)
+
+# Temporary unrestricted runtime surface for authenticated active Organization
+# members. This is deliberately an explicit route matrix: Organization auth,
+# membership, tunnel pairing, cloud-management, and unknown future API routes
+# still use their existing policy. The per-surface authorization model is
+# tracked in avibe#1313.
+_UNRESTRICTED_ORG_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
+_TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES = tuple(
+    (methods, re.compile(pattern))
+    for methods, pattern in (
+        # Settings, configuration, workbench preferences, and service control.
+        # Config responses use the local runtime projection with only the
+        # pairing/tunnel block removed.
+        (frozenset({"POST"}), r"^/api/config$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:settings|settings/thread|workbench/prefs|ui/reload)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:control|doctor|logs|upgrade)$"),
+        # The shell polls the process status and the setup pages use these
+        # local discovery/configuration helpers. They do not alter Organization
+        # identity, pairing, or tunnel state.
+        (_UNRESTRICTED_ORG_METHODS, r"^/status$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:cli/detect|slack/manifest)$"),
+        # Harness, Agent definitions, global prompts, and runtime diagnostics.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/harness/(?:counts|tasks|tasks/[^/]+|watches|watches/[^/]+|runs|runs/[^/]+|bootstrap)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/agents(?:/(?:default|import|[^/]+))?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:agent-backends|agents-graph|agent-onboarding|running-agents(?:/end)?)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/agent/[^/]+/install(?:/[^/]+)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/global-prompts$"),
+        # Skills mutations (read endpoints are viewer-allowed on origin/org).
+        (frozenset({"POST"}), r"^/api/skills$"),
+        (frozenset({"POST"}), r"^/api/skills/preview$"),
+        (frozenset({"POST", "DELETE"}), r"^/api/skills/(?:update|upload|[^/]+)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/dependencies(?:/[^/]+(?:/install(?:/[^/]+)?)?)?$"),
+        # Vault inventory, key material, secret CRUD, grants, approvals, and audit.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/vault/(?:secrets(?:/[^/]+(?:/reveal-context)?)?|tags|pubkey|agent/pubkey|sandbox/root-metadata|agent-bindings:batch|agent-binding|settings|vmk|authz/factors/webauthn(?:/options)?|signing-addresses|requests(?:/[^/]+(?:/(?:deny|fulfill-access))?)?|provision-requests(?:/(?:by-id/)?[^/]+)?|grants(?:/[^/]+)?|sign|pubkey-pin|audit)$"),
+        # Model Hub source/mapping/OAuth/runtime management.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/sources(?:/[^/]+(?:/(?:credential|reauth|refresh|models(?:/.*)?)?)?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/(?:agents|events)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/agents/(?:opencode/menu|[^/]+/(?:sources|mode|mappings|chain|probe))$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/turns/[^/]+/provenance$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/oauth/(?:start|status/[^/]+|submit|cancel)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/migration/(?:scan|apply)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/runtime/(?:status|start)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/sources/[^/]+/models(?:/.*)?$"),
+        # Memory administration.
+        (
+            _UNRESTRICTED_ORG_METHODS,
+            r"^/api/memory/(?:settings|status|processing-record|failures|maintenance|profile|log|log/entry|search|runtime/(?:restart|rebuild|factory-reset|repair)|clear)$",
+        ),
+        # Projects, sessions, chat execution, and ASR.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/projects(?:/[^/]+(?:/agents-md)?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/workbench/projects-bootstrap$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/sessions(?:/[^/]+(?:/(?:fork|cli-activity|cancel|mark-read|queue(?:/[^/]+(?:/send-now)?)?|draft|attachments))?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:search/messages|events|inbox)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/asr/(?:transcribe|telemetry|status)$"),
+        # Apps: Dock, Files, browse favorites, Terminal teardown, and Show Pages.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/dock(?:/pins(?:/[^/]+)?|/order)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/files/(?:list|meta|content|write|upload|mkdir|rename|move|copy|delete|delete/undo|search|search_names|search/replace|search/undo)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/media/[^/]+(?:/meta)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/browse(?:/favorites|/mkdir)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/terminal/[^/]+$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/show-pages(?:/[^/]+(?:/(?:visibility|ensure|access|authorized-emails|rotate-share|share-id|icon))?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),
+        # Agent backends, provider setup, platform settings, and channel tools.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/backend/(?:codex|claude|opencode)/(?:runtime|restart)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/backend/(?:codex|claude)/auth$"),
+        (
+            _UNRESTRICTED_ORG_METHODS,
+            r"^/api/backend/(?:codex|claude|opencode)/auth/(?:oauth/(?:start|status/[^/]+|submit-code|cancel|remove)|api-key/remove|test)$",
+        ),
+        (
+            _UNRESTRICTED_ORG_METHODS,
+            r"^/api/backend/claude/auth/oauth/credentials/remove$",
+        ),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/backend/opencode/(?:providers|custom-provider(?:/[^/]+)?|default-provider|provider/[^/]+/(?:auth(?:/.*)?|test|models(?:/.*)?))$"),
+        (
+            _UNRESTRICTED_ORG_METHODS,
+            r"^/api/(?:opencode/(?:options|permission-status|setup-permission)|claude/(?:agents|models)|codex/(?:agents|models))$",
+        ),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:platforms|slack(?:/(?:auth_test|channels))?|discord/(?:auth_test|channels|guilds)|telegram/(?:auth_test|chats)|lark/(?:auth_test|chats|temp_ws/(?:start|stop))|wechat/qr_login/(?:start|poll)|channels/delete)$"),
+        # Push registration is a runtime notification surface.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/web-push/(?:status|vapid-public-key|subscriptions|test)$"),
+        # Local IM users and bind codes are part of the temporarily unrestricted
+        # runtime administration surface. This does not include Organization
+        # membership, Cloud pairing, or tunnel control routes.
+        (frozenset({"GET", "HEAD", "POST"}), r"^/api/users$"),
+        (frozenset({"POST"}), r"^/api/users/[^/]+/admin$"),
+        (frozenset({"DELETE"}), r"^/api/users/[^/]+$"),
+        (frozenset({"GET", "HEAD", "POST"}), r"^/api/bind-codes$"),
+        (frozenset({"DELETE"}), r"^/api/bind-codes/[^/]+$"),
+        (frozenset({"GET", "HEAD"}), r"^/api/setup/first-bind-code$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/resource-policies(?:/[^/]+/[^/]+)?$"),
+    )
+)
+
+# Compatibility name retained for callers/tests from the previous Apps-only
+# rollout. New code should use the unrestricted Organization matrix above.
+_TEMPORARY_ORGANIZATION_APP_HTTP_RULES = _TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES
+
+# Compatibility allowlist for remote identities outside the temporary active
+# Organization rollout. The unrestricted active-member matrix is evaluated
+# first; unknown routes still use the fail-closed local-only default below.
+_REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
+    (methods, re.compile(pattern))
+    for methods, pattern in (
+        (frozenset({"GET", "HEAD", "POST"}), r"^/api/agent-onboarding$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/agents/[^/]+$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/vault/(?:settings|requests|requests/[^/]+|provision-requests/[^/]+|provision-requests/by-id/[^/]+|grants|audit)$",
+        ),
+        (
+            frozenset({"POST"}),
+            r"^/api/show-pages/[^/]+/ensure$",
+        ),
+        (
+            frozenset({"GET", "HEAD", "PUT"}),
+            r"^/api/show-pages/[^/]+/authorized-emails$",
+        ),
+        # Dock reads and writes are admitted only by the temporary Organization
+        # Apps matrix above; Workbench preference writes remain local-only.
+        # Reading push status stays remote, and so does the `POST` form of it:
+        # it reports this principal's own subscription count and can only
+        # re-attach a device id to an endpoint that is already stored and
+        # enabled for that same principal, so it can neither introduce an
+        # endpoint nor send to one.
+        #
+        # Registering and testing a subscription are different: the endpoint is
+        # caller-supplied data that `send_web_push()` later fetches from the
+        # Avibe host, and nothing between the payload and the request restricts
+        # it to a real push service. A remote caller could register an HTTPS
+        # endpoint aimed at loopback, a private LAN host or a rebinding name and
+        # then have this host issue the request from inside the network, so the
+        # write and the test stay local until the endpoint is checked against
+        # its resolved addresses.
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/web-push/(?:status|vapid-public-key)$",
+        ),
+        (frozenset({"POST"}), r"^/api/web-push/status$"),
+        (
+            frozenset({"PUT"}),
+            r"^/api/resource-policies/[^/]+/[^/]+$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/(?:agents|events)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/agents/[^/]+/(?:sources|chain)$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/models/turns/[^/]+/provenance$",
+        ),
+        # OAuth polling follows its flow: `oauth/start` and the Settings
+        # `auth/oauth/start` are local-only, so only the local owner can open a
+        # flow, while a status poll returns that flow's authorization URL and
+        # device code and - once the Model Hub flow succeeds - the same
+        # credential and account payload `/api/models/sources` deliberately
+        # keeps local. A remote caller holding a flow id would read the local
+        # owner's in-flight login, so both status routes stay local too.
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/remote-access/status$",
+        ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/harness/counts$",
+        ),
+        # Memory reads that describe this principal's own view stay remote, and
+        # search is scoped to the caller. Shared provider settings and the
+        # process-global failure log do not: both expose data across principals,
+        # so they stay trusted-local with the admin log and other sidecar-wide
+        # operations. Memory administration is absent for the same reason: a
+        # settings PATCH repoints the shared provider endpoints, and
+        # `runtime/restart` / `clear` act on the whole local sidecar rather than
+        # one principal.
+        (frozenset({"GET", "HEAD"}), r"^/api/memory/(?:status|profile)$"),
+        (frozenset({"POST"}), r"^/api/memory/search$"),
+    )
+)
+
+
 def _http_rule_matches(
     method: str,
     path: str,
     rules: tuple[tuple[str, re.Pattern[str]], ...],
 ) -> bool:
     return any(rule_method == method and pattern.fullmatch(path) for rule_method, pattern in rules)
+
+
+def _owner_http_rule_matches(method: str, path: str) -> bool:
+    return any(
+        method in methods and pattern.fullmatch(path)
+        for methods, pattern in _REMOTE_OWNER_ALLOWED_HTTP_RULES
+    )
+
+
+def _temporary_unrestricted_org_rule_matches(method: str, path: str) -> bool:
+    return any(
+        method in methods and pattern.fullmatch(path)
+        for methods, pattern in _TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES
+    )
+
+
+def _temporary_organization_app_rule_matches(method: str, path: str) -> bool:
+    """Compatibility alias for the previous Apps-only policy matcher."""
+
+    return _temporary_unrestricted_org_rule_matches(method, path)
 
 
 def http_authorization_policy(
@@ -510,9 +765,9 @@ def http_authorization_policy(
 ) -> HttpAuthorizationPolicy:
     """Return role and remote-exposure policy for one HTTP request.
 
-    Remote requests use the same role and resource authorization as local requests.
-    The former trust-local/local-only transport boundary was transitional and is
-    intentionally removed; unknown API routes still default to owner role.
+    Explicit viewer/editor and owner-management routes keep their approved remote
+    behavior. Unknown API routes fail closed to trusted-local callers so adding a
+    new owner-only endpoint cannot silently expose local machine capabilities.
     """
 
     normalized_method = method.upper()
@@ -530,13 +785,30 @@ def http_authorization_policy(
             path,
         )
         minimum_role = "viewer"
-        return HttpAuthorizationPolicy(minimum_role)
+        remote_access = (
+            REMOTE_HTTP_ALLOWED
+            if is_read or is_safe_human_event
+            else REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER
+        )
+        return HttpAuthorizationPolicy(minimum_role, remote_access)
     if path == "/status":
-        return HttpAuthorizationPolicy(None)
+        return HttpAuthorizationPolicy(None, REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
-    # Route exposure is no longer split into local-only and remote-only
-    # matrices. Every API reaches the role/resource checks below.
+    if _temporary_unrestricted_org_rule_matches(normalized_method, path):
+        # The matrix is an identity-independent route classification. The
+        # request boundary below admits it only after verifying the signed
+        # active-Organization claim; ordinary remote callers still receive
+        # ``remote_execution_disabled`` there. The optional keyword is retained
+        # for callers from the previous Apps-only rollout, but classification is
+        # deliberately context-independent.
+        minimum_role = (
+            "owner"
+            if re.fullmatch(r"^/api/projects/[^/]+/agents-md$", path)
+            else "viewer"
+        )
+        return HttpAuthorizationPolicy(minimum_role, REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER)
+
     minimum_role = "owner"
     if _http_rule_matches(normalized_method, path, _VIEWER_HTTP_MUTATION_RULES):
         # These mutations enforce Show Page ownership and Organization authority
@@ -553,7 +825,22 @@ def http_authorization_policy(
             ):
                 minimum_role = "viewer"
 
-    return HttpAuthorizationPolicy(minimum_role)
+    if _http_rule_matches(normalized_method, path, _REMOTE_LOCAL_ONLY_HTTP_RULES):
+        remote_access = REMOTE_HTTP_LOCAL_ONLY
+    elif _http_rule_matches(
+        normalized_method,
+        path,
+        _REMOTE_PAYLOAD_FILTERED_HTTP_RULES,
+    ):
+        remote_access = REMOTE_HTTP_PAYLOAD_FILTERED
+    elif minimum_role in {"viewer", "editor"} or _owner_http_rule_matches(
+        normalized_method,
+        path,
+    ):
+        remote_access = REMOTE_HTTP_ALLOWED
+    else:
+        remote_access = REMOTE_HTTP_LOCAL_ONLY
+    return HttpAuthorizationPolicy(minimum_role, remote_access)
 
 
 def required_instance_role(method: str, path: str) -> str | None:

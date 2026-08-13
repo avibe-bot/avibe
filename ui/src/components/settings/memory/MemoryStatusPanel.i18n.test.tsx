@@ -35,17 +35,14 @@ const renderAnomaly = (language: 'en' | 'zh', errorCode: string) => {
       <MemoryStatusPanel
         status={null}
         failures={[failure]}
-        recovery={null}
+        clearInProgress={null}
         logSections={null}
         statusLoading={false}
         failuresLoading={false}
         statusError={null}
         failuresError={null}
         refreshPending={false}
-        recoveryAction={null}
         onRefresh={vi.fn()}
-        onResumeClear={vi.fn()}
-        onAbortClear={vi.fn()}
       />
     </I18nextProvider>,
   );
@@ -65,7 +62,7 @@ const renderUnobservedSource = (language: 'en' | 'zh') => {
       <MemoryStatusPanel
         status={null}
         failures={[]}
-        recovery={null}
+        clearInProgress={null}
         logSections={{
           everos: { status: 'available', observed_at: null },
           capture: { status: 'unavailable', observed_at: null, reason: 'missing' },
@@ -76,10 +73,7 @@ const renderUnobservedSource = (language: 'en' | 'zh') => {
         statusError={null}
         failuresError={null}
         refreshPending={false}
-        recoveryAction={null}
         onRefresh={vi.fn()}
-        onResumeClear={vi.fn()}
-        onAbortClear={vi.fn()}
       />
     </I18nextProvider>,
   );
