@@ -271,7 +271,7 @@ export const AddApiKeyDialog: React.FC<{
               type="button"
               variant="ghost"
               size="icon"
-              className="model-hub-ink-white-59 size-[27px]"
+              className="model-hub-ink-59 size-[27px]"
               aria-label={t('settings.models.addKey.cancel')}
               disabled={!canCancel}
               onClick={cancel}
@@ -293,7 +293,7 @@ export const AddApiKeyDialog: React.FC<{
               {(id) => <Input id={id} value={baseUrl} disabled={formLocked} autoComplete="url" spellCheck={false} onChange={(event) => editEndpoint(event.target.value)} className="model-hub-add-key-input font-mono" />}
             </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.apiKey')}>
-              {(id) => <span className="model-hub-add-key-secret relative flex items-center"><Input id={id} value={apiKey} type={revealed ? 'text' : 'password'} disabled={formLocked} autoComplete="off" spellCheck={false} onChange={(event) => editKey(event.target.value)} className="model-hub-add-key-input w-full pr-10 font-mono" /><Button type="button" variant="ghost" size="icon" className="model-hub-ink-white-59 absolute right-1 size-7" aria-label={t(`settings.models.addKey.field.apiKey.${revealed ? 'conceal' : 'reveal'}`)} disabled={formLocked} onClick={() => setRevealed((value) => !value)}>{revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}</Button></span>}
+              {(id) => <span className="model-hub-add-key-secret relative flex items-center"><Input id={id} value={apiKey} type={revealed ? 'text' : 'password'} disabled={formLocked} autoComplete="off" spellCheck={false} onChange={(event) => editKey(event.target.value)} className="model-hub-add-key-input w-full pr-10 font-mono" /><Button type="button" variant="ghost" size="icon" className="model-hub-ink-59 absolute right-1 size-7" aria-label={t(`settings.models.addKey.field.apiKey.${revealed ? 'conceal' : 'reveal'}`)} disabled={formLocked} onClick={() => setRevealed((value) => !value)}>{revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}</Button></span>}
             </Field>
 
             {!isWorking && (
@@ -371,7 +371,7 @@ export const AddApiKeyDialog: React.FC<{
             <div className="model-hub-add-key-protocol-field flex flex-col">
               <div className="flex items-center gap-1.5">
                 <span className="model-hub-add-key-label">{t('settings.models.addKey.undetermined.label')}</span>
-                <Info className="model-hub-ink-white-59 size-[13px]" aria-hidden />
+                <Info className="model-hub-ink-59 size-[13px]" aria-hidden />
               </div>
               <div className="model-hub-add-key-segments flex max-w-full flex-wrap">
                 {SOURCE_PROTOCOLS.map((protocol) => (
@@ -400,7 +400,7 @@ export const AddApiKeyDialog: React.FC<{
           </div>
         )}
 
-        <footer className="model-hub-add-key-foot model-hub-fill-white-05 flex flex-row items-center justify-end border-t border-border">
+        <footer className="model-hub-add-key-foot model-hub-fill-05 flex flex-row items-center justify-end border-t border-border">
           <Button
             type="button"
             variant="outline"

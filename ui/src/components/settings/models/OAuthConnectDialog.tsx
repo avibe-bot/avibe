@@ -691,7 +691,7 @@ export const OAuthConnectDialog: React.FC<{
                       <span
                         className={cn(
                           'mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border',
-                          selected ? 'border-mint' : 'model-hub-border-white-33',
+                          selected ? 'border-mint' : 'model-hub-border-33',
                         )}
                         aria-hidden
                       >
@@ -727,7 +727,7 @@ export const OAuthConnectDialog: React.FC<{
             </p>
           </div>
 
-          <div className="model-hub-add-sub-foot model-hub-fill-white-05 flex items-center justify-end gap-2 border-t border-border">
+          <div className="model-hub-add-sub-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">
             <Button variant="ghost" size="sm" className="model-hub-dialog-action" onClick={onClose}>
               {t('settings.models.addSub.cancel')}
             </Button>

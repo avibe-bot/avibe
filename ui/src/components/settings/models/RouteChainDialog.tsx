@@ -707,7 +707,7 @@ export const RouteChainDialog: React.FC<{
           }
         }}
         data-current={current || undefined}
-        className="model-hub-route-hop model-hub-fill-white-08 flex items-center border border-border"
+        className="model-hub-route-hop model-hub-fill-08 flex items-center border border-border"
       >
         <button
           ref={(node) => {
@@ -741,7 +741,7 @@ export const RouteChainDialog: React.FC<{
             "model-hub-route-ordinal grid shrink-0 place-items-center font-mono font-medium",
             index === 0
               ? "model-hub-accent-pill--mint"
-              : "model-hub-fill-white-0a text-muted",
+              : "model-hub-fill-0a text-muted",
           )}
         >
           {index + 1}
@@ -788,7 +788,7 @@ export const RouteChainDialog: React.FC<{
             phase === "saving" || phase === "impact" || phase === "refreshing"
           }
           onClick={() => remove(index)}
-          className="model-hub-route-remove model-hub-fill-white-0a grid shrink-0 place-items-center border border-border text-muted"
+          className="model-hub-route-remove model-hub-fill-0a grid shrink-0 place-items-center border border-border text-muted"
         >
           <X aria-hidden="true" />
         </button>
@@ -979,7 +979,7 @@ export const RouteChainDialog: React.FC<{
                     ? "model-hub-route-add-none"
                     : undefined
                 }
-                className="model-hub-route-add model-hub-fill-white-05 flex w-full items-center justify-center gap-1.5 border border-border font-semibold text-muted disabled:opacity-60"
+                className="model-hub-route-add model-hub-fill-05 flex w-full items-center justify-center gap-1.5 border border-border font-semibold text-muted disabled:opacity-60"
               >
                 <Plus aria-hidden="true" />
                 {t("settings.models.routeDialog.addHop")}
@@ -1146,7 +1146,7 @@ export const RouteChainDialog: React.FC<{
             </DialogPrimitive.Description>
           </header>
           {body}
-          <footer className="model-hub-route-foot model-hub-fill-white-05 flex items-center justify-end gap-2 border-t border-border">
+          <footer className="model-hub-route-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">
             {phase === "impact" || phase === "refreshing" ? (
               <Button
                 ref={doneButtonRef}
