@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .service import ModelHubError, ModelHubService
@@ -38,7 +39,7 @@ async def dispatch_model_hub_rpc(
             force=payload.get("force") is True,
         )
     if operation == "list_agents":
-        return service.list_agents()
+        return await asyncio.to_thread(service.list_agents)
     if operation == "get_agent_sources":
         return service.get_agent_sources(payload.get("backend"))
     if operation == "set_agent_sources":

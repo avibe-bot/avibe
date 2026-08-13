@@ -545,6 +545,7 @@ class ModelHubService:
             Callable[[BackendName], list[tuple[str, Optional[str]]]]
         ] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
+        cli_presence_refresh: Optional[Callable[[], None]] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -566,6 +567,7 @@ class ModelHubService:
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
         self.cli_present_override = cli_present_override
+        self.cli_presence_refresh = cli_presence_refresh
         self.now = now
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
             lambda _backend, _source: True
@@ -2987,11 +2989,7 @@ class ModelHubService:
             "selected_model_explicit": selected_model_explicit,
             # The UI must distinguish an installed backend CLI from a configured
             # Model Hub route. Keep this host fact at the controller boundary.
-            "cli_present": (
-                bool(self.cli_present_override(backend))
-                if self.cli_present_override is not None
-                else False
-            ),
+            "cli_present": self._cli_present(backend),
             "sources": sources,
             "supply_status": (
                 resolution.supply_status
@@ -3005,8 +3003,26 @@ class ModelHubService:
         }
 
     def list_agents(self) -> list[dict]:
+        self._refresh_cli_presence()
         config = self.store.load()
         return [self._agent_payload(config, config.agents[backend]) for backend in ("claude", "codex", "opencode")]
+
+    def _refresh_cli_presence(self) -> None:
+        if self.cli_presence_refresh is None:
+            return
+        try:
+            self.cli_presence_refresh()
+        except Exception:
+            logger.warning("Model Hub CLI presence refresh failed", exc_info=True)
+
+    def _cli_present(self, backend: BackendName) -> bool:
+        if self.cli_present_override is None:
+            return False
+        try:
+            return bool(self.cli_present_override(backend))
+        except Exception:
+            logger.warning("Model Hub CLI presence probe failed for %s", backend, exc_info=True)
+            return False
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"}:
@@ -4797,6 +4813,7 @@ def create_default_service(
         Callable[[BackendName], list[tuple[str, Optional[str]]]]
     ] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
+    cli_presence_refresh: Optional[Callable[[], None]] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -4842,4 +4859,5 @@ def create_default_service(
         selected_agent_override=selected_agent_override,
         named_agents_override=named_agents_override,
         cli_present_override=cli_present_override,
+        cli_presence_refresh=cli_presence_refresh,
     )

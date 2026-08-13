@@ -741,6 +741,18 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     }
 
 
+def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+
+    def broken_probe(_backend):
+        raise OSError("probe failed")
+
+    service.cli_present_override = broken_probe
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert all(agent["cli_present"] is False for agent in agents.values())
+
+
 def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.requested_model = lambda backend: {
