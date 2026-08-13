@@ -10,6 +10,8 @@ project-scoped mutations return a clear ``project_no_folder`` error.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from vibe import api, ui_server
@@ -33,6 +35,24 @@ def folderless(monkeypatch):
 
 def _boom(*_args, **_kwargs):
     raise AssertionError("askill must not be reached for a folderless project")
+
+
+def test_skills_guarded_redacts_missing_project_path(monkeypatch, tmp_path):
+    from core.services import skills as skills_service
+
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _name: "askill")
+
+    async def fail(_askill, _service):
+        raise skills_service.SkillsError(
+            "project_dir_missing",
+            f"project folder not found: {tmp_path / 'deleted-project'}",
+        )
+
+    result = asyncio.run(api._skills_guarded(fail))
+
+    assert result["error"]["code"] == "project_dir_missing"
+    assert result["error"]["message"] == "The configured project folder is unavailable."
+    assert str(tmp_path) not in result["error"]["message"]
 
 
 def test_list_degrades_to_global_with_flag(folderless, monkeypatch):

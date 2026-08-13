@@ -994,3 +994,11 @@ def test_subprocess_env_prepends_binary_dir(monkeypatch):
 def test_missing_binary_raises_lookup():
     with pytest.raises(LookupError):
         _run(skills._run_askill("", ["list"]))
+
+
+def test_missing_project_dir_error_does_not_include_host_path(tmp_path):
+    missing = tmp_path / "deleted-project"
+    with pytest.raises(skills.SkillsError) as info:
+        _run(skills._run_askill("askill", ["list"], cwd=str(missing)))
+    assert info.value.code == "project_dir_missing"
+    assert str(missing) not in info.value.message

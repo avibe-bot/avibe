@@ -12205,7 +12205,12 @@ async def _skills_guarded(call):
     try:
         return await call(askill, skills_service)
     except skills_service.SkillsError as exc:
-        return {"ok": False, "error": {"code": exc.code, "message": exc.message, "details": exc.details}}
+        message = (
+            "The configured project folder is unavailable."
+            if exc.code == "project_dir_missing"
+            else exc.message
+        )
+        return {"ok": False, "error": {"code": exc.code, "message": message, "details": exc.details}}
     except LookupError:
         return {"ok": False, "error": {"code": "askill_not_found", "message": "askill CLI not found on PATH"}}
 

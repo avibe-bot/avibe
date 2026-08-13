@@ -5067,15 +5067,21 @@ def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) ->
     from storage import project_access_service
     from storage import resource_access_service
 
+    session_id = str(payload.get("session_id") or "")
     effective_role = project_access_service.get_effective_session_role(
         conn,
         context,
-        str(payload.get("session_id") or ""),
+        session_id,
     )
-    if project_access_service.role_allows(effective_role, "editor") or resource_access_service.can_manage_resource_acl(
+    if project_access_service.role_allows(effective_role, "editor"):
+        return payload
+    # Legacy and IM-scoped pages have no project role. Their resource ACL
+    # remains the authority for the page owner/editor, but it must not override
+    # an effective project Viewer downgrade on project-attached sessions.
+    if effective_role is None and resource_access_service.can_manage_resource_acl(
         context,
         "show_page",
-        str(payload.get("session_id") or ""),
+        session_id,
         connection=conn,
     ):
         return payload
