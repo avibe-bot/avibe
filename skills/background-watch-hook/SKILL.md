@@ -262,6 +262,11 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --state-file "$STATE_FILE" --seed-state
 
 # Push or post the review trigger only after the combined baseline is durable.
+# If the push changed the PR head after seeding, refresh both values before arming.
+# This is required even when the old SHA was used to create the baseline.
+HEAD_SHA="$(gh pr view 151 --repo avibe-bot/avibe --json headRefOid --jq .headRefOid)"
+BRANCH="$(gh pr view 151 --repo avibe-bot/avibe --json headRefName --jq .headRefName)"
+
 vibe watch add \
   --name "Watch PR 151 review and CI" \
   --message "PR #151 has new review activity, a head change, or exact-head CI activity. Fetch the latest PR and Actions state, resolve actionable findings, and re-arm the combined waiter for any new head. Summarise the round here in one or two lines; do not post that summary as a PR comment." \
