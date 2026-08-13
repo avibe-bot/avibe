@@ -476,11 +476,13 @@ def test_effective_project_viewer_gets_safe_skill_payload_and_cannot_mutate(monk
     project_dir.mkdir()
     listing = {
         "ok": True,
+        "summary": {"total": 3, "updateAvailable": 2, "upToDate": 1, "uncheckable": 0},
         "skills": [
             {
                 **_skill_row("project-skill"),
                 "scope": "project",
                 "path": str(project_dir / ".agents" / "skills" / "project-skill"),
+                "status": "update_available",
             }
         ],
     }
@@ -532,6 +534,16 @@ def test_effective_project_viewer_gets_safe_skill_payload_and_cannot_mutate(monk
             )
         )
         assert safe["skills"][0]["path"] == ""
+        checked = _run(
+            skills.check(
+                "askill",
+                scope="project",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=viewer,
+            )
+        )
+        assert checked["summary"] == {"total": 1, "updateAvailable": 1, "upToDate": 0, "uncheckable": 0}
 
         with pytest.raises(skills.SkillAccessError):
             _run(
@@ -544,7 +556,17 @@ def test_effective_project_viewer_gets_safe_skill_payload_and_cannot_mutate(monk
                     user_context=viewer,
                 )
             )
-        assert len(recorder.calls) == 1
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.preview_source(
+                    "askill",
+                    ".",
+                    project_dir=str(project_dir),
+                    project_id=project["id"],
+                    user_context=viewer,
+                )
+            )
+        assert len(recorder.calls) == 2
     finally:
         engine.dispose()
 

@@ -814,7 +814,11 @@ async def preview_source(
     """
     if not source:
         raise SkillsError("missing_source", "no source provided")
-    _require_skill_create_access(resolve_resource_access_context(user_context))
+    context = resolve_resource_access_context(user_context)
+    if project_dir and project_id:
+        require_project_editor_access(context, project_id)
+    else:
+        _require_skill_create_access(context)
     return await _run_askill(askill_path, ["add", source, "--list"], cwd=project_dir)
 
 
@@ -1032,11 +1036,7 @@ async def check(
         backends=list(BACKEND_TO_AGENT),
         user_context=context,
     )
-    if (
-        context.is_instance_owner
-        or context.has_role("editor")
-        or not isinstance(filtered.get("summary"), dict)
-    ):
+    if _project_role_allows_editor(context, project_id) or not isinstance(filtered.get("summary"), dict):
         return filtered
     skills = filtered.get("skills") if isinstance(filtered.get("skills"), list) else []
     statuses = [str(skill.get("status") or "") for skill in skills if isinstance(skill, dict)]
