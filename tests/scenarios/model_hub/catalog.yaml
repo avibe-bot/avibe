@@ -105,6 +105,12 @@ scenarios:
     kind: concurrency
     layer: unit
     test: tests/test_opencode_server.py::test_mh_runtime_002_matching_overlay_does_not_wait_for_an_unrelated_active_run
+  - id: MH-RUNTIME-003
+    name: A pending OpenCode overlay transition cannot be starved by new Turns on the old overlay
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_opencode_server.py::test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

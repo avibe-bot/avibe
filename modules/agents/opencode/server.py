@@ -128,6 +128,9 @@ class OpenCodeServerManager:
         self._model_hub_overlay_path: Optional[str] = None
         self._model_hub_overlay_hash: Optional[str] = None
         self._model_hub_overlay_content: Optional[str] = None
+        self._model_hub_overlay_transition: tuple[
+            Optional[str], Optional[str], object
+        ] | None = None
         self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
         self._runtime_activation_retire: Callable[[bool], bool] | None = None
         self._runtime_generation_token: tuple[int, float | None] | None = None
@@ -464,48 +467,84 @@ class OpenCodeServerManager:
             elif isinstance(content, str):
                 desired_content = content
         drain_deadline = time.monotonic() + self._model_hub_overlay_drain_timeout_seconds
-        while True:
-            should_wait = False
-            async with self._get_lock():
-                info = self._read_pid_file() or {}
-                current_server = self._pid_file_references_current_server(info)
-                effective_path = info.get("model_hub_overlay_path") if current_server else None
-                effective_hash = info.get("model_hub_overlay_hash") if current_server else None
-                if effective_path is None and effective_hash is None:
-                    effective_path = self._model_hub_overlay_path
-                    effective_hash = self._model_hub_overlay_hash
-
-                # Most turns reuse the running server's overlay. They must not
-                # wait behind unrelated active work because no runtime mutation
-                # is required. Cache the content so a later crash still restarts
-                # with the same OPENCODE_CONFIG.
-                if (effective_path, effective_hash) == (desired_path, desired_hash):
-                    self._model_hub_overlay_path = desired_path
-                    self._model_hub_overlay_hash = desired_hash
-                    self._model_hub_overlay_content = desired_content
-                    return
-
-                if self._active_requests > 0 or self._has_active_run_sessions():
-                    should_wait = True
-                else:
-                    persisted_active = current_server and bool(info.get("active_run_sessions"))
-                    if persisted_active and time.monotonic() < drain_deadline:
+        transition_owner = object()
+        owns_transition = False
+        try:
+            while True:
+                should_wait = False
+                async with self._get_lock():
+                    transition = self._model_hub_overlay_transition
+                    if transition is not None and transition[2] is not transition_owner:
+                        # Once a real configuration change is queued, new turns on
+                        # the old overlay must wait. Otherwise they can continuously
+                        # replenish the active set and starve the transition.
                         should_wait = True
                     else:
-                        if persisted_active:
-                            logger.warning(
-                                "Ignoring stale OpenCode active-run metadata after %.1fs overlay drain timeout",
-                                self._model_hub_overlay_drain_timeout_seconds,
+                        info = self._read_pid_file() or {}
+                        current_server = self._pid_file_references_current_server(info)
+                        effective_path = (
+                            info.get("model_hub_overlay_path") if current_server else None
+                        )
+                        effective_hash = (
+                            info.get("model_hub_overlay_hash") if current_server else None
+                        )
+                        if effective_path is None and effective_hash is None:
+                            effective_path = self._model_hub_overlay_path
+                            effective_hash = self._model_hub_overlay_hash
+
+                        # Most turns reuse the running server's overlay. They must
+                        # not wait behind unrelated active work when no transition
+                        # has claimed the runtime.
+                        if (effective_path, effective_hash) == (
+                            desired_path,
+                            desired_hash,
+                        ):
+                            self._model_hub_overlay_path = desired_path
+                            self._model_hub_overlay_hash = desired_hash
+                            self._model_hub_overlay_content = desired_content
+                            return
+
+                        if not owns_transition:
+                            self._model_hub_overlay_transition = (
+                                desired_path,
+                                desired_hash,
+                                transition_owner,
                             )
-                        self._model_hub_overlay_path = desired_path
-                        self._model_hub_overlay_hash = desired_hash
-                        self._model_hub_overlay_content = desired_content
-                        if await self._is_healthy():
-                            logger.info("Restarting OpenCode server after Model Hub overlay change")
-                            await self._restart_for_auth_refresh_locked()
-                        return
-            if should_wait:
-                await asyncio.sleep(0.05)
+                            owns_transition = True
+
+                        if self._active_requests > 0 or self._has_active_run_sessions():
+                            should_wait = True
+                        else:
+                            persisted_active = current_server and bool(
+                                info.get("active_run_sessions")
+                            )
+                            if persisted_active and time.monotonic() < drain_deadline:
+                                should_wait = True
+                            else:
+                                if persisted_active:
+                                    logger.warning(
+                                        "Ignoring stale OpenCode active-run metadata after %.1fs overlay drain timeout",
+                                        self._model_hub_overlay_drain_timeout_seconds,
+                                    )
+                                self._model_hub_overlay_path = desired_path
+                                self._model_hub_overlay_hash = desired_hash
+                                self._model_hub_overlay_content = desired_content
+                                if await self._is_healthy():
+                                    logger.info(
+                                        "Restarting OpenCode server after Model Hub overlay change"
+                                    )
+                                    await self._restart_for_auth_refresh_locked()
+                                self._model_hub_overlay_transition = None
+                                owns_transition = False
+                                return
+                if should_wait:
+                    await asyncio.sleep(0.05)
+        finally:
+            if owns_transition:
+                async with self._get_lock():
+                    transition = self._model_hub_overlay_transition
+                    if transition is not None and transition[2] is transition_owner:
+                        self._model_hub_overlay_transition = None
 
     async def mark_run_active(self, session_id: str) -> None:
         async with self._get_lock():

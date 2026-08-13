@@ -3280,9 +3280,19 @@ def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch)
 
     manager, _other, engine, _engine_b, _starts = managers
     manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    manager.controller.emit_agent_message = AsyncMock()
+    settle_calls: list[tuple[list[str], str]] = []
+
+    def settle_runs(run_ids, *, settled_by):
+        settle_calls.append((run_ids, settled_by))
+
+    manager.controller.scheduled_task_service = SimpleNamespace(
+        settle_agent_runs_without_result=settle_runs,
+    )
     dispatch_entered = asyncio.Event()
 
-    async def blocked_prewrite_dispatch(*_args, **_kwargs):
+    async def blocked_prewrite_dispatch(_controller, dispatch_context, *_args, **_kwargs):
+        set_dispatch_phase(dispatch_context, DISPATCH_PHASE_PREWRITE)
         dispatch_entered.set()
         try:
             await asyncio.Event().wait()
@@ -3301,16 +3311,20 @@ def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch)
     )
 
     async def run() -> tuple[dict, str, str]:
+        context = _context()
         admitted = await manager.deliver(
             DeliveryRequest(
                 session_id="ses_fsm",
                 priority="p3",
                 content="stop before native write",
             ),
-            context=_context(),
+            context=context,
         )
         assert admitted.turn_id and admitted.delivery_id
         await asyncio.wait_for(dispatch_entered.wait(), timeout=1.0)
+        manager.in_flight["ses_fsm"].context.platform_specific[
+            "task_execution_id"
+        ] = "run-stop-prewrite"
         stopped = await manager.cancel("ses_fsm")
         return stopped, str(admitted.turn_id), str(admitted.delivery_id)
 
@@ -3324,6 +3338,8 @@ def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch)
     }
     assert "ses_fsm" not in manager.in_flight
     manager.controller.command_handler.handle_stop.assert_not_awaited()
+    manager.controller.emit_agent_message.assert_not_awaited()
+    assert settle_calls == [(["run-stop-prewrite"], SETTLED_BY_STOPPED)]
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
     assert turn is not None

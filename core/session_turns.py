@@ -33,11 +33,7 @@ from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_turn_sink_key,
 )
-from core.native_dispatch_phase import (
-    DISPATCH_PHASE_PREWRITE,
-    backend_dispatch_attempted,
-    set_dispatch_phase,
-)
+from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
     NON_COMPLETING_TURN_SETTLEMENTS,
     SETTLEMENTS_WITHOUT_RESULT,
@@ -7169,7 +7165,6 @@ class SessionTurnManager:
         else:
             logical_turn_id = logical_turn_id or context_turn_id or uuid.uuid4().hex
         context.platform_specific["turn_token"] = logical_turn_id
-        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
 
         async def _runner() -> None:
             cancelled = False
@@ -7299,7 +7294,10 @@ class SessionTurnManager:
                     # persistence failure leaves the durable Turn unresolved for
                     # exact reconciliation; an empty fallback would overwrite that
                     # evidence with a fabricated terminal response.
-                    if definitive_prewrite_exit:
+                    if (
+                        definitive_prewrite_exit
+                        and settled_by != SETTLED_BY_STOPPED
+                    ):
                         try:
                             await self.controller.emit_agent_message(
                                 context,

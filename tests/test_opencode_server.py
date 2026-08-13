@@ -2401,5 +2401,50 @@ def test_changed_overlay_still_waits_for_active_run_before_restart():
     manager._restart_for_auth_refresh_locked.assert_awaited_once()
 
 
+def test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay():
+    """MH-RUNTIME-003: a queued change drains without old-overlay starvation."""
+
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = "old-hash"
+    manager._active_run_sessions.add("sess-active")
+    manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    old_overlay = types.SimpleNamespace(
+        path=Path("/tmp/old-overlay.json"),
+        content_hash="old-hash",
+        content='{"provider": {}}',
+    )
+    new_overlay = types.SimpleNamespace(
+        path=Path("/tmp/new-overlay.json"),
+        content_hash="new-hash",
+        content='{"provider": {}}',
+    )
+
+    async def exercise():
+        configuring = asyncio.create_task(
+            manager.configure_model_hub_overlay(new_overlay)
+        )
+        await asyncio.sleep(0.01)
+        matching_old_turn = asyncio.create_task(
+            manager.configure_model_hub_overlay(old_overlay)
+        )
+        await asyncio.sleep(0.01)
+        assert not matching_old_turn.done()
+        matching_old_turn.cancel()
+        await asyncio.gather(matching_old_turn, return_exceptions=True)
+        manager._active_run_sessions.clear()
+        await asyncio.wait_for(configuring, timeout=0.2)
+
+    asyncio.run(exercise())
+
+    assert manager._model_hub_overlay_path == str(new_overlay.path)
+    assert manager._model_hub_overlay_hash == new_overlay.content_hash
+    assert manager._model_hub_overlay_transition is None
+    manager._restart_for_auth_refresh_locked.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()
