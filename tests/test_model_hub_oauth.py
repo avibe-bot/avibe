@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -12,31 +14,40 @@ from core.handlers.model_hub.revocations import (
 )
 
 
-def test_flow_registry_persists_experimental_consent(tmp_path):
+def test_flow_registry_persists_final_binding_shape(tmp_path):
     path = tmp_path / "oauth_flows.json"
     registry = OAuthFlowRegistry(path)
 
     registry.remember(
-        "oaf_consent01",
+        "oaf_registry01",
         "hub",
-        "src_consent01",
+        "src_oauth01",
         "anthropic",
-        experimental_consent=True,
     )
 
-    binding = OAuthFlowRegistry(path).binding("oaf_consent01")
+    binding = OAuthFlowRegistry(path).binding("oaf_registry01")
     assert binding is not None
-    assert binding.experimental_consent is True
     assert binding.completed is False
-    assert json.loads(path.read_text(encoding="utf-8"))["oaf_consent01"]["experimental_consent"] is True
+    assert set(json.loads(path.read_text(encoding="utf-8"))["oaf_registry01"]) == {
+        "channel",
+        "source_id",
+        "vendor",
+        "intent",
+        "completed",
+        "recovered",
+        "interrupted_pairs",
+        "client_nonce",
+        "expires_at_iso",
+        "terminal_state",
+    }
 
-    OAuthFlowRegistry(path).complete("oaf_consent01")
-    completed = OAuthFlowRegistry(path).binding("oaf_consent01")
+    OAuthFlowRegistry(path).complete("oaf_registry01")
+    completed = OAuthFlowRegistry(path).binding("oaf_registry01")
     assert completed is not None
     assert completed.completed is True
 
 
-def test_flow_registry_defaults_legacy_bindings_to_no_consent(tmp_path):
+def test_flow_registry_rejects_legacy_binding_shapes(tmp_path):
     path = tmp_path / "oauth_flows.json"
     path.write_text(
         json.dumps(
@@ -51,10 +62,86 @@ def test_flow_registry_defaults_legacy_bindings_to_no_consent(tmp_path):
         encoding="utf-8",
     )
 
-    binding = OAuthFlowRegistry(path).binding("oaf_legacy01")
-    assert binding is not None
-    assert binding.experimental_consent is False
-    assert binding.completed is False
+    assert OAuthFlowRegistry(path).binding("oaf_legacy01") is None
+
+
+def test_flow_registry_claims_exact_nonce_tuple_and_replays_committed_flow(tmp_path):
+    now = [datetime(2026, 7, 25, tzinfo=timezone.utc)]
+    registry = OAuthFlowRegistry(tmp_path / "oauth_flows.json", now=lambda: now[0])
+    nonce = "ofn_01j5w8z7p4n6q2rt"
+
+    owner = registry.claim_nonce(nonce, "anthropic", "hub")
+    follower = registry.claim_nonce(nonce, "anthropic", "hub")
+    assert owner.owner is True
+    assert owner.status == follower.status == "in_flight"
+    assert follower.owner is False
+
+    registry.remember(
+        "oaf_nonce01",
+        "hub",
+        "src_nonce01",
+        "anthropic",
+        client_nonce=nonce,
+        expires_at_iso="2026-07-25T00:15:00+00:00",
+    )
+    committed = registry.claim_nonce(nonce, "anthropic", "hub")
+    assert committed.status == "committed"
+    assert committed.flow_id == "oaf_nonce01"
+
+
+def test_flow_registry_releases_failed_claim_and_keeps_tuples_independent(tmp_path):
+    registry = OAuthFlowRegistry(tmp_path / "oauth_flows.json")
+    nonce = "ofn_01j5w8z7p4n6q2rt"
+    registry.claim_nonce(nonce, "anthropic", "hub")
+    registry.release_nonce(nonce, "anthropic", "hub")
+
+    fresh = registry.claim_nonce(nonce, "anthropic", "hub")
+    other_vendor = registry.claim_nonce(nonce, "openai", "hub")
+    other_channel = registry.claim_nonce(nonce, "anthropic", "native_cli")
+    assert fresh.owner is True
+    assert other_vendor.owner is True
+    assert other_channel.owner is True
+
+
+def test_flow_registry_retains_nonce_cancel_until_expiry_then_releases(tmp_path):
+    current = [datetime(2026, 7, 25, tzinfo=timezone.utc)]
+    registry = OAuthFlowRegistry(
+        tmp_path / "oauth_flows.json",
+        now=lambda: current[0],
+    )
+    nonce = "ofn_01j5w8z7p4n6q2rt"
+    registry.remember(
+        "oaf_cancel01",
+        "hub",
+        "src_cancel01",
+        "anthropic",
+        client_nonce=nonce,
+        expires_at_iso="2026-07-25T00:15:00+00:00",
+    )
+    registry.retain_cancelled("oaf_cancel01")
+    assert registry.binding("oaf_cancel01").terminal_state == "cancelled"
+    assert registry.claim_nonce(nonce, "anthropic", "hub").status == "committed"
+
+    current[0] = datetime(2026, 7, 25, 0, 15, tzinfo=timezone.utc)
+    released = registry.claim_nonce(nonce, "anthropic", "hub")
+    assert released.owner is True
+
+
+def test_flow_registry_coalesced_waiter_observes_release(tmp_path):
+    registry = OAuthFlowRegistry(tmp_path / "oauth_flows.json")
+    nonce = "ofn_01j5w8z7p4n6q2rt"
+    owner = registry.claim_nonce(nonce, "anthropic", "hub")
+    follower = registry.claim_nonce(nonce, "anthropic", "hub")
+
+    async def wait_for_release():
+        task = asyncio.create_task(registry.wait_for_nonce(follower))
+        await asyncio.sleep(0)
+        registry.release_nonce(nonce, "anthropic", "hub")
+        return await task
+
+    result = asyncio.run(wait_for_release())
+    assert owner.owner is True
+    assert result.status == "released"
 
 
 def test_flow_registry_returns_latest_pending_reauth_for_source(tmp_path):

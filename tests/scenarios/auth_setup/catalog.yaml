@@ -92,6 +92,13 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_duplicate_native_source_is_rejected_before_login_starts
+  - id: AUTH-SETUP-109
+    name: Hub re-auth requires acknowledgement and converges its repaired Source projection
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered
@@ -232,6 +239,13 @@ scenarios:
     layer: scenario
     backend: show_page_email
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::ShowPageEmailAccessScenarioTests::test_exact_email_login_is_confined_to_its_signed_show_page
+  - id: AUTH-SETUP-210
+    name: Lost Model Hub OAuth start response converges on one provider flow
+    status: covered
+    kind: retry
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_lost_model_hub_oauth_start_response_reuses_nonce_flow
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered
