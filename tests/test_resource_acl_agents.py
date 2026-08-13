@@ -615,3 +615,241 @@ def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_befo
         assert completed["error"] == "harness_access_forbidden"
     finally:
         agent_store.close()
+
+
+def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeypatch, tmp_path) -> None:
+    """Every Editor-admitted runtime list/mutation uses one visibility helper.
+
+    Seed one allowed Agent/session and one denied pair, then assert the same
+    property across agents-graph, running-agents, and Harness. A new runtime
+    surface added later should join this enumeration instead of repeating a
+    one-off case.
+    """
+
+    from datetime import datetime, timezone
+
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.importer import ensure_sqlite_state
+    from vibe import internal_client, ui_server
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    config = _save_config(tmp_path)
+    store, agents = _seed_agents_with_policies()
+    engine = get_cached_sqlite_engine()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with engine.begin() as connection:
+            allowed_scope = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_runtime_allowed",
+                now=now,
+            )
+            denied_scope = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_runtime_denied",
+                now=now,
+            )
+            allowed_session = workbench_sessions_service.create_session(
+                connection,
+                scope_id=allowed_scope,
+                agent_backend="codex",
+                agent_name=agents["public"].name,
+                agent_id=agents["public"].id,
+            )
+            denied_session = workbench_sessions_service.create_session(
+                connection,
+                scope_id=denied_scope,
+                agent_backend="codex",
+                agent_name=agents["private"].name,
+                agent_id=agents["private"].id,
+            )
+    finally:
+        store.close()
+
+    harness = SQLiteBackgroundTaskStore()
+    try:
+        harness.upsert_scheduled_task(
+            {
+                "id": "task-allowed",
+                "name": "allowed task",
+                "prompt": "run allowed",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "session_id": allowed_session["id"],
+                "agent_name": agents["public"].name,
+                "agent_id": agents["public"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        harness.upsert_scheduled_task(
+            {
+                "id": "task-denied",
+                "name": "denied task",
+                "prompt": "run denied",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "session_id": denied_session["id"],
+                "agent_name": agents["private"].name,
+                "agent_id": agents["private"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        harness.upsert_watch(
+            {
+                "id": "watch-allowed",
+                "name": "allowed watch",
+                "shell_command": "true",
+                "enabled": True,
+                "session_id": allowed_session["id"],
+                "agent_name": agents["public"].name,
+                "agent_id": agents["public"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        harness.upsert_watch(
+            {
+                "id": "watch-denied",
+                "name": "denied watch",
+                "shell_command": "true",
+                "enabled": True,
+                "session_id": denied_session["id"],
+                "agent_name": agents["private"].name,
+                "agent_id": agents["private"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    finally:
+        harness.close()
+
+    async def fake_list(**_kwargs):
+        return {
+            "status_code": 200,
+            "body": {
+                "agents": [
+                    {
+                        "session_id": allowed_session["id"],
+                        "agent_name": agents["public"].name,
+                        "agent_id": agents["public"].id,
+                        "state": "idle",
+                        "title": "allowed live",
+                    },
+                    {
+                        "session_id": denied_session["id"],
+                        "agent_name": agents["private"].name,
+                        "agent_id": agents["private"].id,
+                        "state": "idle",
+                        "title": "denied live",
+                    },
+                ],
+                "counts": {"total": 2},
+            },
+        }
+
+    ended: list[dict] = []
+
+    async def fake_end(payload):
+        ended.append(payload)
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "list_running_agents", fake_list)
+    monkeypatch.setattr(internal_client, "end_running_agent", fake_end)
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(
+            config,
+            subject="member-1",
+            groups=["group-engineering"],
+            instance_role="editor",
+        ),
+        domain="alex.avibe.bot",
+    )
+    remote = {"base_url": "https://alex.avibe.bot", "environ_base": _remote_peer()}
+
+    graph = client.get("/api/agents-graph", **remote)
+    assert graph.status_code == 200
+    assert {node["session_id"] for node in graph.get_json().get("nodes") or []} <= {allowed_session["id"]}
+    assert denied_session["id"] not in {node["session_id"] for node in graph.get_json().get("nodes") or []}
+
+    running = client.get("/api/running-agents", **remote)
+    assert running.status_code == 200
+    running_ids = {row.get("session_id") for row in running.get_json().get("agents") or []}
+    assert running_ids == {allowed_session["id"]}
+
+    deny_end = client.post(
+        "/api/running-agents/end",
+        json={"session_id": denied_session["id"], "agent_name": agents["private"].name},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    assert deny_end.status_code == 404
+    assert ended == []
+
+    allow_end = client.post(
+        "/api/running-agents/end",
+        json={"session_id": allowed_session["id"], "agent_name": agents["public"].name},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    assert allow_end.status_code == 200
+    assert ended
+
+    tasks = client.get("/api/harness/tasks", **remote).get_json()["tasks"]
+    watches = client.get("/api/harness/watches", **remote).get_json()["watches"]
+    assert {row["id"] for row in tasks} == {"task-allowed"}
+    assert {row["id"] for row in watches} == {"watch-allowed"}
+
+    denied_patch = client.patch(
+        "/api/harness/tasks/task-denied",
+        json={"enabled": False},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    denied_delete = client.delete(
+        "/api/harness/watches/watch-denied",
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    assert denied_patch.status_code == 404
+    assert denied_delete.status_code == 404
+
+    helper_paths = {
+        ui_server.running_agents_get.__name__,
+        ui_server.running_agents_end.__name__,
+        ui_server.agents_graph_get.__name__,
+        ui_server.harness_tasks_list.__name__,
+        ui_server.harness_task_patch.__name__,
+        ui_server.harness_task_delete.__name__,
+        ui_server.harness_watches_list.__name__,
+        ui_server.harness_watch_patch.__name__,
+        ui_server.harness_watch_delete.__name__,
+        ui_server.harness_runs_list.__name__,
+        ui_server.harness_bootstrap.__name__,
+        ui_server.harness_run_detail.__name__,
+    }
+    assert helper_paths == {
+        "running_agents_get",
+        "running_agents_end",
+        "agents_graph_get",
+        "harness_tasks_list",
+        "harness_task_patch",
+        "harness_task_delete",
+        "harness_watches_list",
+        "harness_watch_patch",
+        "harness_watch_delete",
+        "harness_runs_list",
+        "harness_bootstrap",
+        "harness_run_detail",
+    }

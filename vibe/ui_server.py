@@ -2400,6 +2400,78 @@ def _has_runtime_owner_access(context: Any) -> bool:
     return bool(context is not None and context.is_instance_owner)
 
 
+def _runtime_record_session_id(record: Any) -> str | None:
+    if not isinstance(record, Mapping):
+        return None
+    for key in ("session_id", "id"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _runtime_record_agent_refs(record: Any) -> tuple[str | None, str | None]:
+    if not isinstance(record, Mapping):
+        return None, None
+    agent_id = str(record.get("agent_id") or "").strip() or None
+    agent_name = str(record.get("agent_name") or "").strip() or None
+    return agent_id, agent_name
+
+
+def _runtime_record_visible(context: Any, record: Any, *, connection: Any | None = None) -> bool:
+    """Return whether one Editor-admitted runtime record may be seen or mutated.
+
+    Owners see every record. Everyone else must pass both the Project ACL for
+    the bound session (when one exists) and the Agent ACL for the selected
+    Agent (when one exists). A record with no session and no Agent stays
+    Owner-only so an unbound Harness row cannot leak prompts or stdout.
+    """
+
+    if context is None:
+        return False
+    if _has_runtime_owner_access(context):
+        return True
+    session_id = _runtime_record_session_id(record)
+    agent_id, agent_name = _runtime_record_agent_refs(record)
+    if session_id is None and agent_id is None and agent_name is None:
+        return False
+    if session_id is not None and not _project_session_access_allowed(context, session_id, "editor"):
+        return False
+    if agent_id is None and agent_name is None:
+        return True
+    from core.vibe_agents import VibeAgentAccessError, ensure_agent_selection_access
+
+    def _check(conn: Any) -> bool:
+        try:
+            ensure_agent_selection_access(
+                conn,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                user_context=context,
+            )
+        except VibeAgentAccessError:
+            return False
+        return True
+
+    if connection is not None:
+        return _check(connection)
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        return _check(conn)
+
+
+def _filter_runtime_records(context: Any, records: list[Any] | tuple[Any, ...] | None) -> list[Any]:
+    return [record for record in (records or []) if _runtime_record_visible(context, record)]
+
+
+def _require_runtime_record(context: Any, record: Any, *, not_found: tuple[dict[str, Any], int]):
+    if record is None:
+        return not_found
+    if not _runtime_record_visible(context, record):
+        return not_found
+    return None
+
+
 @app.before_request
 def enforce_instance_role_capabilities():
     if _remote_auth_exempt_path():
@@ -4259,7 +4331,11 @@ async def running_agents_get():
         return jsonify({"ok": False, "unreachable": True, "agents": [], "counts": {}}), 503
     except internal_client.InternalServerTimeout:
         return jsonify({"ok": False, "unreachable": True, "timeout": True, "agents": [], "counts": {}}), 504
-    return jsonify(result.get("body") or {})
+    body = result.get("body") or {}
+    context = _request_authorization_context()
+    agents = _filter_runtime_records(context, body.get("agents") or [])
+    counts = body.get("counts") if _has_runtime_owner_access(context) else {"visible": len(agents)}
+    return jsonify({**body, "agents": agents, "counts": counts})
 
 
 @app.route("/api/running-agents/end", methods=["POST"])
@@ -4270,6 +4346,14 @@ async def running_agents_end():
     from vibe import internal_client
 
     payload = request.json or {}
+    context = _request_authorization_context()
+    denied = _require_runtime_record(
+        context,
+        payload,
+        not_found=({"ok": False, "error": "running_agent_not_found"}, 404),
+    )
+    if denied is not None:
+        return jsonify(denied[0]), denied[1]
     try:
         result = await internal_client.end_running_agent(payload)
     except internal_client.InternalServerUnavailable:
@@ -4325,6 +4409,30 @@ async def agents_graph_get():
         include_background=include_background,
         live_unreachable=live_unreachable,
     )
+    context = _request_authorization_context()
+    if not _has_runtime_owner_access(context):
+        visible_nodes = _filter_runtime_records(context, payload.get("nodes") or [])
+        visible_ids = {
+            str(node.get("session_id") or "")
+            for node in visible_nodes
+            if node.get("session_id")
+        }
+        payload["nodes"] = visible_nodes
+        payload["edges"] = [
+            edge
+            for edge in (payload.get("edges") or [])
+            if str(edge.get("from") or "") in visible_ids
+            and str(edge.get("to") or "") in visible_ids
+        ]
+        payload["trigger_nodes"] = _filter_runtime_records(
+            context,
+            payload.get("trigger_nodes") or [],
+        )
+        payload["counts"] = {
+            **(payload.get("counts") or {}),
+            "nodes": len(visible_nodes),
+            "edges": len(payload["edges"]),
+        }
     return jsonify(payload)
 
 
@@ -11481,6 +11589,21 @@ def _harness_session_filter() -> str | None:
     return session_id or None
 
 
+def _harness_visible_items(items: list[Any] | tuple[Any, ...] | None) -> list[Any]:
+    return _filter_runtime_records(_request_authorization_context(), items)
+
+
+def _harness_require_item(item: Any, *, not_found: dict[str, Any]):
+    denied = _require_runtime_record(
+        _request_authorization_context(),
+        item,
+        not_found=(not_found, 404),
+    )
+    if denied is None:
+        return None
+    return denied
+
+
 def _harness_has_list_params() -> bool:
     return any(key in request.args for key in ("page", "limit", "status", "query", "session_id"))
 
@@ -11525,7 +11648,7 @@ def harness_counts():
 def harness_tasks_list():
     if not _harness_has_list_params():
         with _harness_store() as store:
-            tasks = store.list_scheduled_tasks()
+            tasks = _harness_visible_items(store.list_scheduled_tasks())
             counts = store.count_scheduled_tasks()
         return jsonify(
             {
@@ -11553,6 +11676,7 @@ def harness_tasks_list():
             newest_first=True,
         )
         counts = store.count_scheduled_tasks(query=query, session_id=session_id)
+    page_result.items = _harness_visible_items(page_result.items)
     return jsonify(_harness_page_payload(page_result, items_key="tasks", counts=counts))
 
 
@@ -11565,8 +11689,10 @@ def harness_task_patch(task_id: str):
     from storage.background import TaskResumeBlocked, TaskScheduleRetired
 
     with _harness_store() as store:
-        if not store.get_scheduled_task(task_id):
-            return jsonify({"ok": False, "code": "task_not_found"}), 404
+        existing = store.get_scheduled_task(task_id)
+        denied = _harness_require_item(existing, not_found={"ok": False, "code": "task_not_found"})
+        if denied is not None:
+            return jsonify(denied[0]), denied[1]
         try:
             store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
         except TaskResumeBlocked as exc:
@@ -11583,8 +11709,10 @@ def harness_task_patch(task_id: str):
 @app.route("/api/harness/tasks/<task_id>", methods=["DELETE"])
 def harness_task_delete(task_id: str):
     with _harness_store() as store:
-        if not store.get_scheduled_task(task_id):
-            return jsonify({"ok": False, "code": "task_not_found"}), 404
+        existing = store.get_scheduled_task(task_id)
+        denied = _harness_require_item(existing, not_found={"ok": False, "code": "task_not_found"})
+        if denied is not None:
+            return jsonify(denied[0]), denied[1]
         store.remove_task(task_id)
     from core.inbox_events import publish_definitions_updated
 
@@ -11596,7 +11724,7 @@ def harness_task_delete(task_id: str):
 def harness_watches_list():
     if not _harness_has_list_params():
         with _harness_store() as store:
-            watches = store.list_watches()
+            watches = _harness_visible_items(store.list_watches())
             counts = store.count_watches()
         return jsonify(
             {
@@ -11624,6 +11752,7 @@ def harness_watches_list():
             newest_first=True,
         )
         counts = store.count_watches(query=query, session_id=session_id)
+    page_result.items = _harness_visible_items(page_result.items)
     return jsonify(_harness_page_payload(page_result, items_key="watches", counts=counts))
 
 
@@ -11634,8 +11763,10 @@ def harness_watch_patch(watch_id: str):
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
     enabled = bool(payload["enabled"])
     with _harness_store() as store:
-        if not store.get_watch(watch_id):
-            return jsonify({"ok": False, "code": "watch_not_found"}), 404
+        existing = store.get_watch(watch_id)
+        denied = _harness_require_item(existing, not_found={"ok": False, "code": "watch_not_found"})
+        if denied is not None:
+            return jsonify(denied[0]), denied[1]
         store.set_definition_enabled(watch_id, enabled, definition_type="watch")
         watch = store.get_watch(watch_id)
     from core.inbox_events import publish_definitions_updated
@@ -11647,8 +11778,10 @@ def harness_watch_patch(watch_id: str):
 @app.route("/api/harness/watches/<watch_id>", methods=["DELETE"])
 def harness_watch_delete(watch_id: str):
     with _harness_store() as store:
-        if not store.get_watch(watch_id):
-            return jsonify({"ok": False, "code": "watch_not_found"}), 404
+        existing = store.get_watch(watch_id)
+        denied = _harness_require_item(existing, not_found={"ok": False, "code": "watch_not_found"})
+        if denied is not None:
+            return jsonify(denied[0]), denied[1]
         store.remove_task(watch_id)
     from core.inbox_events import publish_definitions_updated
 
@@ -11698,6 +11831,7 @@ def harness_runs_list():
         # The types present in the ledger, so the selector can offer one the UI
         # has no built-in name for instead of stranding those rows under All.
         run_types = store.list_run_types()
+    page_result.items = _harness_visible_items(page_result.items)
     return jsonify(
         {
             "runs": page_result.items,
@@ -11747,6 +11881,7 @@ def harness_bootstrap():
                 page_request=page_request,
                 newest_first=True,
             )
+            page_result.items = _harness_visible_items(page_result.items)
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="tasks",
@@ -11761,6 +11896,7 @@ def harness_bootstrap():
                 page_request=page_request,
                 newest_first=True,
             )
+            page_result.items = _harness_visible_items(page_result.items)
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="watches",
@@ -11783,6 +11919,7 @@ def harness_bootstrap():
                 page_request=page_request,
                 newest_first=True,
             )
+            page_result.items = _harness_visible_items(page_result.items)
             page_payload = {
                 "runs": page_result.items,
                 "counts": store.count_runs_by_status(
@@ -11814,8 +11951,9 @@ def harness_bootstrap():
 def harness_run_detail(run_id: str):
     with _harness_store() as store:
         run = store.get_run(run_id)
-    if not run:
-        return jsonify({"ok": False, "code": "run_not_found"}), 404
+    denied = _harness_require_item(run, not_found={"ok": False, "code": "run_not_found"})
+    if denied is not None:
+        return jsonify(denied[0]), denied[1]
     return jsonify({"ok": True, "run": run})
 
 
