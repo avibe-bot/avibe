@@ -612,6 +612,17 @@ def _fetch_state(
             max_pages=ci_max_pages,
             cache=cache,
         )
+        # Actions are fetched after several independent PR requests. Re-read the
+        # mutable PR object after that window so a push cannot pair an old head with
+        # a terminal result from the exact SHA supplied by the caller.
+        pull_request = github_get(f"{base_url}/pulls/{pr_number}", token, cache=cache)
+        requests_after_actions = 1
+    else:
+        requests_after_actions = 0
+    if ci_sha and ci_workflows and _current_pr_head_sha(pull_request).casefold() != ci_sha.casefold():
+        # The PR moved while this snapshot was assembled. The caller will report the
+        # head transition and re-arm with a new SHA; never render old-SHA Actions.
+        actions = []
     return (
         {
             "pull_request": pull_request,
@@ -630,6 +641,7 @@ def _fetch_state(
             + reaction_requests
             + review_thread_requests
             + action_requests
+            + requests_after_actions
         ),
     )
 
@@ -892,7 +904,12 @@ def _startup_failure_exit_code(error: Any) -> int:
     return RETRY_EXIT_CODE if isinstance(error, InitialRequestRetriesExhausted) else 1
 
 
-def _watch_identity(args: argparse.Namespace, *, legacy_ci_sha: str | None = None) -> str:
+def _watch_identity(
+    args: argparse.Namespace,
+    *,
+    legacy_ci_sha: str | None = None,
+    include_ci_max_pages: bool = True,
+) -> str:
     """A stable digest of the options that decide what this watch reports.
 
     Ownership by repo and PR alone cannot tell two watches on the same PR apart --
@@ -926,6 +943,8 @@ def _watch_identity(args: argparse.Namespace, *, legacy_ci_sha: str | None = Non
                 ),
             }
         )
+        if include_ci_max_pages:
+            material_fields["ci_max_pages"] = args.max_pages
         if legacy_ci_sha is not None:
             material_fields["ci_sha"] = legacy_ci_sha
     material = json.dumps(material_fields, sort_keys=True)
@@ -971,7 +990,14 @@ def _legacy_watch_identity_aliases(
                     value = run.get("head_sha")
                     if isinstance(value, str) and value:
                         candidate_shas.add(value)
-    return {_watch_identity(args, legacy_ci_sha=sha) for sha in candidate_shas}
+    aliases = {
+        _watch_identity(args, legacy_ci_sha=sha, include_ci_max_pages=False)
+        for sha in candidate_shas
+    }
+    # The released combined identity omitted both the target SHA and page limit.
+    # Accept that exact old shape once so adding coverage cannot strand cursors.
+    aliases.add(_watch_identity(args, include_ci_max_pages=False))
+    return aliases
 
 
 def _managed_watch_id() -> str | None:

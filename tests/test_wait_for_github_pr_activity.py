@@ -860,6 +860,56 @@ def test_combined_watch_identity_includes_ci_contract() -> None:
     assert module._watch_identity(pr_only) != module._watch_identity(combined)
 
 
+def test_combined_watch_identity_includes_actions_page_limit() -> None:
+    module = _load_module()
+
+    def _identity(max_pages: str) -> str:
+        return module._watch_identity(
+            module._build_parser().parse_args(
+                [
+                    "--repo",
+                    "avibe-bot/avibe",
+                    "--pr",
+                    "153",
+                    "--sha",
+                    "abc123",
+                    "--workflow",
+                    "CI",
+                    "--max-pages",
+                    max_pages,
+                ]
+            )
+        )
+
+    assert _identity("1") != _identity("3")
+
+
+def test_combined_watch_migrates_identity_without_actions_page_limit(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    args = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--sha", "abc123", "--workflow", "CI"]
+    )
+    legacy_identity = module._watch_identity(args, include_ci_max_pages=False)
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": legacy_identity,
+                "owner": "wat_123",
+                "head_sha": "abc123",
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    aliases = module._legacy_watch_identity_aliases(args, str(state_file))
+    assert legacy_identity in aliases
+
+
 def test_combined_watch_migrates_the_legacy_sha_identity(tmp_path) -> None:
     module = _load_module()
     state_file = tmp_path / "pr-153-combined.json"
@@ -877,7 +927,7 @@ def test_combined_watch_migrates_the_legacy_sha_identity(tmp_path) -> None:
             "CI",
         ]
     )
-    legacy_identity = module._watch_identity(args, legacy_ci_sha="old-sha")
+    legacy_identity = module._watch_identity(args, legacy_ci_sha="old-sha", include_ci_max_pages=False)
     state_file.write_text(
         json.dumps(
             {
@@ -1932,7 +1982,14 @@ def test_fetch_state_includes_combined_actions_and_request_count() -> None:
     module = _load_module()
     with (
         patch.object(module, "list_paginated_with_count", return_value=([], 1)),
-        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
+        patch.object(
+            module,
+            "github_get",
+            side_effect=[
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+            ],
+        ) as fetch_pr,
         patch.object(module, "_fetch_review_threads", return_value=([], 1)),
         patch.object(
             module,
@@ -1962,7 +2019,39 @@ def test_fetch_state_includes_combined_actions_and_request_count() -> None:
         cache=fetch_actions.call_args.kwargs["cache"],
     )
     assert state["actions"][0]["id"] == 7
-    assert request_count == 1 + 5 + 2
+    assert request_count == 2 + 5 + 2
+    assert fetch_pr.call_count == 2
+
+
+def test_fetch_state_discards_actions_when_pr_moves_during_fetch() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(
+            module,
+            "github_get",
+            side_effect=[
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+                {"number": 153, "state": "open", "head": {"sha": "new-sha"}},
+            ],
+        ),
+        patch.object(
+            module,
+            "fetch_workflow_runs",
+            return_value=([{"id": 7, "name": "CI", "head_sha": "abc123", "status": "completed"}], 1),
+        ),
+    ):
+        state, _request_count = module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_sha="abc123",
+            ci_workflows=["CI"],
+        )
+
+    assert state["pull_request"]["head"]["sha"] == "new-sha"
+    assert state["actions"] == []
 
 
 def test_fetch_state_omits_since_when_no_cursor_is_known() -> None:
