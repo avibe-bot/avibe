@@ -797,6 +797,419 @@ def test_main_detects_pr_status_change_during_polling() -> None:
     assert "pr_status #153 open -> merged" in stdout.getvalue()
 
 
+def test_combined_ci_mode_requires_exact_sha_and_workflow() -> None:
+    module = _load_module()
+
+    valid = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--sha", "abc123", "--workflow", "CI"]
+    )
+    assert module._validate_ci_args(valid) is None
+
+    missing_sha = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI"]
+    )
+    assert "--sha" in (module._validate_ci_args(missing_sha) or "")
+
+    new_pr_mode = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--new-prs", "--sha", "abc123", "--workflow", "CI"]
+    )
+    assert "--new-prs" in (module._validate_ci_args(new_pr_mode) or "")
+
+
+def test_pr_only_watch_identity_keeps_the_legacy_material() -> None:
+    module = _load_module()
+    args = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--actionable-only"]
+    )
+    expected_material = json.dumps(
+        {
+            "mode": "pr",
+            "actionable_only": True,
+            "include_self_comments": False,
+            "ignore_authors": [],
+            "ignore_comment_patterns": [],
+        },
+        sort_keys=True,
+    )
+    expected = module.hashlib.sha256(
+        f"wait_pr/{module.STATE_FILE_VERSION}/{expected_material}".encode()
+    ).hexdigest()[:16]
+
+    assert module._watch_identity(args) == expected
+
+
+def test_combined_watch_identity_includes_ci_contract() -> None:
+    module = _load_module()
+    pr_only = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--actionable-only"]
+    )
+    combined = module._build_parser().parse_args(
+        [
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "153",
+            "--actionable-only",
+            "--sha",
+            "abc123",
+            "--workflow",
+            "CI",
+        ]
+    )
+
+    assert module._watch_identity(pr_only) != module._watch_identity(combined)
+
+
+def test_combined_watch_identity_includes_actions_page_limit() -> None:
+    module = _load_module()
+
+    def _identity(max_pages: str) -> str:
+        return module._watch_identity(
+            module._build_parser().parse_args(
+                [
+                    "--repo",
+                    "avibe-bot/avibe",
+                    "--pr",
+                    "153",
+                    "--sha",
+                    "abc123",
+                    "--workflow",
+                    "CI",
+                    "--max-pages",
+                    max_pages,
+                ]
+            )
+        )
+
+    assert _identity("1") != _identity("3")
+
+
+def test_combined_watch_migrates_identity_without_actions_page_limit(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    args = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--sha", "abc123", "--workflow", "CI"]
+    )
+    legacy_identity = module._watch_identity(args, include_ci_max_pages=False)
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": legacy_identity,
+                "owner": "wat_123",
+                "head_sha": "abc123",
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    aliases = module._legacy_watch_identity_aliases(args, str(state_file))
+    assert legacy_identity in aliases
+
+
+def test_combined_watch_migrates_the_legacy_sha_identity(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    args = module._build_parser().parse_args(
+        [
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "153",
+            "--sha",
+            "new-sha",
+            "--branch",
+            "feature",
+            "--workflow",
+            "CI",
+        ]
+    )
+    legacy_identity = module._watch_identity(args, legacy_ci_sha="old-sha", include_ci_max_pages=False)
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": legacy_identity,
+                "owner": "wat_123",
+                "head_sha": "old-sha",
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = module._watch_identity(args)
+    aliases = module._legacy_watch_identity_aliases(args, str(state_file))
+    saved = module._load_state_file(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity=identity,
+        watch_id="wat_123",
+        watch_identity_aliases=aliases,
+    )
+
+    assert saved["watch"] == legacy_identity
+    assert legacy_identity in aliases
+    module._write_state_file(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity=identity,
+        watch_id="wat_123",
+        watch_identity_aliases=aliases,
+        head_sha="new-sha",
+        actions={"CI": []},
+    )
+    assert json.loads(state_file.read_text(encoding="utf-8"))["watch"] == identity
+
+
+def test_fresh_combined_baseline_rejects_a_stale_sha(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    state = _pr_state()
+    state["pull_request"]["head"] = {"sha": "new-sha"}
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", return_value=(state, 1)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "old-sha",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert "does not match --sha old-sha" in stderr.getvalue()
+    assert not state_file.exists()
+
+
+def test_resumed_combined_watch_rejects_a_stale_sha(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    baseline = _pr_state()
+    baseline["pull_request"]["head"] = {"sha": "new-sha"}
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_cursor": 0,
+                "review_comment_cursor": 0,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                "review_comment_since": "2026-08-04T09:00:00Z",
+                "issue_comment_since": "2026-08-04T09:00:00Z",
+                "viewer_login": "tester",
+                "token_fingerprint": module._token_fingerprint("token"),
+                **_complete_pr_baseline_fields(module, baseline),
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_state = state_file.read_text(encoding="utf-8")
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", return_value=(baseline, 1)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login") as fake_login,
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "old-sha",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert "does not match --sha old-sha" in stderr.getvalue()
+    assert stdout.getvalue() == ""
+    assert state_file.read_text(encoding="utf-8") == original_state
+    fake_login.assert_not_called()
+
+
+def test_combined_pr_waiter_reports_ci_completion(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    fetch_calls = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert kwargs["ci_sha"] == "abc123"
+        assert kwargs["ci_workflows"] == ["CI"]
+        action = {
+            "id": 7,
+            "name": "CI",
+            "head_sha": "abc123",
+            "head_branch": "feature",
+            "status": "in_progress" if fetch_calls == 1 else "completed",
+            "conclusion": None if fetch_calls == 1 else "success",
+            "html_url": "https://github.com/example/actions/runs/7",
+        }
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": "abc123"}
+        state["actions"] = [action]
+        return state, 2
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "abc123",
+                "--branch",
+                "feature",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+                "--interval",
+                "1",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert fetch_calls == 2
+    assert "GitHub Actions success for avibe-bot/avibe@abc123 on feature" in stdout.getvalue()
+    assert "CI: status=completed conclusion=success" in stdout.getvalue()
+
+
+def test_combined_settle_does_not_report_a_stale_ci_success_after_a_rerun_starts() -> None:
+    module = _load_module()
+    fetch_calls = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": "abc123"}
+        if fetch_calls == 1:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 1,
+            }
+        elif fetch_calls == 2:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 2,
+            }
+            state["review_comments"] = [_review_comment(501)]
+        else:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "in_progress",
+                "conclusion": None,
+                "run_attempt": 2,
+            }
+            state["review_comments"] = [_review_comment(501)]
+        state["actions"] = [action]
+        return state, 2
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "abc123",
+                "--branch",
+                "feature",
+                "--workflow",
+                "CI",
+                "--settle",
+                "1",
+                "--timeout",
+                "0",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    output = stdout.getvalue()
+    assert rc == 0
+    assert fetch_calls == 5
+    assert "review_comment #501" in output
+    assert "GitHub Actions success" not in output
+
+
 def test_main_reduces_unauthenticated_new_pr_interval_after_bootstrap() -> None:
     module = _load_module()
     fetch_calls: list[int | None] = []
@@ -1544,6 +1957,82 @@ def test_fetch_state_narrows_comments_and_filters_reactions_server_side() -> Non
     assert "since=" not in issue_comments_url
     # Only the Codex pass reaction is ever reported, so the rest never travel.
     assert "content=%2B1" in reactions_url
+
+
+def test_fetch_state_includes_combined_actions_and_request_count() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(
+            module,
+            "github_get",
+            side_effect=[
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+            ],
+        ) as fetch_pr,
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(
+            module,
+            "fetch_workflow_runs",
+            return_value=(
+                [{"id": 7, "name": "CI", "head_sha": "abc123", "status": "in_progress"}],
+                2,
+            ),
+        ) as fetch_actions,
+    ):
+        state, request_count = module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_sha="abc123",
+            ci_branch="feature",
+            ci_workflows=["CI"],
+            ci_max_pages=4,
+        )
+
+    fetch_actions.assert_called_once_with(
+        "avibe-bot/avibe",
+        "token",
+        branch="feature",
+        head_sha="abc123",
+        max_pages=4,
+        cache=fetch_actions.call_args.kwargs["cache"],
+    )
+    assert state["actions"][0]["id"] == 7
+    assert request_count == 2 + 5 + 2
+    assert fetch_pr.call_count == 2
+
+
+def test_fetch_state_discards_actions_when_pr_moves_during_fetch() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(
+            module,
+            "github_get",
+            side_effect=[
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+                {"number": 153, "state": "open", "head": {"sha": "new-sha"}},
+            ],
+        ),
+        patch.object(
+            module,
+            "fetch_workflow_runs",
+            return_value=([{"id": 7, "name": "CI", "head_sha": "abc123", "status": "completed"}], 1),
+        ),
+    ):
+        state, _request_count = module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_sha="abc123",
+            ci_workflows=["CI"],
+        )
+
+    assert state["pull_request"]["head"]["sha"] == "new-sha"
+    assert state["actions"] == []
 
 
 def test_fetch_state_omits_since_when_no_cursor_is_known() -> None:
