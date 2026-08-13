@@ -7,7 +7,14 @@ import pytest
 from sqlalchemy import select
 
 from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
-from core.vibe_agents import AgentImportCandidate, VibeAgent, VibeAgentAccessError, VibeAgentStore
+from core.vibe_agents import (
+    AgentImportCandidate,
+    VibeAgent,
+    VibeAgentAccessError,
+    VibeAgentStore,
+    ensure_agent_selection_access,
+    ensure_session_agent_access,
+)
 from core.watches import ManagedWatchStore
 from storage import resource_access_service, workbench_sessions_service
 from storage.db import get_cached_sqlite_engine
@@ -303,6 +310,7 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
                     session["id"],
                     agent_name="",
                     agent_id="",
+                    agent_backend="",
                     user_context=_organization_context("member-1"),
                 )
         store.set_default_agent_name(agents["public"].name)
@@ -312,15 +320,101 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
                 session["id"],
                 agent_name="",
                 agent_id="",
+                agent_backend="",
+                user_context=_organization_context("member-1"),
+            )
+        store.set_default_agent_name(agents["scope"].name)
+        with engine.connect() as connection:
+            effective = ensure_session_agent_access(
+                connection,
+                cleared,
                 user_context=_organization_context("member-1"),
             )
     finally:
         store.close()
 
-    assert (cleared["agent_id"], cleared["agent_name"]) == (
-        agents["public"].id,
-        agents["public"].name,
+    assert (cleared["agent_id"], cleared["agent_name"], cleared["agent_backend"]) == (
+        None,
+        None,
+        "",
     )
+    assert effective is not None
+    assert effective.id == agents["scope"].id
+
+
+def test_editor_creating_default_session_validates_without_pinning(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store, agents = _seed_agents_with_policies()
+    engine = get_cached_sqlite_engine()
+    try:
+        with engine.begin() as connection:
+            scope_id = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_create_default",
+                now="2026-08-13T00:00:00Z",
+            )
+
+        store.set_default_agent_name(agents["private"].name)
+        with pytest.raises(VibeAgentAccessError):
+            with engine.begin() as connection:
+                workbench_sessions_service.create_session(
+                    connection,
+                    scope_id=scope_id,
+                    agent_backend="",
+                    user_context=_organization_context("member-1"),
+                )
+
+        store.set_default_agent_name(agents["public"].name)
+        with engine.begin() as connection:
+            created = workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                user_context=_organization_context("member-1"),
+            )
+
+        store.set_default_agent_name(agents["scope"].name)
+        with engine.connect() as connection:
+            effective = ensure_session_agent_access(
+                connection,
+                created,
+                user_context=_organization_context("member-1"),
+            )
+    finally:
+        store.close()
+
+    assert (created["agent_id"], created["agent_name"], created["agent_backend"]) == (
+        None,
+        None,
+        "",
+    )
+    assert effective is not None
+    assert effective.id == agents["scope"].id
+
+
+def test_missing_agent_selector_fails_closed_for_editor_only(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = VibeAgentStore()
+    try:
+        with store.engine.connect() as connection:
+            with pytest.raises(VibeAgentAccessError):
+                ensure_agent_selection_access(
+                    connection,
+                    agent_name="deleted-legacy-agent",
+                    user_context=_organization_context("member-1"),
+                )
+            assert (
+                ensure_agent_selection_access(
+                    connection,
+                    agent_name="deleted-legacy-agent",
+                    user_context=_organization_context("owner-1", instance_role="owner"),
+                )
+                is None
+            )
+    finally:
+        store.close()
 
 
 def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_path) -> None:
@@ -665,17 +759,17 @@ def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_befo
         agent_store.close()
 
 
-def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeypatch, tmp_path) -> None:
-    """Every Editor-admitted runtime list/mutation uses one visibility helper.
+def test_project_runtime_uses_acls_while_harness_remains_editor_wide(monkeypatch, tmp_path) -> None:
+    """Project-bound runtime and global Harness follow their distinct contracts.
 
-    Seed one allowed Agent/session and one denied pair, then assert the same
-    property across agents-graph, running-agents, and Harness. A new runtime
-    surface added later should join this enumeration instead of repeating a
-    one-off case.
+    Running Agents and the graph honor Project and Agent ACLs. Harness has no
+    additional resource ACL in this MVP, so an Editor can see and manage every
+    definition even when it references an inaccessible or deleted Agent.
     """
 
     from datetime import datetime, timezone
 
+    from core.services import agent_graph
     from storage.background import SQLiteBackgroundTaskStore
     from storage.importer import ensure_sqlite_state
     from vibe import internal_client, ui_server
@@ -877,14 +971,57 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
     )
     remote = {"base_url": "https://alex.avibe.bot", "environ_base": _remote_peer()}
 
-    graph = client.get("/api/agents-graph", **remote)
-    assert graph.status_code == 200
-    graph_body = graph.get_json()
-    assert {node["session_id"] for node in graph_body.get("nodes") or []} <= {allowed_session["id"]}
-    assert denied_session["id"] not in {node["session_id"] for node in graph_body.get("nodes") or []}
-    assert graph_body["counts"]["total"] == len(graph_body.get("nodes") or [])
-    assert "nodes" not in graph_body["counts"]
-    assert "edges" not in graph_body["counts"]
+    graph_payload = {
+        "nodes": [
+            {
+                "session_id": allowed_session["id"],
+                "agent_name": agents["public"].name,
+                "agent_id": agents["public"].id,
+                "status": "idle",
+                "live": False,
+                "visibility": "foreground",
+            },
+            {
+                "session_id": denied_session["id"],
+                "agent_name": agents["private"].name,
+                "agent_id": agents["private"].id,
+                "status": "idle",
+                "live": False,
+                "visibility": "foreground",
+            },
+        ],
+        "edges": [
+            {
+                "kind": "trigger",
+                "from": "def:task-allowed",
+                "to": allowed_session["id"],
+            },
+            {
+                "kind": "trigger",
+                "from": "def:task-denied",
+                "to": denied_session["id"],
+            },
+        ],
+        "trigger_nodes": [
+            {"definition_id": "task-allowed"},
+            {"definition_id": "task-denied"},
+        ],
+        "counts": {},
+    }
+    graph_body = ui_server._authorized_graph_payload(
+        _organization_context("member-1"),
+        graph_payload,
+    )
+    assert {node["session_id"] for node in graph_body["nodes"]} == {allowed_session["id"]}
+    assert graph_body["edges"] == [
+        {
+            "kind": "trigger",
+            "from": "def:task-allowed",
+            "to": allowed_session["id"],
+        }
+    ]
+    assert graph_body["trigger_nodes"] == [{"definition_id": "task-allowed"}]
+    assert graph_body["counts"] == agent_graph._counts(graph_body["nodes"])
 
     running = client.get("/api/running-agents", **remote)
     assert running.status_code == 200
@@ -929,55 +1066,45 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
 
     tasks = client.get("/api/harness/tasks", **remote).get_json()["tasks"]
     watches = client.get("/api/harness/watches", **remote).get_json()["watches"]
-    assert {row["id"] for row in tasks} == {"task-allowed", "task-unbound-allowed"}
-    assert {row["id"] for row in watches} == {"watch-allowed"}
-    assert "task-missing-agent" not in {row["id"] for row in tasks}
+    assert {row["id"] for row in tasks} == {
+        "task-allowed",
+        "task-denied",
+        "task-denied-page-0",
+        "task-denied-page-1",
+        "task-denied-page-2",
+        "task-missing-agent",
+        "task-unbound-allowed",
+    }
+    assert {row["id"] for row in watches} == {"watch-allowed", "watch-denied"}
 
     paged = client.get("/api/harness/tasks?page=1&limit=1", **remote).get_json()
     assert len(paged["tasks"]) == 1
-    assert paged["tasks"][0]["id"] in {"task-allowed", "task-unbound-allowed"}
-    assert paged["counts"]["total"] == 2
+    assert paged["counts"]["total"] == 7
     assert paged["has_more"] is True
 
-    denied_patch = client.patch(
+    patch_response = client.patch(
         "/api/harness/tasks/task-denied",
         json={"enabled": False},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         **remote,
     )
-    denied_delete = client.delete(
+    delete_response = client.delete(
         "/api/harness/watches/watch-denied",
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         **remote,
     )
-    assert denied_patch.status_code == 404
-    assert denied_delete.status_code == 404
+    assert patch_response.status_code == 200
+    assert patch_response.get_json()["task"]["enabled"] is False
+    assert delete_response.status_code == 200
 
-    helper_paths = {
-        ui_server.running_agents_get.__name__,
-        ui_server.running_agents_end.__name__,
-        ui_server.agents_graph_get.__name__,
-        ui_server.harness_tasks_list.__name__,
-        ui_server.harness_task_patch.__name__,
-        ui_server.harness_task_delete.__name__,
-        ui_server.harness_watches_list.__name__,
-        ui_server.harness_watch_patch.__name__,
-        ui_server.harness_watch_delete.__name__,
-        ui_server.harness_runs_list.__name__,
-        ui_server.harness_bootstrap.__name__,
-        ui_server.harness_run_detail.__name__,
-    }
-    assert helper_paths == {
-        "running_agents_get",
-        "running_agents_end",
-        "agents_graph_get",
-        "harness_tasks_list",
-        "harness_task_patch",
-        "harness_task_delete",
-        "harness_watches_list",
-        "harness_watch_patch",
-        "harness_watch_delete",
-        "harness_runs_list",
-        "harness_bootstrap",
-        "harness_run_detail",
-    }
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(
+            config,
+            subject="viewer-1",
+            groups=["group-engineering"],
+            instance_role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+    assert client.get("/api/harness/tasks", **remote).status_code == 403
