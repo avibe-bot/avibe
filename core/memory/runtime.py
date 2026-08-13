@@ -906,6 +906,12 @@ class MemoryRuntime:
                     and self._can_disable_without_maintenance_authority(config)
                 ):
                     result = await self._disable_locked(config)
+                elif (
+                    maintenance_open
+                    and self._maintenance is not None
+                    and self._maintenance.has_readable_intent()
+                ):
+                    result = await self._reconcile_locked(config)
                 elif maintenance_open:
                     self.module.pause_claims()
                     return {"ok": False, "error": "memory_clear_failed"}

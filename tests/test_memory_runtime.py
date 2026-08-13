@@ -32,6 +32,7 @@ from core.memory.artifact import (
     MemoryRuntimeActivationError,
 )
 from core.memory.maintenance import MemoryMaintenance
+from core.memory.clear_intent import ClearIntent, ClearIntentStore
 from core.memory.attachments import attachment_pin_root
 from core.memory.everos import (
     AddAck,
@@ -83,6 +84,7 @@ from config.v2_config import (
 
 
 PROJECT = "p-22222222222222222222222222222222"
+PRINCIPAL = "u-11111111111111111111111111111111"
 
 
 def _maintenance(runtime: MemoryRuntime) -> MemoryMaintenance:
@@ -2212,6 +2214,119 @@ async def test_runtime_exposes_interrupted_clear_without_starting_sidecar(
     assert projection is not None
     assert projection.error_code == "memory_clear_marker_unreadable"
     await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_reconcile_completes_readable_clear_marker_on_boot(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+    )
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False, processing=processing),
+        effective_home=tmp_path,
+    )
+    maintenance = _maintenance(runtime)
+    store = runtime._store
+    assert store is not None
+    intent = ClearIntent.new(operator_ref="boot", pre_epoch=store.ensure_meta().epoch)
+    ClearIntentStore(tmp_path).write(intent)
+
+    result = await runtime.reconcile(runtime._config)
+
+    assert result == {"ok": True, "state": "disabled"}
+    assert ClearIntentStore(tmp_path).load() is None
+    assert maintenance.is_open() is False
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_memory_clear_201_discards_manual_required_evidence_and_allows_new_delivery(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    """MEMORY-CLEAR-201: a real runtime clears an unknown add outcome end to end."""
+
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True),
+        effective_home=tmp_path,
+    )
+    provider_timeout = asyncio.Event()
+
+    async def time_out_add(_capture) -> None:
+        await provider_timeout.wait()
+
+    provider = FakeMemoryProvider(add_hook=time_out_add)
+    runtime._provider = provider
+    runtime.module.replace_provider(provider)
+    runtime.module._worker.coordinator._add_timeout_seconds = 0.001
+
+    source_root = tmp_path / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "evidence.txt"
+    source.write_bytes(b"retained ambiguous attachment")
+    source.chmod(0o600)
+    first = CaptureRequest(
+        source_message_id="timed-out-add",
+        session_id="session",
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        provenance="user_input",
+        text="ambiguous payload",
+        occurred_at_ms=1,
+        attachments=(
+            CaptureAttachment(
+                kind="doc",
+                name=source.name,
+                uri=source.as_uri(),
+                ext="txt",
+            ),
+        ),
+    )
+    assert await runtime.module.capture(first) == CaptureAccepted()
+    assert await runtime.module.drain() == 1
+
+    ambiguous = runtime._store.list_queue_rows()
+    assert len(ambiguous) == 1
+    assert ambiguous[0].state == "manual_required"
+    assert ambiguous[0].attachment_bundle_id is not None
+    bundle_id = ambiguous[0].attachment_bundle_id
+    assert runtime._store.has_manual_required_fence() is True
+    assert (await runtime.maintenance_payload())["can_clear"] is True
+
+    async def resume_without_sidecar() -> None:
+        runtime.module.resume_claims()
+
+    maintenance = _maintenance(runtime)
+    maintenance._runtime = replace(maintenance._runtime, resume=resume_without_sidecar)
+    result = await runtime.clear(operator_ref="user:owner")
+
+    assert result["status"] == "completed"
+    assert isinstance(result["operation_id"], str)
+    assert result["epoch"] == 1
+    assert runtime._store.list_queue_rows() == ()
+    assert runtime._store.has_manual_required_fence() is False
+    assert not (tmp_path / "memory" / "attachments" / "bundles" / bundle_id).exists()
+
+    provider.add_hook = None
+    second = replace(
+        first,
+        source_message_id="after-clear",
+        text="deliver after clear",
+        occurred_at_ms=2,
+        attachments=(),
+    )
+    assert await runtime.module.capture(second) == CaptureAccepted()
+    assert await runtime.module.drain() == 1
+    delivered = runtime._store.list_queue_rows()
+    assert len(delivered) == 1
+    assert delivered[0].state == "delivered"
+    assert delivered[0].provider_session_ref.epoch == result["epoch"]
+    assert [capture.text for capture in provider.captures] == [
+        "ambiguous payload",
+        "deliver after clear",
+    ]
 
 
 async def test_runtime_install_artifact_uses_controller_owned_manager(

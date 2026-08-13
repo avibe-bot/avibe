@@ -15,13 +15,14 @@ scenarios:
     status: covered
     kind: recovery
     layer: scenario
-    test: tests/test_memory_maintenance.py::test_clear_writes_marker_and_repeats_four_surfaces
+    test: tests/test_memory_runtime.py::test_memory_clear_201_discards_manual_required_evidence_and_allows_new_delivery
     actor: Memory Settings user
     trigger: A provider add times out after submission and fences its session as manual_required
     given: The queue retains the ambiguous payload and pinned attachment bundle without replaying it
     when: The user confirms Clear Memory Data
     then: Marker-owned Clear removes retained evidence, advances the epoch, and a later capture can deliver normally
     expected_outputs:
+      - Clear completes through the four existing idempotent deletion primitives
       - Maintenance advertises can_clear while the manual_required fence exists
       - Clear completes through the four existing idempotent deletion primitives
       - The ambiguous payload and attachment bundle are removed without another provider add

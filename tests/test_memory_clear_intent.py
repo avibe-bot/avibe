@@ -30,7 +30,7 @@ def test_marker_schema_rejects_non_uuid4_and_extra_fields(tmp_path: Path):
     marker.parent.mkdir(parents=True)
     payload = {
         "schema_version": 1,
-        "operation_id": "operation-1",
+        "operation_id": "operation/id",
         "operator_ref": "user-1",
         "pre_epoch": 1,
         "target_epoch": 2,
@@ -71,6 +71,31 @@ def test_legacy_open_journal_migrates_then_removes_journal(tmp_path: Path):
     assert intent.target_epoch == 3
     assert ClearIntentStore(tmp_path).load() == intent
     assert not journal.exists()
+
+
+def test_legacy_operation_token_is_accepted_by_new_marker_reader(tmp_path: Path):
+    journal = tmp_path / "state/memory/clear-journal.sqlite"
+    journal.parent.mkdir(parents=True)
+    connection = sqlite3.connect(journal)
+    connection.execute(
+        "CREATE TABLE clear_operation (operation_id TEXT, operator_ref TEXT, "
+        "pre_epoch INTEGER, target_epoch INTEGER, state TEXT, started_at TEXT, open_slot INTEGER)"
+    )
+    legacy_id = "a" * 32
+    connection.execute(
+        "INSERT INTO clear_operation VALUES (?, ?, ?, ?, ?, ?, 1)",
+        (legacy_id, "user-1", 2, 3, "deleting", "2026-08-13T00:00:00Z"),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(journal, 0o600)
+
+    store = ClearIntentStore(tmp_path)
+    intent = store.migrate_legacy(current_epoch=2)
+
+    assert intent is not None
+    assert intent.operation_id == legacy_id
+    assert store.load() == intent
 
 
 def test_legacy_open_journal_without_target_epoch_defers_until_store_epoch(tmp_path: Path):

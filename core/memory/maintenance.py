@@ -144,6 +144,21 @@ class MemoryMaintenance:
     def has_open_restore(self) -> bool:
         return False
 
+    def has_readable_intent(self) -> bool:
+        """Return whether boot can safely replay a readable Clear marker."""
+
+        if (
+            self._store is None
+            or self._initialization_error is not None
+            or self._intent_error is not None
+        ):
+            return False
+        try:
+            return self._intent.load() is not None
+        except ClearIntentUnreadable:
+            self._intent_error = ClearIntentUnreadable("Memory clear intent marker is unreadable")
+            return False
+
     def recovery(self, *, operator_ref: str | None = None) -> ClearInProgressResult | None:
         return self._read_projection()
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sqlite3
 import uuid
@@ -36,6 +37,7 @@ LEGACY_SNAPSHOT_RELATIVE_PATH = "state/memory/clear-snapshots"
 BACKUP_JOURNAL_RELATIVE_PATH = "state/memory/backup-restore-journal.sqlite"
 BACKUP_ROOT_RELATIVE_PATH = "state/memory/backups"
 MARKER_SCHEMA_VERSION = 1
+_LEGACY_OPERATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 class ClearIntentError(RuntimeError):
@@ -283,10 +285,15 @@ def _decode(payload: bytes) -> ClearIntent:
         raise ValueError("invalid clear intent operation id")
     try:
         parsed_operation_id = uuid.UUID(operation_id)
-    except (ValueError, AttributeError, TypeError) as error:
-        raise ValueError("invalid clear intent operation id") from error
-    if parsed_operation_id.version != 4:
-        raise ValueError("clear intent operation id must be UUID4")
+    except (ValueError, AttributeError, TypeError):
+        parsed_operation_id = None
+    if parsed_operation_id is not None:
+        if parsed_operation_id.version == 4:
+            pass
+        elif re.fullmatch(r"[0-9a-f]{32}", operation_id) is None:
+            raise ValueError("clear intent operation id must be UUID4")
+    elif _LEGACY_OPERATION_ID_RE.fullmatch(operation_id) is None:
+        raise ValueError("invalid clear intent operation id")
     operator_ref = value["operator_ref"]
     if (
         not isinstance(operator_ref, str)
