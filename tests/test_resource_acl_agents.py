@@ -275,6 +275,54 @@ def test_remote_partial_agent_updates_persist_canonical_selector_pair(monkeypatc
     )
 
 
+def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store, agents = _seed_agents_with_policies()
+    try:
+        store.set_default_agent_name(agents["private"].name)
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as connection:
+            scope_id = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_clear_default",
+                now="2026-07-20T00:00:00Z",
+            )
+            session = workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                agent_id=agents["public"].id,
+                user_context=_organization_context("member-1"),
+            )
+        with pytest.raises(VibeAgentAccessError):
+            with engine.begin() as connection:
+                workbench_sessions_service.update_session(
+                    connection,
+                    session["id"],
+                    agent_name="",
+                    agent_id="",
+                    user_context=_organization_context("member-1"),
+                )
+        store.set_default_agent_name(agents["public"].name)
+        with engine.begin() as connection:
+            cleared = workbench_sessions_service.update_session(
+                connection,
+                session["id"],
+                agent_name="",
+                agent_id="",
+                user_context=_organization_context("member-1"),
+            )
+    finally:
+        store.close()
+
+    assert (cleared["agent_id"], cleared["agent_name"]) == (
+        agents["public"].id,
+        agents["public"].name,
+    )
+
+
 def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)

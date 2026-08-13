@@ -647,15 +647,18 @@ def update_session(
             agent_id=None if agent_id is _UNSET else agent_id,
             user_context=resource_context,
         )
-        if (
-            selected_agent is None
-            and not resource_context.has_role("editor")
-        ):
-            selected_agent = ensure_default_agent_access(
-                conn,
-                user_context=resource_context,
-                missing_is_error=True,
-            )
+        if selected_agent is None:
+            # Clearing to "Default" still has to resolve an accessible Agent.
+            # Owners keep the pre-catalog empty-selector fallback; Editors
+            # must authorize the effective default before the route is persisted.
+            if resource_context.is_instance_owner:
+                pass
+            else:
+                selected_agent = ensure_default_agent_access(
+                    conn,
+                    user_context=resource_context,
+                    missing_is_error=True,
+                )
         if selected_agent is not None:
             requested_backend = str(agent_backend or "").strip() if agent_backend is not _UNSET else ""
             if requested_backend and requested_backend != selected_agent.backend:
