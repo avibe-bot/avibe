@@ -1591,6 +1591,8 @@
     "memory_provider_response_invalid": "Memory returned an invalid response.",
     "memory_processing_failed": "Memory processing failed.",
     "memory_clear_failed": "Clearing Memory data failed.",
+    "memory_clear_marker_unreadable": "Memory Clear state could not be read. Run Clear again to repair it.",
+    "memory_clear_legacy_state_requires_rerun": "An older Memory Clear state needs to be replaced. Run Clear again to continue.",
     "memory_restart_failed": "Restarting the Memory engine failed.",
     "memory_runtime_unpublished": "This Avibe version hasn't published a memory runtime yet.",
     "memory_runtime_manifest_missing": "The memory runtime manifest is missing.",
@@ -4205,21 +4207,12 @@
         "generation": "Data version",
         "requestId": "Request ID"
       },
-      "clearRecovery": {
-        "title": "An unfinished Clear needs your decision",
-        "description": "The last Clear was interrupted. You can finish the deletion, or abort and restore everything to how it was before.",
-        "state": {
-          "preparing": "Preparing snapshot",
-          "prepared": "Snapshot prepared",
-          "deleting": "Deleting Memory data",
-          "recoveryNeeded": "Recovery required"
-        },
-        "resume": "Resume Clear",
-        "abort": "Abort and restore",
-        "abortUnavailable": "Abort is unavailable until the initial snapshot is complete.",
-        "resumeSuccess": "Clear resumed and completed.",
-        "abortSuccess": "Clear aborted and the snapshot was restored.",
-        "actionFailed": "Couldn't update Clear recovery.",
+      "clearInProgress": {
+        "title": "Clear Memory Data is in progress",
+        "description": "Memory remains fenced while the deletion completes automatically.",
+        "explicitRetryDescription": "Clear did not finish automatically. Run Clear Memory Data again to retry or replace the failed operation.",
+        "deleting": "Deleting Memory data",
+        "failed": "Clear needs another attempt",
         "loadFailed": "Couldn't load Clear maintenance state."
       },
       "timeline": {

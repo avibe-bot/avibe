@@ -1666,46 +1666,6 @@ def create_app(
             logger.warning("internal memory clear failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
 
-    async def _memory_clear_recovery(request: Request, *, abort: bool) -> Any:
-        user_key = _verified_memory_ui_user_key(request)
-        if user_key is None:
-            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        if _memory_factory_reset_running():
-            return JSONResponse(
-                status_code=409,
-                content={"status": "failed", "error": "memory_operation_in_progress"},
-            )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        payload = await _safe_json(request)
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != {"operation_id"}
-            or not isinstance(payload.get("operation_id"), str)
-            or not 1 <= len(payload["operation_id"]) <= 128
-        ):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        try:
-            operator_ref = runtime.principal_for_user_key(user_key)
-            operation = runtime.abort_clear if abort else runtime.resume_clear
-            return await operation(payload["operation_id"], operator_ref=operator_ref)
-        except (TypeError, ValueError):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        except MemoryStoreUnavailableError:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
-        except Exception:
-            logger.warning("internal memory clear recovery failed")
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
-
-    @app.post("/internal/memory/clear/resume")
-    async def _memory_clear_resume(request: Request) -> Any:
-        return await _memory_clear_recovery(request, abort=False)
-
-    @app.post("/internal/memory/clear/abort")
-    async def _memory_clear_abort(request: Request) -> Any:
-        return await _memory_clear_recovery(request, abort=True)
-
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""

@@ -570,8 +570,6 @@ export type ApiContextType = {
   getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
   getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
   clearMemory: () => Promise<MemoryClearResult>;
-  resumeMemoryClear: (operationId: string) => Promise<MemoryClearRecoveryResult>;
-  abortMemoryClear: (operationId: string) => Promise<MemoryClearRecoveryResult>;
   factoryResetMemory: () => Promise<MemoryFactoryResetResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
   rebuildMemoryRuntime: () => Promise<MemoryRuntimeRebuildResult>;
@@ -1904,8 +1902,8 @@ export type MemoryStatus = {
     version: string | null;
     capabilities: Record<string, unknown>;
     disabled_features: string[];
-    cascade: Record<string, unknown>;
-    recorder: Record<string, unknown>;
+    cascade: Record<string, unknown> | null;
+    recorder: Record<string, unknown> | null;
   };
 };
 
@@ -1925,11 +1923,9 @@ export type MemoryFailureLogEntry = {
   request_id: string | null;
 };
 
-export type MemoryClearRecovery = {
+export type MemoryClearInProgress = {
   operation_id: string;
-  state: string;
-  can_resume: boolean;
-  can_abort: boolean;
+  state: 'deleting' | 'failed';
   occurred_at?: string | null;
   error_code?: string | null;
 };
@@ -1937,7 +1933,7 @@ export type MemoryClearRecovery = {
 export type MemoryFailureLog = {
   status: 'ok';
   items: MemoryFailureLogEntry[];
-  recovery: MemoryClearRecovery | null;
+  clear_in_progress?: MemoryClearInProgress;
 };
 
 export type MemoryFailureLogResult =
@@ -1949,7 +1945,7 @@ export type MemoryMaintenance = {
   status: 'ok';
   data_exists: boolean;
   can_clear: boolean;
-  clear_recovery: MemoryClearRecovery | null;
+  clear_in_progress: MemoryClearInProgress | null;
 };
 
 export type MemoryMaintenanceResult = MemoryMaintenance | MemoryFailure | { error: string };
@@ -1969,7 +1965,7 @@ export type MemoryProcessingRecordSummary = {
     source: MemoryLogSourceStatus;
     data_exists: boolean;
     can_clear: boolean;
-    clear_recovery: MemoryClearRecovery | null;
+    clear_in_progress: MemoryClearInProgress | null;
   };
   provider_checks?: {
     source: MemoryLogSourceStatus;
@@ -2127,11 +2123,7 @@ export type MemoryLogDetailResult =
 
 export type MemoryClearResult =
   | { status: 'completed'; operation_id: string; epoch: number }
-  | (MemoryFailure & { recovery?: MemoryClearRecovery | null });
-
-export type MemoryClearRecoveryResult =
-  | { status: 'completed' | 'aborted'; operation_id: string }
-  | MemoryFailure;
+  | (MemoryFailure & { clear_in_progress?: MemoryClearInProgress | null });
 
 // Reconciliation answers the controller's ok/error shape rather than the
 // status/error one the read routes use.
@@ -3344,10 +3336,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemoryLogEntry: (memcellId) =>
       getJson(`/api/memory/log/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
-    resumeMemoryClear: (operationId) =>
-      postJson('/api/memory/clear/resume', { operation_id: operationId }, { handleError: false }),
-    abortMemoryClear: (operationId) =>
-      postJson('/api/memory/clear/abort', { operation_id: operationId }, { handleError: false }),
     factoryResetMemory: async () => parseMemoryFactoryResetResult(
       await postJson('/api/memory/runtime/factory-reset', { confirm: true }, { handleError: false }),
     ),

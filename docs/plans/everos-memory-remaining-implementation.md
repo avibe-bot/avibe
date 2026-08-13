@@ -16,8 +16,9 @@ The public Memory seam remains provider-neutral:
 - `SessionFlushCoordinator` exclusively owns session generations, fences, explicit flushes, and flush
   recovery. `MemoryWorker` only claims and delivers add rows through the coordinator.
 - `AttachmentPinStore` owns private durable attachment bundles and crash-safe release.
-- `MemoryClearJournal` and `MemorySnapshotManager` own destructive clear recovery. Runtime lifecycle
-  code only establishes the maintenance fence, stops/starts owned processes, and invokes these seams.
+- `MemoryMaintenance` owns the durable clear-intent marker and four idempotent deletion primitives.
+  Runtime lifecycle code only establishes the maintenance fence, stops/starts owned processes, and
+  invokes this seam.
 - Processing Record directly projects public EverOS `/health`, existing call-log/processing provenance,
   and confirmed Avibe settlement facts. The outbox and lifecycle do not compose product status.
 
@@ -174,40 +175,25 @@ files and finalizes the bundle row. Boot reconciliation completes `releasing` bu
 unreferenced staging/orphan bundles inside the private root. Pending and `manual_required` bundles are
 never removed.
 
-## 6. Snapshot and clear journal
+## 6. Durable clear intent
 
-`MemorySnapshotManager` owns queue SQLite backup, provider root, call-log SQLite backup, and attachment
-bundles. It excludes sockets and runtime artifacts. Manifests contain only effective-home-relative
-paths, types, modes, sizes, per-file hashes, and tree digests. Snapshot creation rejects symlinks and
-special files, fsyncs all bytes and the manifest, and verifies it before returning. Restore verifies all
-digests and relocates paths relative to the current effective home.
+Clear Memory Data uses `<effective_home>/state/memory/clear-intent.json` as its single
+source of truth. Every marker contains a new UUID4 operation id. The marker also contains operator reference,
+pre/target epochs, `deleting|failed` state, error code, and creation/update timestamps. It
+is atomically written through a same-directory temporary file, file fsync, replace, and
+parent-directory fsync.
 
-The independent journal is `<effective_home>/state/memory/clear-journal.sqlite`; snapshots live under
-`<effective_home>/state/memory/clear-snapshots/<operation_id>/`. It has:
-
-- `clear_operation`: opaque operation/operator IDs, state, timestamps, pre/target epochs, relative
-  snapshot path, destructive-started flag, closed error, and one unique open slot;
-- `clear_surface`: one of `queue`, `provider`, `call_log`, `attachments`, its relative snapshot path,
-  pre-clear/snapshot digests, and `pending|snapshotted|deleted|restored` state;
-- append-only `clear_event`: operation, event, optional surface, time, and closed error.
-
-The only transitions are `preparing -> prepared -> deleting -> completed` and any non-terminal state
-to `recovery_needed`; explicit abort ends in `aborted`. Terminal headers and all events are immutable.
-
-Clear ordering under the runtime/root maintenance fence is: create durable journal header; pause add
-and flush coordination; stop recorder/sidecar without deleting data; snapshot and verify all four
-surfaces; mark prepared; mark destructive start; reset queue/epoch, delete provider, delete call log,
-and delete attachment bundles while recording each idempotent substep; then mark completed. Only after
-completion may claims/runtime resume and the restorable snapshot be garbage-collected.
-
-A process restart with any open journal only surfaces `recovery_needed`; capture, recall, worker,
-restart, and backup stay fenced. `resume_clear(operation_id, operator_ref)` continues exact pending
-substeps. `abort_clear(...)` first verifies the complete snapshot, restores every covered surface and
-records each restore, then marks aborted. Missing/corrupt snapshots fail closed. Clear never releases a
-`manual_required` fence by itself. Concurrent start permits exactly one open operation.
-
-Ordinary backup is blocked while a clear journal is open and includes completed journal audit records
-otherwise, so a restore cannot combine incompatible surface generations.
+The operation fences claims and runs exactly four idempotent deletion primitives: queue
+reset, provider-root recreation, call-log clear, and attachment clear. Completion clears
+the in-progress flag and removes the marker. An interrupted or failed marker is retried
+automatically on the next reconcile; corrupt or unreadable marker state fails closed for
+Memory projection while service startup continues. An explicit Clear request can replace
+a corrupt marker. A legacy Clear journal is not semantically migrated: one bounded open-row
+probe either permits best-effort deletion or creates a fresh failed marker with
+`memory_clear_legacy_state_requires_rerun`. Legacy backup/restore and Clear snapshot residue
+is best-effort cleanup only. There is no backup/restore journal or user-facing resume/abort API.
+The complete contract and three-tier fault model live in
+`docs/plans/memory-clear-durable-intent.md`.
 
 ## 7. Recall policy
 
@@ -289,8 +275,8 @@ absolute paths, attachment metadata/hashes, vectors, or raw exceptions. `manual_
 The UI merges status and processing-log tabs into one Processing Record view with explicit Refresh,
 runtime/capabilities, source availability, anomalies/recovery, recent timeline, and existing detail.
 It does not poll the composite status every four seconds. Disabled Memory still renders retained local
-recovery/anomaly evidence. Clear recovery may offer its distinct resume/abort commands;
-`manual_required` has no command. Embedding configuration lock reads a separate cheap local
+recovery/anomaly evidence. Clear recovery is marker-owned and has no user-facing resume/abort
+commands; `manual_required` has no command. Embedding configuration lock reads a separate cheap local
 `data_exists` maintenance fact rather than health or a deep provider-root scan. All copy uses i18n.
 
 ## 9. File scope
@@ -317,9 +303,9 @@ multi-run search, platform aliasing, or assistant/tool/agent capture.
 - Attachments: confinement/symlink/special-file/owner/mode checks; byte limits; mutation detection;
   fault injection at copy/fsync/rename/DB boundaries; original deletion after accepted pin; duplicate
   cleanup; confirmed release; manual/stale retention; boot release/orphan convergence; no leakage.
-- Clear/snapshot: crash after journal/snapshot/each delete/completion boundary; zero automatic deletion
-  on boot; one concurrent open operation; idempotent resume; four-surface abort restore with exact
-  digest; corrupt snapshot fail-closed; operation fences; immutable audit; open-journal backup block.
+- Clear intent: crash after marker creation, each deletion primitive, queue-fence clearing, and marker
+  removal; automatic boot retry; one marker-owned operation; idempotent four-surface deletion; corrupt
+  marker fail-closed projection; operation fences; legacy journal migration.
 - Processing Record: available/stale/unavailable health; Cascade unhealthy as a valid observation;
   independently locked/corrupt/schema-incompatible sources; confirmed-only timeline; anomalies and
   clear recovery; authorization, pagination, bounds, and redaction; no active probes/root scans.

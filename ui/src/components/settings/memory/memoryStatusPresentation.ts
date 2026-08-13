@@ -39,12 +39,6 @@ const ANOMALY_LABEL_KEYS = {
   },
 } as const;
 
-const CLEAR_RECOVERY_STATE_LABEL_KEYS = {
-  preparing: 'memory.processingRecord.clearRecovery.state.preparing',
-  prepared: 'memory.processingRecord.clearRecovery.state.prepared',
-  deleting: 'memory.processingRecord.clearRecovery.state.deleting',
-  recovery_needed: 'memory.processingRecord.clearRecovery.state.recoveryNeeded',
-} as const;
 
 const HEALTH_STATUS_LABEL_KEYS = {
   ok: 'memory.processingRecord.runtime.healthStatus.ok',
@@ -60,6 +54,7 @@ const MEMORY_SOURCE_ERROR_REASONS = new Set([
   'memory_provider_response_invalid',
   'memory_processing_failed',
   'memory_clear_failed',
+  'memory_clear_legacy_state_requires_rerun',
   'memory_restart_failed',
 ]);
 
@@ -134,10 +129,6 @@ export const memoryStatusAnomalyLabel = (
   group: AnomalyLabelGroup,
   value: string,
 ): string => knownLabel(t, ANOMALY_LABEL_KEYS[group] as Record<string, string>, value);
-
-export const memoryStatusClearRecoveryStateLabel = (t: TFunction, value: string): string => (
-  knownLabel(t, CLEAR_RECOVERY_STATE_LABEL_KEYS, value)
-);
 
 export const memoryStatusHealthLabel = (t: TFunction, value: string): string => (
   knownLabel(t, HEALTH_STATUS_LABEL_KEYS, value)

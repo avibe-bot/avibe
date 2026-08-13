@@ -976,26 +976,6 @@ async def memory_clear(
     )
 
 
-async def memory_clear_recovery(
-    operation_id: str,
-    *,
-    action: str,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-) -> dict[str, Any]:
-    if action not in {"resume", "abort"}:
-        raise ValueError("invalid Memory clear recovery action")
-    path = f"/internal/memory/clear/{action}"
-    return await _memory_request(
-        "POST",
-        path,
-        payload={"operation_id": operation_id},
-        headers=_memory_user_key_headers("POST", path, user_key),
-        socket_path=socket_path,
-        timeout=None,
-    )
-
-
 def memory_status_sync(
     *,
     caller_session_id: str | None = None,

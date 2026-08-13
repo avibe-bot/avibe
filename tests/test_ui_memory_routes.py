@@ -533,7 +533,7 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
                 "status": "ok",
                 "data_exists": False,
                 "can_clear": True,
-                "clear_recovery": None,
+                "clear_in_progress": None,
             },
         }
 
@@ -755,7 +755,7 @@ def test_memory_processing_record_proxies_signed_operator_and_composite_payload(
                     "source": {"status": "available", "observed_at": "now", "reason": None},
                     "data_exists": False,
                     "can_clear": True,
-                    "clear_recovery": None,
+                    "clear_in_progress": None,
                 },
             },
         }
@@ -792,11 +792,11 @@ def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path)
                 "status": "ok",
                 "data_exists": True,
                 "can_clear": False,
-                "clear_recovery": {
+                "clear_in_progress": {
                     "operation_id": "clear-42",
-                    "state": "recovery_needed",
-                    "can_resume": False,
-                    "can_abort": True,
+                    "state": "failed",
+                    "occurred_at": "2026-08-13T00:00:00Z",
+                    "error_code": "memory_clear_failed",
                 },
             },
         }
@@ -811,8 +811,8 @@ def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path)
 
     assert response.status_code == 200
     assert response.get_json()["can_clear"] is False
-    assert response.get_json()["clear_recovery"]["operation_id"] == "clear-42"
-    assert response.get_json()["clear_recovery"]["can_resume"] is False
+    assert response.get_json()["clear_in_progress"]["operation_id"] == "clear-42"
+    assert response.get_json()["clear_in_progress"]["error_code"] == "memory_clear_failed"
     assert response.headers["cache-control"] == "no-store"
     assert user_keys == ["avibe:local"]
 
@@ -834,7 +834,7 @@ def test_memory_maintenance_preserves_the_runtime_clear_capability(
                 "status": "ok",
                 "data_exists": False,
                 "can_clear": can_clear,
-                "clear_recovery": None,
+                "clear_in_progress": None,
             },
         }
 
@@ -2454,37 +2454,6 @@ def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> N
 
     assert response.status_code == 403
     assert calls == []
-
-
-@pytest.mark.parametrize("action", ["resume", "abort"])
-def test_memory_clear_recovery_forwards_exact_operation(
-    monkeypatch,
-    tmp_path,
-    action: str,
-) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    calls: list[tuple[str, str, str]] = []
-
-    async def recover(operation_id: str, *, action: str, user_key: str):
-        calls.append((operation_id, action, user_key))
-        return {
-            "status_code": 200,
-            "body": {"status": "aborted" if action == "abort" else "completed"},
-        }
-
-    monkeypatch.setattr(internal_client, "memory_clear_recovery", recover)
-    client = app.test_client()
-    response = client.post(
-        f"/api/memory/clear/{action}",
-        json={"operation_id": "clear-42"},
-        headers=csrf_headers(client, "http://127.0.0.1:15131"),
-        base_url="http://127.0.0.1:15131",
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
-    )
-
-    assert response.status_code == 200
-    assert calls == [("clear-42", action, "avibe:local")]
 
 
 def test_memory_runtime_restart_calls_the_dedicated_transport(monkeypatch, tmp_path) -> None:
