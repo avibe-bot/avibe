@@ -376,6 +376,10 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/agent-backends$"),
         ("GET", r"^/api/running-agents$"),
         ("POST", r"^/api/running-agents/end$"),
+        # Files favorites live under /api/browse, not /api/files. Admit only this
+        # shared dependency — POST /api/browse and /mkdir stay Owner project-picker
+        # routes.
+        ("GET", r"^/api/browse/favorites$"),
         ("GET", r"^/api/cloud/token$"),
         ("GET", r"^/api/asr/status$"),
         ("GET", r"^/api/sessions/[^/]+/(?:archive-preview|queue|draft)$"),

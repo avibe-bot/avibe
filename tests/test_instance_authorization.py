@@ -99,6 +99,7 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
         ("PATCH", "/api/harness/tasks/task-1"),
         ("DELETE", "/api/harness/watches/watch-1"),
         ("DELETE", "/api/terminal/term-1"),
+        ("GET", "/api/browse/favorites"),
     )
     for method, path in editor_routes:
         assert http_authorization_policy(method, path).minimum_role == "editor"
@@ -149,6 +150,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/files/list"),
         ("PUT", "/api/files/write"),
         ("POST", "/api/dock/pins"),
+        ("GET", "/api/browse/favorites"),
     )
     for method, path in editor_examples:
         assert http_authorization_policy(method, path).minimum_role == "editor", path
@@ -171,6 +173,8 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("PATCH", "/api/agents/demo"),
         ("DELETE", "/api/agents/demo"),
         ("GET", "/api/future-owner-capability"),
+        ("POST", "/api/browse"),
+        ("POST", "/api/browse/mkdir"),
     )
     for method, path in owner_examples:
         assert http_authorization_policy(method, path).minimum_role == "owner", path

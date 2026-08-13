@@ -19,7 +19,6 @@ import threading
 import time
 from collections import OrderedDict, deque
 from contextlib import contextmanager
-from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -2404,11 +2403,11 @@ def _has_runtime_owner_access(context: Any) -> bool:
 def _runtime_record_session_id(record: Any) -> str | None:
     if not isinstance(record, Mapping):
         return None
-    for key in ("session_id", "id"):
-        value = str(record.get(key) or "").strip()
-        if value:
-            return value
-    return None
+    # Only ``session_id`` names a session. Harness tasks/watches/runs carry their
+    # own definition or run ``id``; treating that as a session made unbound but
+    # Agent-authorized automation disappear for Editors.
+    value = str(record.get("session_id") or "").strip()
+    return value or None
 
 
 def _runtime_record_agent_refs(record: Any) -> tuple[str | None, str | None]:
@@ -2463,6 +2462,54 @@ def _runtime_record_visible(context: Any, record: Any, *, connection: Any | None
 
 def _filter_runtime_records(context: Any, records: list[Any] | tuple[Any, ...] | None) -> list[Any]:
     return [record for record in (records or []) if _runtime_record_visible(context, record)]
+
+
+def _running_agent_counts(agents: list[Any] | tuple[Any, ...] | None) -> dict[str, Any]:
+    """Recompute the frozen RunningAgentCounts shape from authorized rows."""
+
+    states = {"active": 0, "idle": 0, "orphan": 0}
+    by_backend: dict[str, int] = {}
+    rows = [row for row in (agents or []) if isinstance(row, Mapping)]
+    for row in rows:
+        state = str(row.get("state") or "")
+        if state in states:
+            states[state] += 1
+        backend = str(row.get("backend") or "").strip()
+        if backend:
+            by_backend[backend] = by_backend.get(backend, 0) + 1
+    return {
+        "total": len(rows),
+        "active": states["active"],
+        "idle": states["idle"],
+        "orphan": states["orphan"],
+        "by_backend": by_backend,
+    }
+
+
+def _authorized_graph_payload(context: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    if _has_runtime_owner_access(context):
+        return payload
+    from core.services.agent_graph import _counts as graph_counts
+
+    visible_nodes = _filter_runtime_records(context, payload.get("nodes") or [])
+    visible_ids = {
+        str(node.get("session_id") or "")
+        for node in visible_nodes
+        if node.get("session_id")
+    }
+    payload["nodes"] = visible_nodes
+    payload["edges"] = [
+        edge
+        for edge in (payload.get("edges") or [])
+        if str(edge.get("from") or "") in visible_ids
+        and str(edge.get("to") or "") in visible_ids
+    ]
+    payload["trigger_nodes"] = _filter_runtime_records(
+        context,
+        payload.get("trigger_nodes") or [],
+    )
+    payload["counts"] = graph_counts(visible_nodes)
+    return payload
 
 
 def _require_runtime_record(context: Any, record: Any, *, not_found: tuple[dict[str, Any], int]):
@@ -4335,7 +4382,7 @@ async def running_agents_get():
     body = result.get("body") or {}
     context = _request_authorization_context()
     agents = _filter_runtime_records(context, body.get("agents") or [])
-    counts = body.get("counts") if _has_runtime_owner_access(context) else {"visible": len(agents)}
+    counts = body.get("counts") if _has_runtime_owner_access(context) else _running_agent_counts(agents)
     return jsonify({**body, "agents": agents, "counts": counts})
 
 
@@ -4411,30 +4458,7 @@ async def agents_graph_get():
         live_unreachable=live_unreachable,
     )
     context = _request_authorization_context()
-    if not _has_runtime_owner_access(context):
-        visible_nodes = _filter_runtime_records(context, payload.get("nodes") or [])
-        visible_ids = {
-            str(node.get("session_id") or "")
-            for node in visible_nodes
-            if node.get("session_id")
-        }
-        payload["nodes"] = visible_nodes
-        payload["edges"] = [
-            edge
-            for edge in (payload.get("edges") or [])
-            if str(edge.get("from") or "") in visible_ids
-            and str(edge.get("to") or "") in visible_ids
-        ]
-        payload["trigger_nodes"] = _filter_runtime_records(
-            context,
-            payload.get("trigger_nodes") or [],
-        )
-        payload["counts"] = {
-            **(payload.get("counts") or {}),
-            "nodes": len(visible_nodes),
-            "edges": len(payload["edges"]),
-        }
-    return jsonify(payload)
+    return jsonify(_authorized_graph_payload(context, payload))
 
 
 @app.route("/api/agents/<name>", methods=["GET"])
@@ -11605,6 +11629,45 @@ def _harness_visible_items(items: list[Any] | tuple[Any, ...] | None) -> list[An
     return _filter_runtime_records(_request_authorization_context(), items)
 
 
+def _harness_should_filter() -> bool:
+    return not _has_runtime_owner_access(_request_authorization_context())
+
+
+def _definition_counts_from_items(items: list[Any] | tuple[Any, ...] | None) -> dict[str, int]:
+    from storage.background import DEFINITION_STATUS_COUNTS
+
+    counts = {key: 0 for key in DEFINITION_STATUS_COUNTS}
+    for item in items or []:
+        if not isinstance(item, Mapping):
+            continue
+        state = item.get("lifecycle_state")
+        if state in counts:
+            counts[state] += 1
+        counts["total"] += 1
+    return counts
+
+
+def _run_counts_from_items(items: list[Any] | tuple[Any, ...] | None) -> dict[str, int]:
+    from storage.background import RUN_STATUS_COUNTS
+
+    counts = {key: 0 for key in RUN_STATUS_COUNTS}
+    for item in items or []:
+        if not isinstance(item, Mapping):
+            continue
+        status = item.get("status")
+        if status in counts:
+            counts[status] += 1
+        counts["all"] += 1
+    return counts
+
+
+def _harness_page_after_visibility(items: list[Any] | tuple[Any, ...] | None, page_request):
+    from storage.pagination import page_sequence
+
+    visible = _harness_visible_items(items)
+    return page_sequence(visible, page_request), visible
+
+
 def _harness_require_item(item: Any, *, not_found: dict[str, Any]):
     denied = _require_runtime_record(
         _request_authorization_context(),
@@ -11647,11 +11710,25 @@ def _harness_page_payload_for_status(page_result, *, items_key: str, counts: dic
 @app.route("/api/harness/counts", methods=["GET"])
 def harness_counts():
     with _harness_store() as store:
+        if not _harness_should_filter():
+            return jsonify(
+                {
+                    "tasks": store.count_scheduled_tasks(),
+                    "watches": store.count_watches(),
+                    "runs": store.count_runs_by_status(),
+                }
+            )
         return jsonify(
             {
-                "tasks": store.count_scheduled_tasks(),
-                "watches": store.count_watches(),
-                "runs": store.count_runs_by_status(),
+                "tasks": _definition_counts_from_items(
+                    _harness_visible_items(store.list_scheduled_tasks())
+                ),
+                "watches": _definition_counts_from_items(
+                    _harness_visible_items(store.list_watches())
+                ),
+                "runs": _run_counts_from_items(
+                    _harness_visible_items(store.list_runs_page(page_request=None).items)
+                ),
             }
         )
 
@@ -11660,8 +11737,12 @@ def harness_counts():
 def harness_tasks_list():
     if not _harness_has_list_params():
         with _harness_store() as store:
-            tasks = _harness_visible_items(store.list_scheduled_tasks())
-            counts = store.count_scheduled_tasks()
+            tasks = store.list_scheduled_tasks()
+            if _harness_should_filter():
+                tasks = _harness_visible_items(tasks)
+                counts = _definition_counts_from_items(tasks)
+            else:
+                counts = store.count_scheduled_tasks()
         return jsonify(
             {
                 "tasks": tasks,
@@ -11680,15 +11761,25 @@ def harness_tasks_list():
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
     with _harness_store() as store:
-        page_result = store.list_scheduled_tasks_page(
-            status=status,
-            query=query,
-            session_id=session_id,
-            page_request=page_request,
-            newest_first=True,
-        )
-        counts = store.count_scheduled_tasks(query=query, session_id=session_id)
-    page_result = replace(page_result, items=_harness_visible_items(page_result.items))
+        if _harness_should_filter():
+            candidates = store.list_scheduled_tasks_page(
+                status=status,
+                query=query,
+                session_id=session_id,
+                page_request=None,
+                newest_first=True,
+            ).items
+            page_result, visible = _harness_page_after_visibility(candidates, page_request)
+            counts = _definition_counts_from_items(visible)
+        else:
+            page_result = store.list_scheduled_tasks_page(
+                status=status,
+                query=query,
+                session_id=session_id,
+                page_request=page_request,
+                newest_first=True,
+            )
+            counts = store.count_scheduled_tasks(query=query, session_id=session_id)
     return jsonify(_harness_page_payload(page_result, items_key="tasks", counts=counts))
 
 
@@ -11736,8 +11827,12 @@ def harness_task_delete(task_id: str):
 def harness_watches_list():
     if not _harness_has_list_params():
         with _harness_store() as store:
-            watches = _harness_visible_items(store.list_watches())
-            counts = store.count_watches()
+            watches = store.list_watches()
+            if _harness_should_filter():
+                watches = _harness_visible_items(watches)
+                counts = _definition_counts_from_items(watches)
+            else:
+                counts = store.count_watches()
         return jsonify(
             {
                 "watches": watches,
@@ -11756,15 +11851,25 @@ def harness_watches_list():
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
     with _harness_store() as store:
-        page_result = store.list_watches_page(
-            status=status,
-            query=query,
-            session_id=session_id,
-            page_request=page_request,
-            newest_first=True,
-        )
-        counts = store.count_watches(query=query, session_id=session_id)
-    page_result = replace(page_result, items=_harness_visible_items(page_result.items))
+        if _harness_should_filter():
+            candidates = store.list_watches_page(
+                status=status,
+                query=query,
+                session_id=session_id,
+                page_request=None,
+                newest_first=True,
+            ).items
+            page_result, visible = _harness_page_after_visibility(candidates, page_request)
+            counts = _definition_counts_from_items(visible)
+        else:
+            page_result = store.list_watches_page(
+                status=status,
+                query=query,
+                session_id=session_id,
+                page_request=page_request,
+                newest_first=True,
+            )
+            counts = store.count_watches(query=query, session_id=session_id)
     return jsonify(_harness_page_payload(page_result, items_key="watches", counts=counts))
 
 
@@ -11815,35 +11920,52 @@ def harness_runs_list():
     query = _harness_query_filter()
 
     with _harness_store() as store:
-        page_result = store.list_runs_page(
-            status=status,
-            run_type=run_type,
-            exclude_run_type=exclude_run_type,
-            agent_name=agent_name,
-            definition_id=definition_id,
-            query=query,
-            page_request=page_request,
-            newest_first=True,
-        )
-        total = store.count_runs(
-            status=status,
-            run_type=run_type,
-            exclude_run_type=exclude_run_type,
-            agent_name=agent_name,
-            definition_id=definition_id,
-            query=query,
-        )
-        counts = store.count_runs_by_status(
-            run_type=run_type,
-            exclude_run_type=exclude_run_type,
-            agent_name=agent_name,
-            definition_id=definition_id,
-            query=query,
-        )
         # The types present in the ledger, so the selector can offer one the UI
         # has no built-in name for instead of stranding those rows under All.
         run_types = store.list_run_types()
-    page_result = replace(page_result, items=_harness_visible_items(page_result.items))
+        if _harness_should_filter():
+            candidates = store.list_runs_page(
+                status=status,
+                run_type=run_type,
+                exclude_run_type=exclude_run_type,
+                agent_name=agent_name,
+                definition_id=definition_id,
+                query=query,
+                page_request=None,
+                newest_first=True,
+            ).items
+            page_result, visible = _harness_page_after_visibility(candidates, page_request)
+            counts = _run_counts_from_items(visible)
+            if status:
+                total = int(counts.get(status, 0))
+            else:
+                total = counts["all"]
+        else:
+            page_result = store.list_runs_page(
+                status=status,
+                run_type=run_type,
+                exclude_run_type=exclude_run_type,
+                agent_name=agent_name,
+                definition_id=definition_id,
+                query=query,
+                page_request=page_request,
+                newest_first=True,
+            )
+            total = store.count_runs(
+                status=status,
+                run_type=run_type,
+                exclude_run_type=exclude_run_type,
+                agent_name=agent_name,
+                definition_id=definition_id,
+                query=query,
+            )
+            counts = store.count_runs_by_status(
+                run_type=run_type,
+                exclude_run_type=exclude_run_type,
+                agent_name=agent_name,
+                definition_id=definition_id,
+                query=query,
+            )
     return jsonify(
         {
             "runs": page_result.items,
@@ -11880,39 +12002,74 @@ def harness_bootstrap():
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
 
     with _harness_store() as store:
-        counts_payload = {
-            "tasks": store.count_scheduled_tasks(),
-            "watches": store.count_watches(),
-            "runs": store.count_runs_by_status(),
-        }
+        if _harness_should_filter():
+            counts_payload = {
+                "tasks": _definition_counts_from_items(
+                    _harness_visible_items(store.list_scheduled_tasks())
+                ),
+                "watches": _definition_counts_from_items(
+                    _harness_visible_items(store.list_watches())
+                ),
+                "runs": _run_counts_from_items(
+                    _harness_visible_items(store.list_runs_page(page_request=None).items)
+                ),
+            }
+        else:
+            counts_payload = {
+                "tasks": store.count_scheduled_tasks(),
+                "watches": store.count_watches(),
+                "runs": store.count_runs_by_status(),
+            }
         if tab == "tasks":
-            page_result = store.list_scheduled_tasks_page(
-                status=definition_status,
-                query=query,
-                session_id=session_id,
-                page_request=page_request,
-                newest_first=True,
-            )
-            page_result = replace(page_result, items=_harness_visible_items(page_result.items))
+            if _harness_should_filter():
+                candidates = store.list_scheduled_tasks_page(
+                    status=definition_status,
+                    query=query,
+                    session_id=session_id,
+                    page_request=None,
+                    newest_first=True,
+                ).items
+                page_result, visible = _harness_page_after_visibility(candidates, page_request)
+                counts = _definition_counts_from_items(visible)
+            else:
+                page_result = store.list_scheduled_tasks_page(
+                    status=definition_status,
+                    query=query,
+                    session_id=session_id,
+                    page_request=page_request,
+                    newest_first=True,
+                )
+                counts = store.count_scheduled_tasks(query=query, session_id=session_id)
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="tasks",
-                counts=store.count_scheduled_tasks(query=query, session_id=session_id),
+                counts=counts,
                 status=definition_status,
             )
         elif tab == "watches":
-            page_result = store.list_watches_page(
-                status=definition_status,
-                query=query,
-                session_id=session_id,
-                page_request=page_request,
-                newest_first=True,
-            )
-            page_result = replace(page_result, items=_harness_visible_items(page_result.items))
+            if _harness_should_filter():
+                candidates = store.list_watches_page(
+                    status=definition_status,
+                    query=query,
+                    session_id=session_id,
+                    page_request=None,
+                    newest_first=True,
+                ).items
+                page_result, visible = _harness_page_after_visibility(candidates, page_request)
+                counts = _definition_counts_from_items(visible)
+            else:
+                page_result = store.list_watches_page(
+                    status=definition_status,
+                    query=query,
+                    session_id=session_id,
+                    page_request=page_request,
+                    newest_first=True,
+                )
+                counts = store.count_watches(query=query, session_id=session_id)
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="watches",
-                counts=store.count_watches(query=query, session_id=session_id),
+                counts=counts,
                 status=definition_status,
             )
         else:
@@ -11921,37 +12078,53 @@ def harness_bootstrap():
             exclude_run_type = _harness_exclude_run_type()
             agent_name = request.args.get("agent_name") or None
             definition_id = request.args.get("definition_id") or None
-            page_result = store.list_runs_page(
-                status=run_status,
-                run_type=run_type,
-                exclude_run_type=exclude_run_type,
-                agent_name=agent_name,
-                definition_id=definition_id,
-                query=query,
-                page_request=page_request,
-                newest_first=True,
-            )
-            page_result = replace(page_result, items=_harness_visible_items(page_result.items))
-            page_payload = {
-                "runs": page_result.items,
-                "counts": store.count_runs_by_status(
-                    run_type=run_type,
-                    exclude_run_type=exclude_run_type,
-                    agent_name=agent_name,
-                    definition_id=definition_id,
-                    query=query,
-                ),
-                # Same facet as /api/harness/runs — the tab loads through
-                # whichever of the two the caller reached, so both must carry it.
-                "run_types": store.list_run_types(),
-                "total": store.count_runs(
+            if _harness_should_filter():
+                candidates = store.list_runs_page(
                     status=run_status,
                     run_type=run_type,
                     exclude_run_type=exclude_run_type,
                     agent_name=agent_name,
                     definition_id=definition_id,
                     query=query,
-                ),
+                    page_request=None,
+                    newest_first=True,
+                ).items
+                page_result, visible = _harness_page_after_visibility(candidates, page_request)
+                counts = _run_counts_from_items(visible)
+                total = int(counts.get(run_status, 0)) if run_status else counts["all"]
+            else:
+                page_result = store.list_runs_page(
+                    status=run_status,
+                    run_type=run_type,
+                    exclude_run_type=exclude_run_type,
+                    agent_name=agent_name,
+                    definition_id=definition_id,
+                    query=query,
+                    page_request=page_request,
+                    newest_first=True,
+                )
+                counts = store.count_runs_by_status(
+                    run_type=run_type,
+                    exclude_run_type=exclude_run_type,
+                    agent_name=agent_name,
+                    definition_id=definition_id,
+                    query=query,
+                )
+                total = store.count_runs(
+                    status=run_status,
+                    run_type=run_type,
+                    exclude_run_type=exclude_run_type,
+                    agent_name=agent_name,
+                    definition_id=definition_id,
+                    query=query,
+                )
+            page_payload = {
+                "runs": page_result.items,
+                "counts": counts,
+                # Same facet as /api/harness/runs — the tab loads through
+                # whichever of the two the caller reached, so both must carry it.
+                "run_types": store.list_run_types(),
+                "total": total,
                 "page": page_result.page,
                 "limit": page_result.limit,
                 "has_more": page_result.has_more,

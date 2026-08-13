@@ -729,6 +729,36 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
                 "updated_at": now,
             }
         )
+        harness.upsert_scheduled_task(
+            {
+                "id": "task-unbound-allowed",
+                "name": "unbound allowed task",
+                "prompt": "run unbound",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "agent_name": agents["public"].name,
+                "agent_id": agents["public"].id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        for index in range(3):
+            harness.upsert_scheduled_task(
+                {
+                    "id": f"task-denied-page-{index}",
+                    "name": f"denied page {index}",
+                    "prompt": "run denied page",
+                    "schedule_type": "cron",
+                    "cron": "0 * * * *",
+                    "enabled": True,
+                    "session_id": denied_session["id"],
+                    "agent_name": agents["private"].name,
+                    "agent_id": agents["private"].id,
+                    "created_at": f"2026-08-13T12:0{index}:00Z",
+                    "updated_at": f"2026-08-13T12:0{index}:00Z",
+                }
+            )
     finally:
         harness.close()
 
@@ -741,6 +771,7 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
                         "session_id": allowed_session["id"],
                         "agent_name": agents["public"].name,
                         "agent_id": agents["public"].id,
+                        "backend": "codex",
                         "state": "idle",
                         "title": "allowed live",
                     },
@@ -748,11 +779,18 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
                         "session_id": denied_session["id"],
                         "agent_name": agents["private"].name,
                         "agent_id": agents["private"].id,
-                        "state": "idle",
+                        "backend": "codex",
+                        "state": "active",
                         "title": "denied live",
                     },
                 ],
-                "counts": {"total": 2},
+                "counts": {
+                    "total": 2,
+                    "active": 1,
+                    "idle": 1,
+                    "orphan": 0,
+                    "by_backend": {"codex": 2},
+                },
             },
         }
 
@@ -780,13 +818,35 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
 
     graph = client.get("/api/agents-graph", **remote)
     assert graph.status_code == 200
-    assert {node["session_id"] for node in graph.get_json().get("nodes") or []} <= {allowed_session["id"]}
-    assert denied_session["id"] not in {node["session_id"] for node in graph.get_json().get("nodes") or []}
+    graph_body = graph.get_json()
+    assert {node["session_id"] for node in graph_body.get("nodes") or []} <= {allowed_session["id"]}
+    assert denied_session["id"] not in {node["session_id"] for node in graph_body.get("nodes") or []}
+    assert graph_body["counts"]["total"] == len(graph_body.get("nodes") or [])
+    assert "nodes" not in graph_body["counts"]
+    assert "edges" not in graph_body["counts"]
 
     running = client.get("/api/running-agents", **remote)
     assert running.status_code == 200
-    running_ids = {row.get("session_id") for row in running.get_json().get("agents") or []}
+    running_body = running.get_json()
+    running_ids = {row.get("session_id") for row in running_body.get("agents") or []}
     assert running_ids == {allowed_session["id"]}
+    assert running_body["counts"] == {
+        "total": 1,
+        "active": 0,
+        "idle": 1,
+        "orphan": 0,
+        "by_backend": {"codex": 1},
+    }
+
+    favorites = client.get("/api/browse/favorites", **remote)
+    assert favorites.status_code == 200
+    denied_browse = client.post(
+        "/api/browse",
+        json={"path": "~"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        **remote,
+    )
+    assert denied_browse.status_code == 403
 
     deny_end = client.post(
         "/api/running-agents/end",
@@ -808,8 +868,14 @@ def test_editor_runtime_lists_and_mutations_follow_project_and_agent_acl(monkeyp
 
     tasks = client.get("/api/harness/tasks", **remote).get_json()["tasks"]
     watches = client.get("/api/harness/watches", **remote).get_json()["watches"]
-    assert {row["id"] for row in tasks} == {"task-allowed"}
+    assert {row["id"] for row in tasks} == {"task-allowed", "task-unbound-allowed"}
     assert {row["id"] for row in watches} == {"watch-allowed"}
+
+    paged = client.get("/api/harness/tasks?page=1&limit=1", **remote).get_json()
+    assert len(paged["tasks"]) == 1
+    assert paged["tasks"][0]["id"] in {"task-allowed", "task-unbound-allowed"}
+    assert paged["counts"]["total"] == 2
+    assert paged["has_more"] is True
 
     denied_patch = client.patch(
         "/api/harness/tasks/task-denied",
