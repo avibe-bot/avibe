@@ -485,6 +485,40 @@ class PrivateSqliteDatabase:
             raise
         return connection
 
+    def connect_read_only(self) -> sqlite3.Connection:
+        """Open a validated SQLite database without mutating its journal mode."""
+
+        required_no_follow_flag()
+        try:
+            info = os.lstat(self._path)
+        except FileNotFoundError as error:
+            raise ConfinedFilesystemError(
+                "private SQLite database is missing"
+            ) from error
+        _require_private_regular(info, "private SQLite database")
+        for path in _database_sidecars(self._path):
+            try:
+                sidecar_info = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            _require_private_regular(sidecar_info, "private SQLite sidecar")
+
+        connection = sqlite3.connect(
+            f"{self._path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS,
+        )
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute(
+                f"PRAGMA busy_timeout={int(PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}"
+            )
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
     @contextmanager
     def transaction(
         self,

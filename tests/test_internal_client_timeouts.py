@@ -38,7 +38,6 @@ from vibe.internal_client import (
     MEMORY_MAINTENANCE_TIMEOUT_SECONDS,
     memory_archive_session,
     memory_clear,
-    memory_clear_recovery,
     memory_profile,
     memory_final_flush,
     memory_failures,
@@ -168,11 +167,7 @@ def test_restart_client_has_no_reporting_timeout() -> None:
 
 
 def test_clear_clients_have_no_reporting_timeout() -> None:
-    # Snapshot and restore copy user-owned trees whose size has no runtime
-    # bound. A transport deadline would report failure while the controller's
-    # journaled operation continues and make a destructive retry possible.
-    for operation in (memory_clear, memory_clear_recovery):
-        assert "timeout" not in inspect.signature(operation).parameters
+    assert "timeout" not in inspect.signature(memory_clear).parameters
 
 
 def test_install_client_covers_the_dependency_job_budget() -> None:

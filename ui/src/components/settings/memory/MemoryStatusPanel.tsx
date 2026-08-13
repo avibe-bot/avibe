@@ -7,9 +7,6 @@ import {
   Database,
   Loader2,
   RefreshCw,
-  RotateCcw,
-  ShieldAlert,
-  XCircle,
 } from 'lucide-react';
 
 import { Badge } from '../../ui/badge';
@@ -18,7 +15,7 @@ import { Card, CardContent } from '../../ui/card';
 import { ConfirmDialog } from '../../ui/confirm-dialog';
 import { InfoHint } from '../../ui/info-hint';
 import type {
-  MemoryClearRecovery,
+  MemoryClearInProgress,
   MemoryFailureLogEntry,
   MemoryLogSections,
   MemoryLogSourceStatus,
@@ -32,7 +29,6 @@ import {
   formatMemoryStatusRuntimeFact,
   formatMemoryStatusTimestamp,
   memoryStatusAnomalyLabel,
-  memoryStatusClearRecoveryStateLabel,
   memoryStatusHealthLabel,
   memoryStatusRuntimeFactLabel,
   memoryStatusSourceBadgeVariant,
@@ -44,12 +40,12 @@ import {
 } from './memoryStatusPresentation';
 
 const FactList: React.FC<{
-  facts: Record<string, unknown>;
+  facts: Record<string, unknown> | null | undefined;
   emptyLabel: string;
   group: RuntimeFactGroup;
 }> = ({ facts, emptyLabel, group }) => {
   const { t } = useTranslation();
-  const entries = Object.entries(facts);
+  const entries = Object.entries(facts ?? {});
   if (entries.length === 0) return <span className="text-[11.5px] text-muted">{emptyLabel}</span>;
   return (
     <dl className="grid min-w-0 gap-x-4 gap-y-2 text-[11.5px] sm:grid-cols-2">
@@ -147,64 +143,41 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
   );
 };
 
-const ClearRecoveryCard: React.FC<{
-  recovery: MemoryClearRecovery;
-  action: 'resume' | 'abort' | null;
-  mutationBusy: boolean;
-  onResume: (operationId: string) => void;
-  onAbort: (operationId: string) => void;
-}> = ({ recovery, action, mutationBusy, onResume, onAbort }) => {
+const ClearInProgressCard: React.FC<{
+  clearInProgress: MemoryClearInProgress;
+}> = ({ clearInProgress }) => {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-3 rounded-md border border-gold/40 bg-gold/[0.06] px-4 py-3">
       <div className="flex min-w-0 items-start gap-2.5">
-        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-gold" />
+        <Clock3 className="mt-0.5 size-4 shrink-0 text-gold" />
         <div className="min-w-0">
-          <div className="text-[12.5px] font-semibold text-foreground">{t('memory.processingRecord.clearRecovery.title')}</div>
-          <div className="mt-0.5 text-[11px] text-muted">{t('memory.processingRecord.clearRecovery.description')}</div>
+          <div className="text-[12.5px] font-semibold text-foreground">{t('memory.processingRecord.clearInProgress.title')}</div>
+          <div className="mt-0.5 text-[11px] text-muted">
+            {t(
+              clearInProgress.state === 'failed'
+                ? 'memory.processingRecord.clearInProgress.explicitRetryDescription'
+                : 'memory.processingRecord.clearInProgress.description',
+            )}
+          </div>
         </div>
       </div>
       <div className="grid min-w-0 gap-1.5 text-[11px] sm:grid-cols-2">
-        <Field label={t('memory.processingRecord.field.operationId')} value={recovery.operation_id} />
+        <Field label={t('memory.processingRecord.field.operationId')} value={clearInProgress.operation_id} />
         <Field
           label={t('memory.processingRecord.field.state')}
-          value={memoryStatusClearRecoveryStateLabel(t, recovery.state)}
+          value={clearInProgress.state === 'failed'
+            ? t('memory.processingRecord.clearInProgress.failed')
+            : t('memory.processingRecord.clearInProgress.deleting')}
         />
-        {recovery.occurred_at ? (
-          <Field label={t('memory.processingRecord.field.occurredAt')} value={formatMemoryStatusTimestamp(recovery.occurred_at)} />
+        {clearInProgress.occurred_at ? (
+          <Field label={t('memory.processingRecord.field.occurredAt')} value={formatMemoryStatusTimestamp(clearInProgress.occurred_at)} />
         ) : null}
-        {recovery.error_code ? (
+        {clearInProgress.error_code ? (
           <Field
             label={t('memory.processingRecord.field.errorCode')}
-            value={memoryErrorMessage(t, recovery.error_code)}
+            value={memoryErrorMessage(t, clearInProgress.error_code)}
           />
-        ) : null}
-      </div>
-      <div className="grid gap-1.5">
-        <div className="flex flex-wrap gap-2">
-          <Button
-            size="xs"
-            variant="secondary"
-            disabled={mutationBusy || action !== null || !recovery.can_resume}
-            onClick={() => onResume(recovery.operation_id)}
-          >
-            {action === 'resume' ? <Loader2 className="animate-spin" /> : <RotateCcw />}
-            {t('memory.processingRecord.clearRecovery.resume')}
-          </Button>
-          <Button
-            size="xs"
-            variant="destructive"
-            disabled={mutationBusy || action !== null || !recovery.can_abort}
-            onClick={() => onAbort(recovery.operation_id)}
-          >
-            {action === 'abort' ? <Loader2 className="animate-spin" /> : <XCircle />}
-            {t('memory.processingRecord.clearRecovery.abort')}
-          </Button>
-        </div>
-        {!recovery.can_abort ? (
-          <div className="text-[11px] text-muted">
-            {t('memory.processingRecord.clearRecovery.abortUnavailable')}
-          </div>
         ) : null}
       </div>
     </div>
@@ -214,7 +187,7 @@ const ClearRecoveryCard: React.FC<{
 export const MemoryStatusPanel: React.FC<{
   status: MemoryStatus | null;
   failures: MemoryFailureLogEntry[];
-  recovery: MemoryClearRecovery | null;
+  clearInProgress: MemoryClearInProgress | null;
   logSections: MemoryLogSections | null;
   providerChecks: MemoryProviderCall[];
   providerChecksSource: MemoryLogSourceStatus | null;
@@ -223,10 +196,7 @@ export const MemoryStatusPanel: React.FC<{
   statusError: string | null;
   failuresError: string | null;
   refreshPending: boolean;
-  recoveryAction: 'resume' | 'abort' | null;
   onRefresh: () => void;
-  onResumeClear: (operationId: string) => void;
-  onAbortClear: (operationId: string) => void;
   repairSupported?: boolean;
   repairBusy?: boolean;
   mutationBusy?: boolean;
@@ -236,7 +206,7 @@ export const MemoryStatusPanel: React.FC<{
 }> = ({
   status,
   failures,
-  recovery,
+  clearInProgress,
   logSections,
   providerChecks = [],
   providerChecksSource = null,
@@ -245,10 +215,7 @@ export const MemoryStatusPanel: React.FC<{
   statusError,
   failuresError,
   refreshPending,
-  recoveryAction,
   onRefresh,
-  onResumeClear,
-  onAbortClear,
   repairSupported = false,
   repairBusy = false,
   mutationBusy = false,
@@ -484,14 +451,8 @@ export const MemoryStatusPanel: React.FC<{
           </div>
           <p className="mt-0.5 text-[11.5px] text-muted">{t('memory.processingRecord.anomalies.description')}</p>
         </div>
-        {recovery ? (
-          <ClearRecoveryCard
-            recovery={recovery}
-            action={recoveryAction}
-            mutationBusy={repairBusy || mutationBusy}
-            onResume={onResumeClear}
-            onAbort={onAbortClear}
-          />
+        {clearInProgress ? (
+          <ClearInProgressCard clearInProgress={clearInProgress} />
         ) : null}
         <Card>
           <CardContent className="py-2">

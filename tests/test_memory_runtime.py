@@ -31,8 +31,8 @@ from core.memory.artifact import (
     MemoryProviderRootState,
     MemoryRuntimeActivationError,
 )
-from core.memory.clear_journal import MemoryClearJournal
 from core.memory.maintenance import MemoryMaintenance
+from core.memory.clear_intent import ClearIntent, ClearIntentStore
 from core.memory.attachments import attachment_pin_root
 from core.memory.everos import (
     AddAck,
@@ -84,6 +84,7 @@ from config.v2_config import (
 
 
 PROJECT = "default"
+PRINCIPAL = "u-11111111111111111111111111111111"
 
 
 def _maintenance(runtime: MemoryRuntime) -> MemoryMaintenance:
@@ -310,7 +311,7 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
         "status": "ok",
         "data_exists": True,
         "can_clear": False,
-        "clear_recovery": None,
+        "clear_in_progress": None,
     }
 
 
@@ -1199,99 +1200,6 @@ async def test_runtime_controller_port_never_copies_processing_credentials(
     await memory_runtime_factory.close(runtime)
 
 
-@pytest.mark.parametrize(
-    "journal_attribute",
-    ["_clear_journal", "_backup_restore_journal"],
-)
-async def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    journal_attribute: str,
-    memory_runtime_factory,
-) -> None:
-    processing = MemoryProcessingConfig(
-        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
-        embedding=MemoryEndpointConfig(
-            "https://embed.example.test/v1",
-            "embed",
-            "embed-key",
-        ),
-    )
-    enabled = MemoryConfig(enabled=True, processing=processing)
-    disabled = replace(enabled, enabled=False)
-    factory = FakeEverOSProcessFactory()
-
-    runtime = memory_runtime_factory(
-        enabled,
-        artifact_manager=_installed_artifact(),
-        process_factory=factory,
-        effective_home=tmp_path,
-    )
-    assert await runtime.reconcile(enabled) == {"ok": True, "state": "ready"}
-    sidecar = factory.supervised[0]
-    assert runtime._worker_task is not None
-    assert runtime._process_records_calls is True
-
-    terminal_gc = _maintenance(runtime)._terminal_snapshot_gc_task
-    backup_reconcile = _maintenance(runtime)._backup_stage_reconcile_task
-    if terminal_gc is not None:
-        await terminal_gc
-    if backup_reconcile is not None:
-        await backup_reconcile
-
-    journal = getattr(_maintenance(runtime), journal_attribute)
-    assert journal is not None
-
-    def unreadable_journal() -> None:
-        raise OSError("maintenance journal is unreadable")
-
-    async def recovery_must_not_run() -> bool:
-        raise AssertionError("disable must not mutate an unreadable journal")
-
-    monkeypatch.setattr(journal, "get_open_operation", unreadable_journal)
-    monkeypatch.setattr(_maintenance(runtime), "recover_boot", recovery_must_not_run)
-
-    changed = replace(
-        enabled,
-        processing=replace(
-            processing,
-            llm=replace(processing.llm, model="changed-while-unreadable"),
-        ),
-    )
-    assert await runtime.reconcile(changed) == {
-        "ok": False,
-        "error": "memory_clear_failed",
-    }
-    assert await runtime.restart() == {
-        "ok": False,
-        "error": "memory_clear_failed",
-    }
-    assert runtime._worker_task is not None
-    assert sidecar.stopped is False
-
-    from core.controller import Controller
-
-    controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(memory=enabled)
-    controller.memory_runtime = runtime
-    controller.memory_module = runtime.module
-    assert await controller.reconcile_memory(disabled) == {
-        "ok": True,
-        "state": "disabled",
-    }
-    assert controller.config.memory is disabled
-    assert runtime._config is disabled
-    assert runtime._restart_config == disabled
-    assert runtime.module._worker._claims_paused is True
-    assert runtime._worker_task is None
-    assert runtime._process is None
-    assert runtime._process_records_calls is False
-    assert sidecar.stopped is True
-    assert sidecar.running is False
-    assert len(factory.supervised) == 1
-    await memory_runtime_factory.close(runtime)
-
-
 async def test_reconcile_never_downloads_a_missing_runtime(
     tmp_path: Path,
     memory_runtime_factory,
@@ -1970,11 +1878,11 @@ async def test_multi_scope_session_lifecycle_holds_every_fence_through_operation
     )
     first_scope = (
         "u-11111111111111111111111111111111",
-        "default",
+        PROJECT,
     )
     second_scope = (
         "u-22222222222222222222222222222222",
-        "billing",
+        PROJECT,
     )
     session_id = "multi-scope-lifecycle-session"
     operation_entered = asyncio.Event()
@@ -2044,11 +1952,11 @@ async def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fence
     scopes = (
         (
             "u-11111111111111111111111111111111",
-            "p-11111111111111111111111111111111",
+            PROJECT,
         ),
         (
             "u-22222222222222222222222222222222",
-            "p-22222222222222222222222222222222",
+            PROJECT,
         ),
     )
     session_id = "cancelled-multi-scope-lifecycle"
@@ -2290,13 +2198,9 @@ async def test_runtime_exposes_interrupted_clear_without_starting_sidecar(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
-    journal = MemoryClearJournal(tmp_path)
-    journal.start(
-        operation_id="interrupted-clear",
-        operator_ref="user:owner",
-        pre_epoch=0,
-        target_epoch=1,
-    )
+    marker = tmp_path / "state/memory/clear-intent.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("not json", encoding="utf-8")
     runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_Artifact(),
@@ -2306,11 +2210,136 @@ async def test_runtime_exposes_interrupted_clear_without_starting_sidecar(
 
     assert await runtime.reconcile(runtime._config) == {"ok": False, "error": "memory_clear_failed"}
     assert started == []
-    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
-    assert recovery is not None
-    assert recovery.operation_id == "interrupted-clear"
-    assert recovery.state == "recovery_needed"
+    projection = _maintenance(runtime).recovery()
+    assert projection is not None
+    assert projection.error_code == "memory_clear_marker_unreadable"
     await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_reconcile_completes_readable_clear_marker_on_boot(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    """MEMORY-CLEAR-202: runtime boot retries a failed marker after lease release."""
+
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+    )
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False, processing=processing),
+        effective_home=tmp_path,
+    )
+    maintenance = _maintenance(runtime)
+    store = runtime._store
+    assert store is not None
+    intent = ClearIntent.new(operator_ref="boot", pre_epoch=store.ensure_meta().epoch).failed(
+        "memory_clear_failed"
+    )
+    ClearIntentStore(tmp_path).write(intent)
+
+    competing = MemoryOperationLease(tmp_path)
+    competing.acquire()
+    assert await runtime.reconcile(runtime._config) == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+    }
+    assert ClearIntentStore(tmp_path).load() is not None
+    competing.release()
+
+    result = await runtime.reconcile(runtime._config)
+
+    assert result == {"ok": True, "state": "disabled"}
+    assert ClearIntentStore(tmp_path).load() is None
+    assert maintenance.is_open() is False
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_memory_clear_201_discards_manual_required_evidence_and_allows_new_delivery(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    """MEMORY-CLEAR-201: a real runtime clears an unknown add outcome end to end."""
+
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True),
+        effective_home=tmp_path,
+    )
+    provider_timeout = asyncio.Event()
+
+    async def time_out_add(_capture) -> None:
+        await provider_timeout.wait()
+
+    provider = FakeMemoryProvider(add_hook=time_out_add)
+    runtime._provider = provider
+    runtime.module.replace_provider(provider)
+    runtime.module._worker.coordinator._add_timeout_seconds = 0.001
+
+    source_root = tmp_path / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "evidence.txt"
+    source.write_bytes(b"retained ambiguous attachment")
+    source.chmod(0o600)
+    first = CaptureRequest(
+        source_message_id="timed-out-add",
+        session_id="session",
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        provenance="user_input",
+        text="ambiguous payload",
+        occurred_at_ms=1,
+        attachments=(
+            CaptureAttachment(
+                kind="doc",
+                name=source.name,
+                uri=source.as_uri(),
+                ext="txt",
+            ),
+        ),
+    )
+    assert await runtime.module.capture(first) == CaptureAccepted()
+    assert await runtime.module.drain() == 1
+
+    ambiguous = runtime._store.list_queue_rows()
+    assert len(ambiguous) == 1
+    assert ambiguous[0].state == "manual_required"
+    assert ambiguous[0].attachment_bundle_id is not None
+    bundle_id = ambiguous[0].attachment_bundle_id
+    assert runtime._store.has_manual_required_fence() is True
+    assert (await runtime.maintenance_payload())["can_clear"] is True
+
+    async def resume_without_sidecar() -> None:
+        runtime.module.resume_claims()
+
+    maintenance = _maintenance(runtime)
+    maintenance._runtime = replace(maintenance._runtime, resume=resume_without_sidecar)
+    result = await runtime.clear(operator_ref="user:owner")
+
+    assert result["status"] == "completed"
+    assert isinstance(result["operation_id"], str)
+    assert result["epoch"] == 1
+    assert runtime._store.list_queue_rows() == ()
+    assert runtime._store.has_manual_required_fence() is False
+    assert not (tmp_path / "memory" / "attachments" / "bundles" / bundle_id).exists()
+
+    provider.add_hook = None
+    second = replace(
+        first,
+        source_message_id="after-clear",
+        text="deliver after clear",
+        occurred_at_ms=2,
+        attachments=(),
+    )
+    assert await runtime.module.capture(second) == CaptureAccepted()
+    assert await runtime.module.drain() == 1
+    delivered = runtime._store.list_queue_rows()
+    assert len(delivered) == 1
+    assert delivered[0].state == "delivered"
+    assert delivered[0].provider_session_ref.epoch == result["epoch"]
+    assert [capture.text for capture in provider.captures] == [
+        "ambiguous payload",
+        "deliver after clear",
+    ]
 
 
 async def test_runtime_install_artifact_uses_controller_owned_manager(
@@ -4656,11 +4685,10 @@ async def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_re
     )
 
     meta = recovering._store.ensure_meta()
-    _maintenance(recovering)._clear_journal.start(
-        operation_id="restart-recovery",
-        operator_ref="user:owner",
-        pre_epoch=meta.epoch,
-        target_epoch=meta.epoch + 1,
+    from core.memory.clear_intent import ClearIntentStore, ClearIntent
+
+    ClearIntentStore(tmp_path / "recovery").write(
+        ClearIntent.new(operator_ref="user:owner", pre_epoch=meta.epoch)
     )
 
     assert await marked.restart() == {
@@ -4755,7 +4783,7 @@ async def test_ready_callback_survives_rejected_artifact_install(
     await memory_runtime_factory.close(runtime)
 
 
-@pytest.mark.parametrize("lifecycle", ["clear", "reconcile", "artifact"])
+@pytest.mark.parametrize("lifecycle", ["reconcile", "artifact"])
 async def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4778,15 +4806,7 @@ async def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_proces
     runtime._activation_loop = asyncio.get_running_loop()
     process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
 
-    if lifecycle == "clear":
-        async def blocked_prepare(_operation, **_kwargs):
-            entered.set()
-            await release.wait()
-            raise RuntimeError("injected clear pause")
-
-        monkeypatch.setattr(_maintenance(runtime), "_prepare_clear", blocked_prepare)
-        operation = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
-    elif lifecycle == "reconcile":
+    if lifecycle == "reconcile":
         async def blocked_reconcile(*_args, **_kwargs):
             entered.set()
             await release.wait()
@@ -4830,7 +4850,7 @@ async def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_proces
     ready_task = runtime._ready_activation_task
     if ready_task is not None:
         await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
-    assert activations == ([] if lifecycle in {"clear", "artifact"} else [None])
+    assert activations == ([None] if lifecycle == "reconcile" else [])
     await memory_runtime_factory.close(runtime)
 
 
@@ -5184,14 +5204,6 @@ async def test_runtime_effective_home_owns_the_attachment_pipeline(
     assert runtime.module._attachment_store._effective_home == runtime_home
     assert runtime.module._attachment_store._root == expected_pin_root
     assert runtime.module._attachment_store._source_root == source_root
-    manager = _maintenance(runtime)._snapshot_manager
-    assert manager is not None
-    assert manager.effective_home == runtime_home
-    assert any(
-        surface.path == "memory/attachments"
-        for surface in manager.surfaces
-    )
-
     process = EverOSProcess(
         sys.executable,
         effective_home=runtime_home,
@@ -5809,6 +5821,51 @@ async def test_runtime_rebuild_reads_key_correction_after_admission_gap(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_cancelled_boot_reconcile_releases_lease_after_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    """A cancellation during boot lease admission must not strand the lease."""
+
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        effective_home=tmp_path,
+    )
+    maintenance = _maintenance(runtime)
+    store = runtime._store
+    assert store is not None
+    ClearIntentStore(tmp_path).write(
+        ClearIntent.new(operator_ref="boot", pre_epoch=store.ensure_meta().epoch).failed(
+            "memory_clear_failed"
+        )
+    )
+    entered = threading.Event()
+    release_acquire = threading.Event()
+
+    class _GatedLease(MemoryOperationLease):
+        def acquire(self) -> None:
+            entered.set()
+            assert release_acquire.wait(2)
+            super().acquire()
+
+    monkeypatch.setattr(memory_runtime, "MemoryOperationLease", _GatedLease)
+    reconciling = asyncio.create_task(runtime.reconcile(runtime._config))
+    assert await asyncio.to_thread(entered.wait, 2)
+    reconciling.cancel()
+    await asyncio.sleep(0)
+    release_acquire.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await reconciling
+
+    lease = MemoryOperationLease(tmp_path)
+    lease.acquire()
+    lease.release()
+    assert maintenance.is_open() is True
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_runtime_rebuild_maps_root_busy_without_settling(
     monkeypatch,
     tmp_path,
@@ -6275,14 +6332,6 @@ async def test_runtime_rebuild_lease_rejects_a_second_controller(
         "result": "failed",
     }
     assert await second.clear(operator_ref="user:owner") == {
-        "status": "failed",
-        "error": "memory_operation_in_progress",
-    }
-    assert await second.resume_clear("clear-1", operator_ref="user:owner") == {
-        "status": "failed",
-        "error": "memory_operation_in_progress",
-    }
-    assert await second.abort_clear("clear-1", operator_ref="user:owner") == {
         "status": "failed",
         "error": "memory_operation_in_progress",
     }

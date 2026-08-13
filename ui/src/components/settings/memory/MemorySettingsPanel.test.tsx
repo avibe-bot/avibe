@@ -83,7 +83,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         mutationBusy
@@ -103,7 +103,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={{ ...legacySettings, factory_reset_required: true }}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -213,7 +213,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -329,7 +329,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={firstSetupSettings}
-        maintenance={{ status: 'ok', data_exists: false, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: false, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -399,7 +399,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={{ ...legacySettings, rebuild_required: true }}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -599,7 +599,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: dataExists, can_clear: false, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: dataExists, can_clear: false, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -614,6 +614,39 @@ describe('MemorySettingsPanel', () => {
     expect(clear.disabled).toBe(true);
     await user.click(clear);
     expect(onClearAll).not.toHaveBeenCalled();
+  });
+
+  it('keeps Clear available for an explicit retry after a failed marker', async () => {
+    const onClearAll = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={{
+          status: 'ok',
+          data_exists: true,
+          can_clear: true,
+          clear_in_progress: {
+            operation_id: 'clear-1',
+            state: 'failed',
+            occurred_at: '2026-08-13T00:00:00Z',
+            error_code: 'memory_clear_marker_unreadable',
+          },
+        }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={onClearAll}
+        clearing={false}
+      />,
+    );
+
+    const clear = screen.getByRole('button', { name: 'memory.clear.button' }) as HTMLButtonElement;
+    expect(clear.disabled).toBe(false);
+    await user.click(clear);
+    expect(onClearAll).toHaveBeenCalledOnce();
   });
 
   it('does not announce rebuild completion for ordinary reconcile results', async () => {
@@ -663,7 +696,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
