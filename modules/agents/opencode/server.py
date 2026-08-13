@@ -452,7 +452,7 @@ class OpenCodeServerManager:
         return isinstance(active, list) and bool(active)
 
     async def configure_model_hub_overlay(self, overlay: Any | None) -> None:
-        """Apply a runtime-only overlay after all active OpenCode work drains."""
+        """Apply a changed runtime-only overlay after active OpenCode work drains."""
 
         desired_path = str(overlay.path) if overlay is not None else None
         desired_hash = str(overlay.content_hash) if overlay is not None else None
@@ -467,11 +467,27 @@ class OpenCodeServerManager:
         while True:
             should_wait = False
             async with self._get_lock():
+                info = self._read_pid_file() or {}
+                current_server = self._pid_file_references_current_server(info)
+                effective_path = info.get("model_hub_overlay_path") if current_server else None
+                effective_hash = info.get("model_hub_overlay_hash") if current_server else None
+                if effective_path is None and effective_hash is None:
+                    effective_path = self._model_hub_overlay_path
+                    effective_hash = self._model_hub_overlay_hash
+
+                # Most turns reuse the running server's overlay. They must not
+                # wait behind unrelated active work because no runtime mutation
+                # is required. Cache the content so a later crash still restarts
+                # with the same OPENCODE_CONFIG.
+                if (effective_path, effective_hash) == (desired_path, desired_hash):
+                    self._model_hub_overlay_path = desired_path
+                    self._model_hub_overlay_hash = desired_hash
+                    self._model_hub_overlay_content = desired_content
+                    return
+
                 if self._active_requests > 0 or self._has_active_run_sessions():
                     should_wait = True
                 else:
-                    info = self._read_pid_file() or {}
-                    current_server = self._pid_file_references_current_server(info)
                     persisted_active = current_server and bool(info.get("active_run_sessions"))
                     if persisted_active and time.monotonic() < drain_deadline:
                         should_wait = True
@@ -481,20 +497,9 @@ class OpenCodeServerManager:
                                 "Ignoring stale OpenCode active-run metadata after %.1fs overlay drain timeout",
                                 self._model_hub_overlay_drain_timeout_seconds,
                             )
-                        effective_path = info.get("model_hub_overlay_path") if current_server else None
-                        effective_hash = info.get("model_hub_overlay_hash") if current_server else None
-                        if effective_path is None and effective_hash is None:
-                            effective_path = self._model_hub_overlay_path
-                            effective_hash = self._model_hub_overlay_hash
-
-                        # Cache the desired state even when adopted pid metadata
-                        # already matches. A later crash must restart with the
-                        # same OPENCODE_CONFIG without relying on the old pid file.
                         self._model_hub_overlay_path = desired_path
                         self._model_hub_overlay_hash = desired_hash
                         self._model_hub_overlay_content = desired_content
-                        if (effective_path, effective_hash) == (desired_path, desired_hash):
-                            return
                         if await self._is_healthy():
                             logger.info("Restarting OpenCode server after Model Hub overlay change")
                             await self._restart_for_auth_refresh_locked()

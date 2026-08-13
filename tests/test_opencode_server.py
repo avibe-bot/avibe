@@ -2344,5 +2344,62 @@ async def _async_none():
     return None
 
 
+def test_mh_runtime_002_matching_overlay_does_not_wait_for_an_unrelated_active_run():
+    """MH-RUNTIME-002: unchanged direct mode cannot head-of-line block another Session."""
+
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._active_run_sessions.add("sess-unrelated")
+    manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+        "pid": 321,
+        "port": 4096,
+        "active_run_sessions": ["sess-unrelated"],
+    }
+    manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(
+        asyncio.wait_for(
+            manager.configure_model_hub_overlay(None),
+            timeout=0.1,
+        )
+    )
+
+    assert manager._model_hub_overlay_path is None
+    assert manager._model_hub_overlay_hash is None
+    assert manager._model_hub_overlay_content is None
+    manager._is_healthy.assert_not_awaited()
+    manager._restart_for_auth_refresh_locked.assert_not_awaited()
+
+
+def test_changed_overlay_still_waits_for_active_run_before_restart():
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = "old-hash"
+    manager._active_run_sessions.add("sess-active")
+    manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    overlay = types.SimpleNamespace(
+        path=Path("/tmp/new-overlay.json"),
+        content_hash="new-hash",
+        content='{"provider": {}}',
+    )
+
+    async def exercise():
+        configuring = asyncio.create_task(manager.configure_model_hub_overlay(overlay))
+        await asyncio.sleep(0.01)
+        assert not configuring.done()
+        manager._active_run_sessions.clear()
+        await asyncio.wait_for(configuring, timeout=0.2)
+
+    asyncio.run(exercise())
+
+    assert manager._model_hub_overlay_path == str(overlay.path)
+    assert manager._model_hub_overlay_hash == overlay.content_hash
+    manager._restart_for_auth_refresh_locked.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

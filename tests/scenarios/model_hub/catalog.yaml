@@ -8,6 +8,7 @@ capability:
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
+    - tests/test_opencode_server.py
     - tests/scenarios/model_hub/test_model_hub_catalog.py
     - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
@@ -98,6 +99,12 @@ scenarios:
     layer: unit
     missing_layer: scenario
     test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
+  - id: MH-RUNTIME-002
+    name: Matching OpenCode overlay never waits behind an unrelated active Turn
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_opencode_server.py::test_mh_runtime_002_matching_overlay_does_not_wait_for_an_unrelated_active_run
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

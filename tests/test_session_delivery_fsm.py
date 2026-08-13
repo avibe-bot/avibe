@@ -3275,6 +3275,64 @@ def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(mana
     asyncio.run(run())
 
 
+def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch) -> None:
+    """MESSAGE-DELIVERY-022: Stop retires a definitively unwritten input."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    dispatch_entered = asyncio.Event()
+
+    async def blocked_prewrite_dispatch(*_args, **_kwargs):
+        dispatch_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # OpenCode absorbs cancellation after cleaning up its inner request
+            # task, so lock that adapter behavior into the shared Stop contract.
+            return TurnDispatchOutcome(
+                error=None,
+                settled_by=None,
+                backend_dispatch_attempted=False,
+            )
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        blocked_prewrite_dispatch,
+    )
+
+    async def run() -> tuple[dict, str, str]:
+        admitted = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="stop before native write",
+            ),
+            context=_context(),
+        )
+        assert admitted.turn_id and admitted.delivery_id
+        await asyncio.wait_for(dispatch_entered.wait(), timeout=1.0)
+        stopped = await manager.cancel("ses_fsm")
+        return stopped, str(admitted.turn_id), str(admitted.delivery_id)
+
+    stopped, turn_id, delivery_id = asyncio.run(run())
+
+    assert stopped == {
+        "ok": True,
+        "session_id": "ses_fsm",
+        "status": "stale_released",
+        "reason": "prewrite_canceled",
+    }
+    assert "ses_fsm" not in manager.in_flight
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "not_written"
+    assert turn["settled_by"] == SETTLED_BY_STOPPED
+    assert _row(engine, delivery_id)["state"] == "retired"
+
+
 def test_empty_p0_terminal_race_still_resumes_the_queued_head(
     managers,
     monkeypatch,

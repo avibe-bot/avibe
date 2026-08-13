@@ -140,6 +140,12 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_agent_steering.py::test_message_delivery_021_opencode_preserves_native_order_and_recovers_exact_part
+  - id: MESSAGE-DELIVERY-022
+    name: Stop retires a starting Turn that has not reached the native write boundary
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_stop_cancels_a_starting_turn_before_native_write
   - id: MESSAGE-DELIVERY-101
     name: Unresolved fallback-capable delivery fences only later FIFO submissions
     status: covered
