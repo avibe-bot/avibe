@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_sessions import ActivePollInfo
+from core.native_dispatch_phase import mark_prewrite_user_stop
 from core.processing_indicator import STOPPED_REACTION_EMOJI, ProcessingIndicatorService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
@@ -235,7 +236,7 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
             release_model_hub_overlay_reservation=AsyncMock()
         )
         agent._remove_ack_reaction = AsyncMock()
-        agent._user_stopped_sessions.add(request.base_session_id)
+        mark_prewrite_user_stop(request.context)
 
         await agent._finish_prestart_cancellation(
             request,
@@ -331,9 +332,12 @@ class OpenCodeStopReceiptTests(unittest.TestCase):
     def test_cancellation_branch_reads_the_intent(self):
         source = inspect.getsource(OpenCodeAgent._process_message)
         cleanup = inspect.getsource(OpenCodeAgent._finish_prestart_cancellation)
+        claim = inspect.getsource(OpenCodeAgent._claim_user_stop_receipt)
 
         self.assertIn("_finish_prestart_cancellation", source)
-        self.assertIn("consume_user_stop_intent", cleanup)
+        self.assertIn("_claim_user_stop_receipt", cleanup)
+        self.assertIn("consume_user_stop_intent", claim)
+        self.assertIn("prewrite_user_stop_requested", claim)
         self.assertIn("STOPPED_REACTION_EMOJI", cleanup)
 
     def test_restored_cancellation_branch_reads_the_intent(self):

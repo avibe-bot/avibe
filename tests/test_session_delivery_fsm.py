@@ -16,6 +16,7 @@ from core.services.dispatch import TurnDispatchOutcome
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_ATTEMPTING,
     DISPATCH_PHASE_PREWRITE,
+    prewrite_user_stop_requested,
     set_dispatch_phase,
 )
 from core.run_settlement import (
@@ -3291,13 +3292,20 @@ def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch)
         settle_agent_runs_without_result=settle_runs,
     )
     dispatch_entered = asyncio.Event()
+    stop_intent_seen: list[bool] = []
 
     async def blocked_prewrite_dispatch(_controller, dispatch_context, *_args, **_kwargs):
-        set_dispatch_phase(dispatch_context, DISPATCH_PHASE_PREWRITE)
+        dispatch_evidence = set_dispatch_phase(
+            dispatch_context,
+            DISPATCH_PHASE_PREWRITE,
+        )
         dispatch_entered.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
+            stop_intent_seen.append(
+                prewrite_user_stop_requested(dispatch_context)
+            )
             # OpenCode absorbs cancellation after cleaning up its inner request
             # task, so lock that adapter behavior into the shared Stop contract.
             return TurnDispatchOutcome(
@@ -3340,6 +3348,7 @@ def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch)
     assert "ses_fsm" not in manager.in_flight
     manager.controller.command_handler.handle_stop.assert_not_awaited()
     manager.controller.emit_agent_message.assert_not_awaited()
+    assert stop_intent_seen == [True]
     assert settle_calls == [(["run-stop-prewrite"], SETTLED_BY_STOPPED)]
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)

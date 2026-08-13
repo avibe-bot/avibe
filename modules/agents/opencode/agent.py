@@ -21,7 +21,10 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.message_output import stop_output_for, terminal_output_for
 from core.processing_indicator import STOPPED_REACTION_EMOJI
-from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.native_dispatch_phase import (
+    mark_backend_dispatch_attempted,
+    prewrite_user_stop_requested,
+)
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
@@ -1326,7 +1329,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request,
                 terminal_emoji=(
                     STOPPED_REACTION_EMOJI
-                    if self.consume_user_stop_intent(request.base_session_id)
+                    if self._claim_user_stop_receipt(request)
                     else None
                 ),
             )
@@ -1464,10 +1467,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             request,
             terminal_emoji=(
                 STOPPED_REACTION_EMOJI
-                if self.consume_user_stop_intent(request.base_session_id)
+                if self._claim_user_stop_receipt(request)
                 else None
             ),
         )
+
+    def _claim_user_stop_receipt(self, request: AgentRequest) -> bool:
+        """Recognize adapter-local and shared prewrite Stop ownership."""
+
+        return self.consume_user_stop_intent(
+            request.base_session_id
+        ) or prewrite_user_stop_requested(request.context)
 
     def additional_steer_targets(self, session_id: str) -> list[ActiveSteerTarget]:
         """Expose restored poll owners that did not pass through AgentService."""

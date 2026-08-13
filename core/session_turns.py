@@ -33,7 +33,10 @@ from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_turn_sink_key,
 )
-from core.native_dispatch_phase import backend_dispatch_attempted
+from core.native_dispatch_phase import (
+    backend_dispatch_attempted,
+    mark_prewrite_user_stop,
+)
 from core.run_settlement import (
     NON_COMPLETING_TURN_SETTLEMENTS,
     SETTLEMENTS_WITHOUT_RESULT,
@@ -3660,6 +3663,7 @@ class SessionTurnManager:
             return {"state": "reconciling", "reason": "prewrite_owner_changed"}
 
         projected.cancel_settled_by = SETTLED_BY_STOPPED
+        mark_prewrite_user_stop(projected.context)
         projected.task.cancel()
         await asyncio.gather(projected.task, return_exceptions=True)
 
