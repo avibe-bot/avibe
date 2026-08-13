@@ -33,6 +33,7 @@ from _github_wait_common import (  # noqa: E402
     github_get,
     github_graphql,
     github_request,
+    InitialRequestRetriesExhausted,
     LAST_DELIVERY_ENV,
     later_since,
     list_paginated,
@@ -40,6 +41,7 @@ from _github_wait_common import (  # noqa: E402
     max_id,
     min_interval_for_unauthenticated,
     REQUEST_TIMEOUT_SECONDS,
+    RETRY_EXIT_CODE,
     retry_initial_request,
     requests_per_poll,
     ResponseCache,
@@ -1900,7 +1902,7 @@ def main() -> int:
             )
             if viewer_result.error is not None:
                 print(f"GitHub viewer lookup failed: {viewer_result.error}", file=sys.stderr)
-                return 1
+                return _startup_failure_exit_code(viewer_result.error)
             viewer_login = viewer_result.value
         if token is not None and not viewer_login:
             print(
@@ -1964,7 +1966,7 @@ def main() -> int:
     )
     if initial_request.error is not None:
         print(f"Failed to fetch initial PR state: {initial_request.error}", file=sys.stderr)
-        return 1
+        return _startup_failure_exit_code(initial_request.error)
     if initial_request.value is None:
         print("Initial GitHub PR state request completed without a result", file=sys.stderr)
         return 1
