@@ -667,7 +667,13 @@ export const OAuthConnectDialog: React.FC<{
       <DialogPrimitive.Root open={open} onOpenChange={(value) => !value && onClose()}>
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-add-sub-overlay fixed inset-0 z-50" />
-          <DialogPrimitive.Content className="model-hub-add-sub-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-y-auto border border-border-strong bg-surface p-0 shadow-xl outline-none">
+          <DialogPrimitive.Content
+            className="model-hub-add-sub-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-y-auto border border-border-strong bg-surface p-0 shadow-xl outline-none"
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              window.requestAnimationFrame(() => optionRefs.current[channel]?.focus());
+            }}
+          >
           <header className="model-hub-add-sub-head flex flex-col border-b border-border">
             <div className="flex items-center justify-between gap-3">
               <DialogPrimitive.Title id="model-hub-add-sub-title" className="model-hub-add-sub-title font-bold">

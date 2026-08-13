@@ -251,7 +251,7 @@ describe('SettingsModelsPage surface branches', () => {
     const hub = screen.getByRole('radio', { name: /Gateway|网关/i });
     expect(native.getAttribute('aria-disabled')).toBe('true');
     expect(hub.getAttribute('aria-checked')).toBe('true');
-    expect(document.activeElement).toBe(hub);
+    await waitFor(() => expect(document.activeElement).toBe(hub));
   });
 
   it('returns focus to Add subscription when the OAuth flow is cancelled', async () => {
