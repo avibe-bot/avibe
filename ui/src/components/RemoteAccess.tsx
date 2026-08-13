@@ -727,43 +727,46 @@ export const RemoteAccess: React.FC = () => {
       )}
 
       {showPairingForm ? (
-        <div className="grid gap-3 px-5 py-4 md:grid-cols-[1fr_auto] md:items-end">
-          <label className="space-y-1.5">
-            <span className="text-[12px] font-medium text-foreground">{t('remoteAccess.pairingKey')}</span>
+        <div className="space-y-1.5 px-5 py-4">
+          <label htmlFor="remote-access-pairing-key" className="block text-[12px] font-medium text-foreground">
+            {t('remoteAccess.pairingKey')}
+          </label>
+          <div className="flex flex-col gap-2 md:flex-row md:items-center">
             <CompactField
-              className="w-full font-mono"
+              id="remote-access-pairing-key"
+              className="min-w-0 flex-1 font-mono"
               value={pairingKey}
               onChange={(event) => setPairingKey(event.target.value)}
               placeholder="vrp_xxxxxxxxxxxxxxxxx"
             />
-            <span className="block text-[10px] text-muted">{t('remoteAccess.pairingKeyHelp')}</span>
-          </label>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="default"
-              size="xs"
-              className="font-semibold"
-              disabled={pairing || !pairingKey.trim()}
-              onClick={pair}
-            >
-              <Link2 className="size-3.5" />
-              {pairing ? t('remoteAccess.pairing') : t('remoteAccess.pair')}
-            </Button>
-            {paired && (
+            <div className="flex shrink-0 flex-wrap gap-2">
               <Button
                 type="button"
-                variant="secondary"
+                variant="default"
                 size="xs"
-                onClick={() => {
-                  setReconfiguring(false);
-                  setPairingKey('');
-                }}
+                className="font-semibold"
+                disabled={pairing || !pairingKey.trim()}
+                onClick={pair}
               >
-                {t('common.cancel')}
+                <Link2 className="size-3.5" />
+                {pairing ? t('remoteAccess.pairing') : t('remoteAccess.pair')}
               </Button>
-            )}
+              {paired && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="xs"
+                  onClick={() => {
+                    setReconfiguring(false);
+                    setPairingKey('');
+                  }}
+                >
+                  {t('common.cancel')}
+                </Button>
+              )}
+            </div>
           </div>
+          <span className="block text-[10px] text-muted">{t('remoteAccess.pairingKeyHelp')}</span>
         </div>
       ) : (
         <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
