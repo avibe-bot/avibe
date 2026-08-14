@@ -206,7 +206,9 @@ const STATUS_DOT_CLASS: Record<string, string> = {
 // see sessionActions.tsx, which owns the items and the writes for every surface.
 // Rename is inline here: the commit calls the provider, whose session.activity
 // 'updated' event patches the title in this list, so no manual local patch.
-const SessionRow: React.FC<{
+// Exported for the row-level test: the rail's controls only exist when the row's
+// Popover can actually open, and that pairing is what a test has to hold onto.
+export const SessionRow: React.FC<{
   projectId: string;
   session: WorkbenchSession;
   unread: number;
@@ -352,18 +354,13 @@ const SessionRow: React.FC<{
                   onToggle={pinAction.onSelect}
                 />
               )}
-              <span className="absolute inset-y-0 right-2 flex items-center">
+              <span className={clsx('absolute inset-y-0 flex items-center', SESSION_ROW_MENU_POSITION_CLASS)}>
                 <PopoverTrigger asChild>
                   <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />
                 </PopoverTrigger>
               </span>
             </>
           )}
-          <span className={clsx('absolute inset-y-0 flex items-center', SESSION_ROW_MENU_POSITION_CLASS)}>
-            <PopoverTrigger asChild>
-              <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />
-            </PopoverTrigger>
-          </span>
         </div>
       </PopoverAnchor>
       <SessionActionMenuContent
