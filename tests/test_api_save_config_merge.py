@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import copy
 import json
+import re
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -1166,23 +1167,34 @@ def test_non_owner_config_pairing_requires_runtime_ready_cloud(tmp_path, monkeyp
     assert AudioAsrService(config)._runtime_config() is None
 
 
-def test_malformed_cloud_section_disables_pairing_instead_of_failing_reads(tmp_path, monkeypatch):
-    """A cloud section holding non-strings degrades; it never breaks a config read.
+def test_malformed_cloud_section_is_refused_on_writes_and_recovered_on_disk(tmp_path, monkeypatch):
+    """A non-string cloud value is refused; a persisted one degrades, never 500s.
+
+    Two boundaries, two answers, from one rule. ``V2Config.from_payload`` is
+    where an API write is validated, so a number where a credential belongs is
+    refused rather than emptied — emptying is a repair, and this repair clears
+    a credential the caller never asked to clear, then answers 200. Disk
+    loading is the one path allowed to repair, so the same file recovers the
+    section behind a backup and a warning, which keeps the malformed shape a
+    disabled cloud feature rather than a 500 on every ``/api/config`` read.
 
     Seeded over every field the dataclass declares as ``str`` rather than over
     the three the pairing predicate reads, because the section is copied
     verbatim out of the stored config and any of them can reach code that does
     string work. Seeding is complete by construction, so a field added later
-    is covered without editing this test. Pairing readiness is now consulted
-    on every ``/api/config`` response, which is what makes this the difference
-    between a disabled cloud feature and a 500 on the Settings page.
+    is covered without editing this test.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
 
-    def _load(vibe_cloud: dict) -> V2Config:
+    def _payload(vibe_cloud: dict) -> dict:
         payload = _full_config_payload()
         payload["remote_access"] = {"provider": "vibe_cloud", "vibe_cloud": vibe_cloud}
-        return V2Config.from_payload(payload)
+        return payload
+
+    def _load_from_disk(vibe_cloud: dict) -> V2Config:
+        config_path.write_text(json.dumps(_payload(vibe_cloud)), encoding="utf-8")
+        return V2Config.load(config_path)
 
     def _assert_degrades(config: V2Config) -> None:
         assert config.remote_access.vibe_cloud.is_runtime_paired() is False
@@ -1192,31 +1204,36 @@ def test_malformed_cloud_section_disables_pairing_instead_of_failing_reads(tmp_p
         }
         assert api.client_config_payload(config)["remote_access"]["vibe_cloud"]["paired"] is False
 
-    # One credential of the wrong type: the shape that loads today and would
-    # otherwise raise ``AttributeError`` the moment anything reads the config.
-    _assert_degrades(
-        _load(
-            {
-                "enabled": True,
-                "backend_url": "https://avibe.bot",
-                "instance_id": 12345,
-                "instance_secret": "instance-secret",
-            }
-        )
-    )
-
     string_fields = [
-        info.name for info in fields(VibeCloudRemoteAccessConfig) if info.type in (str, "str")
+        info.name
+        for info in fields(VibeCloudRemoteAccessConfig)
+        # ``instance_kind`` is server-set at pairing and means "unknown" when it
+        # is not one of the kinds this build knows, so for it an unreadable
+        # value and an unrecognised one are the same answer.
+        if info.type in (str, "str") and info.name != "instance_kind"
     ]
     assert string_fields
-    config = _load({"enabled": True, **{name: 12345 for name in string_fields}})
 
-    left = [
-        name
-        for name in string_fields
-        if not isinstance(getattr(config.remote_access.vibe_cloud, name), str)
-    ]
-    assert left == []
+    paired = {
+        "enabled": True,
+        "backend_url": "https://avibe.bot",
+        "instance_id": "inst_123",
+        "instance_secret": "instance-secret",
+    }
+    assert V2Config.from_payload(_payload(paired)).remote_access.vibe_cloud.is_runtime_paired()
+
+    for name in string_fields:
+        # The write path names the field it refused, so the Settings page can
+        # say which one, and the disk path recovers rather than failing.
+        with pytest.raises(ValueError, match=re.escape(f"remote_access.vibe_cloud.{name}")):
+            V2Config.from_payload(_payload({**paired, name: 12345}))
+        config = _load_from_disk({**paired, name: 12345})
+        assert any("remote_access" in warning for warning in config.load_warnings), name
+        _assert_degrades(config)
+
+    # Every field at once, so recovery is not being carried by one lucky field.
+    config = _load_from_disk({"enabled": True, **{name: 12345 for name in string_fields}})
+    assert config.load_warnings
     _assert_degrades(config)
 
 

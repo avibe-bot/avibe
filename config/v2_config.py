@@ -862,6 +862,100 @@ _BOOL_SPELLINGS = {
     "": False,
 }
 
+
+def _named_bool(path: str, value: object) -> bool:
+    """The side a switch's value names, or a refusal.
+
+    ``true``/``1``/``"yes"``/``"off"`` all name a side the caller meant, and
+    ``_BOOL_SPELLINGS`` is the whole vocabulary in one place rather than a
+    truthy list plus an implicit else. A value outside it names no side at all
+    — ``"garbage"``, ``5``, ``[]`` — and is refused rather than read as false,
+    which on a write path would answer 200 having stored the side the caller
+    never asked for.
+    """
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        spelled = _BOOL_SPELLINGS.get(value.strip().lower())
+        if spelled is not None:
+            return spelled
+    elif isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"Config '{path}' must be a boolean")
+
+
+def _named_value(path: str, declared: object, value: object) -> object:
+    """The value a field's declared kind names, or a refusal.
+
+    One vocabulary for every field this reaches, because the alternative is
+    what the review found twice: each field open-coding its own ``int(...)`` /
+    ``str(...)`` / truthy test, and each one deciding on its own whether a
+    value it cannot read is an error or something to repair in place. Repair
+    belongs to ``V2Config.load``, behind a backup and a warning; this states
+    only what a value must name to be readable at all.
+
+    A switch reads the spellings above. A number reads anything that names one,
+    so a hand-edited ``"14"`` still means 14 — but a ``bool`` is refused,
+    because Python makes it an ``int`` and ``int(True)`` is a legal ``1``, so a
+    switch posted where a font size belongs would be stored as a size and
+    answered 200. A string reads only a string: no number names a URL or a
+    credential, and silently emptying one logs the operator out or unpairs the
+    instance. Kinds outside this vocabulary — containers, nested sections —
+    are left to the code that already understands them.
+    """
+
+    if isinstance(declared, str):
+        text = declared
+    elif isinstance(declared, type):
+        text = declared.__name__
+    else:
+        # ``Optional[int]`` and friends are not classes, and their ``__name__``
+        # is the bare ``"Optional"``, which would drop the kind being wrapped.
+        text = str(declared)
+    optional = re.fullmatch(r"(?:typing\.)?Optional\[(?:typing\.)?(.+)\]", text)
+    if optional:
+        if value is None:
+            return None
+        text = optional.group(1)
+    if text == "bool":
+        return _named_bool(path, value)
+    if text in ("int", "float"):
+        if isinstance(value, bool):
+            raise ValueError(f"Config '{path}' must be a number")
+        try:
+            return int(value) if text == "int" else float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Config '{path}' must be a number") from exc
+    if text == "str":
+        if not isinstance(value, str):
+            raise ValueError(f"Config '{path}' must be a string")
+    return value
+
+
+def _refuse_values_naming_nothing(section: str, instance: object) -> None:
+    """Hold every field of ``instance`` to the kind it declares.
+
+    Stated over the declared fields rather than over the ones some reviewer
+    reached, so a field added to the dataclass is held to its own declaration
+    without editing this call site — which is the difference between closing
+    this class and paying for it one review round per field.
+
+    Raised one field at a time, in the ``Config '<section>.<field>'`` shape
+    every other message on this path uses, because that is what lets a disk
+    load recover the unreadable field alone instead of discarding the section.
+    A second unreadable field simply raises on the next pass of the recovery
+    loop.
+    """
+
+    for info in fields(instance):
+        setattr(
+            instance,
+            info.name,
+            _named_value(f"{section}.{info.name}", info.type, getattr(instance, info.name)),
+        )
+
+
 # Sections whose fields are independent of one another, so a single unreadable
 # field is recovered on its own instead of discarding its siblings — and whose
 # switches recover to off rather than to the fresh-install default. See
@@ -1007,9 +1101,7 @@ def _reset_recoverable_config_section(
     if section in {
         "model_hub",
         "memory",
-        "ui",
         "remote_access",
-        "audio_asr",
         "update",
     }:
         payload[section] = {}
@@ -1467,32 +1559,20 @@ class AudioAsrConfig:
     max_file_bytes: Optional[int] = None
 
     def __post_init__(self) -> None:
-        """Refuse a switch that is not the boolean this class declares.
+        """Refuse a value that is not the kind this class declares.
 
-        ``from_payload`` copies this section's switches verbatim, and an Editor
-        may now persist the section, so a stale client or a hand-edited config
-        can put ``[]`` where a switch belongs. Nothing further down coerces it:
-        the Settings pages read ``value !== false`` as on while
-        ``AudioAsrService`` reads the same value for truth, so ASR renders as
-        enabled while transcription is off.
+        ``from_payload`` copies this section verbatim, and an Editor may now
+        persist it, so a stale client or a hand-edited config can put ``[]``
+        where a switch belongs. Nothing further down coerces it: the Settings
+        pages read ``value !== false`` as on while ``AudioAsrService`` reads the
+        same value for truth, so ASR renders as enabled while transcription is
+        off. A ``true`` where ``timeout_seconds`` belongs is the same defect one
+        kind over — ``float(True)`` is a legal one-second timeout.
 
-        Stated over the declared fields rather than over the three switches
-        that exist today, so a boolean added later is covered without editing
-        this method.
-
-        Raised one field at a time, in the ``Config '<section>.<field>'`` shape
-        every other message on this path uses, because that is what lets a disk
-        load recover the unreadable switch alone instead of the whole section —
-        which for this section means turning transcription back on. A second
-        unreadable switch simply raises on the next pass of the recovery loop.
+        Enforced here rather than in ``from_payload`` so every construction path
+        holds the invariant the field types already claim.
         """
-        invalid = sorted(
-            info.name
-            for info in fields(self)
-            if info.type in (bool, "bool") and not isinstance(getattr(self, info.name), bool)
-        )
-        if invalid:
-            raise ValueError(f"Config 'audio_asr.{invalid[0]}' must be a boolean")
+        _refuse_values_naming_nothing("audio_asr", self)
 
 
 _MEMORY_MAX_URL_BYTES = 2048
@@ -2563,6 +2643,23 @@ class UiConfig:
     # otherwise the machine's system hostname).
     instance_name: str = ""
 
+    def __post_init__(self) -> None:
+        """Refuse a value that is not the kind this class declares.
+
+        ``from_payload`` copies this section verbatim and an Editor may now
+        persist part of it, so every field here is reachable from a stale
+        client or a hand-edited file. Held to the declared kinds rather than to
+        the two switches that had call-site checks, which is what closes
+        ``open_browser`` and ``setup_port`` — a declared switch and a declared
+        port that nothing on this path validated at all.
+
+        The switches keep reading the spellings a hand-edited config may use
+        (``"yes"``, ``"0"``, ``1``), which ``test_show_agent_activity_defaults_
+        off_and_round_trips`` states; that is why the normalisation happens here
+        rather than in a check that runs before it.
+        """
+        _refuse_values_naming_nothing("ui", self)
+
 
 @dataclass
 class VibeCloudRemoteAccessConfig:
@@ -2589,34 +2686,35 @@ class VibeCloudRemoteAccessConfig:
     dev_login_hint: str = ""
 
     def __post_init__(self) -> None:
-        """Keep every field declared ``str`` a string, whatever was persisted.
+        """Refuse a value that is not the kind this class declares.
 
         ``from_payload`` copies this section's free-form fields verbatim, so a
-        hand-edited, migrated, or recovered config can hold a number where a
-        URL or credential belongs. Stated over the declared fields rather than
-        over the three the pairing predicate happens to read: any of them can
-        reach code that does string work, and ``is_runtime_paired`` is now
+        hand-edited, migrated, or stale-client payload can hold a number where
+        a URL or credential belongs. Stated over the declared fields rather
+        than over the three the pairing predicate happens to read: any of them
+        can reach code that does string work, and ``is_runtime_paired`` is now
         consulted on every ``/api/config`` response, which would turn one
         malformed field into a 500 on every configuration read.
 
-        A non-string is not a usable value, so it is dropped to ``""`` and
-        logged: the cloud section degrades to "not paired" rather than being
-        repaired with a value the operator never stored. Enforced here rather
-        than in ``from_payload`` so every construction path holds the
-        invariant that the field types already claim.
+        Refused rather than emptied. Emptying is a repair, and a repair here
+        writes a credential the operator never stored: clearing
+        ``session_secret`` logs every remote session out, and clearing
+        ``instance_secret`` unpairs the instance — answered ``200``, on a route
+        an Editor can now reach. Refusing sends a disk load through
+        ``V2Config.load``'s recovery instead, which backs the file up, restores
+        this section, and warns; the "degrade to not paired" outcome is
+        unchanged and now leaves evidence. Enforced here rather than in
+        ``from_payload`` so every construction path holds the invariant.
+
+        ``instance_kind`` is the one field exempt from that, because for it
+        "unreadable" and "unknown" are the same answer and ``""`` already means
+        unknown — the value a pairing this build does not recognise is meant to
+        carry. It is server-set at pairing and absent from every write surface,
+        so nothing an operator types reaches it.
         """
-        dropped = [
-            info.name
-            for info in fields(self)
-            if info.type in (str, "str") and not isinstance(getattr(self, info.name), str)
-        ]
-        for name in dropped:
-            setattr(self, name, "")
-        if dropped:
-            logger.warning(
-                "Ignoring non-string remote_access.vibe_cloud fields: %s",
-                ", ".join(sorted(dropped)),
-            )
+        if self.instance_kind not in ("personal", "organization"):
+            self.instance_kind = ""
+        _refuse_values_naming_nothing("remote_access.vibe_cloud", self)
 
     def runtime_credentials(self) -> tuple[str, str, str] | None:
         """Return ``(backend_url, instance_id, instance_secret)``, or ``None``.
@@ -3040,40 +3138,13 @@ class V2Config:
         if not isinstance(ui_payload, dict):
             raise ValueError("Config 'ui' must be an object")
         ui = UiConfig(**_filter_dataclass_fields(UiConfig, ui_payload))
-        # Clamping an out-of-range size still honours what the caller asked for;
-        # answering an unparseable one with the default does not, so it raises.
-        try:
-            ui.chat_message_font_size = max(
-                MIN_CHAT_MESSAGE_FONT_SIZE_PX,
-                min(MAX_CHAT_MESSAGE_FONT_SIZE_PX, int(ui.chat_message_font_size)),
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Config 'ui.chat_message_font_size' must be a number") from exc
-
-        # This section's switches accept the several spellings a hand-edited
-        # config may use for a boolean — ``true``/``1``/``"yes"``/``"off"`` all
-        # name a side the caller meant, and ``_BOOL_SPELLINGS`` is the whole
-        # vocabulary in one place rather than a truthy list plus an implicit
-        # else. A value outside it names no side at all — ``"garbage"``, ``5``,
-        # ``[]`` — and is refused rather than read as false, which on this write
-        # path would answer 200 having stored the side the caller never asked
-        # for. Applied to every field ``UiConfig`` declares ``bool``, so a
-        # switch added later is spelled and refused like its siblings instead of
-        # reaching the runtime as whatever the file happened to hold.
-        def _spelled_bool(name: str, value: object) -> bool:
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                spelled = _BOOL_SPELLINGS.get(value.strip().lower())
-                if spelled is not None:
-                    return spelled
-            elif isinstance(value, int) and value in (0, 1):
-                return bool(value)
-            raise ValueError(f"Config 'ui.{name}' must be a boolean")
-
-        for info in fields(UiConfig):
-            if info.type in (bool, "bool"):
-                setattr(ui, info.name, _spelled_bool(info.name, getattr(ui, info.name)))
+        # ``UiConfig.__post_init__`` has already held every field to its declared
+        # kind, so this is only the range policy: clamping an out-of-range size
+        # still honours what the caller asked for.
+        ui.chat_message_font_size = max(
+            MIN_CHAT_MESSAGE_FONT_SIZE_PX,
+            min(MAX_CHAT_MESSAGE_FONT_SIZE_PX, ui.chat_message_font_size),
+        )
 
         remote_access_payload = payload.get("remote_access") or {}
         if not isinstance(remote_access_payload, dict):
@@ -3090,10 +3161,6 @@ class V2Config:
                 **_filter_dataclass_fields(VibeCloudRemoteAccessConfig, vibe_cloud_payload)
             ),
         )
-        if not isinstance(remote_access.vibe_cloud.instance_kind, str) or (
-            remote_access.vibe_cloud.instance_kind not in {"personal", "organization"}
-        ):
-            remote_access.vibe_cloud.instance_kind = ""
         remote_access.vibe_cloud.transport_protocol = str(
             remote_access.vibe_cloud.transport_protocol or "auto"
         ).strip().lower()
@@ -3101,16 +3168,10 @@ class V2Config:
             raise ValueError(
                 "Config 'remote_access.vibe_cloud.transport_protocol' must be 'auto', 'quic', or 'http2'"
             )
-        raw_auto_recovery = remote_access.vibe_cloud.auto_recovery
-        if isinstance(raw_auto_recovery, str):
-            remote_access.vibe_cloud.auto_recovery = raw_auto_recovery.strip().lower() in (
-                "1",
-                "true",
-                "yes",
-                "on",
-            )
-        else:
-            remote_access.vibe_cloud.auto_recovery = bool(raw_auto_recovery)
+        # ``auto_recovery`` reads the same spellings every other switch does;
+        # ``VibeCloudRemoteAccessConfig.__post_init__`` has already resolved it,
+        # where the truthy/else it used to have would have read ``"garbage"`` as
+        # off and a stale client's ``[1]`` as on.
         remote_access.vibe_cloud.optimization_profile = str(
             remote_access.vibe_cloud.optimization_profile or "balanced"
         ).strip().lower()
@@ -3150,21 +3211,15 @@ class V2Config:
         audio_asr = AudioAsrConfig(**_filter_dataclass_fields(AudioAsrConfig, audio_asr_payload))
         if audio_asr_enabled_present and audio_asr.enabled is False and not audio_asr.enabled_configured:
             audio_asr.enabled_configured = True
-        # Same split as the preferences below: a value that names a legal
-        # setting is clamped to the nearest legal one, a value that names no
-        # setting is refused instead of being answered with the default.
-        try:
-            audio_asr.timeout_seconds = max(0.1, float(audio_asr.timeout_seconds))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Config 'audio_asr.timeout_seconds' must be a number") from exc
+        # ``AudioAsrConfig.__post_init__`` has already held every field to its
+        # declared kind, so what is left here is range and format policy: a
+        # value that names a legal setting is clamped to the nearest legal one.
+        audio_asr.timeout_seconds = max(0.1, audio_asr.timeout_seconds)
         if audio_asr.max_file_bytes is not None:
-            try:
-                audio_asr.max_file_bytes = max(1, int(audio_asr.max_file_bytes))
-            except (TypeError, ValueError) as exc:
-                raise ValueError("Config 'audio_asr.max_file_bytes' must be an integer") from exc
-        if not isinstance(audio_asr.endpoint_path, str) or not audio_asr.endpoint_path.startswith("/"):
+            audio_asr.max_file_bytes = max(1, audio_asr.max_file_bytes)
+        if not audio_asr.endpoint_path.startswith("/"):
             raise ValueError("Config 'audio_asr.endpoint_path' must be a path starting with '/'")
-        if not isinstance(audio_asr.model, str) or not audio_asr.model.strip():
+        if not audio_asr.model.strip():
             raise ValueError("Config 'audio_asr.model' must be a non-empty string")
 
         update_payload = payload.get("update") or {}

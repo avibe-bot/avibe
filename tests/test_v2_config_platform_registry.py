@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import re
 from dataclasses import fields
 
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from config.v2_config import (
     _BOOL_SPELLINGS,
     AgentsConfig,
+    AudioAsrConfig,
     DiscordConfig,
     LarkConfig,
     PlatformsConfig,
@@ -16,6 +19,7 @@ from config.v2_config import (
     UiConfig,
     UpdateConfig,
     V2Config,
+    VibeCloudRemoteAccessConfig,
     WeChatConfig,
 )
 from vibe import api
@@ -356,6 +360,100 @@ def test_ui_switches_resolve_the_side_a_spelling_names_or_refuse_the_value() -> 
     for falsey in ("false", "False", "0", "no", "off", ""):
         payload["ui"]["show_tool_calls"] = falsey
         assert V2Config.from_payload(payload).ui.show_tool_calls is False, falsey
+
+
+# The sections this PR makes writable, and how to reach each one in a payload.
+# ``instance_kind`` is server-set at pairing and means "unknown" whenever it is
+# not a kind this build knows, so for it an unreadable value and an
+# unrecognised one are the same answer; it is exempt by name in the dataclass.
+_KIND_HELD_SECTIONS = (
+    ("ui", UiConfig, ("ui",)),
+    ("audio_asr", AudioAsrConfig, ("audio_asr",)),
+    (
+        "remote_access.vibe_cloud",
+        VibeCloudRemoteAccessConfig,
+        ("remote_access", "vibe_cloud"),
+    ),
+)
+_KIND_EXEMPT_FIELDS = {("remote_access.vibe_cloud", "instance_kind")}
+
+# What each declared kind must refuse. ``True`` appears under the numbers on
+# purpose: Python makes ``bool`` an ``int``, so ``int(True)`` is a legal ``1``
+# and a switch posted where a size or a timeout belongs would be stored as one.
+_VALUES_NAMING_NO = {
+    "bool": ("garbage", 5, -1, 2.0, [], {}, None),
+    "int": (True, False, "garbage", [], {}, None),
+    "float": (True, False, "garbage", [], {}, None),
+    "str": (5, True, 2.0, [], {}, None),
+}
+
+
+def test_config_fields_are_held_to_the_kind_they_declare() -> None:
+    """Every field of a writable section refuses a value naming another kind.
+
+    ``/api/config`` validates through this same parser, so a value coerced into
+    a legal one is answered 200 having stored something the caller never sent:
+    ``{"chat_message_font_size": true}`` became the minimum font size,
+    ``{"timeout_seconds": true}`` a one-second ASR timeout, and a number where
+    a credential belongs emptied the credential. Each was a separate finding
+    because each field open-coded its own coercion; the property is stated once
+    here instead.
+
+    Seeded from the declared fields of each section rather than from the ones a
+    review reached, and closed with a non-vacuity assertion, so a field added to
+    any of these dataclasses is covered without editing this test.
+    """
+    healthy = api.config_to_payload(
+        V2Config.from_payload(
+            {
+                **api.config_to_payload(_base_config(), include_secrets=True),
+                "remote_access": {"provider": "vibe_cloud", "vibe_cloud": {"enabled": True}},
+                "audio_asr": {"enabled": True},
+            }
+        ),
+        include_secrets=True,
+        include_internal=True,
+    )
+
+    def _seed(section_path: tuple[str, ...], name: str, value: object) -> dict:
+        payload = copy.deepcopy(healthy)
+        cursor = payload
+        for key in section_path:
+            cursor = cursor[key]
+        cursor[name] = value
+        return payload
+
+    held: set[tuple[str, str]] = set()
+    declared_kinds: set[tuple[str, str]] = set()
+    for section, dataclass_type, section_path in _KIND_HELD_SECTIONS:
+        assert V2Config.from_payload(copy.deepcopy(healthy)), section
+        for info in fields(dataclass_type):
+            kind = info.type if isinstance(info.type, str) else getattr(info.type, "__name__", "")
+            if kind not in _VALUES_NAMING_NO:
+                # Containers and nested sections are held by the code that
+                # already understands them, not by the declared-kind rule.
+                continue
+            if (section, info.name) in _KIND_EXEMPT_FIELDS:
+                continue
+            declared_kinds.add((section, info.name))
+            for value in _VALUES_NAMING_NO[kind]:
+                with pytest.raises(ValueError, match=re.escape(f"{section}.{info.name}")):
+                    V2Config.from_payload(_seed(section_path, info.name, value))
+                held.add((section, info.name))
+
+    assert declared_kinds <= held, declared_kinds - held
+    assert len(held) > 10, held
+
+    # A value that *names* the declared kind is still read, so the rule refuses
+    # wrong kinds rather than everything that is not already the right type.
+    assert V2Config.from_payload(_seed(("ui",), "chat_message_font_size", "15")).ui.chat_message_font_size == 15
+    assert V2Config.from_payload(_seed(("audio_asr",), "timeout_seconds", "2.5")).audio_asr.timeout_seconds == 2.5
+    assert (
+        V2Config.from_payload(
+            _seed(("remote_access", "vibe_cloud"), "auto_recovery", "off")
+        ).remote_access.vibe_cloud.auto_recovery
+        is False
+    )
 
 
 def test_config_payload_includes_vibe_cloud_remote_access() -> None:
