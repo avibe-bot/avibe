@@ -469,6 +469,61 @@ def test_editor_config_write_always_answers_with_a_renderable_code(monkeypatch, 
     assert V2Config.load().runtime.default_cwd == "."
 
 
+def test_config_write_requires_an_object_body_whatever_the_role(monkeypatch, tmp_path) -> None:
+    """A config write is a patch object, and a body that is not one is refused.
+
+    Stated over the JSON value space rather than over the shapes a review
+    happened to name: the route decoded the body with the usual ``request.json
+    or {}``, which turned every falsy value — including a missing body — into
+    an empty patch, so a malformed write persisted nothing and still answered
+    200. Truthy non-objects were refused only because they survived that
+    coercion, which is why an enumeration would have missed exactly the half
+    that was broken. Both roles are asserted because the rule belongs to the
+    route, not to the Editor allowlist that happened to cover one side of it.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, _ids = _setup_state(tmp_path)
+    editor = _remote_client(config, role="editor", email="alice@example.com")
+    owner = app.test_client()
+    editor_headers = {**csrf_headers(editor, REMOTE_ORIGIN), "Content-Type": "application/json"}
+    owner_headers = {**csrf_headers(owner, "http://localhost"), "Content-Type": "application/json"}
+
+    def _post_body(body):
+        return (
+            editor.post(
+                "/api/config",
+                base_url=REMOTE_ORIGIN,
+                environ_base=REMOTE_PEER,
+                headers=editor_headers,
+                content=json.dumps(body),
+            ),
+            owner.post(
+                "/api/config",
+                base_url="http://localhost",
+                headers=owner_headers,
+                content=json.dumps(body),
+            ),
+        )
+
+    for body in (None, [], [1], "", "text", 0, 1, False, True):
+        editor_response, owner_response = _post_body(body)
+        assert editor_response.status_code == 400, body
+        assert editor_response.get_json()["error"] == {
+            "code": "editor_config_write_invalid",
+            "message": "editor_config_write_invalid",
+        }, body
+        # The Owner keeps the descriptive message its Settings pages render.
+        assert owner_response.status_code == 400, body
+        assert owner_response.get_json()["error"] == "Config payload must be an object", body
+
+    # An empty object is a valid no-op patch, so the refusals above cannot be
+    # produced by a route that has started refusing every body.
+    editor_response, owner_response = _post_body({})
+    assert editor_response.status_code == 200
+    assert owner_response.status_code == 200
+    assert V2Config.load().ack_mode == "typing"
+
+
 def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)

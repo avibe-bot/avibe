@@ -5871,7 +5871,15 @@ async def config_post():
     from vibe import internal_client
     from vibe import remote_access
 
-    payload = request.json or {}
+    # The decoded body, not the usual ``request.json or {}``: this route's two
+    # validators already require a JSON object — ``editor_config_write_payload``
+    # for an Editor, ``api.save_config`` for everyone — and that coercion turns
+    # every falsy body (``null``, ``[]``, ``false``, ``0``, ``""``, or none at
+    # all) into an empty patch before either of them sees it, so a malformed
+    # write saved nothing and answered 200. Passing the value through keeps one
+    # property — a config write is an object — instead of an enumeration of the
+    # falsy shapes that happen to exist today.
+    payload = request.json
     authorization_context = getattr(g, "authorization_context", None)
     editor_write = authorization_context is not None and not authorization_context.can_manage_instance
     if editor_write:
