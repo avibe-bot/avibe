@@ -503,7 +503,19 @@ assertAccentAliasesKeepTheirTokenName(css);
 // around. So the scope is a decision with evidence under it, not an oversight.
 
 const ACCENT_NAMES = ACCENT_FILLS.map((fill) => fill.slice(2));
-const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*\\)`);
+
+// `var(--mint)` and `var(--mint, #10b981)` are the same paint. CSS reads the fallback only
+// when the name is undefined, and --mint ships in the theme, so the browser paints the
+// vivid accent either way and the fallback is decoration on the source. Requiring `)`
+// immediately after the name checked one spelling of the reference rather than the
+// reference.
+//
+// Closed with a boundary instead of by parsing the fallback. `(?=[,)])` asserts only that
+// the name ended here, which is the single thing this pattern has to get right -- it is
+// what separates --mint from --mint-ink. Parsing the argument would have to survive nested
+// parens (`var(--mint, rgb(0 0 0))`) and a second comma level, and every version of that
+// is another CSS parser living inside a lookahead.
+const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*(?=[,)])`);
 
 // A wash is not exempt because of what its value looks like. It is exempt because
 // someone decided this hairline is decoration, and wrote that down here.
@@ -940,8 +952,12 @@ const LABEL_UTILITIES = [...INK_UTILITIES]
 // pixel as `bg-mint`. An enumeration of opaque spellings can only ever be as complete as
 // whoever wrote it; a parsed number is complete by construction.
 //
-// Unparseable fails closed and counts as a mark: the alternative is exempting the one
-// spelling nobody predicted, which is the bug this replaces.
+// Unparseable returns null rather than a number, and the callers fail closed in opposite
+// directions: an unreadable mark must still be checked, an unreadable label must not license
+// one. Collapsing both onto 1 -- which is what "opaque" means -- reads as fail-closed and is
+// only half of one, because the same 1 that says "check this fill" also says "this label is
+// printed". That asymmetry is not hypothetical: reusing this number for the label is what
+// round 7 did, and it is exactly where the previous round's hole was.
 const markAlpha = (modifier) => {
   if (!modifier) {
     return 1;
@@ -950,7 +966,7 @@ const markAlpha = (modifier) => {
   const percent = raw.endsWith('%');
   const value = Number.parseFloat(percent ? raw.slice(0, -1) : raw);
   if (!Number.isFinite(value) || value < 0) {
-    return 1;
+    return null;
   }
   return percent || value > 1 ? value / 100 : value;
 };
@@ -967,6 +983,51 @@ const markAlpha = (modifier) => {
 // satisfy this file. The threshold is the honest instrument: one stated number, with the
 // parsed alpha reported in the error, instead of a list that silently grows a hole.
 const OPAQUE_ENOUGH = 0.9;
+
+// Does the alpha this guard read mean "check this as a fill"? Named and shared rather than
+// written inline at the scan, because a mutation sweep found the inline form untested: the
+// corpus below could see what the alphabet READ and not what the scan DECIDED, so flipping
+// this one condition to fail open passed everything. Same shape as the defect this round is
+// closing, one level down -- a rule with no single owner is a rule with no test.
+// The two differ in exactly one place -- what an unreadable alpha means -- and that is the
+// asymmetry worth having in one line where both can be seen at once: an alpha this guard
+// could not parse must still be checked as a fill, and must not be accepted as a label.
+const readsAsTheFill = (alpha) => alpha === null || alpha >= OPAQUE_ENOUGH;
+const printsTheLabel = (alpha) => alpha !== null && alpha >= OPAQUE_ENOUGH;
+
+// How a utility names an accent. Tailwind v4 admits four spellings that compile to the
+// same paint -- `bg-mint`, the custom-property shorthand `bg-(--mint)`, and the
+// arbitrary-value forms `bg-[var(--mint)]` and `bg-[--mint]` -- and this file was reading
+// the first one.
+//
+// One source, because the missing spellings were the symptom and this is the defect: "does
+// this text name accent X as paint, and how opaquely" was answered by three separate
+// patterns -- the mark scan, the var scan, and a substring search for the label -- so a
+// spelling only had to be missed by ONE of them to ship, and nothing made a new spelling
+// reach the other two. Three review rounds each found a different member of that set. A
+// shared alphabet is what turns the next spelling into one row instead of three edits, and
+// ACCENT_SPELLINGS below is what makes a broken row a failure instead of a silent hole.
+//
+// Deliberately loose about the wrapper. This alphabet decides only what gets CHECKED, so an
+// invented spelling costs a redundant check while a missing one ships an unlabeled fill --
+// the asymmetry says to over-match. The one place it must be exact is the end of the token:
+// `(?![\w-])` is why `bg-mint-ink` and `text-primary-foregroundish` are still different
+// words, and why matching the remedy this guard prints does not reject the fix.
+//
+// Contributes two groups, in order: the token, then the opacity modifier. The modifier is
+// read after the wrapper closes, because `bg-(--mint)/70` closes its bracket first.
+const accentTokenSource = (tokens) => (
+  `-(?:\\[var\\(\\s*|\\[|\\(\\s*)?(?:--)?(${tokens})(?![\\w-])(?:\\s*\\)|\\])*(/[\\w.%[\\]]+)?`
+);
+
+// Built per call, not shared: a `g` regex carries `lastIndex`, so one instance handed to
+// two scans would start the second one wherever the first stopped. The factory is what lets
+// the corpus test the pattern the scan actually uses rather than a copy of it.
+const accentMarkPattern = () => new RegExp(
+  `\\b(${[...MARK_UTILITIES, ...INK_UTILITIES.keys()].join('|')})`
+  + accentTokenSource([...FILL_LABEL.keys(), 'pink'].join('|')),
+  'g',
+);
 
 // The Tailwind state the utility containing `index` is gated behind: `hover:`,
 // `md:hover:`, or '' for none. Scoped to the one utility rather than the class string,
@@ -986,9 +1047,27 @@ const variantPrefix = (text, index) => {
 // unequal chain (label `hover:`, fill `md:hover:`) fails rather than being reasoned
 // about: no site writes one, and a guard should fail closed on a shape it cannot
 // prove -- the fix is to merge the two utilities into one string, or pin the mark.
-const labelCovers = (haystack, label, fillPrefix) => {
-  for (let at = haystack.indexOf(label); at !== -1; at = haystack.indexOf(label, at + 1)) {
-    const prefix = variantPrefix(haystack, at);
+// A label also has to BE a label, which a substring search cannot tell you.
+// `text-primary-foreground/0` is the right token, spelled completely, applying in the right
+// scope -- and invisible; `text-primary-foregroundish` is not the token at all. Both cleared
+// the mark. So the label is read through the same alphabet and the same alpha as the mark it
+// licenses: a pairing is a claim about contrast between two painted things, and something
+// unpainted cannot make it.
+//
+// One threshold serves both sides on purpose. A second number for labels would have to come
+// from somewhere -- white at 0.7 over vivid mint is still perfectly legible, so the honest
+// label threshold is not 0.9 -- and a number nobody can derive is how a tunable becomes a
+// hole to be argued down. At or above 0.9 a label is the label; below it, whether a
+// translucent label carries a vivid fill is a design.pen question, and the answer is a pin
+// with a reason rather than a threshold quietly lowered to admit it. Nothing live is
+// affected: all 23 label sites in src/ are bare.
+const labelCovers = (haystack, utility, label, fillPrefix) => {
+  const printed = new RegExp(`\\b${utility}${accentTokenSource(label)}`, 'g');
+  for (const match of haystack.matchAll(printed)) {
+    if (!printsTheLabel(markAlpha(match[2]))) {
+      continue;
+    }
+    const prefix = variantPrefix(haystack, match.index);
     if (prefix === '' || prefix === fillPrefix) {
       return true;
     }
@@ -1010,11 +1089,120 @@ function sourceFiles(root) {
     .sort();
 }
 
+// The alphabet's own test, run before any file is read. If the pattern the scans are about
+// to use has stopped recognising a spelling, that is a hole in this guard, and it should
+// fail here -- next to the row that names the spelling -- instead of quietly passing a tree
+// that contains one. Adding a spelling means adding a row, which is the point of there being
+// one alphabet at all.
+//
+// The negatives carry as much weight as the positives, and each was a real defect or a real
+// near-miss. `bg-mint-ink` is the remedy this guard prints, so matching it would reject the
+// fix. `bg-mint/10` is the wash exemption, and it is here as a number rather than as an
+// absence, because the bug it replaced was a `/` treated as an exit from the scan.
+// `text-primary-foreground` must not read as a bare `primary` mark -- that boundary broke
+// twice. `ring-mint` is the deliberate scope decision, not an oversight; the comment above
+// ACCENT_NAMES carries the count behind it.
+// Columns: the spelling, the accent it names (null for "not a mark"), the alpha this guard
+// reads, and whether that alpha reads as the fill. The last column is written out rather than
+// derived, so a flip in readsAsTheFill fails here instead of only in an out-of-tree probe.
+const ACCENT_SPELLINGS = [
+  ['bg-mint', 'mint', 1, true],
+  ['bg-mint/95', 'mint', 0.95, true],
+  ['bg-mint/[99%]', 'mint', 0.99, true],
+  ['bg-mint/[0.95]', 'mint', 0.95, true],
+  ['bg-mint/10', 'mint', 0.1, false],
+  ['bg-mint/[oops]', 'mint', null, true],
+  ['bg-(--mint)', 'mint', 1, true],
+  ['bg-(--mint)/10', 'mint', 0.1, false],
+  ['bg-(--mint)/[99%]', 'mint', 0.99, true],
+  ['bg-[var(--mint)]', 'mint', 1, true],
+  ['bg-[--mint]', 'mint', 1, true],
+  ['hover:bg-mint', 'mint', 1, true],
+  ['fill-cyan', 'cyan', 1, true],
+  ['stroke-gold', 'gold', 1, true],
+  ['text-violet', 'violet', 1, true],
+  ['caret-pink', 'pink', 1, true],
+  ['bg-mint-ink', null, null, null],
+  ['bg-mint-foreground', null, null, null],
+  ['text-primary-foreground', null, null, null],
+  ['bg-muted', null, null, null],
+  ['ring-mint', null, null, null],
+  ['auto-mint', null, null, null],
+];
+
+// The same list for the other operand. A label is only a label when it prints the token as
+// glyphs, opaquely, in a scope the fill also applies to -- so these rows are the three ways
+// that can be false, plus the spellings that make it true.
+const LABEL_SPELLINGS = [
+  ['bg-mint text-primary-foreground', true],
+  ['bg-mint text-primary-foreground/90', true],
+  ['bg-mint text-primary-foreground/[95%]', true],
+  ['bg-mint text-(--primary-foreground)', true],
+  ['bg-mint text-[var(--primary-foreground)]', true],
+  ['bg-mint text-primary-foreground/0', false],
+  ['bg-mint text-primary-foreground/50', false],
+  ['bg-mint text-primary-foregroundish', false],
+  ['bg-mint text-primary-foreground/[oops]', false],
+  ['bg-mint hover:text-primary-foreground', false],
+];
+
+// And the third operand. The var scan reads a CSS reference rather than a utility, so its
+// spellings are its own -- and it had no rows here until reverting its fix ran this corpus
+// green, which is the same defect one level up: a shared question with one operand left
+// outside the shared test. That is how round 6 shipped a measured mark next to an unmeasured
+// label, so the rule now is that every predicate answering "does this name an accent" owes
+// this file rows.
+const VAR_SPELLINGS = [
+  ['var(--mint)', 'mint'],
+  ['var(--mint, #10b981)', 'mint'],
+  ['var(--mint,#fff)', 'mint'],
+  ['var(--mint, rgb(0 0 0))', 'mint'],
+  ['var( --cyan )', 'cyan'],
+  ['var(--mint-ink)', null],
+  ['var(--mint-foreground)', null],
+  ['var(--mint-ink, #063)', null],
+];
+
+function assertAccentSpellingsAreCovered() {
+  for (const [text, accent, alpha, checked] of ACCENT_SPELLINGS) {
+    const read = [...text.matchAll(accentMarkPattern())].map((match) => {
+      const value = markAlpha(match[3]);
+      return [match[2], value, readsAsTheFill(value)];
+    });
+    const expected = accent === null ? [] : [[accent, alpha, checked]];
+    if (JSON.stringify(read) !== JSON.stringify(expected)) {
+      throw new Error(
+        `The accent alphabet reads "${text}" as ${JSON.stringify(read)}, expected ${JSON.stringify(expected)}.\n`
+        + 'ACCENT_SPELLINGS is the set of spellings this guard promises to see; a row that stops '
+        + 'holding is a hole in the scans below, not a stale expectation.',
+      );
+    }
+  }
+
+  for (const [text, labelled] of LABEL_SPELLINGS) {
+    if (labelCovers(text, 'text', 'primary-foreground', '') !== labelled) {
+      throw new Error(
+        `The label alphabet reads "${text}" as ${!labelled}, expected ${labelled}.\n`
+        + `A label counts only when it prints the token as glyphs at alpha ${OPAQUE_ENOUGH} or above, `
+        + 'in a scope the fill also applies to.',
+      );
+    }
+  }
+
+  for (const [text, accent] of VAR_SPELLINGS) {
+    const [, read = null] = text.match(BARE_ACCENT_VAR) ?? [];
+    if (read !== accent) {
+      throw new Error(
+        `The var alphabet reads "${text}" as ${JSON.stringify(read)}, expected ${JSON.stringify(accent)}.\n`
+        + 'A reference names the accent whatever follows the token, and names a different token when '
+        + 'the name continues -- --mint-ink is not --mint with a suffix.',
+      );
+    }
+  }
+}
+
 function assertUnlabeledFillsTakeTheInk(root) {
-  const bare = new RegExp(
-    `\\b(${[...MARK_UTILITIES, ...INK_UTILITIES.keys()].join('|')})-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-])(/[\\w.%[\\]]+)?`,
-    'g',
-  );
+  const bare = accentMarkPattern();
   const found = new Map();
   const inkMarks = [];
 
@@ -1024,13 +1212,20 @@ function assertUnlabeledFillsTakeTheInk(root) {
         const utility = match[1];
         const accent = match[2];
         const modifier = match[3];
+        // Only a modifier this guard could READ exempts a wash. One it could not read is the
+        // spelling nobody predicted, so the mark stays in and the error says why.
         const alpha = markAlpha(modifier);
-        if (alpha < OPAQUE_ENOUGH) {
+        if (!readsAsTheFill(alpha)) {
           continue;
         }
         // Reported alongside the site: a `/[99%]` mark was written believing it was a
         // wash, so the number this guard read is the one fact that explains the failure.
-        const note = alpha < 1 ? ` (alpha ${alpha}, at or above ${OPAQUE_ENOUGH} reads as the fill)` : '';
+        let note = '';
+        if (alpha === null) {
+          note = ` (opacity modifier ${modifier} does not parse, so it is read as the fill)`;
+        } else if (alpha < 1) {
+          note = ` (alpha ${alpha}, at or above ${OPAQUE_ENOUGH} reads as the fill)`;
+        }
         // Ink takes no label and no pin, so it never reaches the pairing logic below.
         if (INK_UTILITIES.has(utility)) {
           inkMarks.push({ file, line, utility, accent, note, signature: markSignature(owner, text) });
@@ -1043,9 +1238,8 @@ function assertUnlabeledFillsTakeTheInk(root) {
         // named, so the label has to be carried by one of them.
         const label = FILL_LABEL.get(accent);
         const labelled = label !== undefined && LABEL_UTILITIES.some((ink) => {
-          const printed = `${ink}-${label}`;
           const fillPrefix = variantPrefix(text, match.index);
-          return labelCovers(text, printed, fillPrefix) || labelCovers(scope, printed, fillPrefix);
+          return labelCovers(text, ink, label, fillPrefix) || labelCovers(scope, ink, label, fillPrefix);
         });
         if (labelled) {
           continue;
@@ -1148,6 +1342,7 @@ function assertNoBareAccentVarInSource(root) {
   }
 }
 
+assertAccentSpellingsAreCovered();
 assertUnlabeledFillsTakeTheInk('src');
 assertNoBareAccentVarInSource('src');
 assertEveryAcceptedPairStillExists();
