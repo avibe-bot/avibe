@@ -184,13 +184,19 @@ class _SteeringAwareOpenCodeServer:
     def _has_post_boundary_activity(
         messages: list[Dict[str, Any]],
         boundary_ids: set[str],
+        baseline_ids: set[str],
     ) -> bool:
-        if not boundary_ids:
-            return True
-        return any(
-            (message.get("info", {}) or {}).get("id") not in boundary_ids
-            for message in messages
-        )
+        # Evidence means a message the restored poll loop would treat as new:
+        # outside the reconciliation boundary AND outside the pre-prompt
+        # baseline. The baseline term matters when the sampled boundary is
+        # empty (only baseline messages existed when it was sampled).
+        for message in messages:
+            message_id = (message.get("info", {}) or {}).get("id")
+            if not message_id:
+                continue
+            if message_id not in boundary_ids and message_id not in baseline_ids:
+                return True
+        return False
 
     @classmethod
     def _inserted_user_index(
@@ -417,6 +423,7 @@ class _SteeringAwareOpenCodeServer:
                                 elif inserted_user_text is None and not self._has_post_boundary_activity(
                                     messages,
                                     awaiting,
+                                    self._state.baseline_message_ids,
                                 ):
                                     # Restored boundary-sampled polls: a busy
                                     # snapshot holding only boundary messages

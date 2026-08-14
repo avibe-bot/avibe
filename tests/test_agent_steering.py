@@ -1586,6 +1586,69 @@ async def test_opencode_restored_busy_snapshot_requires_post_boundary_evidence()
 
 
 @pytest.mark.anyio
+async def test_opencode_restored_empty_boundary_still_requires_new_evidence() -> None:
+    """When the sampled reconciliation boundary is empty (only pre-prompt
+    baseline messages existed at sample time), a busy snapshot holding only
+    the baseline final answer must still be gated: an empty boundary is not
+    automatic evidence."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "old-final-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "old answer"}],
+            }
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.baseline_message_ids = {"old-final-assistant"}
+    state.awaiting_after_message_ids = set()
+    state.awaiting_user_text = None
+    state.restored = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "running-assistant",
+                    "role": "assistant",
+                },
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call-bash",
+                        "state": {"status": "running", "input": {"command": "ls"}},
+                    }
+                ],
+            }
+        )
+        snapshot = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert snapshot[-1]["info"]["id"] == "running-assistant"
+        assert state.closing is False
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
 async def test_opencode_retry_keeps_completed_error_snapshots_gated() -> None:
     """A completed assistant error must stay gated while the native session
     still reports busy/retry: handing it to the poll loop would emit a
