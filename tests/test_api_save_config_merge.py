@@ -1330,11 +1330,11 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
     reaching the caller. Seeded over the same surface as the write test, which
     is what makes the two halves one statement instead of two lists.
 
-    Recovery is also held to what it may not decide on the config's behalf. An
-    unreadable value is not evidence, so it may never leave an optional
-    feature's switch **on**, and it may never answer for a field other than the
-    one it repaired — which is what keeps an unreadable ``audio_asr.model`` from
-    discarding a stored ``enabled: false`` and starting to transcribe.
+    Recovery is also held to what it may not decide on the config's behalf. It
+    may not answer for a field other than the one it repaired, so a sibling the
+    file still spells out survives; and it may not leave an optional feature
+    running, so a section declaring ``enabled`` comes back with it off no matter
+    which of its fields was unreadable.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config_path = tmp_path / "config.json"
@@ -1359,19 +1359,34 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
             if path[0] in _FIELD_SCOPED_RECOVERY_SECTIONS and isinstance(declared, bool)
             else declared
         )
-        assert _walk(config, path, attr=True) == expected, label
+        repaired = copy.deepcopy(healthy)
+        _walk(repaired, path[:-1], attr=False)[path[-1]] = expected  # type: ignore[index]
+        if len(path) > 1:
+            section = _walk(repaired, path[:-1], attr=False)
+            if isinstance(section, dict) and "enabled" in section:
+                # An optional feature that needed recovering does not come back
+                # running, whichever of its fields was the unreadable one.
+                section["enabled"] = False
+        # The load must equal the parse of the file with that one field written
+        # as its recovered value. Stated against the parser rather than against
+        # the constant above because some of these fields are derived — the
+        # recovered ``audio_asr.enabled: false`` is what makes
+        # ``enabled_configured`` true — and a constant would assert the raw
+        # value the parser is contracted to move off.
+        reparsed = V2Config.from_payload(copy.deepcopy(repaired))
+        assert _walk(config, path, attr=True) == _walk(reparsed, path, attr=True), label
         recovered = api.config_to_payload(config, include_secrets=True, include_internal=True)
         if len(path) > 1:
-            # The recovered section must be exactly what the file would have
-            # parsed to had that one field been written with its recovered
-            # value — so every sibling survives, including the ones derived
+            # The recovered section must be exactly what that file would have
+            # parsed to — so every sibling survives, including the ones derived
             # from it. Asserting sibling-by-sibling would instead pass for a
             # recovery that quietly re-derived a flag nobody listed.
-            repaired = copy.deepcopy(healthy)
-            _walk(repaired, path[:-1], attr=False)[path[-1]] = expected  # type: ignore[index]
-            assert recovered[path[0]] == api.config_to_payload(
-                V2Config.from_payload(repaired), include_secrets=True, include_internal=True
-            )[path[0]], label
+            assert (
+                recovered[path[0]]
+                == api.config_to_payload(reparsed, include_secrets=True, include_internal=True)[
+                    path[0]
+                ]
+            ), label
         # Everything outside the corrupted section survives. Without this the
         # test would pass just as well for a recovery that threw the whole file
         # away, which for a scalar looks identical to repairing that scalar.
@@ -1381,18 +1396,24 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
 
 
 def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_path, monkeypatch):
-    """Recovery answers for the field it repaired, and never for the switch.
+    """Recovery keeps the siblings it can read, and never leaves a feature on.
 
-    ``audio_asr.enabled`` and ``ui.show_tool_calls`` both declare ``True``, so
-    replacing either section wholesale answers an unreadable *anything* by
-    switching a feature the file had off back **on** — for ``audio_asr`` that
-    means starting to send audio to a remote endpoint after an upgrade. The
-    fix is scope, not a safer default: repair the unreadable field alone, keep
-    every sibling as written, and resolve an unreadable switch to off, because
-    a value naming no side is no evidence the feature was on.
+    Two properties from two questions that must not share an answer. *How much
+    is discarded* — replacing a section wholesale answers an unreadable font
+    size by hiding the tool-call rows and an unreadable model name by
+    forgetting the endpoint, so the unreadable field is repaired alone and its
+    siblings stay as written. *Whether the feature still runs* — it does not:
+    a section that declares ``enabled`` comes back disabled, whichever of its
+    fields was unreadable, which is what ``AGENTS.md`` means by "a broken
+    optional-feature section disables that feature and warns".
+
+    The second property reverses an earlier round of this PR, which argued the
+    two directions were symmetric. They are not: leaving ASR on ships user
+    audio off-machine under settings nobody wrote and cannot be undone, while
+    leaving it off costs a warning the operator reads before re-enabling.
 
     Stated over the declared fields of every field-scoped section rather than
-    over the two the review named, so a field or a whole section added to
+    over the fields either review named, so a field or a whole section added to
     ``_FIELD_SCOPED_RECOVERY_SECTIONS`` is covered without editing this test.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1442,17 +1463,20 @@ def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_p
                     assert config.load_warnings, (section, side, info.name, unreadable)
 
                     # A declared switch resolves off; anything else falls back
-                    # to its own default. Either way the section must be
-                    # exactly what the file would have parsed to had that one
-                    # field been written so — which is how every sibling,
-                    # including a flag derived from the repaired field, is held
-                    # in a single assertion.
+                    # to its own default; and a section that declares a feature
+                    # switch comes back with it off. Either way the section must
+                    # be exactly what the file would have parsed to had it been
+                    # written that way — which is how every sibling, including a
+                    # flag derived from the repaired field, is held in a single
+                    # assertion.
                     repaired = copy.deepcopy(seed)
                     repaired[section][info.name] = (
                         False
                         if info.name in switches
                         else getattr(getattr(V2Config.default(), section), info.name)
                     )
+                    if "enabled" in switches:
+                        repaired[section]["enabled"] = False
                     assert _section_payload(config, section) == _section_payload(
                         V2Config.from_payload(repaired), section
                     ), (section, side, info.name, unreadable)
@@ -1474,29 +1498,49 @@ def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_p
     # property above vacuous exactly where it matters.
     assert every_switch <= recovered_fields, every_switch - recovered_fields
 
-    # The review's own case, and the mirror it must not become.
-    stored_off = copy.deepcopy(base)
-    stored_off["audio_asr"].update({"enabled": False, "enabled_configured": True})
-    for corrupt_field in ("enabled", "model", "timeout_seconds"):
-        payload = copy.deepcopy(stored_off)
-        payload["audio_asr"][corrupt_field] = "garbage" if corrupt_field != "model" else []
-        assert _load(payload).audio_asr.enabled is False, corrupt_field
+    # Both reviews' own cases: the switch itself, then the siblings. Whichever
+    # field was unreadable, and whichever side the file had asked for, an
+    # ``audio_asr`` that needed recovering comes back not transcribing.
+    assert "enabled" in {
+        info.name
+        for info in fields(V2Config.__dataclass_fields__["audio_asr"].default_factory)
+        if info.type in (bool, "bool")
+    }
+    for side in (False, True):
+        stored = copy.deepcopy(base)
+        stored["audio_asr"].update({"enabled": side, "enabled_configured": True})
+        for corrupt_field in (
+            "enabled",
+            "model",
+            "timeout_seconds",
+            "echo_transcript",
+            "enabled_configured",
+        ):
+            payload = copy.deepcopy(stored)
+            payload["audio_asr"][corrupt_field] = []
+            recovered = _load(payload)
+            assert recovered.load_warnings, (side, corrupt_field)
+            assert recovered.audio_asr.enabled is False, (side, corrupt_field)
 
-    stored_on = copy.deepcopy(base)
-    stored_on["audio_asr"].update({"enabled": True, "enabled_configured": True})
-    stored_on["audio_asr"]["model"] = []
-    # An unreadable model name is no reason to stop transcribing audio the
-    # config plainly asked to transcribe; only the model falls back.
-    recovered = _load(stored_on)
-    assert recovered.audio_asr.enabled is True
+    # Disabled, not discarded: the siblings the file could still be read for
+    # survive, so this is not the whole-section wipe in a new costume.
+    kept = copy.deepcopy(base)
+    kept["audio_asr"].update(
+        {"enabled": True, "endpoint_path": "/v1/custom/transcriptions", "model": []}
+    )
+    recovered = _load(kept)
+    assert recovered.audio_asr.enabled is False
+    assert recovered.audio_asr.endpoint_path == "/v1/custom/transcriptions"
     assert recovered.audio_asr.model == V2Config.default().audio_asr.model
 
-    # The member the review did not reach: same class, same flip, other section.
+    # A section with no feature switch is presentation, not an optional feature:
+    # it keeps every sibling and disables nothing beyond the unreadable field.
     hidden_rows = copy.deepcopy(base)
     hidden_rows["ui"].update({"show_tool_calls": False, "instance_name": "kept"})
     hidden_rows["ui"]["chat_message_font_size"] = "garbage"
     recovered = _load(hidden_rows)
     assert recovered.ui.show_tool_calls is False
+    assert recovered.ui.instance_name == "kept"
     assert recovered.ui.instance_name == "kept"
     assert recovered.ui.chat_message_font_size == V2Config.default().ui.chat_message_font_size
 

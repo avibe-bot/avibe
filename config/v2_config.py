@@ -962,6 +962,11 @@ def _refuse_values_naming_nothing(section: str, instance: object) -> None:
 # ``_reset_recoverable_config_section``.
 _FIELD_SCOPED_RECOVERY_SECTIONS = ("ui", "audio_asr")
 
+# The switch that decides whether an optional feature runs at all. Named once
+# because recovery has to tell it apart from every other switch in a section:
+# the rest describe how a feature behaves, this one decides whether it happens.
+_FEATURE_SWITCH_FIELD = "enabled"
+
 
 def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     message = str(error)
@@ -1037,39 +1042,52 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
 def _recover_switch_section_field(
     payload: dict, section: str, field_name: Optional[str]
 ) -> bool:
-    """Recover the one unreadable field of a section whose fields stand alone.
+    """Keep what the file still says, and leave a recovered feature switched off.
 
-    Discarding the whole section would answer an unreadable font size by hiding
-    the tool-call rows, and — the defect this exists for — an unreadable
-    anything by turning transcription back **on**, because ``audio_asr.enabled``
-    and ``ui.show_tool_calls`` both declare ``True``. So the unreadable field is
-    recovered on its own and its siblings are kept as written: a field declared
-    ``bool`` resolves to ``False``, because an unreadable switch is no evidence
-    the feature was on, and any other field is dropped so its declared default
-    applies — which is what keeps a corrupt ``audio_asr.model`` from switching
-    off transcription the config plainly asked for.
+    Two questions, answered separately, because answering both the same way is
+    what produced this function's two review rounds.
 
-    Stated over the section's declared fields rather than over the switches that
-    exist today, so a boolean added to either dataclass is covered without
-    editing this function.
+    *How much of what the operator wrote is discarded?* As little as possible.
+    Replacing the whole section answers an unreadable font size by hiding the
+    tool-call rows and an unreadable model name by forgetting the endpoint, so
+    the unreadable field is recovered alone: a field declared ``bool`` resolves
+    to ``False`` because a value naming no side is no evidence the feature was
+    on, and any other field is dropped so its declared default applies.
+
+    *Does an optional feature still run afterwards?* No. ``AGENTS.md`` states it
+    — "a broken optional-feature section disables that feature and warns" — and
+    the two directions are not the symmetric pair the previous round argued they
+    were. Leaving ``audio_asr.enabled`` on runs transcription under a
+    configuration nobody wrote, shipping user audio off-machine against
+    substituted settings, and that cannot be taken back. Leaving it off costs a
+    warning the operator reads before turning it back on. Only one of those is
+    reversible, so any repair here clears the section's ``enabled`` switch.
+
+    Both answers are stated over the section's declared fields rather than over
+    the sections that exist today: a section with no ``enabled`` is presentation
+    and keeps its siblings untouched, and one that declares it inherits the
+    disable without editing this function.
     """
 
     declared = V2Config.__dataclass_fields__[section].default_factory
+    declared_fields = {info.name for info in fields(declared)}
     switches = {info.name for info in fields(declared) if info.type in (bool, "bool")}
     stored = payload.get(section)
     if not isinstance(stored, dict):
         # Nothing readable to keep, so every switch resolves off.
-        payload[section] = {name: False for name in switches}
-        return True
-    if field_name is None:
+        stored = {name: False for name in switches}
+        payload[section] = stored
+    elif field_name is None:
         stored.update({name: False for name in switches})
-        return True
-    if field_name in switches:
+    elif field_name in switches:
         stored[field_name] = False
-        return True
-    if field_name in {info.name for info in fields(declared)}:
+    elif field_name in declared_fields:
         stored.pop(field_name, None)
-        return True
+    else:
+        return False
+    if _FEATURE_SWITCH_FIELD in switches:
+        stored[_FEATURE_SWITCH_FIELD] = False
+    return True
     return False
 
 
