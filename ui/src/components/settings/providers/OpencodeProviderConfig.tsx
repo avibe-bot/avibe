@@ -37,6 +37,7 @@ import { useModelHubCapability } from '../models/useModelHubCapability';
 import { OpencodePermissionSetup } from '../shared/OpencodePermissionSetup';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { useOpencodePermission } from '../shared/useOpencodePermission';
+import { providerOauthSignedIn } from './opencodeProviderAuth';
 import { useApi } from '@/context/ApiContext';
 import type {
   OpencodeMutationResult,
@@ -151,13 +152,6 @@ const providerMatchesFilter = (provider: OpencodeProvider, mode: FilterMode): bo
 
 const providerHasAuth = (provider: OpencodeProvider): boolean =>
   provider.has_auth ?? Boolean(provider.api_key_masked || provider.active_auth_type);
-
-// The in-card OAuth panel must only report "signed in" when OpenCode's
-// auth store actually holds an OAuth entry for the provider. ``configured``
-// alone is true for API-key saves too, which used to render "OAuth
-// credentials stored" over a plain API-key setup.
-export const providerOauthSignedIn = (provider: OpencodeProvider): boolean =>
-  provider.active_auth_type === 'oauth';
 
 const providerMatchesSearch = (provider: OpencodeProvider, q: string): boolean => {
   if (!q) return true;

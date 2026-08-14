@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { OpencodeProvider } from '@/context/ApiContext';
 
-import { providerOauthSignedIn } from './OpencodeProviderConfig';
+import { providerOauthSignedIn } from './opencodeProviderAuth';
 
 const baseProvider: OpencodeProvider = {
   id: 'openai',
