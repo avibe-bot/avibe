@@ -350,22 +350,41 @@ class _SteeringAwareOpenCodeServer:
                     else:
                         self._state.status_reconciliation_failures = 0
                         if status is not None and status.get("type") in {"busy", "retry"}:
-                            if (
-                                reconcile_insert
-                                and inserted_user_text is not None
-                                and self._inserted_user_index(
+                            if reconcile_initial_status and awaiting is None:
+                                self._state.awaiting_after_message_ids = (
+                                    self._completed_assistant_boundary(messages)
+                                )
+                            if reconcile_insert and (
+                                inserted_user_text is None
+                                or self._inserted_user_index(
                                     messages,
                                     awaiting,
                                     inserted_user_text,
                                 )
                                 >= 0
                             ):
-                                self._state.awaiting_active_status_observed = True
-                                self._state.awaiting_result_confirmation_deadline = None
-                            if reconcile_initial_status and awaiting is None:
-                                self._state.awaiting_after_message_ids = (
-                                    self._completed_assistant_boundary(messages)
-                                )
+                                # Start confirmed: the inserted user message is
+                                # visible while the native session reports
+                                # activity (or a restored poll sampled its
+                                # boundary during activity). Hand the in-progress
+                                # snapshot back to the poll loop so live tool
+                                # activity keeps streaming; the result-confirmation
+                                # window still guards the idle boundary below.
+                                if inserted_user_text is not None:
+                                    self._state.awaiting_active_status_observed = True
+                                    self._state.awaiting_result_confirmation_deadline = None
+                                    if final_snapshot or self._has_final_assistant_after(
+                                        messages,
+                                        awaiting,
+                                        inserted_user_text=inserted_user_text,
+                                    ):
+                                        # The final assistant already exists even
+                                        # though the session still reports busy
+                                        # (status settles after the message lands):
+                                        # settle like the idle path does.
+                                        self._clear_awaiting_reconciliation()
+                                        self._state.closing = True
+                                return messages
                             wait_for_insert = True
                         else:
                             self._state.reconcile_initial_status = False

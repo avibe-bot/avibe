@@ -623,12 +623,14 @@ def test_busy_restore_reconciles_inserted_user_that_later_becomes_idle() -> None
     class _ReconcilePollLoop:
         async def run_restored_poll_loop(self, poll_info):
             server = await agent._get_server()
-            reconciled_messages.extend(
-                await server.list_messages(
+            while True:
+                batch = await server.list_messages(
                     poll_info.opencode_session_id,
                     poll_info.working_path,
                 )
-            )
+                reconciled_messages.extend(batch)
+                if batch and batch[-1].get("info", {}).get("error"):
+                    return
 
         async def remove_restored_ack(self, poll_info):
             return None
