@@ -706,11 +706,18 @@ class ModelHubService:
                 continue
             # The registry preserves insertion order; the newest pending flow
             # is the only one that can own a vendor's singleton.
+            expires_at: datetime | None = None
+            if binding.expires_at_iso:
+                try:
+                    expires_at = _parse_datetime(binding.expires_at_iso)
+                except ValueError:
+                    # Keep the durable flow's singleton reservation even when
+                    # an older/corrupt timestamp cannot be used as a deadline.
+                    # The provider status remains the source of truth.
+                    pass
             self._native_slot_reservations[binding.vendor] = _NativeSlotReservation(
                 binding.source_id,
-                _parse_datetime(binding.expires_at_iso)
-                if binding.expires_at_iso
-                else None,
+                expires_at,
                 flow_id,
                 True,
             )
@@ -753,7 +760,7 @@ class ModelHubService:
             return
         if reservation.expires_at > self.now():
             return
-        if reservation.flow_id is None or not reservation.reconstructed:
+        if reservation.flow_id is None:
             self._release_native_slot(vendor, reservation.source_id)
             return
         try:

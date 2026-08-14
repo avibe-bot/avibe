@@ -1203,9 +1203,8 @@ def test_failed_native_oauth_releases_the_slot_for_the_next_start(tmp_path):
 def test_abandoned_native_oauth_slot_expires_with_its_flow(tmp_path):
     """Unit layer for scenario AUTH-SETUP-110.
 
-    A tab closed mid-authorization never reports a terminal state. The hold is
-    bound to the flow's own deadline, so it frees itself instead of wedging the
-    vendor until the service restarts.
+    Once the flow deadline passes, the provider's terminal status is checked
+    before the singleton is released for another attempt.
     """
     current = [datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc)]
     store = MemoryStore()
@@ -1228,6 +1227,13 @@ def test_abandoned_native_oauth_slot_expires_with_its_flow(tmp_path):
     with pytest.raises(ModelHubError):
         asyncio.run(service.oauth_start(request))
 
+    adapter.flows[first["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[first["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.error.denied",
+        }
+    )
     current[0] = datetime(2026, 7, 23, 4, 15, tzinfo=timezone.utc)
     second = asyncio.run(service.oauth_start(request))["flow"]
 
@@ -1237,6 +1243,60 @@ def test_abandoned_native_oauth_slot_expires_with_its_flow(tmp_path):
         (first["source_id"], "anthropic"),
         (second["source_id"], "anthropic"),
     ]
+
+
+def test_expired_native_oauth_slot_checks_live_flow_before_releasing(tmp_path):
+    """An expired in-memory hold must not discard a still-live provider flow."""
+    current = [datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc)]
+    service, store, adapter = _service(tmp_path)
+    service.now = lambda: current[0]
+    service.oauth_flows._now = lambda: current[0]
+    request = {"vendor": "anthropic", "channel": "native_cli"}
+    first = asyncio.run(service.oauth_start(request))["flow"]
+    adapter.flows[first["flow_id"]] = OAuthFlowState(
+        **{**adapter.flows[first["flow_id"]].__dict__, "state": "success"}
+    )
+
+    current[0] = datetime(2026, 7, 23, 4, 15, tzinfo=timezone.utc)
+    with pytest.raises(ModelHubError) as rejected:
+        asyncio.run(service.oauth_start(request))
+
+    assert rejected.value.code == "native_source_already_exists"
+    assert rejected.value.data == {"existing_source_id": first["source_id"]}
+    assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
+    assert len(store.config.sources) == 1
+
+
+def test_rebuild_native_oauth_reservation_ignores_malformed_expiry(tmp_path):
+    """A corrupt persisted deadline must fail closed without crashing startup."""
+    service, store, adapter = _service(tmp_path)
+    request = {"vendor": "anthropic", "channel": "native_cli"}
+    first = asyncio.run(service.oauth_start(request))["flow"]
+    flow_path = tmp_path / "oauth_flows.json"
+    payload = json.loads(flow_path.read_text(encoding="utf-8"))
+    payload[first["flow_id"]]["expires_at_iso"] = "not-a-date"
+    flow_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restarted = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        native_oauth_adapter=adapter,
+        oauth_flows=OAuthFlowRegistry(
+            flow_path,
+            now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+        ),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+        requested_model_override=store.requested_model,
+    )
+
+    with pytest.raises(ModelHubError) as rejected:
+        asyncio.run(restarted.oauth_start(request))
+
+    assert rejected.value.code == "native_source_already_exists"
+    assert rejected.value.data == {"existing_source_id": first["source_id"]}
+    assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
 
 
 def test_restarted_native_oauth_materialization_keeps_singleton_source(tmp_path):
