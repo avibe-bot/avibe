@@ -20,6 +20,7 @@ from config.v2_config import (
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
 )
+from core.agent_auth_service import BackendLoginInProgressError
 from core.handlers.model_hub.adapter import (
     EngineHealth,
     EngineStatus,
@@ -1058,6 +1059,22 @@ def test_native_oauth_rejects_duplicate_source_before_adapter(tmp_path):
     assert exc_info.value.code == "native_source_already_exists"
     assert exc_info.value.data == {"existing_source_id": existing.id}
     assert adapter.oauth_start_calls == []
+
+
+def test_native_oauth_preserves_transient_login_conflict_identity(tmp_path):
+    class LoginInProgressAdapter(FakeAdapter):
+        async def start_oauth(self, source_id, vendor):
+            raise BackendLoginInProgressError(vendor, "claude")
+
+    service, _, _ = _service(tmp_path, LoginInProgressAdapter())
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+
+    assert exc_info.value.status == 409
+    assert exc_info.value.code == "native_login_in_progress"
+    assert exc_info.value.detail == "modelHub.errors.native_login_in_progress"
+    assert exc_info.value.data == {}
 
 
 def test_nonce_oauth_start_replays_committed_flow_before_native_slot_conflict(tmp_path):

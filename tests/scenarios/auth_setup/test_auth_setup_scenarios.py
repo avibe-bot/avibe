@@ -1453,8 +1453,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered_flow, lost_flow)
         self.assertEqual(provider_calls, 1)
 
-    async def test_cross_surface_native_login_conflict_is_localized(self):
-        """Scenario: AUTH-SETUP-211."""
+    async def test_same_service_instance_native_login_conflict_is_localized(self):
+        """Scenario: AUTH-SETUP-211; both callers share one service instance."""
         harness = AuthSetupScenarioHarness()
         harness.controller.config.language = "zh"
         process = FakeProcess()

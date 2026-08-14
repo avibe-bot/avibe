@@ -799,6 +799,7 @@
       "authentication_failed": "鉴权失败，请检查 API Key 是否有效。",
       "observation_failed": "已连接，但无法确认服务返回的是有效模型接口。",
       "adapter_error": "无法确认服务是否可连接，请重试。",
+      "native_login_in_progress": "另一个原生登录正在进行中，请先完成或取消后再重试。",
       "native_subscription_exists": "该厂商已经有一个原生订阅来源。",
       "source_timeout": "连接超时，请检查网络后重试。",
       "invalid_source_order": "来源顺序包含不可用、不适用或重复的来源。",

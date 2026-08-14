@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 
-from core.agent_auth_service import BackendLoginInProgressError
-
 from .adapter import OAuthFlowState, RetainedMaterialDisposition
 from .events import contains_credential_material
 from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError
@@ -21,24 +19,6 @@ _INSTRUCTIONS_KEYS = {
 }
 _TIMEOUT_ERROR_KEY = "settings.models.oauth.error.timeout"
 _GENERIC_ERROR_KEY = "settings.models.oauth.error.generic"
-
-
-class NativeLoginConflictError(RuntimeError):
-    """A native credential is already owned by another shared flow."""
-
-    def __init__(
-        self,
-        vendor: str,
-        backend: str,
-        *,
-        owner_ref: str | None = None,
-        flow_id: str | None = None,
-    ) -> None:
-        self.vendor = vendor
-        self.backend = backend
-        self.owner_ref = owner_ref
-        self.flow_id = flow_id
-        super().__init__(f"native login already in progress for {vendor}/{backend}")
 
 
 class AgentAuthService(Protocol):
@@ -183,20 +163,12 @@ class AgentAuthNativeOAuthAdapter:
         if backend is None:
             raise NativeOAuthUnavailableError
 
-        try:
-            flow = await self._agent_auth_service.start_web_setup(
-                backend,
-                force_reset=force_reset,
-                owner_ref=source_id,
-                on_irreversible_start=on_irreversible_start,
-            )
-        except BackendLoginInProgressError as error:
-            raise NativeLoginConflictError(
-                vendor,
-                backend,
-                owner_ref=error.owner_ref,
-                flow_id=error.flow_id,
-            ) from None
+        flow = await self._agent_auth_service.start_web_setup(
+            backend,
+            force_reset=force_reset,
+            owner_ref=source_id,
+            on_irreversible_start=on_irreversible_start,
+        )
         flow_id = getattr(flow, "flow_id", None)
         if not isinstance(flow_id, str) or not flow_id:
             raise NativeOAuthUnavailableError

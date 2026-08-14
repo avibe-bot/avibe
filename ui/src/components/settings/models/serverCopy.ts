@@ -89,10 +89,13 @@ export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney)
 
 /** Start-route failures have not reached provider authorization yet. */
 export const NATIVE_SUBSCRIPTION_EXISTS_FAILURE = 'modelHub.errors.native_subscription_exists';
+export const NATIVE_LOGIN_IN_PROGRESS_FAILURE = 'modelHub.errors.native_login_in_progress';
 
 export const oauthStartFailureKey = (code: string | undefined): string =>
   code === NATIVE_SUBSCRIPTION_EXISTS_FAILURE
     ? 'settings.models.addSub.error.alreadyBound'
+    : code === NATIVE_LOGIN_IN_PROGRESS_FAILURE
+      ? 'settings.models.addSub.error.loginInProgress'
     : code === 'engine_down' || code === 'modelHub.errors.engine_down'
       ? 'settings.models.addSub.error.engineDown'
       : 'settings.models.addSub.error.startFailed';

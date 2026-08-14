@@ -32,6 +32,7 @@ from config.v2_config import (
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
 )
+from core.agent_auth_service import BackendLoginInProgressError
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
@@ -75,7 +76,6 @@ from .migration import (
     apply_native_migration,
     scan_native_configs,
 )
-from .native_oauth import NativeLoginConflictError
 from .oauth import (
     NativeOAuthAdapter,
     NativeOAuthUnavailableError,
@@ -676,13 +676,11 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=404) from None
         except (EngineUnavailableError, NativeOAuthUnavailableError):
             raise ModelHubError("engine_down", status=503) from None
-        except NativeLoginConflictError as error:
-            data = {"existing_source_id": error.owner_ref} if error.owner_ref else None
+        except BackendLoginInProgressError as error:
             raise ModelHubError(
-                "native_source_already_exists",
+                error.code,
                 status=409,
-                detail="modelHub.errors.native_subscription_exists",
-                data=data,
+                detail="modelHub.errors.native_login_in_progress",
             ) from None
         except ModelHubError:
             raise

@@ -188,6 +188,14 @@ async def test_single_service_fixture_routes_all_callers_to_the_same_registry() 
     assert service._web_flows is service._flows_by_id
     assert service._web_flows[im_flow.flow_id] is im_flow
 
+    adapter = AgentAuthNativeOAuthAdapter(
+        service,
+        auth_status_reader=lambda _backend: {"active_auth_mode": "oauth"},
+    )
+    with pytest.raises(BackendLoginInProgressError) as adapter_conflict:
+        await adapter.start_oauth("source", "openai")
+    assert adapter_conflict.value.code == "native_login_in_progress"
+
     with pytest.raises(BackendLoginInProgressError):
         await service.start_web_setup("codex", force_reset=False, owner_ref="source")
 
@@ -195,10 +203,6 @@ async def test_single_service_fixture_routes_all_callers_to_the_same_registry() 
     web_flow = await service.start_web_setup("codex", force_reset=False, owner_ref="source")
     assert service._flows_by_id[web_flow.flow_id] is web_flow
 
-    adapter = AgentAuthNativeOAuthAdapter(
-        service,
-        auth_status_reader=lambda _backend: {"active_auth_mode": "oauth"},
-    )
     assert (await adapter.oauth_status(web_flow.flow_id)).flow_id == web_flow.flow_id
     await adapter.cancel_oauth(web_flow.flow_id)
 
