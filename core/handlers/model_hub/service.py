@@ -76,6 +76,7 @@ from .migration import (
     scan_native_configs,
 )
 from .oauth import (
+    NativeLoginSlotTakenError,
     NativeOAuthAdapter,
     NativeOAuthUnavailableError,
     OAuthAdapter,
@@ -279,22 +280,6 @@ class HandleSettlement:
     turn_outcome: TurnOutcomeProjectionInput | None
 
 
-@dataclass(frozen=True)
-class _NativeSlotReservation:
-    """One in-flight native login holding a vendor's CLI singleton.
-
-    ``expires_at`` mirrors the provider flow's own deadline once the flow
-    exists, so an abandoned authorization frees the slot instead of wedging it
-    until restart. It stays ``None`` only while the start call is in flight,
-    which that call always settles itself.
-    """
-
-    source_id: str
-    expires_at: datetime | None = None
-    flow_id: str | None = None
-    reconstructed: bool = False
-
-
 HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
 
 
@@ -333,7 +318,18 @@ def _source_id() -> str:
 
 
 def _parse_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    """Parse a timestamp into something comparable with this service's clock.
+
+    Every parsed value is compared against ``self.now()``, which is UTC-aware.
+    A provider or an older persisted record may still carry a naive ISO string,
+    and comparing the two raises ``TypeError`` rather than answering the
+    question — so read a naive timestamp as the UTC it was written as.
+    """
+
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _mask_credential(value: str) -> str:
@@ -592,14 +588,6 @@ class ModelHubService:
         self._oauth_start_tasks: dict[
             tuple[str, str, OAuthChannel], asyncio.Task[dict]
         ] = {}
-        # The native singleton is held from before provider work starts until
-        # the flow settles, because the sanctioned CLI owns one shared login:
-        # whichever authorization finishes last overwrites that credential and
-        # cancelling an already-successful flow cannot roll it back. Keeping
-        # this in memory is deliberate — a restart ends every in-flight flow it
-        # describes, and the materialization re-check remains the backstop.
-        self._native_slot_reservations: dict[str, _NativeSlotReservation] = {}
-        self._rebuild_native_slot_reservations()
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
@@ -662,142 +650,31 @@ class ModelHubService:
             None,
         )
 
-    def _native_slot_reservation(
-        self,
-        vendor: str,
-    ) -> _NativeSlotReservation | None:
-        """Return the live reservation holding ``vendor``'s native singleton."""
+    def _native_login_in_progress(self, vendor: str) -> bool:
+        """Ask the credential's owner whether a live login is rewriting it.
 
-        reservation = self._native_slot_reservations.get(vendor)
-        if reservation is None:
-            return None
-        return reservation
+        Migration adopts the credential the CLI already holds rather than
+        starting a login, so it cannot reach the owner through the login path
+        the way create and reauth do.
+        """
 
-    def _reserve_native_slot(
-        self,
-        vendor: str,
-        source_id: str,
-        *,
-        flow_id: str | None = None,
-    ) -> None:
-        self._native_slot_reservations[vendor] = _NativeSlotReservation(
-            source_id,
-            flow_id=flow_id,
-        )
+        return self.native_oauth_adapter.login_in_progress(vendor)
 
-    def _rebuild_native_slot_reservations(self) -> None:
-        """Recover native create holds from the durable OAuth binding journal."""
+    def _release_native_login_slot(self, flow_id: str) -> None:
+        """Tell the credential's owner this native login is fully settled.
+
+        The auth service holds the vendor's CLI credential past success so the
+        window between "credential written" and "Source persisted" cannot be
+        overwritten by a second login. Model Hub is the only layer that knows
+        when that window closes.
+        """
 
         try:
-            bindings = self.oauth_flows._read()
-        except (AttributeError, OSError, ValueError):
-            return
-        for flow_id, binding in bindings.items():
-            if (
-                binding.channel != "native_cli"
-                or binding.intent != "create"
-                or binding.completed
-                or binding.terminal_state is not None
-                or binding.vendor is None
-                or binding.source_id is None
-                or self._existing_native_source(self.store.load(), binding.vendor)
-                is not None
-            ):
-                continue
-            # The registry preserves insertion order; the newest pending flow
-            # is the only one that can own a vendor's singleton.
-            expires_at: datetime | None = None
-            if binding.expires_at_iso:
-                try:
-                    expires_at = _parse_datetime(binding.expires_at_iso)
-                except ValueError:
-                    # Keep the durable flow's singleton reservation even when
-                    # an older/corrupt timestamp cannot be used as a deadline.
-                    # The provider status remains the source of truth.
-                    pass
-            self._native_slot_reservations[binding.vendor] = _NativeSlotReservation(
-                binding.source_id,
-                expires_at,
-                flow_id,
-                True,
-            )
-
-    def _hold_native_slot_until(
-        self,
-        vendor: str,
-        source_id: str | None,
-        expires_at_iso: str | None,
-        flow_id: str | None = None,
-    ) -> None:
-        """Bind a held reservation to the started flow and its deadline."""
-
-        if source_id is None:
-            return
-        reservation = self._native_slot_reservations.get(vendor)
-        if reservation is None or reservation.source_id != source_id:
-            return
-        expires_at: datetime | None = None
-        if expires_at_iso:
-            try:
-                expires_at = _parse_datetime(expires_at_iso)
-            except ValueError:
-                pass
-        if expires_at is not None and (
-            (expires_at.tzinfo is None) != (self.now().tzinfo is None)
-        ):
-            # Incomparable clocks cannot drive deadline checks. Keep the flow
-            # identity so provider status can still reconcile the hold.
-            expires_at = None
-        self._native_slot_reservations[vendor] = _NativeSlotReservation(
-            source_id,
-            expires_at,
-            flow_id or reservation.flow_id,
-            reservation.reconstructed,
-        )
-
-    async def _refresh_expired_native_slot_reservation(
-        self,
-        vendor: str,
-    ) -> None:
-        reservation = self._native_slot_reservations.get(vendor)
-        if reservation is None or reservation.flow_id is None:
-            return
-        if reservation.expires_at is not None and reservation.expires_at > self.now():
-            return
-        try:
-            flow = await self._oauth_status(reservation.flow_id, "native_cli")
-        except ModelHubError:
-            # An unavailable provider cannot prove that the CLI credential is
-            # safe to replace. Keep the hold until a terminal status is known.
-            return
-        if flow.state in {"failed", "cancelled"}:
-            self._release_native_slot(vendor, reservation.source_id)
-            return
-        if flow.state == "success":
-            try:
-                binding = self._oauth_binding(reservation.flow_id)
-                await self._materialize_completed_oauth(
-                    reservation.flow_id,
-                    binding,
-                    flow,
-                )
-            except ModelHubError:
-                # A flow that completed without a durable binding cannot be
-                # safely replaced. Keep the reservation fail-closed.
-                return
-
-    def _release_native_slot(
-        self,
-        vendor: str | None,
-        source_id: str | None,
-    ) -> None:
-        """Free the singleton once this flow can no longer reach the CLI."""
-
-        if not vendor or source_id is None:
-            return
-        reservation = self._native_slot_reservations.get(vendor)
-        if reservation is not None and reservation.source_id == source_id:
-            self._native_slot_reservations.pop(vendor, None)
+            self.native_oauth_adapter.release_login_slot(flow_id)
+        except Exception:  # noqa: BLE001
+            # The hold is already bounded by the owner's own reap; failing to
+            # shorten it must never fail the settled flow.
+            logger.debug("native login slot release failed", exc_info=True)
 
     async def _engine_call(self, awaitable):
         try:
@@ -823,6 +700,20 @@ class ModelHubService:
             if flow_id is not None:
                 self.oauth_flows.forget(flow_id)
             raise ModelHubError("flow_not_found", status=404) from None
+        except NativeLoginSlotTakenError as taken:
+            # Every native login — create and reauth alike — reaches the CLI
+            # through this call, so the owner's refusal surfaces here for all
+            # of them instead of only where Model Hub remembered to ask.
+            raise ModelHubError(
+                "native_source_already_exists",
+                status=409,
+                detail="modelHub.errors.native_subscription_slot_taken",
+                data=(
+                    {"existing_source_id": taken.occupant_ref}
+                    if taken.occupant_ref
+                    else None
+                ),
+            ) from None
         except (EngineUnavailableError, NativeOAuthUnavailableError):
             raise ModelHubError("engine_down", status=503) from None
         except ModelHubError:
@@ -1794,11 +1685,12 @@ class ModelHubService:
                         pass
                 raise
             finally:
-                if channel == "native_cli" and source_id and native_slot_safe:
+                if channel == "native_cli" and native_slot_safe:
                     # Release only after the Source is durable or provider
                     # cleanup is confirmed. A materialization failure leaves
-                    # the provider-owned reservation fail-closed.
-                    self._release_native_slot(vendor, source_id)
+                    # the hold in place so a retry cannot overwrite a
+                    # credential this flow may still own.
+                    self._release_native_login_slot(oauth_ref)
 
     @staticmethod
     def _source_matches_binding(
@@ -2252,11 +2144,8 @@ class ModelHubService:
         flow: OAuthFlowState,
     ) -> tuple[OAuthFlowState, dict | None]:
         if flow.state != "success":
-            if flow.state in {"failed", "cancelled"}:
-                # Terminal only. A polled ``awaiting_action`` flow still owns the
-                # CLI login it launched, so releasing on every non-success poll
-                # would hand the singleton away mid-authorization.
-                self._release_native_slot(binding.vendor, binding.source_id)
+            # A failed or cancelled flow stops holding the CLI credential in
+            # the layer that owns it; nothing has to be released from here.
             if (
                 self._is_hub_unsuccessful_terminal(binding, flow)
                 and binding.source_id is not None
@@ -2270,11 +2159,20 @@ class ModelHubService:
         if binding.source_id is None or binding.vendor is None:
             raise ModelHubError("flow_not_found", status=404)
         if binding.intent == "reauth":
-            repair_result = await self._materialize_reauth(
-                flow_id,
-                binding,
-                flow,
-            )
+            try:
+                repair_result = await self._materialize_reauth(
+                    flow_id,
+                    binding,
+                    flow,
+                )
+            finally:
+                if binding.channel == "native_cli":
+                    # Reauth overwrites the credential of a Source that already
+                    # exists, so once this materialization has run there is no
+                    # later write left for the hold to protect — on every
+                    # outcome, including the ones that mark the Source
+                    # needs_action.
+                    self._release_native_login_slot(flow_id)
             return flow, repair_result
         await self._create_oauth_source(
             [],
@@ -4035,13 +3933,14 @@ class ModelHubService:
                     raise ModelHubError("engine_down", status=503)
                 return await asyncio.shield(task)
 
-        reserved_source_id: str | None = None
         if oauth_channel == "native_cli":
-            await self._refresh_expired_native_slot_reservation(vendor)
             async with self._mutation_lock:
+                # Only the persisted Source is Model Hub's to know about; the
+                # in-flight login is refused by the layer that owns the CLI
+                # credential. The lock serializes this read with migration's
+                # native Source writer.
                 existing = self._existing_native_source(self.store.load(), vendor)
-                reserved = self._native_slot_reservation(vendor)
-                if existing is not None or reserved is not None:
+                if existing is not None:
                     # This request owns a new nonce claim, so release it before
                     # rejecting the occupied singleton. A committed/in-flight
                     # nonce has already returned above and never reaches here.
@@ -4051,24 +3950,15 @@ class ModelHubService:
                             vendor,
                             oauth_channel,
                         )
-                    occupant = (
-                        existing.id
-                        if existing is not None
-                        else cast(_NativeSlotReservation, reserved).source_id
-                    )
                     raise ModelHubError(
                         "native_source_already_exists",
                         status=409,
                         detail="modelHub.errors.native_subscription_slot_taken",
-                        data={"existing_source_id": occupant},
+                        data={"existing_source_id": existing.id},
                     )
-                # Hold the singleton before external provider work. The lock
-                # serializes this check with migration's native Source writer.
-                reserved_source_id = _source_id()
-                self._reserve_native_slot(vendor, reserved_source_id)
 
         async def start_and_remember() -> dict:
-            pending_source_id = reserved_source_id or _source_id()
+            pending_source_id = _source_id()
             flow: OAuthFlowState | None = None
             flow_cleanup_done = False
             flow_cleanup_attempted = False
@@ -4078,15 +3968,6 @@ class ModelHubService:
                         pending_source_id,
                         vendor,
                     )
-                )
-                # Bind the provider flow before validating its echoed
-                # identity. If cleanup of a malformed response fails, the
-                # reservation still carries the flow ID for reconciliation.
-                self._hold_native_slot_until(
-                    vendor,
-                    reserved_source_id,
-                    flow.expires_at_iso,
-                    flow.flow_id,
                 )
                 if flow.source_id != pending_source_id or flow.vendor != vendor:
                     flow_cleanup_attempted = True
@@ -4117,7 +3998,6 @@ class ModelHubService:
                     ),
                 )
             except BaseException as error:
-                cleanup_confirmed = flow is None or flow_cleanup_done
                 try:
                     if (
                         flow is not None
@@ -4125,7 +4005,7 @@ class ModelHubService:
                         and not flow_cleanup_attempted
                     ):
                         flow_cleanup_attempted = True
-                        cleanup_confirmed = await self._discard_started_oauth_flow(
+                        await self._discard_started_oauth_flow(
                             flow,
                             oauth_channel,
                         )
@@ -4135,8 +4015,6 @@ class ModelHubService:
                     if not isinstance(error, asyncio.CancelledError):
                         raise ModelHubError("engine_down", status=503) from None
                 finally:
-                    if cleanup_confirmed:
-                        self._release_native_slot(vendor, reserved_source_id)
                     if client_nonce is not None:
                         try:
                             self.oauth_flows.release_nonce(
@@ -4282,10 +4160,9 @@ class ModelHubService:
                     else:
                         self.oauth_flows.forget(flow_id)
                 else:
-                    # The provider flow is cancelled, so this authorization can
-                    # no longer touch the CLI credential: free the singleton for
-                    # the next attempt instead of holding it until expiry.
-                    self._release_native_slot(binding.vendor, binding.source_id)
+                    # Cancelling the provider flow removes it from the layer
+                    # that owns the CLI credential, so the singleton is already
+                    # free for the next attempt.
                     if binding.client_nonce is not None:
                         self.oauth_flows.retain_cancelled(flow_id)
                     else:

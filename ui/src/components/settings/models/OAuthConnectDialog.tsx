@@ -144,7 +144,17 @@ export const OAuthConnectDialog: React.FC<{
   const preopenProviderWindow = React.useCallback(() => {
     if (providerWindow.current && !providerWindow.current.closed) return;
     try {
-      providerWindow.current = window.open('about:blank', '_blank');
+      const tab = window.open('about:blank', '_blank');
+      if (tab) {
+        try {
+          // The provider's authorization page is navigated into this tab, so
+          // leaving `opener` attached would let it drive this window.
+          tab.opener = null;
+        } catch {
+          // Some browser WindowProxy implementations expose a read-only opener.
+        }
+      }
+      providerWindow.current = tab;
     } catch {
       providerWindow.current = null;
     }

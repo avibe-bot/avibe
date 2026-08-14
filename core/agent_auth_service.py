@@ -353,6 +353,30 @@ class ClaudeOAuthAttempt:
 WebFlowState = str  # "starting" | "awaiting_code" | "verifying" | "success" | "failed" | "cancelled"
 
 
+class BackendLoginInProgressError(RuntimeError):
+    """Another login already holds this backend's sanctioned CLI credential.
+
+    Raised by ``start_web_setup`` instead of starting a second flow. The
+    sanctioned CLI keeps one credential per login target, so whichever
+    authorization finishes last silently overwrites the other — and cancelling
+    an already-successful one cannot roll it back.
+    """
+
+    def __init__(
+        self,
+        backend: str,
+        *,
+        flow_id: str,
+        owner_ref: str | None = None,
+    ):
+        super().__init__(f"login_in_progress:{backend}")
+        self.backend = backend
+        self.flow_id = flow_id
+        # Opaque tag supplied by whoever holds the slot, echoed back so the
+        # refused caller can name the occupant in its own vocabulary.
+        self.owner_ref = owner_ref
+
+
 @dataclass
 class WebAuthFlow:
     flow_id: str
@@ -382,6 +406,14 @@ class WebAuthFlow:
     # TTL so the dict doesn't grow unboundedly across sign-in
     # attempts on a long-lived UI server.
     terminal_at: float | None = None
+    # Opaque tag naming whoever started this login, echoed to a caller that
+    # gets refused the slot. ``hold_after_success`` keeps the credential
+    # claimed past success for a caller with its own post-login write to
+    # finish (Model Hub persists a Source); ``slot_released`` records that
+    # acknowledgement.
+    owner_ref: str | None = None
+    hold_after_success: bool = False
+    slot_released: bool = False
 
 
 class AgentAuthService:
@@ -2013,12 +2045,82 @@ class AgentAuthService:
         "github-copilot": {"deploymentType": "github.com"},
     }
 
+    # ------------------------------------------------------------------
+    # Login-slot single flight
+    #
+    # The sanctioned CLI keeps one credential per login target, so two
+    # concurrent logins race to overwrite it. This service owns that
+    # credential, so it owns the guard: the slot is the flow registry
+    # itself, claimed by the insert below before any provider work starts.
+    # Every caller — Settings sign-in, Model Hub create, Model Hub reauth —
+    # reaches the CLI through ``start_web_setup``, so none of them can
+    # bypass it, and none of them has to remember to ask.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _login_slot_key(backend: str, provider_id: Optional[str]) -> str:
+        """Name the credential a login would overwrite."""
+
+        # Claude and Codex authenticate the whole backend; OpenCode stores one
+        # credential per provider, so two providers do not contend.
+        if backend == "opencode":
+            return f"opencode:{(provider_id or '').strip()}"
+        return backend
+
+    def _flow_holds_login_slot(self, flow: WebAuthFlow, now: float) -> bool:
+        if flow.slot_released:
+            return False
+        if flow.state in self._WEB_FLOW_TERMINAL_STATES:
+            # A failed or cancelled login can no longer reach the credential.
+            # A successful one still can, until its caller has finished the
+            # write it asked to hold for — or the terminal TTL reaps the
+            # record, which bounds a caller that never comes back.
+            return flow.state == "success" and flow.hold_after_success
+        # A live flow past the login deadline cannot still be driving the CLI:
+        # its own waiter times out at exactly this bound. Fail open so a lost
+        # waiter cannot wedge the vendor until restart.
+        return now - flow.created_at < self.setup_timeout_seconds
+
+    def _login_slot_holder(self, slot_key: str) -> WebAuthFlow | None:
+        now = time.time()
+        for flow in self._web_flows.values():
+            if (
+                self._login_slot_key(flow.backend, flow.provider) == slot_key
+                and self._flow_holds_login_slot(flow, now)
+            ):
+                return flow
+        return None
+
+    def login_in_progress(self, backend: str, *, provider_id: Optional[str] = None) -> bool:
+        """Report whether a live login is rewriting this login target's credential.
+
+        For callers that do not log in and so cannot pass through
+        ``start_web_setup`` — adopting the credential the CLI already holds
+        into a Model Hub Source, for one. They still need to know the
+        credential is about to be replaced, and this service is the only thing
+        that knows it.
+        """
+
+        holder = self._login_slot_holder(self._login_slot_key(backend, provider_id))
+        return holder is not None
+
+    def release_login_slot(self, flow_id: str) -> bool:
+        """Acknowledge that a held successful login is fully settled."""
+
+        flow = self._web_flows.get(flow_id)
+        if flow is None:
+            return False
+        flow.slot_released = True
+        return True
+
     async def start_web_setup(
         self,
         backend: str,
         *,
         force_reset: bool = True,
         provider_id: Optional[str] = None,
+        owner_ref: Optional[str] = None,
+        hold_after_success: bool = False,
         on_irreversible_start: Callable[
             [], Callable[[], None] | None
         ] | None = None,
@@ -2035,16 +2137,40 @@ class AgentAuthService:
         surfaced via ``WebAuthFlow.url`` / ``WebAuthFlow.device_code`` and
         completion is auto-detected by OpenCode's daemon — no code submit
         from the user.
+
+        Raises ``BackendLoginInProgressError`` when another live login already
+        holds this backend's credential.
         """
         if backend not in self.WEB_BACKENDS:
             raise ValueError(f"unsupported_backend:{backend}")
 
+        if isinstance(provider_id, str):
+            provider_id = provider_id.strip()
         flow_id = uuid.uuid4().hex[:12]
-        flow = WebAuthFlow(flow_id=flow_id, backend=backend, state="starting")
+        flow = WebAuthFlow(
+            flow_id=flow_id,
+            backend=backend,
+            state="starting",
+            owner_ref=owner_ref,
+            hold_after_success=hold_after_success,
+        )
         if backend == "opencode":
             flow.provider = provider_id
 
         async with self._web_flow_lock:
+            # Claiming the slot IS the registry insert, and it happens before
+            # any provider work — there is no window where a login has touched
+            # the CLI without being visible here.
+            self._reap_stale_web_flows()
+            holder = self._login_slot_holder(
+                self._login_slot_key(backend, flow.provider)
+            )
+            if holder is not None:
+                raise BackendLoginInProgressError(
+                    backend,
+                    flow_id=holder.flow_id,
+                    owner_ref=holder.owner_ref,
+                )
             self._web_flows[flow_id] = flow
 
         try:
@@ -2069,9 +2195,17 @@ class AgentAuthService:
                 flow.state = "awaiting_code"
                 flow.waiter_task = asyncio.create_task(self._wait_for_claude_completion_web(flow))
             else:  # opencode
-                if not isinstance(provider_id, str) or not provider_id.strip():
+                if not isinstance(provider_id, str) or not provider_id:
                     raise ValueError("opencode_provider_id_required")
-                await self._start_opencode_oauth_web(flow, provider_id.strip())
+                await self._start_opencode_oauth_web(flow, provider_id)
+        except asyncio.CancelledError:
+            # Cancellation between the claim and a started provider flow would
+            # otherwise leave this record live and non-terminal, holding the
+            # credential with nobody able to settle it.
+            flow.state = "failed"
+            flow.error = "cancelled"
+            flow.terminal_at = time.time()
+            raise
         except Exception as err:  # noqa: BLE001
             logger.error("Web auth start failed for %s: %s", backend, err, exc_info=True)
             if backend == "claude":

@@ -8,9 +8,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol
 
+from core.agent_auth_service import BackendLoginInProgressError
+
 from .adapter import OAuthFlowState, RetainedMaterialDisposition
 from .events import contains_credential_material
-from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError
+from .oauth import (
+    NativeLoginSlotTakenError,
+    NativeOAuthSourceStatus,
+    NativeOAuthUnavailableError,
+)
 
 _VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
 _INSTRUCTIONS_KEYS = {
@@ -30,6 +36,8 @@ class AgentAuthService(Protocol):
         backend: str,
         *,
         force_reset: bool = True,
+        owner_ref: str | None = None,
+        hold_after_success: bool = False,
         on_irreversible_start: Callable[
             [], Callable[[], None] | None
         ] | None = None,
@@ -40,6 +48,10 @@ class AgentAuthService(Protocol):
     async def submit_web_code(self, flow_id: str, code: str) -> dict[str, Any]: ...
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]: ...
+
+    def release_login_slot(self, flow_id: str) -> bool: ...
+
+    def login_in_progress(self, backend: str, *, provider_id: str | None = None) -> bool: ...
 
 
 @dataclass
@@ -165,11 +177,20 @@ class AgentAuthNativeOAuthAdapter:
         if backend is None:
             raise NativeOAuthUnavailableError
 
-        flow = await self._agent_auth_service.start_web_setup(
-            backend,
-            force_reset=force_reset,
-            on_irreversible_start=on_irreversible_start,
-        )
+        try:
+            # The auth service owns the CLI credential, so it owns the
+            # singleton: the slot is claimed by this call before any provider
+            # work, and stays held past success until Model Hub has persisted
+            # the Source that inherits the credential.
+            flow = await self._agent_auth_service.start_web_setup(
+                backend,
+                force_reset=force_reset,
+                owner_ref=source_id,
+                hold_after_success=True,
+                on_irreversible_start=on_irreversible_start,
+            )
+        except BackendLoginInProgressError as conflict:
+            raise NativeLoginSlotTakenError(conflict.owner_ref) from None
         flow_id = getattr(flow, "flow_id", None)
         if not isinstance(flow_id, str) or not flow_id:
             raise NativeOAuthUnavailableError
@@ -225,6 +246,19 @@ class AgentAuthNativeOAuthAdapter:
         if status is None:
             raise KeyError(flow_id)
         return status
+
+    def release_login_slot(self, flow_id: str) -> None:
+        """Tell the credential's owner this login is fully settled."""
+
+        self._agent_auth_service.release_login_slot(flow_id)
+
+    def login_in_progress(self, vendor: str) -> bool:
+        """Ask the credential's owner whether a live login is rewriting it."""
+
+        backend = _VENDOR_BACKENDS.get(vendor)
+        if backend is None:
+            return False
+        return self._agent_auth_service.login_in_progress(backend)
 
     def _binding(self, flow_id: str) -> _FlowBinding:
         try:

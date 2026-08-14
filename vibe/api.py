@@ -9396,12 +9396,24 @@ async def start_oauth_web_async(
     if recovery_message:
         return {"ok": False, "error": "config_recovery", "message": recovery_message}
     service = _get_oauth_service()
+    from core.agent_auth_service import BackendLoginInProgressError
+
     try:
         flow = await service.start_web_setup(
             backend,
             force_reset=force_reset,
             provider_id=(provider_id.strip() if isinstance(provider_id, str) else None),
         )
+    except BackendLoginInProgressError as conflict:
+        # Not a failure to start: another login already holds this backend's
+        # single CLI credential. Name it so the caller can offer to wait or
+        # cancel instead of retrying into the same refusal.
+        return {
+            "ok": False,
+            "error": "login_in_progress",
+            "backend": backend,
+            "flow_id": conflict.flow_id,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.error("Web OAuth start failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "start_failed", "detail": str(exc)}

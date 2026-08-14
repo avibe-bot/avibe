@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock
@@ -22,6 +23,7 @@ import pytest
 
 from core.agent_auth_service import (
     AgentAuthService,
+    BackendLoginInProgressError,
     ClaudeOAuthAttempt,
     ClaudeOAuthBatch,
     WebAuthFlow,
@@ -1749,3 +1751,262 @@ def test_test_web_auth_api_key_mode_does_not_prompt_for_oauth_login(
 
     assert result["ok"] is False
     assert result["error"] == "invalid_credentials"
+
+
+# ---------------------------------------------------------------------------
+# Login-slot single flight
+#
+# Unit layer for scenario AUTH-SETUP-110.
+#
+# The sanctioned CLI keeps one credential per login target, so two concurrent
+# logins race to overwrite it and the loser is silently discarded. This service
+# owns that credential, so it owns the guard: every caller — Settings sign-in,
+# Model Hub create, Model Hub reauth — reaches the CLI through
+# ``start_web_setup``, so none of them can bypass it by forgetting a protocol.
+# ---------------------------------------------------------------------------
+
+
+def _claude_start_stub() -> AsyncMock:
+    return AsyncMock(return_value=(object(), "https://claude.ai/oauth/authorize", None))
+
+
+async def _claim_login(service: AgentAuthService, backend: str, **kwargs) -> WebAuthFlow:
+    """Start a login and drop its background waiters, keeping the claim."""
+
+    flow = await service.start_web_setup(backend, **kwargs)
+    pending = [task for task in (flow.reader_task, flow.waiter_task) if task is not None]
+    # Cancel every waiter before awaiting any of them: the first await hands
+    # control back to the loop, which would otherwise run the ones still armed.
+    for task in pending:
+        task.cancel()
+    for task in pending:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    return flow
+
+
+@pytest.mark.parametrize("live_state", ["starting", "awaiting_code", "verifying"])
+def test_a_live_login_refuses_the_next_one_before_any_provider_work(
+    service: AgentAuthService, live_state: str
+) -> None:
+    """Seed every non-terminal shape the registry can hold. Each one can still
+    write the vendor's credential, so none of them may be started over — and
+    the refusal lands before the sign-out a reauth would otherwise perform."""
+    holder = WebAuthFlow(
+        flow_id="held",
+        backend="claude",
+        state=live_state,
+        owner_ref="src_first",
+    )
+    service._web_flows[holder.flow_id] = holder
+    irreversible: list[str] = []
+    service._start_claude_control_flow = _claude_start_stub()
+
+    with pytest.raises(BackendLoginInProgressError) as refused:
+        _run(
+            service.start_web_setup(
+                "claude",
+                force_reset=True,
+                owner_ref="src_second",
+                on_irreversible_start=lambda: irreversible.append("started"),
+            )
+        )
+
+    assert refused.value.backend == "claude"
+    assert refused.value.flow_id == "held"
+    assert refused.value.owner_ref == "src_first"
+    assert irreversible == []
+    service._start_claude_control_flow.assert_not_awaited()
+    assert list(service._web_flows) == ["held"]
+
+
+@pytest.mark.parametrize(
+    ("settled_state", "hold_after_success"),
+    [
+        ("failed", False),
+        ("failed", True),
+        ("cancelled", False),
+        ("cancelled", True),
+        ("success", False),
+    ],
+)
+def test_a_settled_login_frees_the_credential_for_the_next_one(
+    service: AgentAuthService, settled_state: str, hold_after_success: bool
+) -> None:
+    """Seed every terminal shape that can no longer reach the credential: a
+    login that failed or was cancelled, and a successful one whose caller never
+    asked to hold it. None of them may block the next sign-in."""
+    holder = WebAuthFlow(
+        flow_id="held",
+        backend="claude",
+        state=settled_state,
+        hold_after_success=hold_after_success,
+        owner_ref="src_first",
+    )
+    service._web_flows[holder.flow_id] = holder
+    service._start_claude_control_flow = _claude_start_stub()
+
+    flow = _run(_claim_login(service, "claude", owner_ref="src_second"))
+
+    assert flow.state == "awaiting_code"
+    assert flow.owner_ref == "src_second"
+
+
+def test_a_successful_login_stays_held_until_its_caller_settles(
+    service: AgentAuthService,
+) -> None:
+    """A caller with its own post-login write — Model Hub persisting the Source
+    that inherits the credential — keeps the claim across that window, because
+    a second login landing inside it would overwrite what was just written."""
+    holder = WebAuthFlow(
+        flow_id="held",
+        backend="claude",
+        state="success",
+        hold_after_success=True,
+        owner_ref="src_first",
+    )
+    service._web_flows[holder.flow_id] = holder
+    service._start_claude_control_flow = _claude_start_stub()
+
+    with pytest.raises(BackendLoginInProgressError) as refused:
+        _run(service.start_web_setup("claude", owner_ref="src_second"))
+    assert refused.value.owner_ref == "src_first"
+
+    assert service.release_login_slot("held") is True
+    flow = _run(_claim_login(service, "claude", owner_ref="src_second"))
+    assert flow.state == "awaiting_code"
+
+
+def test_releasing_an_unknown_login_reports_nothing_to_release(
+    service: AgentAuthService,
+) -> None:
+    assert service.release_login_slot("nonexistent") is False
+
+
+@pytest.mark.parametrize("elapsed_fraction", [0.0, 0.5, 0.999])
+def test_a_login_inside_its_own_deadline_still_holds_the_credential(
+    service: AgentAuthService, elapsed_fraction: float
+) -> None:
+    holder = WebAuthFlow(flow_id="held", backend="claude", state="awaiting_code")
+    holder.created_at = time.time() - service.setup_timeout_seconds * elapsed_fraction
+    service._web_flows[holder.flow_id] = holder
+
+    with pytest.raises(BackendLoginInProgressError):
+        _run(service.start_web_setup("claude"))
+
+
+def test_a_login_past_its_own_deadline_stops_holding_the_credential(
+    service: AgentAuthService,
+) -> None:
+    """A live record older than the login deadline cannot still be driving the
+    CLI — its own waiter times out at exactly that bound. Fail open, so a lost
+    waiter cannot wedge the vendor until the process restarts."""
+    holder = WebAuthFlow(flow_id="held", backend="claude", state="awaiting_code")
+    holder.created_at = time.time() - service.setup_timeout_seconds - 1
+    service._web_flows[holder.flow_id] = holder
+    service._start_claude_control_flow = _claude_start_stub()
+
+    flow = _run(_claim_login(service, "claude"))
+
+    assert flow.state == "awaiting_code"
+
+
+def test_a_restarted_service_never_inherits_a_login_hold(
+    service: AgentAuthService,
+) -> None:
+    """The claim lives only in this process's flow registry, so a login that
+    was in flight when the process died takes its hold with it: nothing
+    survives that can still write the credential, and nothing survives that can
+    wedge the vendor either."""
+    holder = WebAuthFlow(
+        flow_id="held",
+        backend="claude",
+        state="awaiting_code",
+        hold_after_success=True,
+        owner_ref="src_first",
+    )
+    service._web_flows[holder.flow_id] = holder
+
+    restarted = AgentAuthService(_StubController())
+    restarted._start_claude_control_flow = _claude_start_stub()
+
+    flow = _run(_claim_login(restarted, "claude", owner_ref="src_second"))
+
+    assert flow.state == "awaiting_code"
+    assert flow.flow_id != "held"
+
+
+def test_cancelling_a_login_frees_the_credential_for_the_next_one(
+    service: AgentAuthService,
+) -> None:
+    """Cancellation is settled by the owner's own state, not by a caller's
+    guess: the record it cancelled is the record the guard reads."""
+    service._start_claude_control_flow = _claude_start_stub()
+
+    async def scenario() -> tuple[WebAuthFlow, dict, WebAuthFlow]:
+        first = await _claim_login(service, "claude", owner_ref="src_first")
+        cancelled = await service.cancel_web_flow(first.flow_id)
+        second = await _claim_login(service, "claude", owner_ref="src_second")
+        return first, cancelled, second
+
+    first, cancelled, second = _run(scenario())
+
+    assert cancelled == {"ok": True}
+    assert first.state == "cancelled"
+    assert second.flow_id != first.flow_id
+    assert second.state == "awaiting_code"
+
+
+def test_a_login_cancelled_mid_start_does_not_wedge_the_credential(
+    service: AgentAuthService,
+) -> None:
+    """The claim precedes the provider call, so a cancellation landing between
+    them would otherwise leave a live record nobody can settle."""
+    service._start_claude_control_flow = AsyncMock(side_effect=asyncio.CancelledError)
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(service.start_web_setup("claude", owner_ref="src_first"))
+
+    service._start_claude_control_flow = _claude_start_stub()
+    flow = _run(_claim_login(service, "claude", owner_ref="src_second"))
+
+    assert flow.state == "awaiting_code"
+
+
+def test_opencode_logins_contend_per_provider(service: AgentAuthService) -> None:
+    """OpenCode stores one credential per provider, so the slot is named after
+    the credential a login would overwrite, not after the backend."""
+    service._start_opencode_oauth_web = AsyncMock()
+
+    first = _run(
+        service.start_web_setup("opencode", provider_id="anthropic", owner_ref="src_a")
+    )
+    other_provider = _run(
+        service.start_web_setup(
+            "opencode", provider_id="github-copilot", owner_ref="src_b"
+        )
+    )
+    with pytest.raises(BackendLoginInProgressError) as refused:
+        _run(service.start_web_setup("opencode", provider_id="  anthropic  "))
+
+    assert first.provider == "anthropic"
+    assert other_provider.provider == "github-copilot"
+    assert refused.value.flow_id == first.flow_id
+    assert refused.value.owner_ref == "src_a"
+
+
+def test_logins_for_different_credentials_do_not_contend(
+    service: AgentAuthService,
+) -> None:
+    holder = WebAuthFlow(
+        flow_id="held", backend="claude", state="awaiting_code", owner_ref="src_first"
+    )
+    service._web_flows[holder.flow_id] = holder
+    service._start_codex_process = AsyncMock(return_value=SimpleNamespace(returncode=None))
+    service._start_opencode_oauth_web = AsyncMock()
+
+    codex_flow = _run(_claim_login(service, "codex"))
+    opencode_flow = _run(_claim_login(service, "opencode", provider_id="anthropic"))
+
+    assert codex_flow.state == "starting"
+    assert opencode_flow.state == "starting"

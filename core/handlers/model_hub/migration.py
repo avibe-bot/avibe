@@ -57,7 +57,7 @@ class MigrationHost(Protocol):
     now: Callable[[], datetime]
     migration_claude_oauth_probe: Optional[Callable[[], bool]]
 
-    def _native_slot_reservation(self, vendor: str) -> object | None: ...
+    def _native_login_in_progress(self, vendor: str) -> bool: ...
 
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig: ...
@@ -690,11 +690,13 @@ async def apply_native_migration(
             item.vendor
             for item in selected
             if item.proposed_action == "keep_native"
-            and host._native_slot_reservation(item.vendor) is not None
+            and host._native_login_in_progress(item.vendor)
         }
         if held_vendors:
-            # A pending native OAuth already owns the shared CLI credential.
-            # Do not scan/provision a second native Source under that hold.
+            # Adoption records the credential the CLI holds right now, and a
+            # live login is about to replace it — so the Source would describe
+            # an account that no longer exists. Refuse instead of guessing
+            # which of the two wins.
             raise MigrationConflictError
 
         provisioned: list[tuple[str, str]] = []

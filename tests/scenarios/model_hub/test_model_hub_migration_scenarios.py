@@ -681,6 +681,46 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
     }
 
 
+def test_adopting_a_vendor_being_signed_into_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scenario: AUTH-SETUP-110.
+
+    Adoption records the credential the sanctioned CLI holds right now. A live
+    login is about to replace it, so the adopted Source would describe an
+    account that no longer exists — and nothing about it would look wrong.
+    """
+
+    native_home = tmp_path / "native-home"
+    _write_claude_oauth(native_home)
+    _write_codex_oauth(native_home)
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, adapter = _service(tmp_path)
+    monkeypatch.setattr(
+        service.native_oauth_adapter,
+        "login_in_progress",
+        lambda vendor: vendor == "anthropic",
+        raising=False,
+    )
+
+    scan = service.migration_scan()["items"]
+    oauth_items = [item for item in scan if item["kind"] == "oauth_native"]
+    by_backend = {item["backend"]: item for item in oauth_items}
+
+    with pytest.raises(ModelHubError) as refused:
+        asyncio.run(service.migration_apply([by_backend["claude"]["id"]]))
+    assert refused.value.code == "migration_item_conflict"
+    assert store.config.sources == []
+
+    # The vendor nobody is signing into is untouched by the refusal.
+    result = asyncio.run(service.migration_apply([by_backend["codex"]["id"]]))
+    assert result["applied"] == 1
+    assert [(source.vendor, source.supply_channel) for source in store.config.sources] == [
+        ("openai", "native_cli")
+    ]
+
+
 @pytest.mark.parametrize(
     ("writer", "vendor", "protocol"),
     (

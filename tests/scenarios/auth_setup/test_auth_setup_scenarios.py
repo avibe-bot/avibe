@@ -1359,6 +1359,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             [source.id for source in harness.store.config.sources],
             [second["flow"]["source_id"]],
         )
+        # The Source that inherits the credential is persisted, so the hold the
+        # login kept across that window is handed back to its owner.
+        self.assertEqual(harness.agent_auth.released, [second["flow"]["flow_id"]])
 
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.
