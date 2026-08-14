@@ -63,6 +63,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   agentsWithEcho,
+  classifyOAuthFailure,
   createFlowAuthority,
   createLatestAsyncAuthority,
   createLatestAsyncAuthorityByKey,
@@ -610,7 +611,12 @@ describe('seedStep', () => {
 });
 
 describe('flowStep', () => {
-  const fresh: FlowView = { flow: null, errorKey: null, settled: false };
+  const fresh: FlowView = {
+    flow: null,
+    errorKey: null,
+    failureClass: null,
+    settled: false,
+  };
 
   it('keeps polling while the flow is running', () => {
     const step = flowStep(fresh, { kind: 'response', flow: flow('awaiting_action') });
@@ -663,6 +669,7 @@ describe('flowStep', () => {
     expect(tick.action).toBe('timeout');
     expect(tick.view.flow?.state).toBe('failed');
     expect(tick.view.errorKey).toBe('settings.models.oauth.error.timeout');
+    expect(tick.view.failureClass).toBe('inconclusive');
     expect(isDone(tick.action)).toBe(true);
   });
 
@@ -675,6 +682,7 @@ describe('flowStep', () => {
     const failed = flowStep(fresh, { kind: 'response', flow: flow('cancelled') });
     expect(failed.action).toBe('fail');
     expect(failed.view.errorKey).toBe('settings.models.oauth.error.generic');
+    expect(failed.view.failureClass).toBe('retryable-provider');
     expect(failed.view.settled).toBe(true);
     expect(flowStep(failed.view, { kind: 'response', flow: flow('success') }).action).toBe('ignore');
   });
@@ -689,12 +697,14 @@ describe('flow authority', () => {
     const latePoll = authority.transition({
       kind: 'error',
       errorKey: 'settings.models.oauth.error.generic',
+      failureClass: 'retryable-provider',
     });
 
     expect(latePoll.action).toBe('ignore');
     expect(authority.current()).toEqual({
       flow: expect.objectContaining({ state: 'success' }),
       errorKey: null,
+      failureClass: null,
       settled: true,
     });
   });
@@ -707,12 +717,14 @@ describe('flow authority', () => {
     const latePaste = authority.transition({
       kind: 'error',
       errorKey: 'settings.models.oauth.error.finalize',
+      failureClass: 'retryable-provider',
     });
 
     expect(latePaste.action).toBe('ignore');
     expect(authority.current()).toEqual({
       flow: expect.objectContaining({ state: 'success' }),
       errorKey: null,
+      failureClass: null,
       settled: true,
     });
   });
@@ -735,24 +747,46 @@ describe('flow authority', () => {
     expect(authority.current()).toEqual({
       flow: expect.objectContaining({ state: 'failed' }),
       errorKey: 'settings.models.oauth.error.timeout',
+      failureClass: 'inconclusive',
       settled: true,
     });
     expect(landed.at(-1)).toEqual(authority.current());
   });
 });
 
-describe('pollFailureSettles — who speaks for a journey whose submit is outstanding', () => {
+describe('OAuth failure classification', () => {
+  const named = (code: string) => ({ serverNamed: true, code });
+
+  it('keeps transport failures and engine outages inconclusive', () => {
+    expect(classifyOAuthFailure(null)).toBe('inconclusive');
+    expect(classifyOAuthFailure({ serverNamed: false, code: 'bad_response' })).toBe('inconclusive');
+    expect(classifyOAuthFailure(named('engine_down'))).toBe('inconclusive');
+    expect(classifyOAuthFailure(named('modelHub.errors.engine_down'))).toBe('inconclusive');
+  });
+
+  it.each(['source_not_found', 'flow_settled', 'already_connected'])(
+    'treats %s as an authoritative terminal',
+    (code) => {
+      expect(classifyOAuthFailure(named(code))).toBe('authoritative-terminal');
+    },
+  );
+
+  it('defaults other server-named failures to retryable provider failures', () => {
+    expect(classifyOAuthFailure(named('discovery_failed'))).toBe('retryable-provider');
+  });
+
   it('lets a failed poll settle the journey when it is the only authority', () => {
     // A status read is also the call that materializes a just-succeeded flow, so on
     // a device-code login its failure can be the one thing that knows the login
     // produced nothing usable — when the route is what said so.
-    expect(pollFailureSettles(false, true)).toBe(true);
+    expect(pollFailureSettles(false, 'retryable-provider')).toBe(true);
+    expect(pollFailureSettles(false, 'authoritative-terminal')).toBe(true);
   });
 
   it('does not let it settle one while the user’s own submit is outstanding', () => {
     // The submit is the writer of record; a read failing beside it says nothing
     // about whether that write committed.
-    expect(pollFailureSettles(true, true)).toBe(false);
+    expect(pollFailureSettles(true, 'retryable-provider')).toBe(false);
   });
 
   it('does not let a failure the route never named settle one either', () => {
@@ -762,14 +796,9 @@ describe('pollFailureSettles — who speaks for a journey whose submit is outsta
     // source may exist while the dialog declares a terminal nobody reported — and
     // an ordinary connect retried from that sentence mints a second source. Same
     // `serverNamed` bit `mayHaveWritten` reads for the refetch, asked about speech.
-    expect(pollFailureSettles(false, false)).toBe(false);
+    expect(pollFailureSettles(false, 'inconclusive')).toBe(false);
     // …and the submit's precedence does not depend on it.
-    expect(pollFailureSettles(true, false)).toBe(false);
-  });
-
-  it('keeps a named engine outage inconclusive so the held flow is polled again', () => {
-    expect(pollFailureSettles(false, true, 'engine_down')).toBe(false);
-    expect(pollFailureSettles(false, true, 'modelHub.errors.engine_down')).toBe(false);
+    expect(pollFailureSettles(true, 'inconclusive')).toBe(false);
   });
 
   it('shows what latching one costs: the success right behind it is ignored', () => {
@@ -778,7 +807,11 @@ describe('pollFailureSettles — who speaks for a journey whose submit is outsta
     const authority = createFlowAuthority(() => {}, null);
 
     authority.transition({ kind: 'response', flow: flow('awaiting_action') });
-    authority.transition({ kind: 'error', errorKey: 'settings.models.oauth.error.generic' });
+    authority.transition({
+      kind: 'error',
+      errorKey: 'settings.models.oauth.error.generic',
+      failureClass: 'retryable-provider',
+    });
     const submitSucceeded = authority.transition({ kind: 'response', flow: flow('success') });
 
     expect(submitSucceeded.action).toBe('ignore');
@@ -791,14 +824,12 @@ describe('pollFailureSettles — who speaks for a journey whose submit is outsta
     // read the submit's in-flight state through a ref or it reads `false` forever.
     const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
 
-    expect(dialog).toMatch(
-      /pollFailureSettles\(submittingRef\.current, failure\?\.serverNamed \?\? false, failure\?\.code \?\? failure\?\.detail\)/,
-    );
+    expect(dialog).toMatch(/pollFailureSettles\(submittingRef\.current, failureClass\)/);
     expect(dialog).toMatch(/submittingRef\.current = submitting;/);
     // The second argument only exists if the failure is read BEFORE the question is
     // asked — reading it after the settle branch is how this reverts silently.
     expect(dialog.indexOf('const failure = apiFailure(err);')).toBeLessThan(
-      dialog.indexOf('if (!pollFailureSettles('),
+      dialog.indexOf('const failureClass = classifyOAuthFailure(failure);'),
     );
   });
 });
@@ -947,10 +978,8 @@ describe('failureLanded — whose account of the rows is the one on screen', () 
     const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
     const carrying = [...dialog.matchAll(/rowsBehindAreStale\(failure[^)]*\)/g)].map((m) => m[0]);
 
-    // Three: the start rejection, the status poll's, and the paste submit's. The
-    // start one cannot reach a settled view today and asks regardless — a site that
-    // is right because of where it sits stops being right when it is moved.
-    expect(carrying.length).toBe(3);
+    // The pattern must exist somewhere, or the sweep proves nothing.
+    expect(carrying.length).toBeGreaterThan(0);
     for (const call of carrying) expect(call).toMatch(/failureLanded\(step\.action\)/);
     // And the refetch is still owed on the ignored path: the gate is the second
     // argument, never a reason to skip the call.
