@@ -982,7 +982,11 @@ class MemoryModule:
     ) -> MemoryListResult:
         if (
             not isinstance(result, MemoryListPage)
+            or isinstance(result.page, bool)
+            or not isinstance(result.page, int)
             or result.page != page
+            or isinstance(result.page_size, bool)
+            or not isinstance(result.page_size, int)
             or result.page_size != page_size
             or not isinstance(result.items, tuple)
             or isinstance(result.count, bool)
@@ -992,10 +996,11 @@ class MemoryModule:
             or isinstance(result.total_count, bool)
             or not isinstance(result.total_count, int)
             or result.total_count < result.count
-            or (
-                result.count > 0
-                and result.total_count < (page - 1) * page_size + result.count
+            or result.count != min(
+                page_size,
+                max(result.total_count - (page - 1) * page_size, 0),
             )
+            or result.status != "ok"
             or not isinstance(result.warnings, tuple)
             or any(warning != "memory_list_truncated" for warning in result.warnings)
         ):

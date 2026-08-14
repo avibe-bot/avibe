@@ -888,7 +888,7 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
                 PRINCIPAL,
                 "notes",
                 2,
-                5,
+                1,
             )
         )
 
@@ -899,7 +899,7 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
             "project_id": "notes",
             "memory_type": "episode",
             "page": 2,
-            "page_size": 5,
+            "page_size": 1,
             "sort_by": "timestamp",
             "sort_order": "desc",
         }
@@ -916,7 +916,7 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
             ),
         ),
         page=2,
-        page_size=5,
+        page_size=1,
         count=1,
         total_count=20_001,
         warnings=("memory_list_truncated",),
@@ -928,6 +928,7 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
     [
         lambda data: data["episodes"][0].update(user_id="u-" + "f" * 32),
         lambda data: data.update(count=0),
+        lambda data: data.update(episodes=[], count=0, total_count=1),
         lambda data: data["profiles"].append({"profile_data": {}}),
         lambda data: data["episodes"][0].update(timestamp="not-a-timestamp"),
     ],

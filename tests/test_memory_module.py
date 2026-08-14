@@ -603,7 +603,7 @@ async def test_list_episodes_enforces_scope_pagination_and_page_bounds(tmp_path:
             page=1,
             page_size=20,
             count=1,
-            total_count=21,
+            total_count=6,
         )
     )
     module, _store, _provider = _module(tmp_path, provider=provider)
@@ -618,7 +618,7 @@ async def test_list_episodes_enforces_scope_pagination_and_page_bounds(tmp_path:
         page=2,
         page_size=5,
         count=1,
-        total_count=21,
+        total_count=6,
     )
     assert provider.list_requests == [(PRINCIPAL, "notes", 2, 5)]
 
@@ -679,6 +679,50 @@ async def test_list_episodes_rejects_nonempty_page_beyond_total_count(
         project_id="notes",
         page=3,
         page_size=5,
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        MemoryListPage(
+            items=(),
+            page=1,
+            page_size=20,
+            count=0,
+            total_count=1,
+        ),
+        MemoryListPage(
+            items=(
+                MemoryListItem(
+                    id="opaque-episode-id",
+                    subject="Subject",
+                    summary="Summary",
+                    body="Processed body",
+                    timestamp="2026-08-14T02:11:12Z",
+                    project="notes",
+                ),
+            ),
+            page=1,
+            page_size=20,
+            count=1,
+            total_count=1,
+            status="failed",  # type: ignore[arg-type]
+        ),
+    ],
+)
+async def test_list_episodes_rejects_invalid_page_envelope(
+    tmp_path: Path,
+    page: MemoryListPage,
+) -> None:
+    module, _store, _provider = _module(
+        tmp_path,
+        provider=FakeMemoryProvider(list_page=page),
+    )
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
     ) == OperationFailed(error="memory_provider_response_invalid")
 
 
