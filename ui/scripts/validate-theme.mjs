@@ -876,7 +876,17 @@ function classStrings(file, source) {
 // pinned-state Pin shipped a 14px `fill-cyan` glyph that this scan could not see.
 // A 14px filled glyph is read like small text rather than like a large non-text shape,
 // which is the bar its ink clears and its fill does not.
-const MARK_UTILITIES = ['bg', 'fill', 'stroke'];
+// A gradient stop is a fill too, spelled in three parts. `from-mint via-mint to-mint`
+// paints the same shape `bg-mint` does, so leaving them out would have been a hole with
+// a Tailwind name -- 0 sites today, which is why they cost nothing to close now instead
+// of in the round that finds them.
+//
+// `border-`, `ring-`, `outline-` and `divide-` are deliberately NOT here. They paint a
+// hairline, not a shape, and whether a 1px accent border needs the ink is the same open
+// design.pen question as the ten pinned control-chrome sites -- 46 live sites, measured
+// and recorded in the PR ledger rather than quietly recoloured to satisfy this file. That
+// is a decision, not an omission; do not read the gap as one and "fix" it here.
+const MARK_UTILITIES = ['bg', 'fill', 'stroke', 'from', 'via', 'to'];
 
 // `text-mint` is not a fill that might carry a label. It IS the label -- and through
 // `currentColor`, so is every icon under it that names no colour of its own, which is
@@ -890,7 +900,24 @@ const MARK_UTILITIES = ['bg', 'fill', 'stroke'];
 // 214 cyan, 138 destructive, 115 gold, 58 violet, 28 pink, 12 accent, 1 primary). That
 // is exactly why the rule belongs here: the codemod is what made it true, and nothing
 // was stopping the next `text-mint` from undoing it one site at a time.
-const INK_UTILITIES = ['text'];
+// `placeholder-`, `decoration-` and `caret-` print ink for the same reason: a placeholder
+// is text, an underline is read as part of the glyphs it sits under, and a caret you
+// cannot find is a text field you cannot use. 0 sites today.
+//
+// The flag is which of them prints *glyphs*, because "is ink" and "can carry a label" are
+// two different questions and collapsing them opens the hole this file just closed on
+// `border-`: a `caret-primary-foreground` is a 1px bar, so licensing `bg-mint` with it
+// excuses the fill on the strength of something nobody reads a word off. Glyphs sit on
+// the fill and are read off it; a caret and an underline sit near text without being it.
+const INK_UTILITIES = new Map([
+  ['text', true],
+  ['placeholder', true],
+  ['decoration', false],
+  ['caret', false],
+]);
+const LABEL_UTILITIES = [...INK_UTILITIES]
+  .filter(([, printsGlyphs]) => printsGlyphs)
+  .map(([utility]) => utility);
 
 // `bg-mint/100` is not a wash. It is `bg-mint` spelled with a modifier -- same token,
 // same opacity, same 2.35:1 -- and a `/` in the lookahead let it leave the scan
@@ -907,7 +934,39 @@ const INK_UTILITIES = ['text'];
 // a translucent mark is invisible in both themes, which whoever writes it sees
 // immediately, while an opaque one looks right in dark and goes illegible only in
 // light -- unseen, which is the whole reason this guard exists.
-const FULLY_OPAQUE_MODIFIER = /^\/(?:100|\[1\]|\[1\.0+\]|\[100%\])$/;
+// So the line is drawn on the alpha, which means reading it as a number. Tailwind
+// spells the same alpha four ways -- `/70`, `/[0.7]`, `/[70%]`, and no modifier at all
+// -- and matching the spellings that mean 1 exempted `bg-mint/[99%]`, which is the same
+// pixel as `bg-mint`. An enumeration of opaque spellings can only ever be as complete as
+// whoever wrote it; a parsed number is complete by construction.
+//
+// Unparseable fails closed and counts as a mark: the alternative is exempting the one
+// spelling nobody predicted, which is the bug this replaces.
+const markAlpha = (modifier) => {
+  if (!modifier) {
+    return 1;
+  }
+  const raw = modifier.slice(1).replace(/^\[|\]$/g, '');
+  const percent = raw.endsWith('%');
+  const value = Number.parseFloat(percent ? raw.slice(0, -1) : raw);
+  if (!Number.isFinite(value) || value < 0) {
+    return 1;
+  }
+  return percent || value > 1 ? value / 100 : value;
+};
+
+// Where a tint stops being a tint. The exemption above says a wash is not a mark -- it
+// is a colour cast on the surface, and what gets read is whatever sits on top of it. At
+// alpha 0.9 that defence is gone: the composite differs from the opaque fill by a tenth
+// of the surface, so it is the same shape, read the same way, and `/[99%]` was using the
+// wash exemption to smuggle it through.
+//
+// 0.5-0.89 is a real grey zone, and the tree has 35 of them (`/50`, `/55`, `/60`, `/70`).
+// Where a half-opacity accent stops being decorative is a design.pen question, not a
+// guard question, so they stay out and go in the ledger rather than being recoloured to
+// satisfy this file. The threshold is the honest instrument: one stated number, with the
+// parsed alpha reported in the error, instead of a list that silently grows a hole.
+const OPAQUE_ENOUGH = 0.9;
 
 // The Tailwind state the utility containing `index` is gated behind: `hover:`,
 // `md:hover:`, or '' for none. Scoped to the one utility rather than the class string,
@@ -953,7 +1012,7 @@ function sourceFiles(root) {
 
 function assertUnlabeledFillsTakeTheInk(root) {
   const bare = new RegExp(
-    `\\b(${[...MARK_UTILITIES, ...INK_UTILITIES].join('|')})-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-])(/[\\w.%[\\]]+)?`,
+    `\\b(${[...MARK_UTILITIES, ...INK_UTILITIES.keys()].join('|')})-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-])(/[\\w.%[\\]]+)?`,
     'g',
   );
   const found = new Map();
@@ -965,34 +1024,47 @@ function assertUnlabeledFillsTakeTheInk(root) {
         const utility = match[1];
         const accent = match[2];
         const modifier = match[3];
-        if (modifier && !FULLY_OPAQUE_MODIFIER.test(modifier)) {
+        const alpha = markAlpha(modifier);
+        if (alpha < OPAQUE_ENOUGH) {
           continue;
         }
+        // Reported alongside the site: a `/[99%]` mark was written believing it was a
+        // wash, so the number this guard read is the one fact that explains the failure.
+        const note = alpha < 1 ? ` (alpha ${alpha}, at or above ${OPAQUE_ENOUGH} reads as the fill)` : '';
         // Ink takes no label and no pin, so it never reaches the pairing logic below.
-        if (INK_UTILITIES.includes(utility)) {
-          inkMarks.push({ file, line, utility, accent, signature: markSignature(owner, text) });
+        if (INK_UTILITIES.has(utility)) {
+          inkMarks.push({ file, line, utility, accent, note, signature: markSignature(owner, text) });
           continue;
         }
+        // A label only labels if it is printed as ink. The lookup was for the token
+        // suffix anywhere in the string, so `bg-mint border-primary-foreground` cleared
+        // the mark on the strength of a 1px border nobody reads a word off -- the token
+        // was present, the label was not. The utilities that print ink are already
+        // named, so the label has to be carried by one of them.
         const label = FILL_LABEL.get(accent);
-        const fillPrefix = variantPrefix(text, match.index);
-        if (label && (labelCovers(text, `-${label}`, fillPrefix)
-          || labelCovers(scope, `-${label}`, fillPrefix))) {
+        const labelled = label !== undefined && LABEL_UTILITIES.some((ink) => {
+          const printed = `${ink}-${label}`;
+          const fillPrefix = variantPrefix(text, match.index);
+          return labelCovers(text, printed, fillPrefix) || labelCovers(scope, printed, fillPrefix);
+        });
+        if (labelled) {
           continue;
         }
 
         const key = `${file} --${accent}`;
-        found.set(key, [...found.get(key) ?? [], { signature: markSignature(owner, text), line }]);
+        found.set(key, [...found.get(key) ?? [], { signature: markSignature(owner, text), line, note }]);
       }
     }
   }
 
   if (inkMarks.length > 0) {
     throw new Error(
-      'These paint text (and, through currentColor, the icons inside it) with a bare accent, which '
-      + 'is the ink side of the split by definition -- no label can sit on top of text, so there is '
-      + 'nothing to pair it with. Use the -ink token:\n'
-      + inkMarks.map(({ file, line, utility, accent, signature }) => (
-        `  ${file}:${line} ${utility}-${accent} -> ${utility}-${accent}-ink\n    ${signature}`
+      'These paint a glyph, a placeholder, an underline or the caret with a bare accent -- text, '
+      + 'plus through currentColor every icon inside it. That is the ink side of the split by '
+      + 'definition: nothing can sit on top of text, so there is nothing to pair it with. Use the '
+      + '-ink token:\n'
+      + inkMarks.map(({ file, line, utility, accent, note, signature }) => (
+        `  ${file}:${line} ${utility}-${accent} -> ${utility}-${accent}-ink${note}\n    ${signature}`
       )).join('\n'),
     );
   }
@@ -1003,8 +1075,10 @@ function assertUnlabeledFillsTakeTheInk(root) {
       'These paint a bare accent with no paired *-foreground label in the same class string or in an '
       + 'unconditional sibling attribute/property, so they are marks read straight off the canvas and must use the '
       + '-ink token (bg-mint-ink, fill-cyan-ink, stroke-gold-ink, ...):\n'
-      + unpinned.map(([key, marks]) => marks.map(({ signature, line }) => `  ${key} at line ${line}\n    ${signature}`).join('\n')).join('\n')
-      + '\nIf the label is real but lives on a child element, move it into the same class string. '
+      + unpinned.map(([key, marks]) => marks.map(({ signature, line, note }) => `  ${key} at line ${line}${note}\n    ${signature}`).join('\n')).join('\n')
+      + `\nA label counts only when one of ${LABEL_UTILITIES.join('-, ')}- prints it as glyphs: the token on a `
+      + 'border, a ring, an underline or a caret is a hairline nobody reads a word off. '
+      + 'If the label is real but lives on a child element, move it into the same class string. '
       + 'If it is real but gated behind a state the fill is not, the resting element is still unlabeled '
       + '-- give the label the same variant prefix or drop the prefix, and for a JS condition '
       + '(`active ? ... : ...`, `active && ...`) merge the label into the fill\'s own string. '
