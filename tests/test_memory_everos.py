@@ -26,6 +26,8 @@ from core.memory.everos import (
 )
 from core.memory.store import _provider_session_ref
 from core.memory.types import (
+    MemoryListItem,
+    MemoryListPage,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
@@ -844,6 +846,235 @@ def test_profile_uses_get_and_reports_empty_profile_as_non_failure() -> None:
     # The provider keeps no per-read state for it: one EverOSPort serves every
     # principal, so a field here would be whichever read finished last.
     assert items == ()
+
+
+def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "get-page-2",
+                "data": {
+                    "episodes": [
+                        {
+                            "id": "episode-opaque-2",
+                            "user_id": PRINCIPAL,
+                            "app_id": "avibe",
+                            "project_id": "notes",
+                            "session_id": "provider-session",
+                            "timestamp": "2026-08-14T10:11:12+08:00",
+                            "sender_ids": [PRINCIPAL],
+                            "summary": " A bounded summary. ",
+                            "subject": " ",
+                            "episode": "Processed episode body.",
+                            "type": "Conversation",
+                        }
+                    ],
+                    "profiles": [],
+                    "agent_cases": [],
+                    "agent_skills": [],
+                    "total_count": 20_001,
+                    "count": 1,
+                },
+            },
+        )
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(
+            EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                "notes",
+                2,
+                1,
+            )
+        )
+
+    assert requests == [
+        {
+            "user_id": PRINCIPAL,
+            "app_id": "avibe",
+            "project_id": "notes",
+            "memory_type": "episode",
+            "page": 2,
+            "page_size": 1,
+            "sort_by": "timestamp",
+            "sort_order": "desc",
+        }
+    ]
+    assert result == MemoryListPage(
+        items=(
+            MemoryListItem(
+                id="episode-opaque-2",
+                subject="",
+                summary="A bounded summary.",
+                body="Processed episode body.",
+                timestamp="2026-08-14T02:11:12Z",
+                project="notes",
+            ),
+        ),
+        page=2,
+        page_size=1,
+        count=1,
+        total_count=20_001,
+        warnings=("memory_list_truncated",),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda data: data["episodes"][0].update(user_id="u-" + "f" * 32),
+        lambda data: data.update(count=0),
+        lambda data: data.update(episodes=[], count=0, total_count=1),
+        lambda data: data["profiles"].append({"profile_data": {}}),
+        lambda data: data["episodes"][0].update(timestamp="not-a-timestamp"),
+        lambda data: data["episodes"][0].update(
+            timestamp="0001-01-01T00:00:00+23:59"
+        ),
+        lambda data: data["episodes"][0].update(summary="\ud800"),
+        lambda data: (
+            data["episodes"].append(dict(data["episodes"][0])),
+            data.update(total_count=2, count=2),
+        ),
+    ],
+)
+def test_list_episodes_rejects_cross_scope_or_malformed_envelopes(mutation) -> None:
+    data = {
+        "episodes": [
+            {
+                "id": "episode-1",
+                "user_id": PRINCIPAL,
+                "app_id": "avibe",
+                "project_id": PROJECT,
+                "session_id": "provider-session",
+                "timestamp": "2026-08-14T00:00:00Z",
+                "sender_ids": [],
+                "summary": "Summary",
+                "subject": "Subject",
+                "episode": "Body",
+                "type": "Conversation",
+            }
+        ],
+        "profiles": [],
+        "agent_cases": [],
+        "agent_skills": [],
+        "total_count": 1,
+        "count": 1,
+    }
+    mutation(data)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = json.dumps(
+            {"request_id": "request", "data": data},
+            ensure_ascii=True,
+        ).encode("ascii")
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                PROJECT,
+                1,
+                20,
+            )
+        assert raised.value.error == "memory_provider_response_invalid"
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
+
+
+def test_list_episodes_rejects_nonempty_page_beyond_total_count() -> None:
+    data = {
+        "episodes": [
+            {
+                "id": "episode-impossible-page",
+                "user_id": PRINCIPAL,
+                "app_id": "avibe",
+                "project_id": PROJECT,
+                "session_id": "provider-session",
+                "timestamp": "2026-08-14T00:00:00Z",
+                "sender_ids": [],
+                "summary": "Summary",
+                "subject": "Subject",
+                "episode": "Body",
+                "type": "Conversation",
+            }
+        ],
+        "profiles": [],
+        "agent_cases": [],
+        "agent_skills": [],
+        "total_count": 1,
+        "count": 1,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"request_id": "request", "data": data})
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                PROJECT,
+                3,
+                5,
+            )
+        assert raised.value.error == "memory_provider_response_invalid"
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
+
+
+def test_list_episodes_rejects_ascending_provider_page() -> None:
+    def episode(episode_id: str, timestamp: str) -> dict[str, object]:
+        return {
+            "id": episode_id,
+            "user_id": PRINCIPAL,
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "session_id": "provider-session",
+            "timestamp": timestamp,
+            "sender_ids": [],
+            "summary": "Summary",
+            "subject": "Subject",
+            "episode": "Body",
+            "type": "Conversation",
+        }
+
+    data = {
+        "episodes": [
+            episode("episode-older", "2026-08-14T00:00:00Z"),
+            episode("episode-newer", "2026-08-14T00:00:01Z"),
+        ],
+        "profiles": [],
+        "agent_cases": [],
+        "agent_skills": [],
+        "total_count": 2,
+        "count": 2,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"request_id": "request", "data": data})
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                PROJECT,
+                1,
+                20,
+            )
+        assert raised.value.error == "memory_provider_response_invalid"
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
 
 
 def test_profile_canonicalizes_structured_profile() -> None:

@@ -31,6 +31,9 @@ from core.memory.types import (
     CaptureSkipped,
     MemoryItem,
     MemoryItems,
+    MemoryListItem,
+    MemoryListPage,
+    MemoryListResult,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
@@ -585,6 +588,280 @@ async def test_profile_bounds_accept_structured_data_only_on_profile_items(tmp_p
     )
 
 
+async def test_list_episodes_enforces_scope_pagination_and_page_bounds(tmp_path: Path) -> None:
+    item = MemoryListItem(
+        id="opaque-episode-id",
+        subject="Subject",
+        summary="Summary",
+        body="Processed body",
+        timestamp="2026-08-14T02:11:12Z",
+        project="notes",
+    )
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=(item,),
+            page=1,
+            page_size=20,
+            count=1,
+            total_count=6,
+        )
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+        page=2,
+        page_size=5,
+    ) == MemoryListPage(
+        items=(item,),
+        page=2,
+        page_size=5,
+        count=1,
+        total_count=6,
+    )
+    assert provider.list_requests == [(PRINCIPAL, "notes", 2, 5)]
+
+    for page, page_size in ((0, 5), (1, 0), (1, 21), (True, 5)):
+        assert await module.list_episodes(
+            principal_id=PRINCIPAL,
+            project_id="notes",
+            page=page,
+            page_size=page_size,
+        ) == OperationFailed(error="memory_invalid_input")
+    assert provider.list_requests == [(PRINCIPAL, "notes", 2, 5)]
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="all",
+    ) == OperationFailed(error="memory_access_denied")
+
+    provider.list_page = replace(provider.list_page, count=0)
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+    provider.list_failure = RuntimeError("provider-list-body-canary")
+    result = await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    )
+    assert result == OperationFailed(error="memory_processing_failed")
+    assert "provider-list-body-canary" not in repr(result)
+
+
+async def test_list_episodes_rejects_nonempty_page_beyond_total_count(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=(
+                MemoryListItem(
+                    id="opaque-episode-id",
+                    subject="Subject",
+                    summary="Summary",
+                    body="Processed body",
+                    timestamp="2026-08-14T02:11:12Z",
+                    project="notes",
+                ),
+            ),
+            page=1,
+            page_size=20,
+            count=1,
+            total_count=1,
+        )
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+        page=3,
+        page_size=5,
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        MemoryListPage(
+            items=(),
+            page=1,
+            page_size=20,
+            count=0,
+            total_count=1,
+        ),
+        MemoryListPage(
+            items=(
+                MemoryListItem(
+                    id="opaque-episode-id",
+                    subject="Subject",
+                    summary="Summary",
+                    body="Processed body",
+                    timestamp="2026-08-14T02:11:12Z",
+                    project="notes",
+                ),
+            ),
+            page=1,
+            page_size=20,
+            count=1,
+            total_count=1,
+            status="failed",  # type: ignore[arg-type]
+        ),
+        MemoryListPage(
+            items=(
+                MemoryListItem(
+                    id="duplicate-id",
+                    subject="Subject",
+                    summary="Summary",
+                    body="Processed body one",
+                    timestamp="2026-08-14T02:11:12Z",
+                    project="notes",
+                ),
+                MemoryListItem(
+                    id="duplicate-id",
+                    subject="Subject",
+                    summary="Summary",
+                    body="Processed body two",
+                    timestamp="2026-08-14T02:11:11Z",
+                    project="notes",
+                ),
+            ),
+            page=1,
+            page_size=20,
+            count=2,
+            total_count=2,
+        ),
+    ],
+)
+async def test_list_episodes_rejects_invalid_page_envelope(
+    tmp_path: Path,
+    page: MemoryListPage,
+) -> None:
+    module, _store, _provider = _module(
+        tmp_path,
+        provider=FakeMemoryProvider(list_page=page),
+    )
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        (
+            MemoryListItem(
+                id="older",
+                subject="Subject",
+                summary="Summary",
+                body="Processed body",
+                timestamp="2026-08-14T02:11:11Z",
+                project="notes",
+            ),
+            MemoryListItem(
+                id="newer",
+                subject="Subject",
+                summary="Summary",
+                body="Processed body",
+                timestamp="2026-08-14T02:11:12Z",
+                project="notes",
+            ),
+        ),
+        (
+            MemoryListItem(
+                id="week-date",
+                subject="Subject",
+                summary="Summary",
+                body="Processed body",
+                timestamp="2026-W33-5T02:11:12+00:00",
+                project="notes",
+            ),
+        ),
+        (
+            MemoryListItem(
+                id="overflowing-offset",
+                subject="Subject",
+                summary="Summary",
+                body="Processed body",
+                timestamp="0001-01-01T00:00:00+23:59",
+                project="notes",
+            ),
+        ),
+    ],
+)
+async def test_list_episodes_rejects_invalid_shared_timestamp_contract(
+    tmp_path: Path,
+    items: tuple[MemoryListItem, ...],
+) -> None:
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=items,
+            page=1,
+            page_size=20,
+            count=len(items),
+            total_count=len(items),
+        )
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+
+async def test_list_episodes_rejects_invalid_items_container(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=None,  # type: ignore[arg-type]
+            page=1,
+            page_size=20,
+            count=0,
+            total_count=0,
+        )
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+
+async def test_list_episodes_requires_canonical_provider_text(tmp_path: Path) -> None:
+    item = MemoryListItem(
+        id="opaque-episode-id",
+        subject="Subject",
+        summary="Summary",
+        body="Processed body",
+        timestamp="2026-08-14T02:11:12Z",
+        project="notes",
+    )
+    provider = FakeMemoryProvider()
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    for malformed in (
+        replace(item, subject=" Subject"),
+        replace(item, summary="Summary "),
+        replace(item, body=" \t "),
+    ):
+        provider.list_page = MemoryListPage(
+            items=(malformed,),
+            page=1,
+            page_size=20,
+            count=1,
+            total_count=1,
+        )
+        assert await module.list_episodes(
+            principal_id=PRINCIPAL,
+            project_id="notes",
+        ) == OperationFailed(error="memory_provider_response_invalid")
+
+
 async def test_keyword_recall_skips_health_and_succeeds_without_embedding(tmp_path: Path) -> None:
     class NoHealthProvider(FakeMemoryProvider):
         async def health_snapshot(self):
@@ -1057,6 +1334,17 @@ def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
 
     assert "MemoryProviderPort" not in memory.__all__
     assert "ProviderCapture" not in memory.__all__
+
+
+def test_memory_list_result_types_are_public() -> None:
+    import core.memory as memory
+
+    assert memory.MemoryListItem is MemoryListItem
+    assert memory.MemoryListPage is MemoryListPage
+    assert memory.MemoryListResult is MemoryListResult
+    assert {"MemoryListItem", "MemoryListPage", "MemoryListResult"} <= set(
+        memory.__all__
+    )
 
 
 def test_slice2_runtime_types_remain_internal_to_the_memory_package() -> None:
