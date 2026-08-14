@@ -159,6 +159,32 @@ def _expanded_targets(values: list[str] | None) -> list[Path]:
     return [Path(value).expanduser() for value in raw_targets]
 
 
+def _active_skill_file(repo_root: Path) -> Path:
+    override = os.environ.get("BACKGROUND_WATCH_HOOK_SKILL_FILE")
+    if override:
+        candidates = [Path(override).expanduser()]
+    else:
+        candidates = [
+            repo_root / SKILL_RELATIVE_PATH / "SKILL.md",
+            repo_root / ".agents/skills" / SKILL_NAME / "SKILL.md",
+        ]
+        for variable, default in (
+            ("CODEX_HOME", "~/.codex"),
+            ("AGENTS_HOME", "~/.agents"),
+            ("OPENCODE_HOME", "~/.opencode"),
+            ("XDG_CONFIG_HOME", "~/.config"),
+        ):
+            root = Path(os.environ.get(variable) or default).expanduser()
+            skill_root = root / "opencode/skills" if variable == "XDG_CONFIG_HOME" else root / "skills"
+            candidates.append(skill_root / SKILL_NAME / "SKILL.md")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise SyncError(f"active {SKILL_NAME} skill not found; searched: {searched}")
+
+
 def _target_destination(target: Path) -> Path:
     if target.is_symlink():
         if not target.exists():
@@ -171,10 +197,19 @@ def _path_key(path: Path) -> str:
     return os.path.realpath(path)
 
 
-def _install_target(target: Path, source: Path, manifest: dict[str, Any]) -> Path:
+def _install_target(
+    target: Path,
+    source: Path,
+    canonical_root: Path,
+    manifest: dict[str, Any],
+) -> Path:
     destination = _target_destination(target)
-    if destination == source or destination.is_relative_to(source):
-        raise SyncError(f"refusing to install the skill into its canonical snapshot: {destination}")
+    if (
+        destination == canonical_root
+        or destination.is_relative_to(canonical_root)
+        or canonical_root.is_relative_to(destination)
+    ):
+        raise SyncError(f"refusing to install the skill over the canonical checkout: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging: Path | None = Path(tempfile.mkdtemp(prefix=f".{SKILL_NAME}-", dir=destination.parent))
     backup: Path | None = None
@@ -228,7 +263,33 @@ def _check_target(target: Path, expected: dict[str, Any]) -> list[str]:
     except OSError as exc:
         problems.append(f"{target}: cannot hash installed skill: {exc}")
 
-    wait_pr = actual_root / "scripts/wait_pr.py"
+    problems.extend(_check_waiter_capabilities(actual_root))
+    return problems
+
+
+def _check_active_target(
+    active_file: Path,
+    expected: dict[str, Any],
+    canonical_root: Path,
+) -> list[str]:
+    active_root = active_file.parent
+    if active_root == canonical_root:
+        try:
+            actual_hash = _tree_sha256(active_root)
+        except OSError as exc:
+            return [f"{active_root}: cannot hash active skill: {exc}"]
+        if actual_hash != expected["tree_sha256"]:
+            return [
+                f"{active_root}: tree_sha256={actual_hash}, "
+                f"expected {expected['tree_sha256']}"
+            ]
+        return _check_waiter_capabilities(active_root)
+    return _check_target(active_root, expected)
+
+
+def _check_waiter_capabilities(skill_root: Path) -> list[str]:
+    problems: list[str] = []
+    wait_pr = skill_root / "scripts/wait_pr.py"
     try:
         help_result = subprocess.run(
             [sys.executable, str(wait_pr), "--help"],
@@ -237,21 +298,24 @@ def _check_target(target: Path, expected: dict[str, Any]) -> list[str]:
             text=True,
         )
     except OSError as exc:
-        problems.append(f"{target}: cannot execute wait_pr.py --help: {exc}")
-    else:
-        help_text = f"{help_result.stdout}\n{help_result.stderr}"
-        if help_result.returncode != 0:
-            problems.append(f"{target}: wait_pr.py --help exited {help_result.returncode}")
-        for flag in REQUIRED_WAIT_PR_FLAGS:
-            if flag not in help_text:
-                problems.append(f"{target}: wait_pr.py --help is missing {flag}")
+        return [f"{skill_root}: cannot execute wait_pr.py --help: {exc}"]
+    help_text = f"{help_result.stdout}\n{help_result.stderr}"
+    if help_result.returncode != 0:
+        problems.append(f"{skill_root}: wait_pr.py --help exited {help_result.returncode}")
+    for flag in REQUIRED_WAIT_PR_FLAGS:
+        if flag not in help_text:
+            problems.append(f"{skill_root}: wait_pr.py --help is missing {flag}")
     return problems
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--check", action="store_true", help="Verify installed targets without changing them")
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify the active skill or explicit installed targets without changing them",
+    )
     mode.add_argument("--install", action="store_true", help="Install the canonical skill into the targets")
     parser.add_argument("--repo-root", help="Avibe repository root; defaults to this checkout")
     parser.add_argument(
@@ -269,9 +333,19 @@ def main(argv: list[str] | None = None) -> int:
         repo_root = _resolve_repo_root(args.repo_root)
         commit = _resolve_commit(repo_root, args.commit)
         canonical_path = repo_root / SKILL_RELATIVE_PATH
-        targets = _expanded_targets(args.target)
+        active_file = None
+        targets = _expanded_targets(args.target) if args.install or args.target else []
         with _materialize_skill(repo_root, commit) as canonical:
             expected = _manifest(repo_root, commit, canonical)
+            canonical_root = canonical_path.resolve()
+            if args.check and not args.target:
+                try:
+                    active_file = _active_skill_file(repo_root)
+                except SyncError as exc:
+                    raise SyncError(
+                        f"{exc}; canonical path {canonical_path} requires commit {commit}"
+                    ) from exc
+                targets = [active_file.parent]
             if args.install:
                 installed: list[str] = []
                 seen: set[str] = set()
@@ -281,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                     if key in seen:
                         continue
                     seen.add(key)
-                    installed.append(str(_install_target(target, canonical, expected)))
+                    installed.append(str(_install_target(target, canonical, canonical_root, expected)))
                 payload: dict[str, Any] = {
                     "ok": True,
                     "action": "install",
@@ -308,7 +382,10 @@ def main(argv: list[str] | None = None) -> int:
                         continue
                     seen.add(key)
                     checked.append(str(target))
-                    problems.extend(_check_target(target, expected))
+                    if active_file is not None:
+                        problems.extend(_check_active_target(active_file, expected, canonical_root))
+                    else:
+                        problems.extend(_check_target(target, expected))
                 payload = {
                     "ok": not problems,
                     "action": "check",

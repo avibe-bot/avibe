@@ -249,8 +249,10 @@ python3 "$SYNC_SKILL" \
   --check
 ```
 
-The check compares the installed tree with the current canonical commit,
-records the full tree SHA-256 and frontmatter version, and probes
+With no `--target`, the check follows the same active-skill resolution order as
+the waiter examples above. It hashes a repository-provided canonical tree
+directly, or validates the manifest of the selected harness installation. It
+also records the full tree SHA-256 and frontmatter version, and probes
 `wait_pr.py --help` for the combined `--sha`, `--workflow`, `--seed-state`,
 `--actionable-only`, and `--ignore-author` options. A non-zero result is an
 environment blocker: report the canonical path and required commit, then

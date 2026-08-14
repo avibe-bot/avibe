@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -52,21 +53,30 @@ parser.parse_args()
     return repo, _git(repo, "rev-parse", "HEAD")
 
 
-def _run(repo: Path, target: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+def _run(
+    repo: Path,
+    target: Path | None,
+    *extra: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--repo-root",
+        str(repo),
+    ]
+    if target is not None:
+        command.extend(["--target", str(target)])
+    command.extend([*extra, "--json"])
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
     return subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--repo-root",
-            str(repo),
-            "--target",
-            str(target),
-            *extra,
-            "--json",
-        ],
+        command,
         check=False,
         capture_output=True,
         text=True,
+        env=process_env,
     )
 
 
@@ -140,6 +150,51 @@ def test_check_reports_missing_target_and_required_commit(tmp_path: Path) -> Non
     assert payload["required_commit"] == commit
     assert str(target) in payload["problems"][0]
     assert "canonical_path" in payload
+
+
+def test_check_follows_the_active_skill_resolution(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    target = tmp_path / "home/.codex/skills/background-watch-hook"
+
+    installed = _run(repo, target, "--install")
+    assert installed.returncode == 0, installed.stderr
+
+    installed_check = _run(
+        repo,
+        None,
+        "--check",
+        env={"BACKGROUND_WATCH_HOOK_SKILL_FILE": str(target / "SKILL.md")},
+    )
+    assert installed_check.returncode == 0, installed_check.stderr
+
+    canonical_check = _run(
+        repo,
+        None,
+        "--check",
+        env={
+            "BACKGROUND_WATCH_HOOK_SKILL_FILE": str(
+                repo / "skills/background-watch-hook/SKILL.md"
+            )
+        },
+    )
+    assert canonical_check.returncode == 0, canonical_check.stderr
+
+
+def test_install_refuses_the_canonical_checkout_and_symlink(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    canonical = repo / "skills/background-watch-hook"
+
+    direct = _run(repo, canonical, "--install")
+    assert direct.returncode == 1
+    assert "canonical checkout" in json.loads(direct.stdout)["error"]
+    assert not (canonical / ".avibe-skill-sync.json").exists()
+
+    symlink = tmp_path / "home/.agents/skills/background-watch-hook"
+    symlink.parent.mkdir(parents=True)
+    symlink.symlink_to(canonical, target_is_directory=True)
+    linked = _run(repo, symlink, "--install")
+    assert linked.returncode == 1
+    assert "canonical checkout" in json.loads(linked.stdout)["error"]
 
 
 def test_default_commit_tracks_the_skill_tree_not_unrelated_changes(tmp_path: Path) -> None:
