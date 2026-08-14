@@ -3111,10 +3111,14 @@ class AgentAuthService:
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]:
         async with self._flow_lock:
-            flow = self._web_flows.pop(flow_id, None)
+            flow = self._web_flows.get(flow_id)
         if flow is None:
             return {"ok": False, "error": "flow_not_found"}
-        await self._terminate_web_flow(flow, final_state="cancelled")
+        try:
+            await self._terminate_web_flow(flow, final_state="cancelled")
+        finally:
+            async with self._flow_lock:
+                self._flow_registry.drop(flow)
         return {"ok": True}
 
     async def _opencode_server(self):

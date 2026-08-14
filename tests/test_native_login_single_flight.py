@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -234,3 +235,51 @@ async def test_model_hub_drives_the_shared_web_flow_through_submit_and_cancel() 
         flow, final_state="cancelled"
     )
     assert state.flow_id not in service._flows_by_id
+
+
+@pytest.mark.asyncio
+async def test_cancel_keeps_native_claim_until_termination_settles() -> None:
+    service = AgentAuthService(_Controller())
+    process = SimpleNamespace(stdout=None, returncode=None)
+    service._start_codex_process = AsyncMock(return_value=process)
+    service._read_codex_output_web = AsyncMock()
+    service._wait_for_codex_completion_web = AsyncMock()
+    flow = await service.start_web_setup("codex", force_reset=False)
+    termination_started = asyncio.Event()
+    finish_termination = asyncio.Event()
+
+    async def terminate(_flow, **_kwargs) -> None:
+        termination_started.set()
+        await finish_termination.wait()
+
+    service._terminate_web_flow = terminate
+    cancel_task = asyncio.create_task(service.cancel_web_flow(flow.flow_id))
+    await termination_started.wait()
+
+    try:
+        with pytest.raises(BackendLoginInProgressError):
+            await service.start_web_setup("codex", force_reset=False)
+    finally:
+        finish_termination.set()
+        assert await cancel_task == {"ok": True}
+
+    replacement = await service.start_web_setup("codex", force_reset=False)
+    assert replacement.flow_id in service._flows_by_id
+
+
+@pytest.mark.asyncio
+async def test_cancel_releases_native_claim_when_termination_raises() -> None:
+    service = AgentAuthService(_Controller())
+    process = SimpleNamespace(stdout=None, returncode=None)
+    service._start_codex_process = AsyncMock(return_value=process)
+    service._read_codex_output_web = AsyncMock()
+    service._wait_for_codex_completion_web = AsyncMock()
+    flow = await service.start_web_setup("codex", force_reset=False)
+    service._terminate_web_flow = AsyncMock(side_effect=RuntimeError("terminate failed"))
+
+    with pytest.raises(RuntimeError, match="terminate failed"):
+        await service.cancel_web_flow(flow.flow_id)
+
+    assert flow.flow_id not in service._flows_by_id
+    replacement = await service.start_web_setup("codex", force_reset=False)
+    assert replacement.flow_id in service._flows_by_id

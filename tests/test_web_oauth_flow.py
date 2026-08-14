@@ -255,6 +255,39 @@ def test_cancel_removes_flow_and_marks_state(service: AgentAuthService) -> None:
     assert result == {"ok": True}
     assert "any" not in service._web_flows
     assert flow.state == "cancelled"
+    assert _run(service.cancel_web_flow("any")) == {
+        "ok": False,
+        "error": "flow_not_found",
+    }
+
+
+def test_concurrent_double_cancel_is_idempotent(service: AgentAuthService) -> None:
+    flow = WebAuthFlow(flow_id="double", backend="codex", state="awaiting_code")
+    service._web_flows[flow.flow_id] = flow
+    terminate = service._terminate_web_flow
+    both_entered = asyncio.Event()
+    entered = 0
+
+    async def terminate_together(target: WebAuthFlow, **kwargs) -> None:
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            both_entered.set()
+        await both_entered.wait()
+        await terminate(target, **kwargs)
+
+    async def cancel_twice() -> list[dict[str, object]]:
+        return await asyncio.gather(
+            service.cancel_web_flow(flow.flow_id),
+            service.cancel_web_flow(flow.flow_id),
+        )
+
+    service._terminate_web_flow = terminate_together
+    results = _run(cancel_twice())
+
+    assert results == [{"ok": True}, {"ok": True}]
+    assert flow.flow_id not in service._web_flows
+    assert flow.state == "cancelled"
 
 
 def test_post_web_success_hook_invocation_when_set(
