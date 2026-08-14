@@ -206,13 +206,20 @@ def _project_for_context(
     """Return the Project fields and capabilities safe for this caller."""
 
     payload = dict(project)
+    project_id = str(project.get("id") or "")
+    effective_role = project_access_service.get_effective_project_role(
+        conn,
+        context,
+        project_id,
+    )
     payload["capabilities"] = {
-        "can_chat": project_access_service.can_chat_project(
-            conn,
-            context,
-            str(project.get("id") or ""),
-        )
+        "can_chat": project_access_service.role_allows(effective_role, "editor"),
+        "has_folder": bool(payload.get("folder_path")),
     }
+    if not project_access_service.role_allows(effective_role, "editor"):
+        # Effective Viewers must not disclose host-local filesystem details.
+        payload["folder_path"] = ""
+        payload["metadata"] = {}
     return payload
 
 

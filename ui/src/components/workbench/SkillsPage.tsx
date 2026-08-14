@@ -52,8 +52,9 @@ export const SkillsPage: React.FC = () => {
   // A folderless project can't hold project-scoped skills (askill needs a real
   // cwd), so the add/browse flows treat it as global-only: the add dialog drops
   // the project-scope option, and browse installs land in global.
-  const projectHasFolder = Boolean(activeProject?.folder_path);
-  const addDialogProjectId = projectHasFolder ? activeProject?.id : undefined;
+  const projectHasFolder = Boolean(activeProject?.capabilities?.has_folder ?? activeProject?.folder_path);
+  const projectCanManage = canManage && (scope !== 'project' || Boolean(activeProject?.capabilities?.can_chat));
+  const addDialogProjectId = scope === 'project' && projectCanManage && projectHasFolder ? activeProject?.id : undefined;
   const browseScope: SkillScope = scope === 'project' && projectHasFolder ? 'project' : 'global';
   const browseProjectId = browseScope === 'project' ? activeProject?.id : undefined;
 
@@ -285,7 +286,7 @@ export const SkillsPage: React.FC = () => {
 
         <BackendFilter value={backendFilter} onChange={setBackendFilter} />
 
-        {canManage ? (
+        {projectCanManage ? (
           <>
             <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
               <Compass className="size-3.5 text-cyan" />
@@ -322,7 +323,7 @@ export const SkillsPage: React.FC = () => {
           <Terminal className="size-7 text-muted" />
           <div className="text-[14px] font-semibold text-foreground">{t('skills.notInstalled')}</div>
           <div className="max-w-md font-mono text-[11.5px] text-muted">{t('skills.notInstalledHint')}</div>
-          {canManage ? <Button
+          {projectCanManage ? <Button
             variant="brand"
             size="sm"
             className="mt-1"
@@ -409,13 +410,13 @@ export const SkillsPage: React.FC = () => {
               onToggleBackend={onToggleBackend}
               onUpdate={onUpdate}
               onRemove={onRemove}
-              canManage={canManage}
+              canManage={canManage && (selected.scope !== 'project' || Boolean(activeProject?.capabilities?.can_chat))}
             />
           ) : null}
         </div>
       )}
 
-      {canManage && showAdd ? (
+      {projectCanManage && showAdd ? (
         <AddSkillDialog
           defaultScope={scope}
           projectId={addDialogProjectId}
@@ -424,7 +425,7 @@ export const SkillsPage: React.FC = () => {
           onInstalled={afterDialog}
         />
       ) : null}
-      {canManage && showBrowse ? (
+      {projectCanManage && showBrowse ? (
         <BrowseRegistryDialog
           scope={browseScope}
           projectId={browseProjectId}

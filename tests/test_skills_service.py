@@ -470,6 +470,112 @@ def test_active_org_members_list_project_skills_without_project_acl(monkeypatch,
         engine.dispose()
 
 
+def test_effective_project_viewer_gets_safe_skill_payload_and_cannot_mutate(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    listing = {
+        "ok": True,
+        "summary": {"total": 3, "updateAvailable": 2, "upToDate": 1, "uncheckable": 0},
+        "skills": [
+            {
+                **_skill_row("global-skill"),
+                "path": "/global/skills/global-skill",
+            },
+            {
+                **_skill_row("project-skill"),
+                "scope": "project",
+                "path": str(project_dir / ".agents" / "skills" / "project-skill"),
+                "status": "update_available",
+            }
+        ],
+    }
+    try:
+        with engine.begin() as connection:
+            project = projects_service.create_project(connection, str(project_dir))
+            result = project_access_service.apply_project_access_intent(
+                connection,
+                {
+                    "project_id": project["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "organization_id": "org-1",
+                    "bindings": [
+                        {
+                            "principal_kind": "email",
+                            "principal_value": "member-1@example.com",
+                            "access_role": "viewer",
+                        }
+                    ],
+                },
+            )
+            assert result.outcome == "applied"
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="skill",
+                resource_id=skills.skill_resource_id(
+                    "codex",
+                    scope="project",
+                    project_dir=str(project_dir),
+                    project_id=project["id"],
+                    name="project-skill",
+                ),
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="public",
+            )
+
+        recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", recorder)
+        viewer = _organization_context("member-1")
+        safe = _run(
+            skills.list_skills(
+                "askill",
+                scope="project",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=viewer,
+            )
+        )
+        assert safe["skills"][0]["path"] == "/global/skills/global-skill"
+        assert safe["skills"][1]["path"] == ""
+        checked = _run(
+            skills.check(
+                "askill",
+                scope="project",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=viewer,
+            )
+        )
+        assert checked["summary"] == {"total": 2, "updateAvailable": 1, "upToDate": 0, "uncheckable": 0}
+
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.add_skill(
+                    "askill",
+                    "gh:owner/repo",
+                    scope="project",
+                    project_dir=str(project_dir),
+                    project_id=project["id"],
+                    user_context=viewer,
+                )
+            )
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.preview_source(
+                    "askill",
+                    ".",
+                    project_dir=str(project_dir),
+                    project_id=project["id"],
+                    user_context=viewer,
+                )
+            )
+        assert len(recorder.calls) == 2
+    finally:
+        engine.dispose()
+
+
 def test_active_org_skill_listing_returns_complete_runtime_payload(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     raw_skill = {
@@ -805,7 +911,7 @@ def test_active_org_editor_can_upload_skill_zip(monkeypatch, tmp_path) -> None:
     with zipfile.ZipFile(archive_bytes, "w") as archive:
         archive.writestr("uploaded-skill/SKILL.md", "# Uploaded Skill\n")
 
-    async def preview_uploaded_skill(_callback):
+    async def preview_uploaded_skill(_callback, **_kwargs):
         return {"ok": True, "skills": [{"name": "uploaded-skill"}]}
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
@@ -833,7 +939,7 @@ def test_viewer_cannot_upload_skill_zip(monkeypatch) -> None:
     from vibe import api
     from vibe.authorization import InstanceAuthorizationError
 
-    async def unexpected_preview(_callback):
+    async def unexpected_preview(_callback, **_kwargs):
         raise AssertionError("viewer upload must fail before inspecting the archive")
 
     monkeypatch.setattr(api, "_skills_guarded", unexpected_preview)
@@ -888,3 +994,11 @@ def test_subprocess_env_prepends_binary_dir(monkeypatch):
 def test_missing_binary_raises_lookup():
     with pytest.raises(LookupError):
         _run(skills._run_askill("", ["list"]))
+
+
+def test_missing_project_dir_error_preserves_host_path_for_authorized_service_call(tmp_path):
+    missing = tmp_path / "deleted-project"
+    with pytest.raises(skills.SkillsError) as info:
+        _run(skills._run_askill("askill", ["list"], cwd=str(missing)))
+    assert info.value.code == "project_dir_missing"
+    assert str(missing) in info.value.message

@@ -226,7 +226,7 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     project_a = next(row for row in project_rows if row["id"] == ids["project_a"])
     assert project_a["folder_path"] == str((tmp_path / "project-a").resolve())
     assert project_a["metadata"] == {"host_path_hint": "/private/host"}
-    assert project_a["capabilities"] == {"can_chat": True}
+    assert project_a["capabilities"] == {"can_chat": True, "has_folder": True}
     sessions = _get(client, "/api/sessions?status=active").get_json()["sessions"]
     assert {row["id"] for row in sessions} == {
         ids["session_a"],
@@ -345,7 +345,9 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     client = _remote_client(config, role="editor", email="alice@example.com")
 
     viewer_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
-    assert viewer_project["capabilities"] == {"can_chat": False}
+    assert viewer_project["capabilities"] == {"can_chat": False, "has_folder": True}
+    assert viewer_project["folder_path"] == ""
+    assert viewer_project["metadata"] == {}
 
     viewer_bootstrap = _get(client, f"/api/sessions/{ids['session_a']}/bootstrap")
 
@@ -413,7 +415,7 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, ids["session_a"])["text"] == "remote overwrite"
     editor_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
-    assert editor_project["capabilities"] == {"can_chat": True}
+    assert editor_project["capabilities"] == {"can_chat": True, "has_folder": True}
 
 
 def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path) -> None:
@@ -624,6 +626,13 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     engine.dispose()
 
     viewer = _remote_client(config, role="viewer", email="alice@example.com")
+    viewer_projects = _get(viewer, "/api/projects").get_json()["projects"]
+    viewer_project = next(row for row in viewer_projects if row["id"] == ids["project_a"])
+    assert viewer_project["folder_path"] == ""
+    assert viewer_project["metadata"] == {}
+    viewer_project_detail = _get(viewer, f"/api/projects/{ids['project_a']}").get_json()
+    assert viewer_project_detail["folder_path"] == ""
+    assert viewer_project_detail["metadata"] == {}
     assert _get(viewer, f"/api/sessions/{ids['session_a']}").status_code == 200
     assert _get(viewer, f"/api/sessions/{ids['session_b']}").status_code == 404
     headers = csrf_headers(viewer, REMOTE_ORIGIN)
@@ -734,6 +743,264 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     assert local_session_a["workdir"] == str((tmp_path / "project-a").resolve())
     assert local_session_a["metadata"] == {"host_session_hint": "/private/session"}
     assert local.get(f"/api/sessions/{ids['unscoped']}", base_url="http://localhost").status_code == 200
+
+
+def test_show_page_payload_redacts_path_for_viewers(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                **_intent(ids["project_a"], "alice@example.com", role="viewer"),
+                "revision": 2,
+            },
+        )
+    monkeypatch.setattr(
+        api,
+        "list_show_pages",
+        lambda **_kwargs: {
+            "ok": True,
+            "count": 1,
+            "pages": [{"session_id": ids["session_a"], "path": "/private/show-page"}],
+        },
+    )
+
+    viewer = _remote_client(config, role="viewer", email="alice@example.com")
+    viewer_page = _get(viewer, "/api/show-pages").get_json()["pages"][0]
+    assert "path" not in viewer_page
+
+    editor = _remote_client(config, role="editor", email="alice@example.com")
+    editor_page = _get(editor, "/api/show-pages").get_json()["pages"][0]
+    assert "path" not in editor_page
+
+    owner = _remote_client(config, role="owner", email="owner@example.com")
+    owner_page = _get(owner, "/api/show-pages").get_json()["pages"][0]
+    assert owner_page["path"] == "/private/show-page"
+
+
+def test_show_page_mutation_payload_redacts_direct_and_nested_pages(monkeypatch) -> None:
+    context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        subject="user-editor",
+        is_remote=True,
+    )
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr(
+        project_access_service,
+        "get_effective_session_role",
+        lambda _conn, _context, _session_id: "viewer",
+    )
+    monkeypatch.setattr(
+        project_access_service,
+        "get_session_project_id",
+        lambda _conn, _session_id: "project-1",
+    )
+    monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: True)
+    monkeypatch.setattr(
+        resource_access_service,
+        "can_manage_resource_acl",
+        lambda _context, _kind, _resource_id, *, connection: False,
+    )
+
+    direct = ui_server._show_page_response_for_request(
+        {"ok": True, "session_id": "session-a", "path": "/private/page"},
+        context,
+    )
+    nested = ui_server._show_page_response_for_request(
+        {
+            "ok": True,
+            "page": {"session_id": "session-a", "path": "/private/page"},
+        },
+        context,
+    )
+
+    assert "path" not in direct
+    assert "path" not in nested["page"]
+
+
+def test_show_page_payload_preserves_path_for_non_project_page_owner(monkeypatch) -> None:
+    context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        subject="user-editor",
+        is_remote=True,
+    )
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr(
+        project_access_service,
+        "get_effective_session_role",
+        lambda _conn, _context, _session_id: None,
+    )
+    monkeypatch.setattr(
+        project_access_service,
+        "get_session_project_id",
+        lambda _conn, _session_id: None,
+    )
+    monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: True)
+    monkeypatch.setattr(
+        resource_access_service,
+        "can_manage_resource_acl",
+        lambda _context, _kind, _resource_id, *, connection: True,
+    )
+
+    payload = ui_server._show_page_response_for_request(
+        {"ok": True, "session_id": "im-session", "path": "/private/page"},
+        context,
+    )
+
+    assert payload["path"] == "/private/page"
+
+
+def test_show_page_payload_does_not_bypass_project_viewer_with_resource_manager(monkeypatch) -> None:
+    context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        subject="user-editor",
+        is_remote=True,
+    )
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr(
+        project_access_service,
+        "get_effective_session_role",
+        lambda _conn, _context, _session_id: "viewer",
+    )
+    monkeypatch.setattr(
+        project_access_service,
+        "get_session_project_id",
+        lambda _conn, _session_id: "project-1",
+    )
+    monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: True)
+    monkeypatch.setattr(
+        resource_access_service,
+        "can_manage_resource_acl",
+        lambda _context, _kind, _resource_id, *, connection: True,
+    )
+
+    payload = ui_server._show_page_response_for_request(
+        {"ok": True, "session_id": "project-session", "path": "/private/page"},
+        context,
+    )
+
+    assert "path" not in payload
+
+
+def test_show_page_payload_does_not_treat_inaccessible_project_as_unscoped(monkeypatch) -> None:
+    context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        subject="user-editor",
+        is_remote=True,
+    )
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr(
+        project_access_service,
+        "get_effective_session_role",
+        lambda _conn, _context, _session_id: None,
+    )
+    monkeypatch.setattr(
+        project_access_service,
+        "get_session_project_id",
+        lambda _conn, _session_id: "project-removed-binding",
+    )
+    monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: True)
+    monkeypatch.setattr(
+        resource_access_service,
+        "can_manage_resource_acl",
+        lambda _context, _kind, _resource_id, *, connection: True,
+    )
+
+    payload = ui_server._show_page_response_for_request(
+        {"ok": True, "session_id": "project-session", "path": "/private/page"},
+        context,
+    )
+
+    assert "path" not in payload
+
+
+def test_show_page_payload_redacts_path_when_session_is_missing(monkeypatch) -> None:
+    context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        subject="user-editor",
+        is_remote=True,
+    )
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Connection()
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: False)
+    monkeypatch.setattr(
+        resource_access_service,
+        "can_manage_resource_acl",
+        lambda _context, _kind, _resource_id, *, connection: True,
+    )
+
+    payload = ui_server._show_page_response_for_request(
+        {"ok": True, "session_id": "deleted-session", "path": "/private/page"},
+        context,
+    )
+
+    assert "path" not in payload
 
 
 def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) -> None:

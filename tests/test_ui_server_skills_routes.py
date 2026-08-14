@@ -10,6 +10,8 @@ project-scoped mutations return a clear ``project_no_folder`` error.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from vibe import api, ui_server
@@ -33,6 +35,76 @@ def folderless(monkeypatch):
 
 def _boom(*_args, **_kwargs):
     raise AssertionError("askill must not be reached for a folderless project")
+
+
+def test_skills_guarded_redacts_missing_project_path(monkeypatch, tmp_path):
+    from core.services import skills as skills_service
+    from storage import project_access_service
+    from vibe.authorization import AuthorizationContext
+
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _name: "askill")
+
+    async def fail(_askill, _service):
+        raise skills_service.SkillsError(
+            "project_dir_missing",
+            f"project folder not found: {tmp_path / 'deleted-project'}",
+        )
+
+    class _Engine:
+        class _Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
+
+        def connect(self):
+            return self._Connection()
+
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: _Engine())
+    monkeypatch.setattr(project_access_service, "get_effective_project_role", lambda *_args: "viewer")
+    context = AuthorizationContext(instance_role="editor", subject="viewer", is_remote=True)
+    result = asyncio.run(
+        api._skills_guarded(fail, user_context=context, project_id="proj-viewer")
+    )
+
+    assert result["error"]["code"] == "project_dir_missing"
+    assert result["error"]["message"] == "The configured project folder is unavailable."
+    assert str(tmp_path) not in result["error"]["message"]
+
+
+def test_skills_guarded_preserves_missing_project_path_for_effective_editor(monkeypatch, tmp_path):
+    from core.services import skills as skills_service
+    from storage import project_access_service
+    from vibe.authorization import AuthorizationContext
+
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _name: "askill")
+
+    async def fail(_askill, _service):
+        raise skills_service.SkillsError(
+            "project_dir_missing",
+            f"project folder not found: {tmp_path / 'deleted-project'}",
+        )
+
+    class _Engine:
+        class _Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
+
+        def connect(self):
+            return self._Connection()
+
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: _Engine())
+    monkeypatch.setattr(project_access_service, "get_effective_project_role", lambda *_args: "editor")
+    context = AuthorizationContext(instance_role="editor", subject="editor", is_remote=True)
+    result = asyncio.run(
+        api._skills_guarded(fail, user_context=context, project_id="proj-editor")
+    )
+
+    assert str(tmp_path) in result["error"]["message"]
 
 
 def test_list_degrades_to_global_with_flag(folderless, monkeypatch):
@@ -70,13 +142,13 @@ def test_resolve_project_dir_uses_request_authorization_context(monkeypatch):
         def connect(self):
             return self._Connection()
 
-    def fake_get_project(conn, project_id, *, authorization_context=None):
+    def fake_get_project_workdir(conn, project_id, *, authorization_context=None):
         seen["project_id"] = project_id
         seen["authorization_context"] = authorization_context
-        return {"folder_path": "/tmp/project"}
+        return "/tmp/project"
 
     monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
-    monkeypatch.setattr("storage.projects_service.get_project", fake_get_project)
+    monkeypatch.setattr("storage.projects_service.get_project_workdir", fake_get_project_workdir)
     remote_context = AuthorizationContext(instance_role="editor", is_remote=True, subject="user-1")
 
     with app.test_request_context("/api/skills?project_id=proj-restricted"):
@@ -191,6 +263,31 @@ def test_upload_preserves_project_id_for_real_project(monkeypatch):
         "project_id": "proj-real",
         "is_instance_owner": True,
     }
+
+
+def test_project_viewer_cannot_reach_skill_mutations(monkeypatch):
+    denied = ui_server._coded_error_response(
+        "resource_access_forbidden",
+        "Skill access is not permitted.",
+        403,
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_require_project_editor_for_skill_mutation",
+        lambda project_id, **_kwargs: denied if project_id == "proj-viewer" else None,
+    )
+    monkeypatch.setattr(ui_server, "_resolve_project_dir", lambda _project_id: "/tmp/project")
+    monkeypatch.setattr(api, "add_skill", _boom)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/skills",
+        json={"project_id": "proj-viewer", "source": "gh:owner/repo"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"]["code"] == "resource_access_forbidden"
 
 
 @pytest.mark.parametrize(

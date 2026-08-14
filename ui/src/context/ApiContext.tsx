@@ -897,6 +897,7 @@ export type WorkbenchProject = {
   metadata?: Record<string, unknown>;
   capabilities: {
     can_chat: boolean;
+    has_folder: boolean;
   };
 };
 

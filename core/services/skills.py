@@ -378,10 +378,11 @@ def _filter_skill_listing(
     if not result.get("ok") or not isinstance(result.get("skills"), list):
         return result
     context = resolve_resource_access_context(user_context)
-    if context.has_role("editor"):
+    if _project_role_allows_editor(context, project_id):
         return result
 
     raw_skills = [dict(skill) for skill in result["skills"] if isinstance(skill, dict)]
+    instance_editor = context.has_role("editor")
     descriptors = _skill_resource_descriptors(
         raw_skills,
         requested_scope=scope,
@@ -406,6 +407,9 @@ def _filter_skill_listing(
         allowed = {(item["skill_index"], item["agent_index"]) for item in accessible}
         filtered_skills = []
         for skill_index, skill in enumerate(raw_skills):
+            if instance_editor and _skill_scope(skill, scope) == "global":
+                filtered_skills.append(skill)
+                continue
             matching = [item for item in descriptors if item["skill_index"] == skill_index]
             if not matching or not any((item["skill_index"], item["agent_index"]) in allowed for item in matching):
                 continue
@@ -459,6 +463,35 @@ def _remote_safe_skill_payload(skill: dict[str, Any]) -> dict[str, Any]:
             if isinstance(agent, dict)
         ]
     return projected
+
+
+def _project_role_allows_editor(user_context: Any, project_id: Optional[str]) -> bool:
+    """Return whether the caller has effective Editor access to a project."""
+
+    context = resolve_resource_access_context(user_context)
+    if context.is_instance_owner:
+        return True
+    if not project_id:
+        return context.has_role("editor")
+
+    from storage import project_access_service
+    from storage.db import get_cached_sqlite_engine
+
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        role = project_access_service.get_effective_project_role(
+            connection,
+            context,
+            str(project_id),
+        )
+    return project_access_service.role_allows(role, "editor")
+
+
+def require_project_editor_access(user_context: Any, project_id: Optional[str]) -> None:
+    """Require effective project Editor access for a project-scoped mutation."""
+
+    if project_id and not _project_role_allows_editor(user_context, project_id):
+        raise SkillAccessError()
 
 
 def _resource_ids_for_skill_name(
@@ -785,7 +818,11 @@ async def preview_source(
     """
     if not source:
         raise SkillsError("missing_source", "no source provided")
-    _require_skill_create_access(resolve_resource_access_context(user_context))
+    context = resolve_resource_access_context(user_context)
+    if project_dir and project_id:
+        require_project_editor_access(context, project_id)
+    else:
+        _require_skill_create_access(context)
     return await _run_askill(askill_path, ["add", source, "--list"], cwd=project_dir)
 
 
@@ -814,6 +851,8 @@ async def add_skill(
     if scope not in ("global", "project"):
         raise SkillsError("invalid_scope", "install scope must be global or project")
     context = resolve_resource_access_context(user_context)
+    if scope == "project":
+        require_project_editor_access(context, project_id)
     if not (
         context.is_instance_owner
         or context.has_role("editor")
@@ -921,6 +960,8 @@ async def remove_skill(
     if scope not in ("global", "project"):
         raise SkillsError("invalid_scope", "remove scope must be global or project")
     context = resolve_resource_access_context(user_context)
+    if scope == "project":
+        require_project_editor_access(context, project_id)
     if not (
         context.is_instance_owner
         or context.has_role("editor")
@@ -999,11 +1040,7 @@ async def check(
         backends=list(BACKEND_TO_AGENT),
         user_context=context,
     )
-    if (
-        context.is_instance_owner
-        or context.has_role("editor")
-        or not isinstance(filtered.get("summary"), dict)
-    ):
+    if _project_role_allows_editor(context, project_id) or not isinstance(filtered.get("summary"), dict):
         return filtered
     skills = filtered.get("skills") if isinstance(filtered.get("skills"), list) else []
     statuses = [str(skill.get("status") or "") for skill in skills if isinstance(skill, dict)]
@@ -1031,6 +1068,8 @@ async def update(
     if scope not in ("global", "project"):
         raise SkillsError("invalid_scope", "update scope must be global or project")
     context = resolve_resource_access_context(user_context)
+    if scope == "project":
+        require_project_editor_access(context, project_id)
     if not (
         context.is_instance_owner
         or context.has_role("editor")

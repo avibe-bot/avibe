@@ -245,8 +245,12 @@ def test_remote_show_page_access_does_not_bypass_acl(
     expected = {"ses-private", "ses-public", "ses-scope"} if instance_role == "owner" else {
         "ses-public", "ses-scope"
     }
-    assert {item["session_id"] for item in catalog.get_json()["pages"]} == expected
-    assert all(item.get("path") for item in catalog.get_json()["pages"])
+    pages = catalog.get_json()["pages"]
+    assert {item["session_id"] for item in pages} == expected
+    if instance_role == "owner":
+        assert all(item.get("path") for item in pages)
+    else:
+        assert all("path" not in item for item in pages)
     assert mutation.status_code == (200 if instance_role == "owner" else 403)
     assert page.status_code == (200 if instance_role == "owner" else 302)
 

@@ -5052,8 +5052,70 @@ def _is_remote_show_page_request() -> bool:
     )
 
 
-def _show_page_payload_for_request(payload: dict) -> dict:
-    return payload
+def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
+    context = _request_authorization_context(context)
+    if context is None or _has_runtime_owner_access(context):
+        return payload
+    from storage import project_access_service
+
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        return _show_page_payload_for_connection(payload, context, conn)
+
+
+def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) -> dict:
+    from storage import project_access_service
+    from storage import resource_access_service
+
+    session_id = str(payload.get("session_id") or "")
+    if not project_access_service.session_exists(conn, session_id):
+        return {key: value for key, value in payload.items() if key != "path"}
+    project_id = project_access_service.get_session_project_id(conn, session_id)
+    effective_role = project_access_service.get_effective_session_role(
+        conn,
+        context,
+        session_id,
+    )
+    if project_access_service.role_allows(effective_role, "editor"):
+        return payload
+    # Legacy and IM-scoped pages have no project role. Their resource ACL
+    # remains the authority for the page owner/editor, but it must not override
+    # an effective project Viewer downgrade on project-attached sessions.
+    if project_id is None and resource_access_service.can_manage_resource_acl(
+        context,
+        "show_page",
+        session_id,
+        connection=conn,
+    ):
+        return payload
+    return {key: value for key, value in payload.items() if key != "path"}
+
+
+def _show_page_payloads_for_request(payloads: list[dict], context: Any = None) -> list[dict]:
+    context = _request_authorization_context(context)
+    if context is None or _has_runtime_owner_access(context):
+        return payloads
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        return [
+            _show_page_payload_for_connection(payload, context, conn)
+            for payload in payloads
+        ]
+
+
+def _show_page_response_for_request(response: Any, context: Any = None) -> Any:
+    """Project every Show Page payload embedded in a mutation response."""
+
+    if not isinstance(response, dict):
+        return response
+    if isinstance(response.get("session_id"), str):
+        return _show_page_payload_for_request(response, context)
+    projected = dict(response)
+    for key in ("page", "show_page"):
+        payload = response.get(key)
+        if isinstance(payload, dict) and isinstance(payload.get("session_id"), str):
+            projected[key] = _show_page_payload_for_request(payload, context)
+    return projected
 
 
 @app.route("/api/show-pages", methods=["GET"])
@@ -5063,14 +5125,10 @@ def show_pages_list_get():
     context = getattr(g, "authorization_context", None)
     resource_context = _request_authorization_context(context)
     payload = api.list_show_pages(user_context=resource_context)
-    if _is_remote_show_page_request():
-        payload = {
-            **payload,
-            "pages": [
-                _show_page_payload_for_request(page)
-                for page in payload.get("pages", [])
-            ],
-        }
+    payload = {
+        **payload,
+        "pages": _show_page_payloads_for_request(payload.get("pages", []), context),
+    }
     return jsonify(payload)
 
 
@@ -5081,12 +5139,13 @@ def show_page_visibility_post(session_id):
 
     payload = request.json or {}
     try:
+        context = _request_authorization_context()
         return jsonify(
-            api.set_show_page_visibility(
+            _show_page_response_for_request(api.set_show_page_visibility(
                 session_id,
                 str(payload.get("visibility") or ""),
-                user_context=_request_authorization_context(),
-            )
+                user_context=context,
+            ), context)
         )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
@@ -5098,12 +5157,14 @@ def show_page_ensure_post(session_id):
     from vibe import api
 
     try:
+        context = _request_authorization_context()
         return jsonify(
             _show_page_payload_for_request(
                 api.ensure_show_page(
                     session_id,
-                    user_context=_request_authorization_context(),
-                )
+                    user_context=context,
+                ),
+                context,
             )
         )
     except ShowPageError as exc:
@@ -5164,12 +5225,13 @@ def show_page_authorized_emails_put(session_id):
             ShowPageError("Invalid Show Page email audience.", code="invalid_email")
         )
     try:
+        context = _request_authorization_context()
         return jsonify(
-            api.replace_show_page_authorized_emails(
+            _show_page_response_for_request(api.replace_show_page_authorized_emails(
                 session_id,
                 emails,
-                user_context=_request_authorization_context(),
-            )
+                user_context=context,
+            ), context)
         )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
@@ -5181,11 +5243,12 @@ def show_page_rotate_share_post(session_id):
     from vibe import api
 
     try:
+        context = _request_authorization_context()
         return jsonify(
-            api.rotate_show_page_share(
+            _show_page_response_for_request(api.rotate_show_page_share(
                 session_id,
-                user_context=_request_authorization_context(),
-            )
+                user_context=context,
+            ), context)
         )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
@@ -5198,12 +5261,13 @@ def show_page_set_share_id_post(session_id):
 
     payload = request.json or {}
     try:
+        context = _request_authorization_context()
         return jsonify(
-            api.set_show_page_share_id(
+            _show_page_response_for_request(api.set_show_page_share_id(
                 session_id,
                 str(payload.get("share_id") or ""),
-                user_context=_request_authorization_context(),
-            )
+                user_context=context,
+            ), context)
         )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
@@ -8063,17 +8127,17 @@ def _resolve_project_dir(project_id):
     """
     if not project_id:
         return None
+    authorization_context = getattr(g, "authorization_context", None)
     from storage import projects_service
 
-    authorization_context = getattr(g, "authorization_context", None)
     engine = _projects_engine()
     with engine.connect() as conn:
-        project = projects_service.get_project(
+        folder = projects_service.get_project_workdir(
             conn,
             project_id,
             authorization_context=authorization_context,
         )
-    folder = (project.get("folder_path") or "").strip()
+    folder = str(folder or "").strip()
     if not folder:
         raise _ProjectNoFolder(project_id)
     return folder
@@ -8117,6 +8181,27 @@ def _skills_user_context_kwargs(context: Any) -> dict[str, Any]:
     if context is not None:
         return {"user_context": context}
     return {}
+
+
+def _require_project_editor_for_skill_mutation(
+    project_id: str | None,
+    *,
+    scope: str = "project",
+):
+    """Reject project Skill mutations below the effective Editor role."""
+
+    if not project_id or scope != "project":
+        return None
+    from core.services import skills as skills_service
+
+    try:
+        skills_service.require_project_editor_access(
+            getattr(g, "authorization_context", None),
+            project_id,
+        )
+    except skills_service.SkillsError as exc:
+        return _coded_error_response(exc.code, exc.message, 403)
+    return None
 
 
 @app.route("/api/projects/<project_id>/agents-md", methods=["GET"])
@@ -8270,6 +8355,12 @@ async def skills_add():
         return _project_not_found(err)
     except _ProjectNoFolder:
         return _project_no_folder_error()
+    denied = _require_project_editor_for_skill_mutation(
+        project_id,
+        scope=str(payload.get("scope") or "project"),
+    )
+    if denied is not None:
+        return denied
     return jsonify(
         await api.add_skill(
             str(payload.get("source") or ""),
@@ -8298,6 +8389,12 @@ async def skills_remove(name):
         return _project_not_found(err)
     except _ProjectNoFolder:
         return _project_no_folder_error()
+    denied = _require_project_editor_for_skill_mutation(
+        project_id,
+        scope=request.args.get("scope") or "project",
+    )
+    if denied is not None:
+        return denied
     return jsonify(
         await api.remove_skill(
             name,
@@ -8359,6 +8456,12 @@ async def skills_update():
         return _project_not_found(err)
     except _ProjectNoFolder:
         return _project_no_folder_error()
+    denied = _require_project_editor_for_skill_mutation(
+        project_id,
+        scope=str(payload.get("scope") or "project"),
+    )
+    if denied is not None:
+        return denied
     return jsonify(
         await api.update_skill(
             str(payload.get("name") or ""),
@@ -8385,6 +8488,9 @@ async def skills_upload():
         # The zip is unpacked to a temp dir (project-independent); the install
         # step picks the scope. Drop the cwd like preview rather than erroring.
         project_dir = None
+    denied = _require_project_editor_for_skill_mutation(project_id)
+    if denied is not None:
+        return denied
     return jsonify(
         await api.upload_skill_zip(
             payload,
@@ -9844,6 +9950,10 @@ async def show_page_icon_upload(session_id: str, starlette_request: FastAPIReque
                     filename=upload.filename,
                     content_type=upload.content_type,
                     user_context=_request_authorization_context(),
+                )
+                result = _show_page_response_for_request(
+                    result,
+                    _request_authorization_context(),
                 )
                 # Broadcast so EVERY already-mounted inventory (Dock, WindowLayer, mobile
                 # drawer, app search) reloads and picks up the new icon_version — the
