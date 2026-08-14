@@ -1,6 +1,8 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import vm from 'node:vm';
 import postcss from 'postcss';
+import ts from 'typescript';
 
 const html = fs.readFileSync('index.html', 'utf8');
 const css = fs.readFileSync('src/index.css', 'utf8');
@@ -495,11 +497,28 @@ function assertMarksTakeTheInk(source, name) {
 assertMarksTakeTheInk(modelHubCss, 'model hub');
 
 // The same rule in Tailwind: `bg-mint` on a 6px dot is a mark, `bg-mint` under a
-// `text-primary-foreground` label is a fill. Only the label tells them apart, and it
-// is regularly a prop or two away (an icon tile passes `iconTileClassName="bg-gold"`
-// and `iconClassName="text-gold-foreground"` on adjacent lines), so the label is
-// looked for in a window rather than on the same line. A per-line check produced
-// three false positives on exactly that shape.
+// `text-primary-foreground` label is a fill. Only the label tells them apart, so the
+// question is where a label counts as belonging to this fill. Two places do, and they
+// are the two the code actually uses:
+//
+//   1. the same class string -- `bg-mint text-primary-foreground` (21 of the 23
+//      labelled fills in src/, including every cva variant in button-variants.ts)
+//   2. a sibling attribute or property of the same node -- an icon tile passes
+//      `iconTileClassName="bg-gold"` beside `iconClassName="text-gold-foreground"`,
+//      and agentBackends.ts pairs `tileCls`/`iconCls` in one object literal
+//
+// Both scopes come from the TypeScript AST, so "belongs to" is a parent node rather
+// than a line count. Proximity is not evidence: an earlier draft looked in a +/-4 line
+// window and would accept a `text-primary-foreground` button standing next to an
+// unrelated `bg-mint` dot as proof the dot was labelled -- passing exactly the mark it
+// exists to catch. Reading literals off the AST also drops the need to blank comments
+// (a class name in JSDoc is comment trivia, never a string literal) and makes
+// multi-line class strings work without a hand-rolled quote scanner.
+//
+// A label on a child element (`<div className="bg-mint"><span
+// className="text-primary-foreground">`) is deliberately NOT a scope: no site needs it
+// today, and widening to a subtree would re-admit an unrelated nested label. Such a
+// site fails and is either merged into one class string or pinned below.
 //
 // mint/cyan/pink declare no -foreground of their own; they print --primary-foreground
 // and --accent-foreground, the aliases SEMANTIC_FILL_ALIASES keeps equal. pink has no
@@ -513,7 +532,6 @@ const FILL_LABEL = new Map([
   ['violet', 'violet-foreground'],
   ['gold', 'gold-foreground'],
 ]);
-const LABEL_WINDOW = 4;
 
 // Control chrome the owner has not ruled on: switch/toggle tracks and progress/step
 // bars, where the fill is a large shape whose state is already carried by knob
@@ -536,48 +554,86 @@ const ACCEPTED_BARE_FILLS = new Map([
   ['src/components/visual/EmbeddedConfigShell.tsx --mint', { marks: 1, reason: STEP_DOTS }],
 ]);
 
+// Every class string in a file, paired with the scope a sibling label may live in:
+// the JSX attribute list or the object literal the string sits in, else the string
+// itself. A template literal counts as one class string -- its static head and spans
+// are one `className`, and the interpolations are visited separately.
+function classStrings(file, source) {
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const strings = [];
+
+  const scopeOf = (node) => {
+    const parent = node.parent;
+    if (ts.isJsxAttribute(parent) || (ts.isJsxExpression(parent) && ts.isJsxAttribute(parent.parent))) {
+      return ts.isJsxAttribute(parent) ? parent.parent : parent.parent.parent;
+    }
+    if (ts.isPropertyAssignment(parent) && ts.isObjectLiteralExpression(parent.parent)) {
+      return parent.parent;
+    }
+    return node;
+  };
+
+  const record = (node, text) => {
+    strings.push({
+      text,
+      scope: scopeOf(node).getText(ast),
+      line: ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1,
+    });
+  };
+
+  const visit = (node) => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      record(node, node.text);
+    } else if (ts.isTemplateExpression(node)) {
+      record(node, [node.head.text, ...node.templateSpans.map((span) => span.literal.text)].join(' '));
+      node.templateSpans.forEach((span) => visit(span.expression));
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(ast);
+  return strings;
+}
+
 function assertUnlabeledFillsTakeTheInk(root) {
   const bare = new RegExp(`\\bbg-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-/])`, 'g');
   const found = new Map();
 
+  // readdirSync(recursive) yields platform separators, so on Windows an entry arrives
+  // as `components\ui\switch.tsx`. Normalise before it becomes a lookup key, or every
+  // pin below misses and validate:theme fails on an unchanged checkout.
   const files = fs.readdirSync(root, { recursive: true })
+    .map((entry) => entry.split(path.sep).join('/'))
     .filter((entry) => /\.tsx?$/.test(entry))
     .map((entry) => `${root}/${entry}`)
     .sort();
 
   for (const file of files) {
-    // A class name inside a comment paints nothing -- BackendRuntimeCard's JSDoc
-    // names ``"bg-gold"`` to document what callers pass -- so comment-only lines are
-    // blanked before the scan. Blanked for the label window too, and not merely
-    // skipped as marks: prose describing a pairing is not evidence that the pairing
-    // is rendered, and letting it stand in would excuse the next real mark beside it.
-    const lines = fs.readFileSync(file, 'utf8').split('\n')
-      .map((line) => (/^\s*(\*|\/\/|\/\*)/.test(line) ? '' : line));
-    lines.forEach((line, index) => {
-      for (const match of line.matchAll(bare)) {
+    for (const { text, scope, line } of classStrings(file, fs.readFileSync(file, 'utf8'))) {
+      for (const match of text.matchAll(bare)) {
         const accent = match[1];
         const label = FILL_LABEL.get(accent);
-        const window = lines
-          .slice(Math.max(0, index - LABEL_WINDOW), index + LABEL_WINDOW + 1)
-          .join('\n');
-        if (label && window.includes(`-${label}`)) {
+        if (label && (text.includes(`-${label}`) || scope.includes(`-${label}`))) {
           continue;
         }
 
         const key = `${file} --${accent}`;
         const entry = found.get(key) ?? { count: 0, lines: [] };
-        found.set(key, { count: entry.count + 1, lines: [...entry.lines, index + 1] });
+        found.set(key, { count: entry.count + 1, lines: [...entry.lines, line] });
       }
-    });
+    }
   }
 
   const unpinned = [...found.entries()].filter(([key]) => !ACCEPTED_BARE_FILLS.has(key));
   if (unpinned.length > 0) {
     throw new Error(
-      'These paint a bare accent fill with no paired *-foreground label anywhere near it, so they are '
-      + 'marks read straight off the canvas and must use the -ink token (bg-mint-ink, bg-gold-ink, ...):\n'
+      'These paint a bare accent fill with no paired *-foreground label in the same class string or on '
+      + 'a sibling attribute/property, so they are marks read straight off the canvas and must use the '
+      + '-ink token (bg-mint-ink, bg-gold-ink, ...):\n'
       + unpinned.map(([key, { lines }]) => `  ${key} at line ${lines.join(', ')}`).join('\n')
-      + '\nIf a mark is deliberately exempt, pin it in ACCEPTED_BARE_FILLS with its reason.',
+      + '\nIf the label is real but lives on a child element, move it into the same class string. '
+      + 'If a mark is deliberately exempt, pin it in ACCEPTED_BARE_FILLS with its reason.',
     );
   }
 
