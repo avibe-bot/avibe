@@ -505,6 +505,26 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
     if not isinstance(items, list) or not items:
         print(i18n_t("memory.cli.empty", language))
         return
+    if operation == "list":
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            timestamp = item.get("timestamp")
+            subject = item.get("subject")
+            summary = item.get("summary")
+            body = item.get("body")
+            lines = [
+                value
+                for value in (subject, summary, body)
+                if isinstance(value, str) and value
+            ]
+            if not lines:
+                continue
+            prefix = f"{timestamp} " if isinstance(timestamp, str) and timestamp else ""
+            print(f"{prefix}{lines[0]}")
+            for line in lines[1:]:
+                print(line)
+        return
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -526,7 +546,7 @@ def cmd_memory(args) -> int:
     as_json = bool(getattr(args, "json", False))
     language = _memory_cli_language()
     query = ""
-    if operation not in {"status", "profile", "search", "remember"}:
+    if operation not in {"status", "profile", "list", "search", "remember"}:
         return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json, language=language)
     if operation == "search":
         query = args.query.strip() if isinstance(args.query, str) else ""
@@ -538,6 +558,15 @@ def cmd_memory(args) -> int:
             or not 1 <= args.limit <= 20
         ):
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
+    if operation == "list" and (
+        not isinstance(args.page, int)
+        or isinstance(args.page, bool)
+        or args.page < 1
+        or not isinstance(args.limit, int)
+        or isinstance(args.limit, bool)
+        or not 1 <= args.limit <= 20
+    ):
+        return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     if operation == "remember":
         query = args.text if isinstance(args.text, str) else ""
         if not query.strip() or len(query) > 4_000:
@@ -553,6 +582,13 @@ def cmd_memory(args) -> int:
             response = internal_client.memory_status_sync(**access)
         elif operation == "profile":
             response = internal_client.memory_profile_sync(**access)
+        elif operation == "list":
+            response = internal_client.memory_list_sync(
+                page=args.page,
+                limit=args.limit,
+                project=getattr(args, "project", None),
+                **access,
+            )
         elif operation == "search":
             response = internal_client.memory_search_sync(
                 query,
@@ -14217,7 +14253,7 @@ def build_parser():
     )
     memory_subparsers = memory_parser.add_subparsers(
         dest="memory_command",
-        metavar="{status,profile,search,remember}",
+        metavar="{status,profile,list,search,remember}",
     )
     memory_subparsers.required = True
     memory_status_parser = memory_subparsers.add_parser(
@@ -14234,6 +14270,32 @@ def build_parser():
         help=i18n_t("memory.cli.help.profile", memory_help_language),
     )
     memory_profile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_list_parser = memory_subparsers.add_parser(
+        "list",
+        help=i18n_t("memory.cli.help.list", memory_help_language),
+    )
+    memory_list_parser.add_argument(
+        "--project",
+        default=None,
+        help=i18n_t("memory.cli.help.project", memory_help_language),
+    )
+    memory_list_parser.add_argument(
+        "--page",
+        type=int,
+        default=1,
+        help=i18n_t("memory.cli.help.page", memory_help_language),
+    )
+    memory_list_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help=i18n_t("memory.cli.help.pageLimit", memory_help_language),
+    )
+    memory_list_parser.add_argument(
         "--json",
         action="store_true",
         help=i18n_t("memory.cli.help.json", memory_help_language),

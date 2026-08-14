@@ -724,6 +724,182 @@ def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None
     assert current_session_id == "ses-memory"
 
 
+def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    runtime = SimpleNamespace(
+        list_memory_projects=Mock(return_value=("default", "notes")),
+        list_episodes_payload=AsyncMock(
+            return_value={"status": "ok", "items": [], "page": 2}
+        ),
+    )
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/list",
+                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
+                json={"project": "notes", "page": 2, "limit": 5},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": [], "page": 2}
+    controller.memory_scope_for_cli_session.assert_called_once_with("ses-memory-list")
+    runtime.list_memory_projects.assert_called_once_with(
+        "u-11111111111111111111111111111111"
+    )
+    runtime.list_episodes_payload.assert_awaited_once_with(
+        "u-11111111111111111111111111111111",
+        "notes",
+        page=2,
+        page_size=5,
+    )
+
+
+def test_memory_list_rejects_all_for_cli_at_controller_boundary() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    runtime = SimpleNamespace(
+        list_all_episodes_payload=AsyncMock(),
+        list_episodes_payload=AsyncMock(),
+    )
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/list",
+                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
+                json={"project": "all", "page": 1, "limit": 20},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    runtime.list_all_episodes_payload.assert_not_awaited()
+    runtime.list_episodes_payload.assert_not_awaited()
+
+
+def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    runtime = SimpleNamespace(
+        principal_for_user_key=Mock(
+            return_value="u-22222222222222222222222222222222"
+        ),
+        list_all_episodes_payload=AsyncMock(
+            return_value={
+                "status": "ok",
+                "items": [],
+                "next_cursor": "next-token",
+            }
+        ),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    user_key = "avibe:remote:subject-list"
+
+    async def _exercise() -> httpx.Response:
+        path = "/internal/memory/list"
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+                json={"project": "all", "cursor": "cursor-token", "limit": 7},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json()["next_cursor"] == "next-token"
+    runtime.principal_for_user_key.assert_called_once_with(user_key)
+    runtime.list_all_episodes_payload.assert_awaited_once_with(
+        "u-22222222222222222222222222222222",
+        cursor="cursor-token",
+        limit=7,
+    )
+
+
+def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    runtime = SimpleNamespace(
+        principal_for_user_key=Mock(
+            return_value="u-22222222222222222222222222222222"
+        ),
+        list_all_episodes_payload=AsyncMock(
+            return_value={"status": "failed", "error": "memory_invalid_input"}
+        ),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/list"
+    user_key = "avibe:local"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+                json={"project": "all", "cursor": "malformed", "limit": 20},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+
+
 def test_memory_rebuild_requires_signed_ui_operator() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER

@@ -1134,6 +1134,96 @@ def test_memory_search_rejects_agentic_policy_before_internal_transport(
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_memory_list_requires_csrf_and_forwards_ui_aggregate_cursor(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def memory_list(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "items": [],
+                "next_cursor": "next-token",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_list", memory_list)
+    client = app.test_client()
+    payload = {"project": "all", "cursor": "cursor-token", "limit": 7}
+    rejected = client.post(
+        "/api/memory/list",
+        json=payload,
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    response = client.post(
+        "/api/memory/list",
+        json=payload,
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert rejected.status_code == 403
+    assert response.status_code == 200
+    assert response.get_json()["next_cursor"] == "next-token"
+    assert response.headers["cache-control"] == "no-store"
+    assert calls == [
+        {
+            "user_key": "avibe:local",
+            "project": "all",
+            "page": None,
+            "cursor": "cursor-token",
+            "limit": 7,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"project": "all", "page": 1},
+        {"project": "notes", "cursor": "cursor-token"},
+        {"project": "all", "cursor": ""},
+        {"project": "default", "page": 0},
+        {"project": "default", "limit": 21},
+        {"project": "default", "unknown": True},
+    ],
+)
+def test_memory_list_rejects_invalid_pagination_before_internal_transport(
+    monkeypatch,
+    tmp_path,
+    payload,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def transport_must_not_run(**_kwargs):
+        raise AssertionError("invalid list payload reached internal transport")
+
+    monkeypatch.setattr(internal_client, "memory_list", transport_must_not_run)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/list",
+        json=payload,
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+
+
 def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

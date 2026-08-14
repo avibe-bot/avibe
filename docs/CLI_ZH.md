@@ -104,14 +104,22 @@ vibe status
 
 通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或提交需要记住的长期内容——既包括用户明确要求保存的内容，也包括 Agent 从对话以及在本机工作中主动提炼的结论（含在文件或工具输出中遇到的持久环境、账户事实）。该命令不会启动服务，也没有清空、配置、导出或删除子命令。
 
-`status` 可在普通终端中使用。`profile`、`search` 和 `remember` 必须在 Avibe 已注入当前 Session 上下文的合规 Agent shell 中运行；从普通终端运行会返回 `memory_access_denied`。
+`status` 可在普通终端中使用。`profile`、`list`、`search` 和 `remember` 必须在
+Avibe 已注入当前 Session 上下文的合规 Agent shell 中运行；从普通终端运行会返回
+`memory_access_denied`。
 
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
+vibe memory list [--project <slug>] [--page N] [--limit 1..20] [--json]
 vibe memory search <查询> [--project <slug>] [--limit 1..20] [--json]
 vibe memory remember <文本> [--project <slug>] [--json]
 ```
+
+`list` 按时间倒序返回有效且已处理的事件。页码严格采用 EverOS 从 1 开始的语义，每页
+默认 20 条；JSON 会包含每条事件的不透明 entry id。Agent CLI 只接受 `default` 或目录中
+已有的具名项目，`--project all` 仅供设置页使用。该命令用于显式检查，不会加入注入的
+个人记忆 prompt。
 
 ### `vibe doctor`
 

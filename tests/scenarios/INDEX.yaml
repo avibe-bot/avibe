@@ -53,6 +53,18 @@ capabilities:
       - tests/test_memory_project_ids.py
       - tests/test_memory_sidecar.py
       - tests/test_ui_memory_routes.py
+  - id: memory_list
+    name: Scoped processed Memory episode listing
+    status: active
+    catalog: tests/scenarios/memory_list/catalog.yaml
+    observations: tests/scenarios/memory_list/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_list/test_memory_list_scenarios.py
+    unit_or_contract_tests:
+      - tests/test_memory_runtime.py
+      - tests/test_internal_server.py
+      - tests/test_internal_client.py
+      - tests/test_memory_cli.py
   - id: memory_repair
     name: Live Memory index repair via admitted artifact sync
     status: active

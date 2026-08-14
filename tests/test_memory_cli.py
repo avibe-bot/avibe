@@ -20,11 +20,17 @@ _MEMORY_HELP_BY_LANGUAGE = {
         "memory": (
             "Show Memory status",
             "Show the Memory profile",
+            "List processed Memory episodes",
             "Search local Memory",
             "Queue durable personal context",
         ),
         "status": ("Print machine-readable output",),
         "profile": ("Print machine-readable output",),
+        "list": (
+            "Page number (1-based)",
+            "Episodes per page (1-20)",
+            "Print machine-readable output",
+        ),
         "search": (
             "Search query",
             "Maximum results (1-20)",
@@ -35,9 +41,16 @@ _MEMORY_HELP_BY_LANGUAGE = {
     },
     "zh": {
         "top": ("通过运行中的控制器使用本地记忆",),
-        "memory": ("显示记忆状态", "显示记忆档案", "搜索本地记忆", "将长期个人信息加入队列"),
+        "memory": (
+            "显示记忆状态",
+            "显示记忆档案",
+            "列出已处理的记忆片段",
+            "搜索本地记忆",
+            "将长期个人信息加入队列",
+        ),
         "status": ("输出机器可读格式",),
         "profile": ("输出机器可读格式",),
+        "list": ("页码（从 1 开始）", "每页记忆片段数（1-20）", "输出机器可读格式"),
         "search": ("搜索内容", "最大结果数（1-20）", "召回模式（默认：hybrid）", "输出机器可读格式"),
         "remember": ("要记住的文本（最多 4,000 个字符）", "输出机器可读格式"),
     },
@@ -60,7 +73,7 @@ def test_memory_help_uses_configured_i18n(language, arguments, section, monkeypa
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])
-@pytest.mark.parametrize("command", ["status", "profile", "search", "remember"])
+@pytest.mark.parametrize("command", ["status", "profile", "list", "search", "remember"])
 def test_memory_subcommand_help_uses_configured_i18n(language, command, monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "_memory_cli_language", lambda: language)
     parser = cli.build_parser()
@@ -100,6 +113,120 @@ def test_memory_search_json_is_a_presentation_of_the_uds_response(monkeypatch, c
         "kind": "memory_search",
         "result": {"status": "ok", "items": [{"kind": "fact", "text": "result"}]},
     }
+
+
+def test_memory_list_json_preserves_opaque_entry_id_and_page_contract(
+    monkeypatch,
+    capsys,
+) -> None:
+    """Scenario: MEMORY-LIST-001 and MEMORY-LIST-004."""
+
+    args = cli.build_parser().parse_args(
+        ["memory", "list", "--project", "notes", "--page", "2", "--limit", "5", "--json"]
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setenv(AVIBE_SESSION_ID_ENV, "ses-memory-list")
+
+    def list_sync(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "items": [
+                    {
+                        "id": "opaque-entry-id",
+                        "kind": "episode",
+                        "subject": "Subject",
+                        "summary": "Summary",
+                        "body": "Body",
+                        "timestamp": "2026-08-14T12:00:00Z",
+                        "project": "notes",
+                    }
+                ],
+                "page": 2,
+                "page_size": 5,
+                "count": 1,
+                "total_count": 6,
+                "warnings": [],
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_list_sync", list_sync)
+
+    assert cli.cmd_memory(args) == 0
+    assert calls == [
+        {
+            "page": 2,
+            "limit": 5,
+            "project": "notes",
+            "caller_session_id": "ses-memory-list",
+        }
+    ]
+    output = json.loads(capsys.readouterr().out)
+    assert output["kind"] == "memory_list"
+    assert output["result"]["items"][0]["id"] == "opaque-entry-id"
+    assert output["result"]["page"] == 2
+
+
+def test_memory_list_parser_defaults_match_everos_page_semantics() -> None:
+    args = cli.build_parser().parse_args(["memory", "list"])
+
+    assert args.memory_command == "list"
+    assert args.project is None
+    assert args.page == 1
+    assert args.limit == 20
+    assert args.json is False
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["memory", "list", "--page", "0", "--json"],
+        ["memory", "list", "--limit", "0", "--json"],
+        ["memory", "list", "--limit", "21", "--json"],
+    ],
+)
+def test_memory_list_rejects_invalid_bounds_before_transport(
+    arguments,
+    monkeypatch,
+    capsys,
+) -> None:
+    args = cli.build_parser().parse_args(arguments)
+
+    def transport_must_not_run(**_kwargs):
+        raise AssertionError("invalid list input reached the controller")
+
+    monkeypatch.setattr(internal_client, "memory_list_sync", transport_must_not_run)
+
+    assert cli.cmd_memory(args) == 1
+    assert json.loads(capsys.readouterr().out)["code"] == "memory_invalid_input"
+
+
+def test_memory_list_all_rejection_comes_from_controller(monkeypatch, capsys) -> None:
+    """Scenario: MEMORY-LIST-003."""
+
+    args = cli.build_parser().parse_args(
+        ["memory", "list", "--project", "all", "--json"]
+    )
+    calls: list[str | None] = []
+
+    def list_sync(**kwargs):
+        calls.append(kwargs["project"])
+        return {
+            "status_code": 400,
+            "body": {"status": "failed", "error": "memory_invalid_input"},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_list_sync", list_sync)
+
+    assert cli.cmd_memory(args) == 1
+    assert calls == ["all"]
+    assert json.loads(capsys.readouterr().out)["code"] == "memory_invalid_input"
+
+
+def test_memory_list_is_not_added_to_the_injected_personal_memory_prompt() -> None:
+    assert "vibe memory list" not in _MEMORY_CLI_PROMPT
 
 
 def test_injected_agentic_memory_example_is_accepted_by_the_live_parser() -> None:

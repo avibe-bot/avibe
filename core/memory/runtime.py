@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from copy import deepcopy
+import hashlib
+import json
 import logging
 import os
 import stat
@@ -93,6 +96,8 @@ from core.memory.types import (
     MemoryItem,
     MemoryItems,
     MemoryListPage,
+    MemoryListItem,
+    MemoryListWarningCode,
     MemoryResult,
     MemoryWarningCode,
     OperationFailed,
@@ -115,6 +120,10 @@ ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 _CALL_LOG_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
 _RECORDER_DISABLED = {"state": "disabled", "reason": None}
 _RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
+_MEMORY_LIST_CURSOR_VERSION = 1
+_MEMORY_LIST_CURSOR_MAX_BYTES = 4096
+_MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
+_MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1468,6 +1477,149 @@ class MemoryRuntime:
         if isinstance(result, MemoryListPage):
             return memory_list_page_payload(result)
         return {"status": "failed", "error": "memory_processing_failed"}
+
+    async def list_all_episodes_payload(
+        self,
+        principal_id: str,
+        *,
+        cursor: str | None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Merge this principal's project pages behind an Avibe cursor."""
+
+        if not self.available:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        if (
+            not is_principal_id(principal_id)
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _MEMORY_LIST_PROVIDER_PAGE_SIZE
+        ):
+            return {"status": "failed", "error": "memory_invalid_input"}
+        try:
+            projects = await run_blocking(self.list_memory_projects, principal_id)
+        except Exception:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        if not projects:
+            projects = (DEFAULT_MEMORY_PROJECT_ID,)
+        fingerprint = _memory_list_catalog_fingerprint(projects)
+        try:
+            offsets = _decode_memory_list_cursor(
+                cursor,
+                projects=projects,
+                fingerprint=fingerprint,
+            )
+        except ValueError:
+            return {"status": "failed", "error": "memory_invalid_input"}
+
+        deadline = time.monotonic() + _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS
+        candidates: list[MemoryListItem] = []
+        warnings: list[MemoryListWarningCode] = []
+        totals: dict[str, int] = {}
+        complete = True
+        for project_id in projects:
+            window = await self._list_project_window(
+                principal_id,
+                project_id,
+                offset=offsets[project_id],
+                limit=limit,
+                deadline=deadline,
+            )
+            if isinstance(window, OperationFailed):
+                complete = False
+                warning: MemoryListWarningCode = (
+                    "memory_list_truncated"
+                    if window.error == "memory_provider_timeout"
+                    else "memory_list_partial"
+                )
+                warnings.append(warning)
+                if window.error == "memory_provider_timeout":
+                    break
+                continue
+            items, total_count, project_warnings = window
+            candidates.extend(items)
+            totals[project_id] = total_count
+            warnings.extend(project_warnings)
+
+        ordered = sorted(candidates, key=lambda item: (item.project, item.id))
+        ordered.sort(key=lambda item: item.timestamp, reverse=True)
+        selected = tuple(ordered[:limit])
+        next_offsets = dict(offsets)
+        for item in selected:
+            next_offsets[item.project] += 1
+
+        has_more = any(
+            next_offsets[project_id] < total_count
+            for project_id, total_count in totals.items()
+        )
+        if not complete and selected:
+            has_more = True
+        next_cursor = (
+            _encode_memory_list_cursor(fingerprint, next_offsets)
+            if has_more and selected
+            else None
+        )
+        return {
+            "status": "ok",
+            "items": memory_list_page_payload(
+                MemoryListPage(
+                    items=selected,
+                    page=1,
+                    page_size=limit,
+                    count=len(selected),
+                    total_count=sum(totals.values()),
+                )
+            )["items"],
+            "count": len(selected),
+            "total_count": sum(totals.values()) if complete else None,
+            "warnings": list(dict.fromkeys(warnings)),
+            "next_cursor": next_cursor,
+        }
+
+    async def _list_project_window(
+        self,
+        principal_id: str,
+        project_id: str,
+        *,
+        offset: int,
+        limit: int,
+        deadline: float,
+    ) -> (
+        tuple[tuple[MemoryListItem, ...], int, tuple[MemoryListWarningCode, ...]]
+        | OperationFailed
+    ):
+        page = offset // _MEMORY_LIST_PROVIDER_PAGE_SIZE + 1
+        skip = offset % _MEMORY_LIST_PROVIDER_PAGE_SIZE
+        items: list[MemoryListItem] = []
+        warnings: list[MemoryListWarningCode] = []
+        total_count = 0
+        while len(items) < limit:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return OperationFailed(error="memory_provider_timeout")
+            try:
+                result = await asyncio.wait_for(
+                    self.module.list_episodes(
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        page=page,
+                        page_size=_MEMORY_LIST_PROVIDER_PAGE_SIZE,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                return OperationFailed(error="memory_provider_timeout")
+            if isinstance(result, OperationFailed):
+                return result
+            total_count = result.total_count
+            warnings.extend(result.warnings)
+            available = result.items[skip:]
+            items.extend(available[: limit - len(items)])
+            if result.count < _MEMORY_LIST_PROVIDER_PAGE_SIZE or page * _MEMORY_LIST_PROVIDER_PAGE_SIZE >= total_count:
+                break
+            page += 1
+            skip = 0
+        return tuple(items), total_count, tuple(dict.fromkeys(warnings))
 
     def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
         if not self.available:
@@ -3348,3 +3500,70 @@ def _merge_search_items(items: list[MemoryItem], *, limit: int) -> tuple[MemoryI
         if len(merged) >= limit:
             break
     return tuple(merged)
+
+
+def _memory_list_catalog_fingerprint(projects: tuple[str, ...]) -> str:
+    material = json.dumps(
+        {"projects": list(projects), "sort": "timestamp:desc"},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _encode_memory_list_cursor(fingerprint: str, offsets: dict[str, int]) -> str:
+    raw = json.dumps(
+        {"v": _MEMORY_LIST_CURSOR_VERSION, "f": fingerprint, "o": offsets},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    if len(token.encode("ascii")) > _MEMORY_LIST_CURSOR_MAX_BYTES:
+        raise ValueError("Memory list cursor is too large")
+    return token
+
+
+def _decode_memory_list_cursor(
+    cursor: str | None,
+    *,
+    projects: tuple[str, ...],
+    fingerprint: str,
+) -> dict[str, int]:
+    if cursor is None:
+        return {project_id: 0 for project_id in projects}
+    if (
+        not isinstance(cursor, str)
+        or not cursor
+        or len(cursor.encode("utf-8")) > _MEMORY_LIST_CURSOR_MAX_BYTES
+    ):
+        raise ValueError("invalid Memory list cursor")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        raw = base64.b64decode(
+            cursor + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(raw)
+    except (UnicodeEncodeError, ValueError, TypeError, json.JSONDecodeError):
+        raise ValueError("invalid Memory list cursor") from None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"v", "f", "o"}
+        or payload.get("v") != _MEMORY_LIST_CURSOR_VERSION
+        or payload.get("f") != fingerprint
+        or not isinstance(payload.get("o"), dict)
+        or set(payload["o"]) != set(projects)
+    ):
+        raise ValueError("invalid Memory list cursor")
+    offsets = payload["o"]
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= 20_000
+        for value in offsets.values()
+    ):
+        raise ValueError("invalid Memory list cursor")
+    return {project_id: offsets[project_id] for project_id in projects}

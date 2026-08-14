@@ -1570,6 +1570,145 @@ def create_app(
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
+    @app.post("/internal/memory/list")
+    async def _memory_list(request: Request) -> Any:
+        try:
+            scope = _memory_read_scope(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        principal_id, _default_project_id = scope
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        payload = await _safe_json(request)
+        if not isinstance(payload, dict) or set(payload) - {
+            "project",
+            "page",
+            "limit",
+            "cursor",
+        }:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+        from core.memory.project_ids import (
+            DEFAULT_MEMORY_PROJECT_ID,
+            MEMORY_SEARCH_ALL_PROJECTS,
+            omitted_project_to_default,
+            parse_agent_search_project,
+            parse_ui_search_project,
+        )
+
+        is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
+        limit = payload.get("limit", 20)
+        try:
+            raw_project = omitted_project_to_default(payload.get("project"))
+            project_id = (
+                parse_ui_search_project(raw_project)
+                if is_ui
+                else parse_agent_search_project(raw_project)
+            )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 20
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        if project_id == MEMORY_SEARCH_ALL_PROJECTS:
+            cursor = payload.get("cursor")
+            if (
+                "page" in payload
+                or (
+                    cursor is not None
+                    and (
+                        not isinstance(cursor, str)
+                        or not cursor
+                        or len(cursor.encode("utf-8")) > 4096
+                    )
+                )
+            ):
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "failed", "error": "memory_invalid_input"},
+                )
+            try:
+                result = await runtime.list_all_episodes_payload(
+                    principal_id,
+                    cursor=cursor,
+                    limit=limit,
+                )
+                if result == {
+                    "status": "failed",
+                    "error": "memory_invalid_input",
+                }:
+                    return JSONResponse(status_code=400, content=result)
+                return result
+            except Exception:
+                logger.warning("internal aggregate memory list failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "failed", "error": "memory_processing_failed"},
+                )
+
+        page = payload.get("page", 1)
+        if (
+            "cursor" in payload
+            or isinstance(page, bool)
+            or not isinstance(page, int)
+            or page < 1
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        if project_id != DEFAULT_MEMORY_PROJECT_ID:
+            try:
+                catalog = await run_blocking(runtime.list_memory_projects, principal_id)
+            except Exception:
+                logger.warning("internal memory project catalog failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "failed", "error": "memory_store_unavailable"},
+                )
+            if project_id not in catalog:
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "failed", "error": "memory_invalid_input"},
+                )
+        try:
+            return await runtime.list_episodes_payload(
+                principal_id,
+                project_id,
+                page=page,
+                page_size=limit,
+            )
+        except Exception:
+            logger.warning("internal memory list failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
+
     @app.post("/internal/memory/remember")
     async def _memory_remember(request: Request) -> Any:
         scope = _memory_cli_scope(request)

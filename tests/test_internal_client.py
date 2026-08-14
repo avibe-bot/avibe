@@ -566,6 +566,83 @@ def test_memory_sync_read_helpers_use_verified_uds(socket_path):
     ]
 
 
+def test_memory_list_sync_forwards_page_project_and_caller_session(socket_path):
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(
+            path=request.url.path,
+            payload=json.loads(request.content.decode("utf-8")),
+            caller_session=request.headers.get("x-avibe-caller-session"),
+        )
+        return httpx.Response(200, json={"status": "ok", "items": []})
+
+    with patch(
+        "vibe.internal_client.httpx.HTTPTransport",
+        return_value=httpx.MockTransport(handler),
+    ):
+        response = internal_client.memory_list_sync(
+            project="notes",
+            page=3,
+            limit=7,
+            caller_session_id="ses-memory-list",
+            socket_path=socket_path,
+        )
+
+    assert response["status_code"] == 200
+    assert captured == {
+        "path": "/internal/memory/list",
+        "payload": {"page": 3, "limit": 7, "project": "notes"},
+        "caller_session": "ses-memory-list",
+    }
+
+
+def test_memory_list_async_signs_ui_aggregate_cursor(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(
+            path=request.url.path,
+            payload=json.loads(request.content.decode("utf-8")),
+            user_key=request.headers.get("x-avibe-memory-user-key"),
+            proof=request.headers.get("x-avibe-memory-ui-proof"),
+        )
+        return httpx.Response(200, json={"status": "ok", "items": []})
+
+    async def _exercise():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_list(
+                user_key="avibe:remote:user-list",
+                project="all",
+                cursor="cursor-token",
+                limit=9,
+                socket_path=socket_path,
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response["status_code"] == 200
+    assert captured["path"] == "/internal/memory/list"
+    assert captured["payload"] == {
+        "limit": 9,
+        "project": "all",
+        "cursor": "cursor-token",
+    }
+    assert captured["user_key"] == "avibe:remote:user-list"
+    assert captured["proof"] == ui_access.build_ui_read_proof(
+        "test-ui-controller-secret",
+        method="POST",
+        path="/internal/memory/list",
+        user_key="avibe:remote:user-list",
+    )
+
+
 def test_memory_ui_read_helper_signs_the_fixed_local_owner(monkeypatch, socket_path):
     from core.memory import ui_access
 

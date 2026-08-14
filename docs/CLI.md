@@ -123,14 +123,24 @@ vibe status
 
 Read scoped local Memory or queue durable context to remember — facts the user explicitly asked to save, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. This command does not start a service and has no clear, configuration, export, or delete subcommands.
 
-`status` works from a normal terminal. `profile`, `search`, and `remember` require an eligible Agent shell where Avibe has injected the current Session context; running them from a normal terminal returns `memory_access_denied`.
+`status` works from a normal terminal. `profile`, `list`, `search`, and `remember`
+require an eligible Agent shell where Avibe has injected the current Session
+context; running them from a normal terminal returns `memory_access_denied`.
 
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
+vibe memory list [--project <slug>] [--page N] [--limit 1..20] [--json]
 vibe memory search <query> [--project <slug>] [--mode {hybrid|keyword|vector|agentic}] [--limit 1..20] [--json]
 vibe memory remember <text> [--project <slug>] [--json]
 ```
+
+List returns valid processed episodes newest first. It uses EverOS's exact
+1-based page semantics, defaults to 20 episodes per page, and exposes each
+episode's opaque entry id in JSON. The Agent CLI accepts `default` or one
+catalogued named project; `--project all` is reserved for the Settings UI.
+Listing is an explicit inspection command and is not added to the injected
+Personal Memory prompt.
 
 Search defaults to `--mode hybrid` with `--limit 8`. Use `keyword` for exact
 terms, `vector` for semantic matches, and reserve `agentic` for complex,
