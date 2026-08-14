@@ -92,7 +92,6 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
     assert sources[0]["account_label"] is None
     assert sources[0]["credential_ref"] is None
     assert harness.store.config.sources[0].id == started["source_id"]
-    harness.adapter._flows.clear()
     harness.agent_auth.flows.clear()
     repeated = client.get(
         f"/api/models/oauth/status/{started['flow_id']}",

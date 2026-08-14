@@ -110,6 +110,18 @@ class FakeAgentAuthService:
         self.cancelled.append(flow_id)
         return {"ok": True}
 
+    def set_flow_source_status(
+        self,
+        flow_id: str,
+        *,
+        signed_in: bool,
+        account_label: str | None,
+    ) -> None:
+        self.flows[flow_id].source_status = {
+            "signed_in": signed_in,
+            "account_label": account_label,
+        }
+
     def expose_codex_device_flow(self, flow_id: str) -> None:
         flow = self.flows[flow_id]
         flow.url = "https://auth.openai.com/codex/device"

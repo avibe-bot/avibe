@@ -2319,6 +2319,20 @@ class AgentAuthService:
             )
         return result
 
+    def set_flow_source_status(
+        self,
+        flow_id: str,
+        *,
+        signed_in: bool,
+        account_label: str | None,
+    ) -> None:
+        """Attach non-secret source metadata to the owning shared flow."""
+        flow = self._flows_by_id.get(flow_id)
+        if not isinstance(flow, WebAuthFlow):
+            raise KeyError(flow_id)
+        flow.source_signed_in = signed_in
+        flow.source_account_label = account_label
+
     async def remove_web_auth(self, backend: str) -> dict[str, Any]:
         """Drop the stored credentials for a Claude/Codex backend.
 

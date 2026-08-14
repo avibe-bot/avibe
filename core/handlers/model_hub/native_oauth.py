@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -59,6 +60,14 @@ class AgentAuthService(Protocol):
     async def submit_web_code(self, flow_id: str, code: str) -> dict[str, Any]: ...
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]: ...
+
+    def set_flow_source_status(
+        self,
+        flow_id: str,
+        *,
+        signed_in: bool,
+        account_label: str | None,
+    ) -> None: ...
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -135,11 +144,6 @@ class AgentAuthNativeOAuthAdapter:
         self._agent_auth_service = agent_auth_service
         self._auth_status_reader = auth_status_reader
         self._now = now
-
-    @property
-    def _flows(self) -> dict[str, Any]:
-        """Empty legacy view; live flow ownership belongs to AgentAuthService."""
-        return {}
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
         return await self._start_oauth(
@@ -279,6 +283,20 @@ class AgentAuthNativeOAuthAdapter:
             "failed": "failed",
             "cancelled": "cancelled",
         }.get(str(payload.get("state")), "failed")
+        source_status = payload.get("source_status")
+        if (
+            state == "success"
+            and (
+                not isinstance(source_status, Mapping)
+                or not isinstance(source_status.get("signed_in"), bool)
+            )
+        ):
+            resolved = await self._read_source_status(_VENDOR_BACKENDS[vendor])
+            self._agent_auth_service.set_flow_source_status(
+                flow_id,
+                signed_in=resolved.signed_in,
+                account_label=resolved.account_label,
+            )
         error_key = None
         if state == "failed":
             error_key = _TIMEOUT_ERROR_KEY if payload.get("error") == "timed_out" else _GENERIC_ERROR_KEY
@@ -304,6 +322,18 @@ class AgentAuthNativeOAuthAdapter:
             channel="native_cli",
             retained_material_disposition=RetainedMaterialDisposition.NONE,
             retained_credential_ref=None,
+        )
+
+    async def _read_source_status(self, backend: str) -> NativeOAuthSourceStatus:
+        try:
+            status = await asyncio.to_thread(self._auth_status_reader, backend)
+            if not isinstance(status, Mapping):
+                raise TypeError("invalid auth status")
+        except Exception:  # noqa: BLE001
+            return NativeOAuthSourceStatus(signed_in=True, account_label=None)
+        return NativeOAuthSourceStatus(
+            signed_in=_signed_in(backend, status),
+            account_label=_account_label(status),
         )
 
 def create_native_oauth_adapter() -> AgentAuthNativeOAuthAdapter:

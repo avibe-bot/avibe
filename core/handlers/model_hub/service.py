@@ -1296,11 +1296,6 @@ class ModelHubService:
     def _raise_if_flow_expired(self, flow_id: str, flow: OAuthFlowState) -> None:
         if not flow.expires_at_iso or flow.state in {"success", "failed", "cancelled"}:
             return
-        # Native CLI settlement is owned by AgentAuthService's waiter. The
-        # journal timestamp is identity metadata, not a timer that may release
-        # a live CLI credential while its process is still running.
-        if flow.channel == "native_cli":
-            return
         try:
             expired = _parse_datetime(flow.expires_at_iso) <= self.now()
         except ValueError:
