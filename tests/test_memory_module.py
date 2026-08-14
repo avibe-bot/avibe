@@ -31,6 +31,8 @@ from core.memory.types import (
     CaptureSkipped,
     MemoryItem,
     MemoryItems,
+    MemoryListItem,
+    MemoryListPage,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
@@ -583,6 +585,69 @@ async def test_profile_bounds_accept_structured_data_only_on_profile_items(tmp_p
     assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
         error="memory_provider_response_invalid"
     )
+
+
+async def test_list_episodes_enforces_scope_pagination_and_page_bounds(tmp_path: Path) -> None:
+    item = MemoryListItem(
+        id="opaque-episode-id",
+        subject="Subject",
+        summary="Summary",
+        body="Processed body",
+        timestamp="2026-08-14T02:11:12Z",
+        project="notes",
+    )
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=(item,),
+            page=1,
+            page_size=20,
+            count=1,
+            total_count=21,
+        )
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+        page=2,
+        page_size=5,
+    ) == MemoryListPage(
+        items=(item,),
+        page=2,
+        page_size=5,
+        count=1,
+        total_count=21,
+    )
+    assert provider.list_requests == [(PRINCIPAL, "notes", 2, 5)]
+
+    for page, page_size in ((0, 5), (1, 0), (1, 21), (True, 5)):
+        assert await module.list_episodes(
+            principal_id=PRINCIPAL,
+            project_id="notes",
+            page=page,
+            page_size=page_size,
+        ) == OperationFailed(error="memory_invalid_input")
+    assert provider.list_requests == [(PRINCIPAL, "notes", 2, 5)]
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="all",
+    ) == OperationFailed(error="memory_access_denied")
+
+    provider.list_page = replace(provider.list_page, count=0)
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+    provider.list_failure = RuntimeError("provider-list-body-canary")
+    result = await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    )
+    assert result == OperationFailed(error="memory_processing_failed")
+    assert "provider-list-body-canary" not in repr(result)
 
 
 async def test_keyword_recall_skips_health_and_succeeds_without_embedding(tmp_path: Path) -> None:

@@ -63,6 +63,8 @@ from core.memory.types import (
     CaptureAccepted,
     MemoryItem,
     MemoryItems,
+    MemoryListItem,
+    MemoryListPage,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     OperationFailed,
@@ -3918,6 +3920,76 @@ async def test_profile_payload_reports_only_its_own_principal_emptiness(
 
     assert populated["profile_warning"] is None
     assert empty["profile_warning"] == "empty"
+
+
+def test_list_episodes_payload_serializes_opaque_id_and_page_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = create_memory_runtime(
+        MemoryConfig(enabled=True),
+        artifact_manager=_installed_artifact(),
+    )
+    item = MemoryListItem(
+        id="copyable-opaque-id",
+        subject="Subject",
+        summary="Summary",
+        body="Processed episode body",
+        timestamp="2026-08-14T02:11:12Z",
+        project="notes",
+    )
+
+    class _ListModule:
+        async def list_episodes(
+            self,
+            *,
+            principal_id: str,
+            project_id: str,
+            page: int,
+            page_size: int,
+        ) -> MemoryListPage:
+            assert principal_id == PRINCIPAL
+            assert project_id == "notes"
+            assert (page, page_size) == (2, 5)
+            return MemoryListPage(
+                items=(item,),
+                page=page,
+                page_size=page_size,
+                count=1,
+                total_count=6,
+                warnings=("memory_list_truncated",),
+            )
+
+    runtime._module = _ListModule()
+    payload = asyncio.run(
+        runtime.list_episodes_payload(
+            PRINCIPAL,
+            "notes",
+            page=2,
+            page_size=5,
+        )
+    )
+
+    assert payload == {
+        "status": "ok",
+        "items": [
+            {
+                "id": "copyable-opaque-id",
+                "kind": "episode",
+                "subject": "Subject",
+                "summary": "Summary",
+                "body": "Processed episode body",
+                "timestamp": "2026-08-14T02:11:12Z",
+                "project": "notes",
+            }
+        ],
+        "page": 2,
+        "page_size": 5,
+        "count": 1,
+        "total_count": 6,
+        "warnings": ["memory_list_truncated"],
+    }
 
 
 def test_profile_payload_serializes_structured_profile_without_widening_legacy_items(

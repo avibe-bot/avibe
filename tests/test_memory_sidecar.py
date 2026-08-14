@@ -549,6 +549,56 @@ def test_sidecar_guard_accepts_agentic_but_rejects_untrusted_search_scope() -> N
         )
 
 
+def test_sidecar_guard_keeps_profile_exact_and_allows_only_bounded_episode_lists() -> None:
+    principal = "u-11111111111111111111111111111111"
+    profile = {
+        "user_id": principal,
+        "app_id": "avibe",
+        "project_id": "default",
+        "memory_type": "profile",
+        "page": 1,
+        "page_size": 1,
+    }
+    episode = {
+        "user_id": principal,
+        "app_id": "avibe",
+        "project_id": "notes",
+        "memory_type": "episode",
+        "page": 2,
+        "page_size": 20,
+        "sort_by": "timestamp",
+        "sort_order": "desc",
+    }
+
+    assert _request_rejection("POST", "/api/v2/memory/get", json.dumps(profile).encode()) is None
+    assert _request_rejection("POST", "/api/v2/memory/get", json.dumps(episode).encode()) is None
+
+    invalid_profiles = (
+        {**profile, "project_id": "notes"},
+        {**profile, "page_size": 2},
+        {**profile, "sort_by": "timestamp"},
+    )
+    invalid_episodes = (
+        {**episode, "agent_id": principal},
+        {**episode, "project_id": "all"},
+        {**episode, "project_id": "p-" + "a" * 32},
+        {**episode, "page": 0},
+        {**episode, "page_size": 21},
+        {**episode, "sort_by": "updated_at"},
+        {**episode, "sort_order": "asc"},
+        {**episode, "filters": {}},
+    )
+    for invalid in (*invalid_profiles, *invalid_episodes):
+        assert (
+            _request_rejection(
+                "POST",
+                "/api/v2/memory/get",
+                json.dumps(invalid).encode(),
+            )
+            == "get"
+        )
+
+
 def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path) -> None:
     attachments_root = tmp_path / "attachments" / "avibe"
     asset = attachments_root / "session-1" / "diagram.png"

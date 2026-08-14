@@ -12,7 +12,7 @@ from core.memory.everos import (
     MemoryProviderPort,
     ProviderCapture,
 )
-from core.memory.types import ProviderSessionRef
+from core.memory.types import MemoryListItem, MemoryListPage, ProviderSessionRef
 
 
 SESSION_REF = ProviderSessionRef(
@@ -190,3 +190,39 @@ def test_timing_hooks_are_fake_only() -> None:
     assert not hasattr(MemoryProviderPort, "add_hook")
     assert not hasattr(MemoryProviderPort, "flush_hook")
     assert not hasattr(MemoryProviderPort, "processing_healthy_hook")
+
+
+async def test_list_fake_records_exact_page_request_and_returns_configured_items() -> None:
+    item = MemoryListItem(
+        id="opaque-id",
+        subject="Subject",
+        summary="Summary",
+        body="Body",
+        timestamp="2026-08-14T00:00:00Z",
+        project="notes",
+    )
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=(item,),
+            page=1,
+            page_size=20,
+            count=1,
+            total_count=1,
+        )
+    )
+
+    result = await provider.list_episodes(
+        SESSION_REF.principal_id,
+        "notes",
+        3,
+        5,
+    )
+
+    assert result == MemoryListPage(
+        items=(item,),
+        page=3,
+        page_size=5,
+        count=1,
+        total_count=1,
+    )
+    assert provider.list_requests == [(SESSION_REF.principal_id, "notes", 3, 5)]
