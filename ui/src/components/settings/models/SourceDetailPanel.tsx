@@ -8,13 +8,14 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
-import { GuardGapList } from './GuardGapList';
 import { formatRelativeTime } from '@/lib/relativeTime';
+import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { GuardImpact } from './GuardImpact';
 import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { handOffProviderTab } from './providerTab';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
-import { REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
+import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { tierMutationPayload, type TierMutationIntent } from './tierMutation';
 import { useDeadlineClock } from './useDeadlineClock';
@@ -223,6 +224,7 @@ export const SourceDetailPanel: React.FC<{
   const { Icon, accent } = sourceVisual(source);
   const [busy, setBusy] = React.useState(false);
   const [confirmingReauth, setConfirmingReauth] = React.useState(false);
+  const [replacingKey, setReplacingKey] = React.useState(false);
   const [manualDraft, setManualDraft] = React.useState<{ modelId: string; tiers: string[]; failed: boolean; retryRead: boolean } | null>(null);
   const [guard, setGuard] = React.useState<GuardedAction | null>(null);
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
@@ -405,13 +407,11 @@ export const SourceDetailPanel: React.FC<{
     native: source.supply_channel === 'native_cli',
   });
   const host = enteredHost(source);
-  // `repairAction` is the authority on which remedy a stopped source has, so the
-  // condition is 「this source's one tap IS a re-login」 rather than a status list
-  // this file would have to keep in step with it. `retest` needs no entry of its
-  // own — it is the same `POST …/refresh` the 重新拉取 button beside this one
-  // already runs — and `replace_key` has no dialog in the UI yet (ledgered as
-  // follow-up), so neither renders here.
+  // One authority picks the remedy and another total Record names its concrete
+  // control. In particular, `retest` points at the existing refetch button; it is
+  // not a special case that can fall out of destination-completeness checks.
   const repair = repairAction(source);
+  const repairDestination = repair ? REPAIR_DESTINATION[repair] : null;
 
   return (
     <div className="model-hub-source-detail">
@@ -426,8 +426,9 @@ export const SourceDetailPanel: React.FC<{
           <p className="model-hub-source-summary mt-1 truncate font-mono">{t(host ? 'settings.models.sourceDetail.summary' : 'settings.models.gateway.modelCount', { host, count: source.models.length })}</p>
         </div>
         <div className="flex shrink-0 gap-2">
-          {repair === 'reauth' && <Button size="sm" className="model-hub-source-action" disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
-          {source.supply_channel === 'hub' && <Button variant="outline" size="sm" className="model-hub-source-action" disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
+          {repairDestination === 'reauth_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
+          {repairDestination === 'replace_key_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
+          {source.supply_channel === 'hub' && <Button variant="outline" size="sm" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
           {source.kind === 'api_key' && <Button variant="secondary" size="sm" className="model-hub-source-action model-hub-ink-mint" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
         </div>
       </section>
@@ -508,6 +509,13 @@ export const SourceDetailPanel: React.FC<{
           onReauth(source);
         }}
       />
+      <AddApiKeyDialog
+        mode="replace"
+        open={replacingKey}
+        source={source}
+        trackMutation={trackMutation}
+        onClose={() => setReplacingKey(false)}
+      />
       <DialogPrimitive.Root open={guard !== null} onOpenChange={(open) => !open && !busy && setGuard(null)}>
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />
@@ -519,14 +527,7 @@ export const SourceDetailPanel: React.FC<{
               </div>
               <DialogPrimitive.Description className="model-hub-guard-subtitle">{t(`settings.models.guard.subtitle.${guard?.kind === 'remove' ? 'removeModel' : 'refetch'}`)}</DialogPrimitive.Description>
             </header>
-            {guard && <div className="model-hub-guard-body">
-              {guard.hops.length > 0 && <>
-                <div className="model-hub-guard-label"><p>{t('settings.models.guard.label')}</p><span>{t('settings.models.guard.count', { count: guard.hops.length })}</span></div>
-                <div className="model-hub-guard-list">{guard.hops.map((hop) => <div key={`${hop.backend}:${hop.menu_model}:${hop.position}:${hop.source_id}:${hop.model_id}`} className="model-hub-guard-hop"><span className="min-w-0 flex-1"><strong>{t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}</strong><span>{hop.model_id} · {t('settings.models.guard.hop.position', { n: hop.position })}</span></span></div>)}</div>
-              </>}
-              <GuardGapList gaps={guard.gaps} />
-              <p className={cn('model-hub-guard-hint', guard.gaps.length > 0 && 'text-destructive-ink')}><Info aria-hidden />{t(`settings.models.guard.hint.${guard.gaps.length > 0 ? 'interrupt' : 'safe'}`)}</p>
-            </div>}
+            {guard && <div className="model-hub-guard-body"><GuardImpact hops={guard.hops} gaps={guard.gaps} /></div>}
             <footer className="model-hub-guard-foot"><Button variant="outline" className="model-hub-guard-action" onClick={() => setGuard(null)} disabled={busy}>{t('settings.models.guard.cancel')}</Button><Button variant="destructive" className="model-hub-guard-action" onClick={confirmGuard} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(`settings.models.guard.confirm.${guard?.kind === 'remove' ? 'removeModel' : 'refetch'}`)}</Button></footer>
           </DialogPrimitive.Content>
         </DialogPrimitive.Portal>

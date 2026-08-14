@@ -1338,21 +1338,32 @@
           "subject": "{{backend}} · {{menuModel}}",
           "agents": "已指定它的 Agent：{{agents}}"
         },
+        "result": {
+          "label": "已移除的跳",
+          "gapLabel": "已经没有可用来源的型号",
+          "hint": {
+            "safe": "这些型号仍有别的来源可用。",
+            "interrupt": "有型号现在没有可用来源。"
+          }
+        },
         "cancel": "取消",
         "title": {
           "refetch": "重新拉取 {{source}} 的型号",
           "removeModel": "从 {{source}} 移除 {{model}}",
-          "saveRoute": "保存 {{menuModel}} 的路由链"
+          "saveRoute": "保存 {{menuModel}} 的路由链",
+          "replaceKey": "更换 {{source}} 的 Key"
         },
         "subtitle": {
           "refetch": "这次拉取会让部分型号从这个来源的清单里消失。",
           "removeModel": "这个型号会从这个来源的清单里消失。",
-          "saveRoute": "这次保存会让已配置的型号没有可用来源"
+          "saveRoute": "这次保存会让已配置的型号没有可用来源",
+          "replaceKey": "这次更换会改变这个来源的型号清单。"
         },
         "confirm": {
           "refetch": "仍要拉取",
           "removeModel": "仍要移除",
-          "saveRoute": "仍要保存"
+          "saveRoute": "仍要保存",
+          "replaceKey": "仍要更换"
         }
       },
       "repair": {

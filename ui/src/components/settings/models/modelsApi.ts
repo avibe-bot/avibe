@@ -58,6 +58,11 @@ import { AGENT_CHAIN_CONTRACT_VERSION, CONTRACT_VERSION, PROBE_RESULT_CONTRACT_V
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
 export type SourceCreated = { source: Source } & Adoption;
 export type SourceRefresh = { source: Source; discovered: number };
+export type CredentialReplacement = {
+  source: Source;
+  removed_hops: RouteHopRef[];
+  interrupted: SupplyGap[];
+};
 export type GuardConfirmation = {
   force: true;
   would_remove_hops: RouteHopRef[];
@@ -103,10 +108,9 @@ export type ModelsApi = {
   refreshSource(id: string, confirmation?: GuardConfirmation): Promise<SourceRefresh>;
   /** Delete a source. `force` overrides the only-supplier guard. */
   deleteSource(id: string, force?: boolean): Promise<void>;
-  /** Replace the credential of a hub-channel api_key source. Refuses with
-   *  `source_last_supplier` + `would_interrupt` when the replacement set would
-   *  strand a selected model; `force` commits anyway. */
-  replaceCredential(id: string, body: CredentialReplace): Promise<SourceRepaired>;
+  /** Replace the credential of a hub-channel api_key source. The normal guarded
+   *  mutation tail reports every route hop removed and model interrupted. */
+  replaceCredential(id: string, body: CredentialReplace): Promise<CredentialReplacement>;
   /** Start re-authorization for a subscription source. Irreversible once it
    *  begins, which is why the acknowledgement is sent unconditionally — the
    *  server rejects a native source without it (`reauth_confirmation_required`).
@@ -322,13 +326,16 @@ const created = (r: SourceCreatedResponse): SourceCreated => ({
   ...adoption(r),
 });
 
-/** api.md "recovery symmetry": both repair routes answer with this same tail,
- *  so both unwrap through one reader. */
-type SourceRepairedResponse = { source?: Source; recovered?: boolean; interrupted_pairs?: SupplyGap[] } & Source;
-const repaired = (r: SourceRepairedResponse): SourceRepaired => ({
+type CredentialReplacementResponse = {
+  source?: Source;
+  removed_hops?: RouteHopRef[];
+  interrupted?: SupplyGap[];
+} & Source;
+
+const credentialReplacement = (r: CredentialReplacementResponse): CredentialReplacement => ({
   source: (r.source ?? r) as Source,
-  recovered: r.recovered === true,
-  interrupted_pairs: supplyGaps(r.interrupted_pairs),
+  removed_hops: routeHopRefs(r.removed_hops),
+  interrupted: supplyGaps(r.interrupted),
 });
 
 /** The oauth terminal envelope, unwrapped without discarding either tail. */
@@ -386,7 +393,7 @@ const liveApi: ModelsApi = {
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
   // and carry no `contract_version` — the same closed-body rule as putAgentSources.
-  replaceCredential: (id, body) => call<SourceRepairedResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(repaired),
+  replaceCredential: (id, body) => call<CredentialReplacementResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(credentialReplacement),
   // The acknowledgement is unconditional by design: the server enforces it for
   // native sources pre-login, and api.md's per-channel truth makes a hub grant
   // replacement equally irreversible once new material is written. One confirm,
@@ -709,10 +716,7 @@ class MockStore {
       throw new ApiCallError('source_last_supplier', undefined, true, interrupted);
     }
     this.syncAgents();
-    return delay(
-      { source: structuredClone(source), recovered, interrupted_pairs: interrupted },
-      700,
-    );
+    return delay({ source: structuredClone(source), removed_hops: [], interrupted }, 700);
   }
 
   reauthSource(id: string) {

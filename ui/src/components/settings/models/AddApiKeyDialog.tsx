@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifetime';
 import { Field } from './dialogFields';
 import {
   classifyObservation,
@@ -26,17 +27,22 @@ import {
   type AddApiKeyOrigin,
 } from './addApiKeyState';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
+import { GuardImpact } from './GuardImpact';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
 import { createContinuationSettlement, createSourceCreatedDelivery, type ContinuationTicket } from './mutationSettlement';
+import type { TrackSourceMutation } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
+import { mayHaveWritten, REPAIR_LINE_KEY, wasBlocked } from './repair';
 import { serverText } from './serverCopy';
 import {
   SOURCE_DISPLAY_NAME_MAX_LENGTH,
   SOURCE_PROTOCOLS,
   type ApiKeySourceCreate,
+  type RouteHopRef,
   type Source,
   type SourceObservation,
   type SourceProtocol,
+  type SupplyGap,
 } from './types';
 import { optionalTrimmedTextWithin } from './validation';
 
@@ -50,6 +56,34 @@ type Phase =
   | { kind: 'save_unconfirmed'; protocolOrder: SourceProtocol[] | undefined };
 
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
+
+type ReplaceOutcome =
+  | { kind: 'repaired' }
+  | { kind: 'unresolved' }
+  | { kind: 'impact'; hops: RouteHopRef[]; gaps: SupplyGap[] };
+
+type ReplacePhase =
+  | { kind: 'edit' }
+  | { kind: 'submitting' }
+  | { kind: 'guard'; hops: RouteHopRef[]; gaps: SupplyGap[] }
+  | { kind: 'done'; outcome: ReplaceOutcome }
+  | { kind: 'failure'; failureClass: ModelHubFailureClass };
+
+type AddApiKeyDialogProps = {
+  open: boolean;
+  onClose: () => void;
+} & (
+  | {
+      mode?: 'add';
+      onAdded: (created: SourceCreated) => void;
+      sourceReads: CollectionReadAuthority<Source[]>;
+    }
+  | {
+      mode: 'replace';
+      source: Source;
+      trackMutation: TrackSourceMutation;
+    }
+);
 
 const sourceClientNonce = (): string => {
   const uuid = globalThis.crypto.randomUUID?.();
@@ -85,30 +119,90 @@ const failureMessageKey = (failure: ReturnType<typeof apiFailure>): string | nul
   return failure.code || null;
 };
 
-export const AddApiKeyDialog: React.FC<{
-  open: boolean;
-  onClose: () => void;
-  onAdded: (created: SourceCreated) => void;
-  sourceReads: CollectionReadAuthority<Source[]>;
-}> = ({ open, onClose, onAdded, sourceReads }) => {
+const REPLACE_FAILURE_KEY: Record<ModelHubFailureClass, string> = {
+  'authoritative-terminal': 'settings.models.repair.replaceFailed',
+  inconclusive: 'settings.models.repair.replaceFailed',
+  'retryable-provider': 'settings.models.repair.replaceFailed',
+};
+
+const ApiKeyField: React.FC<{
+  value: string;
+  revealed: boolean;
+  disabled: boolean;
+  label: React.ReactNode;
+  autoFocus?: boolean;
+  onChange: (value: string) => void;
+  onToggleReveal: () => void;
+  onEnter?: () => void;
+}> = ({ value, revealed, disabled, label, autoFocus, onChange, onToggleReveal, onEnter }) => {
+  const { t } = useTranslation();
+  return (
+    <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={label}>
+      {(id) => (
+        <span className="model-hub-add-key-secret relative flex items-center">
+          <Input
+            id={id}
+            value={value}
+            type={revealed ? 'text' : 'password'}
+            disabled={disabled}
+            autoFocus={autoFocus}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => onChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter' || disabled || !onEnter) return;
+              event.preventDefault();
+              onEnter();
+            }}
+            className="model-hub-add-key-input w-full pr-10 font-mono"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="model-hub-ink-59 absolute right-1 size-7"
+            aria-label={t(`settings.models.addKey.field.apiKey.${revealed ? 'conceal' : 'reveal'}`)}
+            disabled={disabled}
+            onClick={onToggleReveal}
+          >
+            {revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+          </Button>
+        </span>
+      )}
+    </Field>
+  );
+};
+
+export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
+  const { open, onClose } = props;
+  const replaceMode = props.mode === 'replace';
+  const addSourceReads = replaceMode ? null : props.sourceReads;
+  const addOnAdded = replaceMode ? null : props.onAdded;
+  const replaceSourceId = replaceMode ? props.source.id : null;
   const { t } = useTranslation();
   const [displayName, setDisplayName] = React.useState('');
   const [baseUrl, setBaseUrl] = React.useState('');
   const [apiKey, setApiKey] = React.useState('');
   const [revealed, setRevealed] = React.useState(false);
   const [phase, setPhase] = React.useState<Phase>(INITIAL_PHASE);
+  const [replacePhase, setReplacePhase] = React.useState<ReplacePhase>({ kind: 'edit' });
   const [continuation] = React.useState(createContinuationSettlement);
   const [createdDelivery] = React.useState(createSourceCreatedDelivery);
   const clientNonce = React.useRef(sourceClientNonce());
   const observationAbort = React.useRef<AbortController | null>(null);
+  const replaceCloseTimer = React.useRef<number | null>(null);
   React.useEffect(() => {
-    createdDelivery.update(onAdded, onClose);
-  }, [createdDelivery, onAdded, onClose]);
+    if (addOnAdded) createdDelivery.update(addOnAdded, onClose);
+  }, [addOnAdded, createdDelivery, onClose]);
 
   React.useEffect(() => {
     continuation.invalidate();
     observationAbort.current?.abort();
     observationAbort.current = null;
+    if (replaceCloseTimer.current !== null) {
+      window.clearTimeout(replaceCloseTimer.current);
+      replaceCloseTimer.current = null;
+    }
     if (open) {
       clientNonce.current = sourceClientNonce();
       setDisplayName('');
@@ -116,8 +210,15 @@ export const AddApiKeyDialog: React.FC<{
       setApiKey('');
       setRevealed(false);
       setPhase(INITIAL_PHASE);
+      setReplacePhase({ kind: 'edit' });
     }
-  }, [continuation, open]);
+    return () => {
+      if (replaceCloseTimer.current !== null) {
+        window.clearTimeout(replaceCloseTimer.current);
+        replaceCloseTimer.current = null;
+      }
+    };
+  }, [continuation, open, replaceSourceId]);
 
   const draft = React.useCallback((protocolOrder?: SourceProtocol[]): ApiKeySourceCreate => ({
     kind: 'api_key',
@@ -205,7 +306,59 @@ export const AddApiKeyDialog: React.FC<{
     }
   }, [apiKey, baseUrl, continuation, persist]);
 
+  const submitReplacement = React.useCallback(async (force: boolean) => {
+    if (props.mode !== 'replace' || !apiKey.trim() || replacePhase.kind === 'submitting') return;
+    const key = apiKey.trim();
+    const seq = continuation.begin();
+    setReplacePhase({ kind: 'submitting' });
+    await props.trackMutation(async (latest, settlement) => {
+      try {
+        const answer = await modelsApi.replaceCredential(
+          latest.id,
+          force ? { key, force: true } : { key },
+        );
+        const outcome: ReplaceOutcome = answer.removed_hops.length > 0 || answer.interrupted.length > 0
+          ? { kind: 'impact', hops: answer.removed_hops, gaps: answer.interrupted }
+          : wasBlocked(answer.source.state)
+            ? { kind: 'unresolved' }
+            : { kind: 'repaired' };
+        await settlement.source(answer.source);
+        const landed = continuation.settle(seq, () => setReplacePhase({ kind: 'done', outcome }));
+        if (landed === 'stale') return;
+        if (outcome.kind === 'repaired') {
+          replaceCloseTimer.current = window.setTimeout(onClose, 1400);
+        }
+      } catch (error) {
+        const failure = apiFailure(error);
+        if (failure && (failure.wouldRemoveHops.length > 0 || failure.wouldInterrupt.length > 0)) {
+          settlement.release();
+          continuation.settle(seq, () => setReplacePhase({
+            kind: 'guard',
+            hops: failure.wouldRemoveHops,
+            gaps: failure.wouldInterrupt,
+          }));
+          return;
+        }
+        const failureClass = classifyModelHubFailure(failure);
+        if (failure?.code === 'source_not_found') await settlement.gone(latest.id);
+        else if (mayHaveWritten(failure)) await settlement.unread();
+        else settlement.release();
+        continuation.settle(seq, () => setReplacePhase({ kind: 'failure', failureClass }));
+      }
+    });
+  }, [apiKey, continuation, onClose, props, replacePhase.kind]);
+
   const cancel = React.useCallback(() => {
+    if (replaceMode) {
+      if (replacePhase.kind === 'submitting') return;
+      if (replacePhase.kind === 'guard') {
+        setReplacePhase({ kind: 'edit' });
+        return;
+      }
+      continuation.invalidate();
+      onClose();
+      return;
+    }
     if (phase.kind === 'working' && phase.stage === 'persist') return;
     continuation.invalidate();
     observationAbort.current?.abort();
@@ -215,7 +368,7 @@ export const AddApiKeyDialog: React.FC<{
       return;
     }
     createdDelivery.close();
-  }, [continuation, createdDelivery, phase]);
+  }, [continuation, createdDelivery, onClose, phase, replaceMode, replacePhase.kind]);
 
   const retry = async () => {
     if (phase.kind === 'undetermined') {
@@ -233,9 +386,10 @@ export const AddApiKeyDialog: React.FC<{
       return;
     }
     if (phase.kind === 'save_unconfirmed') {
+      if (!addSourceReads) return;
       const seq = continuation.begin();
       const reconciliation = await reconcileUnknownWrite(
-        () => sourceReads.readValue(),
+        () => addSourceReads.readValue(),
         (sources) => sources.find((source) => source.client_nonce === clientNonce.current),
       );
       if (reconciliation.kind === 'committed') {
@@ -270,6 +424,7 @@ export const AddApiKeyDialog: React.FC<{
   };
   const editKey = (value: string) => {
     setApiKey(value);
+    if (replaceMode && replacePhase.kind === 'failure') setReplacePhase({ kind: 'edit' });
     if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
   };
   const editDisplayName = (value: string) => {
@@ -279,11 +434,18 @@ export const AddApiKeyDialog: React.FC<{
 
   const isWorking = phase.kind === 'working';
   const formLocked = isWorking || phase.kind === 'save_unconfirmed';
-  const canCancel = !(phase.kind === 'working' && phase.stage === 'persist');
+  const canCancel = replaceMode
+    ? replacePhase.kind !== 'submitting'
+    : !(phase.kind === 'working' && phase.stage === 'persist');
   const displayNameValid = optionalTrimmedTextWithin(displayName, SOURCE_DISPLAY_NAME_MAX_LENGTH);
   const canObserve = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
   const canSubmit = canObserve && displayNameValid;
   const showForm = phase.kind !== 'undetermined' && phase.kind !== 'inventory';
+  const replaceTerminalFailure = replacePhase.kind === 'failure'
+    && replacePhase.failureClass === 'authoritative-terminal';
+  const replaceFieldLocked = replacePhase.kind === 'submitting'
+    || replacePhase.kind === 'done'
+    || replaceTerminalFailure;
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && canCancel && cancel()}>
       <DialogPrimitive.Portal>
@@ -296,14 +458,18 @@ export const AddApiKeyDialog: React.FC<{
         <header className="model-hub-add-key-head flex flex-col border-b border-border px-5 py-4">
           <div className="flex items-center justify-between gap-3">
             <DialogPrimitive.Title className="model-hub-add-key-title font-bold text-foreground">
-              {t('settings.models.addKey.title')}
+              {replaceMode
+                ? replacePhase.kind === 'guard'
+                  ? t('settings.models.guard.title.replaceKey', { source: props.source.display_name })
+                  : t('settings.models.repair.replaceTitle', { name: props.source.display_name })
+                : t('settings.models.addKey.title')}
             </DialogPrimitive.Title>
             <Button
               type="button"
               variant="ghost"
               size="icon"
               className="model-hub-ink-59 size-[27px]"
-              aria-label={t('settings.models.addKey.cancel')}
+              aria-label={t(replacePhase.kind === 'guard' ? 'settings.models.guard.cancel' : 'settings.models.addKey.cancel')}
               disabled={!canCancel}
               onClick={cancel}
             >
@@ -311,11 +477,77 @@ export const AddApiKeyDialog: React.FC<{
             </Button>
           </div>
           <DialogPrimitive.Description className="model-hub-add-key-subtitle model-hub-ink-muted-b3 font-mono">
-            {t('settings.models.addKey.subtitle')}
+            {replaceMode
+              ? replacePhase.kind === 'guard'
+                ? t('settings.models.guard.subtitle.replaceKey')
+                : t('settings.models.repair.replaceBody')
+              : t('settings.models.addKey.subtitle')}
           </DialogPrimitive.Description>
         </header>
 
-        {showForm && (
+        {replaceMode && replacePhase.kind === 'guard' && (
+          <div className="model-hub-guard-body">
+            <GuardImpact hops={replacePhase.hops} gaps={replacePhase.gaps} />
+          </div>
+        )}
+
+        {replaceMode && replacePhase.kind !== 'guard' && (
+          <div className="model-hub-add-key-body flex flex-col">
+            <ApiKeyField
+              value={apiKey}
+              revealed={revealed}
+              disabled={replaceFieldLocked}
+              autoFocus
+              label={t('settings.models.repair.replaceLabel')}
+              onChange={editKey}
+              onToggleReveal={() => setRevealed((value) => !value)}
+              onEnter={replaceTerminalFailure ? undefined : () => void submitReplacement(false)}
+            />
+            {replacePhase.kind === 'submitting' && (
+              <div className="model-hub-add-key-strip model-hub-add-key-strip--working">
+                <LoaderCircle className="model-hub-ink-mint size-3.5 shrink-0 animate-spin" />
+                <span className="model-hub-add-key-strip-title text-foreground">{t('settings.models.repair.replacing')}</span>
+              </div>
+            )}
+            {replacePhase.kind === 'failure' && (
+              <div
+                className="model-hub-add-key-strip model-hub-add-key-strip--error"
+                data-failure-class={replacePhase.failureClass}
+              >
+                <TriangleAlert className="model-hub-add-key-error-ink size-3.5 shrink-0" />
+                <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">
+                  {t(REPLACE_FAILURE_KEY[replacePhase.failureClass])}
+                </span>
+              </div>
+            )}
+            {replacePhase.kind === 'done' && replacePhase.outcome.kind === 'impact' && (
+              <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-3">
+                <span className="model-hub-ink-gold text-[12.5px] font-semibold leading-relaxed">
+                  {t('settings.models.repair.refreshed')}
+                </span>
+                <GuardImpact
+                  hops={replacePhase.outcome.hops}
+                  gaps={replacePhase.outcome.gaps}
+                  committed
+                />
+              </div>
+            )}
+            {replacePhase.kind === 'done' && replacePhase.outcome.kind === 'unresolved' && (
+              <div className="model-hub-ink-gold flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] font-medium">
+                <TriangleAlert className="size-4 shrink-0" />
+                {t('settings.models.repair.unresolved')}
+              </div>
+            )}
+            {replacePhase.kind === 'done' && replacePhase.outcome.kind === 'repaired' && (
+              <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
+                <CheckCircle2 className="size-4 shrink-0" />
+                {t(REPAIR_LINE_KEY.repaired)}
+              </div>
+            )}
+          </div>
+        )}
+
+        {!replaceMode && showForm && (
           <div className="model-hub-add-key-body flex flex-col">
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
               {(id) => <Input id={id} value={displayName} disabled={formLocked} aria-invalid={!displayNameValid} onChange={(event) => editDisplayName(event.target.value)} className="model-hub-add-key-input" />}
@@ -323,9 +555,14 @@ export const AddApiKeyDialog: React.FC<{
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
               {(id) => <Input id={id} value={baseUrl} disabled={formLocked} autoComplete="url" spellCheck={false} onChange={(event) => editEndpoint(event.target.value)} className="model-hub-add-key-input font-mono" />}
             </Field>
-            <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.apiKey')}>
-              {(id) => <span className="model-hub-add-key-secret relative flex items-center"><Input id={id} value={apiKey} type={revealed ? 'text' : 'password'} disabled={formLocked} autoComplete="off" spellCheck={false} onChange={(event) => editKey(event.target.value)} className="model-hub-add-key-input w-full pr-10 font-mono" /><Button type="button" variant="ghost" size="icon" className="model-hub-ink-59 absolute right-1 size-7" aria-label={t(`settings.models.addKey.field.apiKey.${revealed ? 'conceal' : 'reveal'}`)} disabled={formLocked} onClick={() => setRevealed((value) => !value)}>{revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}</Button></span>}
-            </Field>
+            <ApiKeyField
+              value={apiKey}
+              revealed={revealed}
+              disabled={formLocked}
+              label={t('settings.models.addKey.field.apiKey')}
+              onChange={editKey}
+              onToggleReveal={() => setRevealed((value) => !value)}
+            />
 
             {!isWorking && (
               <div className="model-hub-add-key-test-row flex items-center justify-between gap-4">
@@ -388,7 +625,7 @@ export const AddApiKeyDialog: React.FC<{
           </div>
         )}
 
-        {phase.kind === 'undetermined' && (
+        {!replaceMode && phase.kind === 'undetermined' && (
           <div className="model-hub-add-key-outcome flex flex-col">
             <div className="model-hub-add-key-outcome-wrap">
               <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory">
@@ -422,7 +659,7 @@ export const AddApiKeyDialog: React.FC<{
           </div>
         )}
 
-        {phase.kind === 'inventory' && (
+        {!replaceMode && phase.kind === 'inventory' && (
           <div className="model-hub-add-key-outcome-wrap">
             <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory model-hub-add-key-strip--inventory">
               <TriangleAlert className="model-hub-ink-gold size-3.5 shrink-0" />
@@ -432,51 +669,89 @@ export const AddApiKeyDialog: React.FC<{
         )}
 
         <footer className="model-hub-add-key-foot model-hub-fill-05 flex flex-row items-center justify-end border-t border-border">
-          <Button
-            type="button"
-            variant="outline"
-            className="model-hub-add-key-action"
-            disabled={!canCancel}
-            onClick={cancel}
-          >
-            {t('settings.models.addKey.cancel')}
-          </Button>
-          {phase.kind === 'inventory' && phase.origin === 'add' && (
-            <Button type="button" variant="outline" className="model-hub-add-key-action" onClick={() => void addAnyway()}>
-              {t('settings.models.addKey.addAnyway')}
-            </Button>
-          )}
-          {phase.kind === 'form' && (
-            <Button
-              type="button"
-              variant="brand"
-              className="model-hub-add-key-action"
-              disabled={!canSubmit}
-              onClick={() => void observe('add')}
-            >
-              {t('settings.models.addKey.submit')}
-            </Button>
-          )}
-          {phase.kind === 'working' && (
-            <Button type="button" variant="brand" className="model-hub-add-key-action" disabled>
-              <LoaderCircle className="size-3 animate-spin" />
-              {t('settings.models.addKey.adding')}
-            </Button>
-          )}
-          {(phase.kind === 'failure' || phase.kind === 'persist_failure' || phase.kind === 'save_unconfirmed' || phase.kind === 'inventory' || phase.kind === 'undetermined') && (
-            <Button
-              type="button"
-              variant="brand"
-              className={cn(
-                'model-hub-add-key-action',
-                (phase.kind === 'inventory' || phase.kind === 'save_unconfirmed' || (phase.kind === 'undetermined' && !phase.hint))
-                  && 'model-hub-add-key-action--dim',
+          {replaceMode ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                className="model-hub-add-key-action"
+                disabled={!canCancel}
+                onClick={cancel}
+              >
+                {t(replacePhase.kind === 'done'
+                  ? 'common.close'
+                  : replacePhase.kind === 'guard'
+                    ? 'settings.models.guard.cancel'
+                    : 'settings.models.addKey.cancel')}
+              </Button>
+              {replacePhase.kind !== 'done' && !replaceTerminalFailure && (
+                <Button
+                  type="button"
+                  variant={replacePhase.kind === 'guard' ? 'destructive' : 'brand'}
+                  className="model-hub-add-key-action"
+                  disabled={replacePhase.kind === 'submitting' || !apiKey.trim()}
+                  onClick={() => void submitReplacement(replacePhase.kind === 'guard')}
+                >
+                  {replacePhase.kind === 'submitting' && <LoaderCircle className="size-3 animate-spin" />}
+                  {t(replacePhase.kind === 'submitting'
+                    ? 'settings.models.repair.replacing'
+                    : replacePhase.kind === 'guard'
+                      ? 'settings.models.guard.confirm.replaceKey'
+                      : replacePhase.kind === 'failure'
+                        ? 'settings.models.addKey.retry'
+                        : 'settings.models.repair.replaceSubmit')}
+                </Button>
               )}
-              disabled={phase.kind === 'undetermined' && !phase.hint}
-              onClick={() => void retry()}
-            >
-              {t('settings.models.addKey.retry')}
-            </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                className="model-hub-add-key-action"
+                disabled={!canCancel}
+                onClick={cancel}
+              >
+                {t('settings.models.addKey.cancel')}
+              </Button>
+              {phase.kind === 'inventory' && phase.origin === 'add' && (
+                <Button type="button" variant="outline" className="model-hub-add-key-action" onClick={() => void addAnyway()}>
+                  {t('settings.models.addKey.addAnyway')}
+                </Button>
+              )}
+              {phase.kind === 'form' && (
+                <Button
+                  type="button"
+                  variant="brand"
+                  className="model-hub-add-key-action"
+                  disabled={!canSubmit}
+                  onClick={() => void observe('add')}
+                >
+                  {t('settings.models.addKey.submit')}
+                </Button>
+              )}
+              {phase.kind === 'working' && (
+                <Button type="button" variant="brand" className="model-hub-add-key-action" disabled>
+                  <LoaderCircle className="size-3 animate-spin" />
+                  {t('settings.models.addKey.adding')}
+                </Button>
+              )}
+              {(phase.kind === 'failure' || phase.kind === 'persist_failure' || phase.kind === 'save_unconfirmed' || phase.kind === 'inventory' || phase.kind === 'undetermined') && (
+                <Button
+                  type="button"
+                  variant="brand"
+                  className={cn(
+                    'model-hub-add-key-action',
+                    (phase.kind === 'inventory' || phase.kind === 'save_unconfirmed' || (phase.kind === 'undetermined' && !phase.hint))
+                      && 'model-hub-add-key-action--dim',
+                  )}
+                  disabled={phase.kind === 'undetermined' && !phase.hint}
+                  onClick={() => void retry()}
+                >
+                  {t('settings.models.addKey.retry')}
+                </Button>
+              )}
+            </>
           )}
         </footer>
         </DialogPrimitive.Content>

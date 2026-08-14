@@ -8,7 +8,16 @@ import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
-import { CONTRACT_VERSION, SOURCE_DISPLAY_NAME_MAX_LENGTH, SOURCE_PROTOCOLS, type Source, type SourceObservation } from './types';
+import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import {
+  CONTRACT_VERSION,
+  SOURCE_DISPLAY_NAME_MAX_LENGTH,
+  SOURCE_PROTOCOLS,
+  type RouteHopRef,
+  type Source,
+  type SourceObservation,
+  type SupplyGap,
+} from './types';
 
 const observed = (patch: Partial<SourceObservation> = {}): SourceObservation => ({
   contract_version: CONTRACT_VERSION,
@@ -35,6 +44,18 @@ const source: Source = {
   models: [],
 };
 
+const blockedSource: Source = {
+  ...source,
+  id: 'src_revoked',
+  display_name: 'Revoked key',
+  credential_ref: 'cred_revoked',
+  state: {
+    status: 'needs_action',
+    retry_at: null,
+    detail_key: 'models.source.needs_action.credential_revoked',
+  },
+};
+
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -48,6 +69,37 @@ const renderDialog = (onClose = vi.fn(), onAdded = vi.fn()) => {
     </I18nextProvider>,
   );
   return { onClose, onAdded };
+};
+
+const replacementSettlement = (
+  overrides: Partial<SourceMutationSettlement> = {},
+): SourceMutationSettlement => ({
+  source: vi.fn().mockResolvedValue(undefined),
+  gone: vi.fn().mockResolvedValue(undefined),
+  unread: vi.fn().mockResolvedValue(undefined),
+  release: vi.fn(),
+  readInventory: vi.fn().mockResolvedValue({ snapshot: 1, sources: [blockedSource] }),
+  ...overrides,
+});
+
+const renderReplacement = (
+  current: Source = blockedSource,
+  settlement: SourceMutationSettlement = replacementSettlement(),
+  onClose = vi.fn(),
+) => {
+  const trackMutation: TrackSourceMutation = (work) => work(current, settlement);
+  render(
+    <I18nextProvider i18n={i18n}>
+      <AddApiKeyDialog
+        mode="replace"
+        open
+        source={current}
+        trackMutation={trackMutation}
+        onClose={onClose}
+      />
+    </I18nextProvider>,
+  );
+  return { onClose, settlement };
 };
 
 const fillCredentials = async () => {
@@ -398,4 +450,92 @@ describe('AddApiKeyDialog', () => {
     expect(await screen.findByText(/cannot tell which interface|无法判断是哪种接口/i)).toBeTruthy();
     expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
   });
+
+  it('reaches the credential PUT with only the trimmed key', async () => {
+    const requests: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      requests.push({ input: path, init });
+      return Response.json({
+        source: { ...blockedSource, state: { status: 'active' } },
+        removed_hops: [],
+        interrupted: [],
+      });
+    }));
+    const settled = replacementSettlement();
+    renderReplacement(blockedSource, settled);
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), '  sk-replacement  ');
+    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].input).toBe(`/api/models/sources/${blockedSource.id}/credential`);
+    expect(requests[0].init?.method).toBe('PUT');
+    expect(JSON.parse(String(requests[0].init?.body))).toEqual({ key: 'sk-replacement' });
+    expect(settled.source).toHaveBeenCalledWith(expect.objectContaining({ state: { status: 'active' } }));
+  });
+
+  it('uses the existing guard shape before force and reports the committed impact', async () => {
+    const hop: RouteHopRef = {
+      backend: 'claude',
+      menu_model: 'sonnet',
+      position: 1,
+      source_id: blockedSource.id,
+      model_id: 'claude-sonnet-4-5',
+    };
+    const gap: SupplyGap = { backend: 'claude', model_id: 'claude-sonnet-4-5', agents: ['pm-claude'] };
+    const replace = vi.spyOn(modelsApi, 'replaceCredential')
+      .mockRejectedValueOnce(new ApiCallError(
+        'source_model_in_route_chain',
+        undefined,
+        true,
+        [gap],
+        [],
+        [hop],
+      ))
+      .mockResolvedValueOnce({
+        source: { ...blockedSource, state: { status: 'active' } },
+        removed_hops: [hop],
+        interrupted: [gap],
+      });
+    renderReplacement();
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-force');
+    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+
+    expect(await screen.findByRole('dialog', { name: /Replace key for|更换.*Key/i })).toBeTruthy();
+    expect(screen.getByText(/pm-claude/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
+
+    await waitFor(() => expect(replace).toHaveBeenCalledTimes(2));
+    expect(replace.mock.calls).toEqual([
+      [blockedSource.id, { key: 'sk-force' }],
+      [blockedSource.id, { key: 'sk-force', force: true }],
+    ]);
+    expect(await screen.findByText(/^Removed hops$|^已移除的跳$/i)).toBeTruthy();
+    expect(screen.getByText(/now have no usable source|现在没有可用来源/i)).toBeTruthy();
+  });
+
+  it.each([
+    ['discovery_failed', 'retryable-provider', true],
+    ['engine_down', 'inconclusive', true],
+    ['source_not_found', 'authoritative-terminal', false],
+  ] as const)(
+    'renders %s through the shared %s failure taxonomy',
+    async (code, failureClass, retries) => {
+      vi.spyOn(modelsApi, 'replaceCredential').mockRejectedValueOnce(new ApiCallError(code));
+      renderReplacement();
+      const user = userEvent.setup();
+
+      await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-failure');
+      await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+
+      const failure = await screen.findByText(/Couldn't replace the key|更换失败/i);
+      expect(failure.closest('[data-failure-class]')?.getAttribute('data-failure-class')).toBe(failureClass);
+      expect(screen.queryByRole('button', { name: /^Retry$|^重试$/i }) !== null).toBe(retries);
+    },
+  );
 });
