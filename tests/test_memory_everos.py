@@ -13,6 +13,7 @@ from core.memory.everos import (
     _AGENTIC_TIMEOUT_HEADER,
     AddAck,
     AddRejected,
+    AgenticRecallTelemetry,
     EverOSPort,
     FlushRejected,
     FlushRetryable,
@@ -653,11 +654,10 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
     assert items[1].text == "Uses Python for automation."
 
 
-def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_agentic_search_retains_allowlisted_round_metadata() -> None:
     requests: list[dict] = []
     sidecar_timeouts: list[float] = []
+    telemetry = AgenticRecallTelemetry()
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
@@ -680,9 +680,9 @@ def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
             2,
             method="agentic",
             timeout_seconds=5,
+            agentic_telemetry=telemetry,
         )
 
-    caplog.set_level("INFO", logger="core.memory.everos")
     with _sidecar_transport(handler):
         assert asyncio.run(run()) == ()
 
@@ -699,22 +699,12 @@ def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
         }
     ]
     assert sidecar_timeouts == [pytest.approx(4.95)]
-    telemetry = [
-        record.getMessage()
-        for record in caplog.records
-        if "telemetry" in record.getMessage()
-    ]
-    assert len(telemetry) == 1
-    assert "mode=agentic" in telemetry[0]
-    assert "round=round2" in telemetry[0]
-    assert "success=true" in telemetry[0]
-    assert "timeout=false" in telemetry[0]
-    assert "private multi-hop query" not in telemetry[0]
+    assert telemetry.round == "round2"
 
 
-def test_agentic_search_logs_mapping_failure_as_unsuccessful(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_agentic_search_retains_round_on_mapping_failure() -> None:
+    telemetry = AgenticRecallTelemetry()
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -731,31 +721,22 @@ def test_agentic_search_logs_mapping_failure_as_unsuccessful(
                 2,
                 method="agentic",
                 timeout_seconds=5,
+                agentic_telemetry=telemetry,
             )
         return raised.value
 
-    caplog.set_level("INFO", logger="core.memory.everos")
     with _sidecar_transport(handler):
         failure = asyncio.run(run())
 
     assert failure.error == "memory_provider_response_invalid"
-    telemetry = [
-        record.getMessage()
-        for record in caplog.records
-        if "telemetry" in record.getMessage()
-    ]
-    assert len(telemetry) == 1
-    assert "round=round1" in telemetry[0]
-    assert "success=false" in telemetry[0]
-    assert "timeout=false" in telemetry[0]
-    assert "private multi-hop query" not in telemetry[0]
+    assert telemetry.round == "round1"
 
 
-def test_agentic_search_wall_clock_timeout_is_typed_and_logged(
+def test_agentic_search_wall_clock_timeout_is_typed(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     provider = EverOSPort(Path("/tmp/everos.sock"))
+    telemetry = AgenticRecallTelemetry()
 
     async def slow_request(*_args, **_kwargs):
         await asyncio.sleep(1)
@@ -772,23 +753,14 @@ def test_agentic_search_wall_clock_timeout_is_typed_and_logged(
                 2,
                 method="agentic",
                 timeout_seconds=0.01,
+                agentic_telemetry=telemetry,
             )
         return raised.value
 
-    caplog.set_level("INFO", logger="core.memory.everos")
     failure = asyncio.run(run())
 
     assert failure.error == "memory_provider_timeout"
-    telemetry = [
-        record.getMessage()
-        for record in caplog.records
-        if "telemetry" in record.getMessage()
-    ]
-    assert len(telemetry) == 1
-    assert "round=unknown" in telemetry[0]
-    assert "success=false" in telemetry[0]
-    assert "timeout=true" in telemetry[0]
-    assert "private multi-hop query" not in telemetry[0]
+    assert telemetry.round == "unknown"
 
 
 def test_agentic_search_maps_provider_422_to_closed_capability_error() -> None:
@@ -817,9 +789,9 @@ def test_agentic_search_maps_provider_422_to_closed_capability_error() -> None:
     assert "422" not in str(failure)
 
 
-def test_agentic_search_maps_sidecar_deadline_with_round_telemetry(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_agentic_search_retains_round_on_sidecar_deadline() -> None:
+    telemetry = AgenticRecallTelemetry()
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert float(request.headers[_AGENTIC_TIMEOUT_HEADER]) <= 5
         return httpx.Response(
@@ -837,23 +809,15 @@ def test_agentic_search_maps_sidecar_deadline_with_round_telemetry(
                 2,
                 method="agentic",
                 timeout_seconds=5,
+                agentic_telemetry=telemetry,
             )
         return raised.value
 
-    caplog.set_level("INFO", logger="core.memory.everos")
     with _sidecar_transport(handler):
         failure = asyncio.run(run())
 
     assert failure.error == "memory_provider_timeout"
-    telemetry = [
-        record.getMessage()
-        for record in caplog.records
-        if "telemetry" in record.getMessage()
-    ]
-    assert len(telemetry) == 1
-    assert "round=round2" in telemetry[0]
-    assert "success=false" in telemetry[0]
-    assert "timeout=true" in telemetry[0]
+    assert telemetry.round == "round2"
 
 
 def test_profile_uses_get_and_reports_empty_profile_as_non_failure() -> None:

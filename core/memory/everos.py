@@ -91,6 +91,14 @@ class ProviderHealthSnapshot:
         }
 
 
+@dataclass
+class AgenticRecallTelemetry:
+    """Scrub-safe state retained across one bounded agentic recall."""
+
+    round: Literal["round1", "round2", "unknown"] = "unknown"
+    timed_out: bool = False
+
+
 @dataclass(frozen=True)
 class ProviderCapture:
     session_ref: ProviderSessionRef
@@ -407,9 +415,9 @@ class EverOSPort:
         include_profile: bool = True,
         session_ref: ProviderSessionRef | None = None,
         timeout_seconds: float | None = None,
+        agentic_telemetry: AgenticRecallTelemetry | None = None,
     ) -> tuple[MemoryItem, ...]:
-        agentic_started = time.monotonic() if method == "agentic" else None
-        telemetry: dict[str, str] = {}
+        response_metadata: dict[str, str] = {}
         try:
             data = await self._search_data(
                 principal_id,
@@ -420,25 +428,14 @@ class EverOSPort:
                 include_profile=include_profile,
                 session_ref=session_ref,
                 timeout_seconds=timeout_seconds,
-                telemetry=telemetry,
+                telemetry=response_metadata,
             )
-            items = _map_search_items(data, principal_id=principal_id, limit=limit)
-        except MemoryProviderFailure as failure:
-            if agentic_started is not None:
-                logger.info(
-                    "Memory search telemetry mode=agentic round=%s duration_ms=%s success=false timeout=%s",
-                    telemetry.get("round", "unknown"),
-                    _elapsed_ms(agentic_started),
-                    str(failure.error == "memory_provider_timeout").lower(),
-                )
-            raise
-        if agentic_started is not None:
-            logger.info(
-                "Memory search telemetry mode=agentic round=%s duration_ms=%s success=true timeout=false",
-                telemetry.get("round", "unknown"),
-                _elapsed_ms(agentic_started),
-            )
-        return items
+            return _map_search_items(data, principal_id=principal_id, limit=limit)
+        finally:
+            if method == "agentic" and agentic_telemetry is not None:
+                round_value = response_metadata.get("round")
+                if round_value in {"round1", "round2"}:
+                    agentic_telemetry.round = round_value
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
         del project_id
@@ -1446,6 +1443,7 @@ class MemoryProviderPort(Protocol):
         include_profile: bool = True,
         session_ref: ProviderSessionRef | None = None,
         timeout_seconds: float | None = None,
+        agentic_telemetry: AgenticRecallTelemetry | None = None,
     ) -> tuple[MemoryItem, ...]: ...
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
@@ -1485,6 +1483,7 @@ class FakeMemoryProvider:
     profile_failure: BaseException | None = None
     health_failure: BaseException | None = None
     agentic_budget_enforced_flag: bool = False
+    agentic_round: Literal["round1", "round2", "unknown"] = "unknown"
     processing_health_failure: BaseException | None = None
     recorder_health_state: dict[str, str | None] = field(
         default_factory=lambda: {"state": "disabled", "reason": None}
@@ -1538,10 +1537,13 @@ class FakeMemoryProvider:
         include_profile: bool = True,
         session_ref: ProviderSessionRef | None = None,
         timeout_seconds: float | None = None,
+        agentic_telemetry: AgenticRecallTelemetry | None = None,
     ) -> tuple[MemoryItem, ...]:
         self.search_scopes.append((principal_id, project_id))
         self.search_policies.append((method, include_profile, session_ref))
         self.search_timeouts.append(timeout_seconds)
+        if method == "agentic" and agentic_telemetry is not None:
+            agentic_telemetry.round = self.agentic_round
         del query, limit
         if self.search_failure is not None:
             raise self.search_failure
