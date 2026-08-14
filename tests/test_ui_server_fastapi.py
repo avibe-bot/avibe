@@ -3346,6 +3346,46 @@ def test_web_push_status_reports_normal_delivery_diagnostics(monkeypatch, tmp_pa
     assert normal_delivery["recent_deliveries"] == []
 
 
+def test_web_push_status_reads_cross_process_delivery_dispositions(monkeypatch, tmp_path):
+    """The status surface reads dispositions persisted by the delivery process.
+
+    Normal delivery runs in the controller process while this endpoint runs in
+    the UI process, so the disposition ring must round-trip through storage.
+    """
+
+    from core import web_push_notifications
+    from core.chat_discovery import set_state_meta
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    controller_entry = {
+        "at": "2026-08-14T00:00:00Z",
+        "message_id": "msg_controller",
+        "session_id": "ses_controller",
+        "owners": {"local": {"policy": "local", "disposition": "sent", "reason": ""}},
+        "disposition": "sent",
+    }
+    other_entry = {
+        "at": "2026-08-14T00:01:00Z",
+        "message_id": "msg_other",
+        "session_id": "ses_other",
+        "owners": {"remote:user-a": {"policy": "personal", "disposition": None, "reason": ""}},
+        "disposition": "sent",
+    }
+    set_state_meta(
+        web_push_notifications._DELIVERY_DISPOSITIONS_STATE_KEY,
+        [controller_entry, other_entry],
+    )
+
+    client = app.test_client()
+    status = client.post("/api/web-push/status", json={}, headers=csrf_headers(client))
+    assert status.status_code == 200
+    normal_delivery = status.get_json()["normal_delivery"]
+    # Newest first, scoped to the calling local owner: the remote entry stays
+    # private to its own owner's diagnostics.
+    assert normal_delivery["recent_deliveries"] == [controller_entry]
+
+
 def test_web_push_test_route_targets_current_endpoint_only(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()

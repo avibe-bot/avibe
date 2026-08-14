@@ -60,6 +60,7 @@ _ORGANIZATION_REVISION_DISPOSITIONS = {
 
 _RECENT_DELIVERY_DISPOSITIONS: collections.deque[dict[str, Any]] = collections.deque(maxlen=64)
 _RECENT_DELIVERY_LOCK = threading.Lock()
+_DELIVERY_DISPOSITIONS_STATE_KEY = "web_push.recent_delivery_dispositions"
 
 
 @dataclass(frozen=True)
@@ -170,9 +171,18 @@ def _evaluate_record_authorization(
             reason="personal access resolved from the persisted signed snapshot",
         )
     revision_state = remote_access.session_authorization_revision_state(config, record)
+    if revision_state == "not_configured" and _record_carries_signed_revision(record):
+        # A revision-signed Organization snapshot proves the instance was
+        # revision-synced when the snapshot was minted. Being unable to check
+        # the watermark now — missing, unreadable, or unpaired local config —
+        # is unavailability, not evidence that no sync ever applied, and must
+        # not authorize delivery of protected output.
+        revision_state = "unavailable"
     if revision_state == "unavailable" and allow_sync_retry:
         _retry_authorization_revision_sync(config)
         revision_state = remote_access.session_authorization_revision_state(config, record)
+        if revision_state == "not_configured" and _record_carries_signed_revision(record):
+            revision_state = "unavailable"
     if revision_state in {"current", "not_configured"}:
         return OwnerAuthorizationDecision(
             user_key=user_key,
@@ -200,33 +210,87 @@ def _evaluate_record_authorization(
     )
 
 
+def _record_carries_signed_revision(record: Mapping[str, Any]) -> bool:
+    value = record.get("vibe_instance_authorization_revision")
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _resolve_owner_authorization_decisions(
     metadata: dict[str, Any],
     *,
     allow_sync_retry: bool = True,
 ) -> dict[str, OwnerAuthorizationDecision]:
-    """Resolve per-owner notification authorization from persisted records."""
+    """Resolve per-owner notification authorization from persisted records.
+
+    The bounded watermark refresh is shared by the whole owner set: one merged
+    prompt with several Organization owners performs at most one synchronous
+    sync request per delivery, never one request timeout per owner.
+    """
 
     raw_contexts = metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
     if not isinstance(raw_contexts, list):
         return {}
-    config = _load_notification_config()
-    decisions: dict[str, OwnerAuthorizationDecision] = {}
+    records: list[tuple[str, dict[str, Any]]] = []
+    seen_user_keys: set[str] = set()
     for raw_context in raw_contexts:
         if not isinstance(raw_context, dict):
             continue
         user_key = raw_context.get("user_key")
         if not isinstance(user_key, str) or not user_key.startswith("remote:"):
             continue
-        if user_key in decisions:
+        if user_key in seen_user_keys:
             continue
-        decisions[user_key] = _evaluate_record_authorization(
+        seen_user_keys.add(user_key)
+        records.append((user_key, raw_context))
+    if not records:
+        return {}
+    config = _load_notification_config()
+    if allow_sync_retry and any(
+        _notification_policy_for_record(config, record) == "organization"
+        for _user_key, record in records
+    ):
+        from vibe import remote_access
+
+        if config is None or remote_access.current_authorization_revision(config) is None:
+            _retry_authorization_revision_sync(config)
+            config = _load_notification_config()
+    return {
+        user_key: _evaluate_record_authorization(
             config,
             user_key,
-            raw_context,
-            allow_sync_retry=allow_sync_retry,
+            record,
+            allow_sync_retry=False,
         )
-    return decisions
+        for user_key, record in records
+    }
+
+
+def _stored_delivery_dispositions() -> list[dict[str, Any]] | None:
+    """Read the durable disposition ring from ``state_meta``.
+
+    Normal delivery runs in the controller process while the Web Push
+    test/status surface runs in the UI process, so the ring is persisted in
+    SQLite rather than kept only in memory. Returns ``None`` when storage is
+    unavailable so callers can fall back to the process-local deque.
+    """
+
+    try:
+        from core.chat_discovery import get_state_meta
+
+        stored = get_state_meta(_DELIVERY_DISPOSITIONS_STATE_KEY)
+    except Exception:
+        logger.debug("web push: could not read stored delivery dispositions", exc_info=True)
+        return None
+    return stored if isinstance(stored, list) else []
+
+
+def _store_delivery_dispositions(entries: list[dict[str, Any]]) -> None:
+    try:
+        from core.chat_discovery import set_state_meta
+
+        set_state_meta(_DELIVERY_DISPOSITIONS_STATE_KEY, entries[-_RECENT_DELIVERY_DISPOSITIONS.maxlen :])
+    except Exception:
+        logger.debug("web push: could not store delivery dispositions", exc_info=True)
 
 
 def recent_delivery_dispositions(
@@ -238,13 +302,17 @@ def recent_delivery_dispositions(
 
     ``user_key`` scopes the report to attempts that considered that owner, so
     the test/status surface explains only the calling owner's deliveries.
+    Reads the durable ``state_meta`` ring so deliveries recorded by the
+    controller process are visible to the UI-process status surface.
     """
 
-    with _RECENT_DELIVERY_LOCK:
-        entries = list(_RECENT_DELIVERY_DISPOSITIONS)
+    stored = _stored_delivery_dispositions()
+    if stored is None:
+        with _RECENT_DELIVERY_LOCK:
+            stored = list(_RECENT_DELIVERY_DISPOSITIONS)
     scoped = [
         entry
-        for entry in entries
+        for entry in stored
         if user_key is None or user_key in entry.get("owners", {})
     ]
     return list(reversed(scoped[-limit:]))
@@ -316,6 +384,10 @@ def _finish_delivery_attempt(attempt: dict[str, Any], disposition: str) -> None:
     attempt["disposition"] = disposition
     with _RECENT_DELIVERY_LOCK:
         _RECENT_DELIVERY_DISPOSITIONS.append(attempt)
+        entries = list(_RECENT_DELIVERY_DISPOSITIONS)
+    # The lock serializes writers within the delivery process; the durable
+    # ring is what makes the entry visible to the UI-process status surface.
+    _store_delivery_dispositions(entries)
 
 
 def _is_notifiable_message(message_type: Any, metadata: Any = None) -> bool:
@@ -655,6 +727,13 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
             user_keys = _metadata_user_keys(owner_metadata)
             for user_key in user_keys:
                 decision = decisions.get(user_key)
+                if user_key == "local":
+                    attempt["owners"][user_key] = {
+                        "policy": "local",
+                        "disposition": None,
+                        "reason": "local install namespace; no remote authorization gates apply",
+                    }
+                    continue
                 if decision is None:
                     attempt["owners"][user_key] = {
                         "policy": "unknown",

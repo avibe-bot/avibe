@@ -54,9 +54,18 @@ skip was only logged at debug level.
   - Structured dispositions (`sent`, `no_owner`,
     `authorization_refresh_required`, `revision_unavailable`, `revoked`,
     `no_subscription`, `provider_failure`, `suppressed_read`) recorded in a
-    bounded in-memory ring and surfaced through
+    bounded ring persisted to `state_meta`
+    (`web_push.recent_delivery_dispositions`) so entries written by the
+    controller-process delivery worker are visible to the UI-process
+    test/status surface, and surfaced through
     `recent_delivery_dispositions()` / `evaluate_delivery_authorization_for_context()`.
   - Authorization skips now log at warning/info instead of debug.
+  - Review round 1 hardening (Codex findings): a revision-signed Organization
+    snapshot with missing/unreadable config is `revision_unavailable`, never
+    authorized (the snapshot proves the instance was revision-synced when it
+    was minted); the single bounded watermark retry is shared across all
+    merged owners of one delivery; local owners are labeled with the `local`
+    policy instead of a bogus remote refresh disposition.
 - `vibe/ui_server.py`:
   - `_web_push_user_key()` no longer applies the 12-hour refresh cutoff;
     `parse_session_cookie` still enforces signature, expiry, and confirmed
