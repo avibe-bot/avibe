@@ -1597,6 +1597,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, "Done.")
         self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
 
+    def test_process_reply_accepts_trailing_pipe_without_rule(self):
+        for text in ("Done.\n[A] | [B] |", "Done.\n[A] ｜ [B] ｜"):
+            with self.subTest(text=text):
+                reply = process_reply(text)
+
+                self.assertEqual(reply.text, "Done.")
+                self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
     def test_process_reply_preserves_single_bracket_line_without_rule(self):
         text = "Use this value:\n[example]"
 

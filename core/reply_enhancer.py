@@ -309,7 +309,7 @@ _UNSEPARATED_BUTTON_ROW_RE = re.compile(
     + _BUTTON_LINE_TOKEN
     + r"[ \t]*(?:[|｜][ \t]*"
     + _BUTTON_LINE_TOKEN
-    + r"[ \t]*)+)"
+    + r"[ \t]*)+(?:[|｜][ \t]*)?)"
     r"(?:\r?\n[ \t]*)*$"
 )
 
