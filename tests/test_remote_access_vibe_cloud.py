@@ -152,6 +152,68 @@ def test_ra_tq_026_remote_status_ignores_spoofed_cf_ray(monkeypatch, tmp_path):
     assert config.remote_access.vibe_cloud.public_url == "https://alex.avibe.bot"
 
 
+def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.save()
+    full_payload = {
+        "ok": True,
+        "provider": "vibe_cloud",
+        "enabled": True,
+        "public_url": "https://alex.avibe.bot",
+        "paired": True,
+        "running": True,
+        "pid": 4711,
+        "pid_state": "cloudflared",
+        "binary_found": True,
+        "binary_path": "/usr/local/bin/cloudflared",
+        "binary_version": "2024.1.0",
+        "transport_protocol": "http2",
+        "settings": {
+            "transport_protocol": "http2",
+            "auto_recovery": True,
+            "optimization_profile": "balanced",
+            "edge_ip_version": "4",
+            "edge_bind_address": "192.168.1.5",
+        },
+        "tunnel_quality": {"sampled_at": "2026-08-10T10:00:00Z", "grade": "good"},
+        "network_path": {
+            "schema_version": 1,
+            "provider": "Cloudflare",
+            "asn": 13335,
+            "client_access": "remote",
+        },
+    }
+    monkeypatch.setattr(remote_access, "status", lambda *a, **k: dict(full_payload))
+
+    client = ui_server.app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _session_cookie(config),
+        domain="alex.avibe.bot",
+    )
+    remote_response = client.get(
+        "/api/remote-access/status",
+        base_url="https://alex.avibe.bot",
+    )
+    local_response = client.get(
+        "/api/remote-access/status",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert remote_response.status_code == 200
+    remote_body = remote_response.get_json()
+    assert set(remote_body) == set(ui_server._REMOTE_ACCESS_STATUS_PUBLIC_FIELDS)
+    for sensitive in ("pid", "binary_found", "binary_path", "binary_version"):
+        assert sensitive not in remote_body
+    assert remote_body["network_path"] == full_payload["network_path"]
+    assert remote_body["settings"] == full_payload["settings"]
+    assert remote_body["pid_state"] == "cloudflared"
+
+    assert local_response.status_code == 200
+    assert local_response.get_json() == full_payload
+
+
 def test_session_cookie_roundtrip() -> None:
     config = _config()
 
