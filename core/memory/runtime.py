@@ -121,9 +121,10 @@ ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 _CALL_LOG_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
 _RECORDER_DISABLED = {"state": "disabled", "reason": None}
 _RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
-_MEMORY_LIST_CURSOR_VERSION = 1
+_MEMORY_LIST_CURSOR_VERSION = 2
 MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
+_MEMORY_LIST_PROVIDER_MAX_PAGE = 1_000_000
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
 
 
@@ -1518,7 +1519,7 @@ class MemoryRuntime:
         projects = tuple(sorted(projects))
         fingerprint = _memory_list_catalog_fingerprint(principal_id, projects)
         try:
-            boundaries = _decode_memory_list_cursor(
+            boundaries, page_hints = _decode_memory_list_cursor(
                 cursor,
                 projects=projects,
                 fingerprint=fingerprint,
@@ -1533,6 +1534,7 @@ class MemoryRuntime:
         failures: list[OperationFailed] = []
         available_counts: dict[str, int] = {}
         project_has_more: dict[str, bool] = {}
+        candidate_page_hints: dict[tuple[str, str], int] = {}
         complete = True
         async with _concurrent_episode_lists(self.module) as list_episodes:
             project_windows = await asyncio.gather(
@@ -1542,6 +1544,7 @@ class MemoryRuntime:
                         project_id,
                         list_episodes=list_episodes,
                         boundary=boundaries[project_id],
+                        page_hint=page_hints[project_id],
                         limit=limit,
                         deadline=deadline,
                     )
@@ -1559,8 +1562,19 @@ class MemoryRuntime:
                 )
                 warnings.append(warning)
                 continue
-            items, total_count, project_warnings, has_more, window_complete = window
+            (
+                items,
+                total_count,
+                project_warnings,
+                has_more,
+                window_complete,
+                item_page_hints,
+            ) = window
             candidates.extend(items)
+            candidate_page_hints.update(
+                ((project_id, item.id), item_page_hints[item.id])
+                for item in items
+            )
             totals[project_id] = total_count
             available_counts[project_id] = len(items)
             project_has_more[project_id] = has_more
@@ -1586,10 +1600,12 @@ class MemoryRuntime:
         )
         selected = tuple(ordered[:limit])
         next_boundaries = dict(boundaries)
+        next_page_hints = dict(page_hints)
         selected_counts = {project_id: 0 for project_id in projects}
         for item in selected:
             selected_counts[item.project] += 1
             next_boundaries[item.project] = (item.timestamp, item.id)
+            next_page_hints[item.project] = candidate_page_hints[(item.project, item.id)]
 
         has_more = any(
             project_has_more[project_id]
@@ -1599,7 +1615,11 @@ class MemoryRuntime:
         if not complete:
             has_more = True
         next_cursor = (
-            _encode_memory_list_cursor(fingerprint, next_boundaries)
+            _encode_memory_list_cursor(
+                fingerprint,
+                next_boundaries,
+                next_page_hints,
+            )
             if has_more
             else None
         )
@@ -1627,6 +1647,7 @@ class MemoryRuntime:
         *,
         list_episodes: Callable[..., Awaitable[MemoryListResult]],
         boundary: tuple[str, str] | None,
+        page_hint: int,
         limit: int,
         deadline: float,
     ) -> (
@@ -1636,13 +1657,15 @@ class MemoryRuntime:
             tuple[MemoryListWarningCode, ...],
             bool,
             bool,
+            dict[str, int],
         ]
         | OperationFailed
     ):
-        page = 1
+        page = max(1, page_hint - 1)
         items_by_id: dict[str, MemoryListItem] = {}
+        item_page_hints: dict[str, int] = {}
         warnings: list[MemoryListWarningCode] = []
-        total_count = 0
+        total_count: int | None = None
 
         def failure_result(error):
             if not items_by_id:
@@ -1655,10 +1678,14 @@ class MemoryRuntime:
             )
             return (
                 tuple(ordered[:limit]),
-                total_count,
+                total_count or 0,
                 tuple(dict.fromkeys((*warnings, warning))),
                 True,
                 False,
+                {
+                    item.id: item_page_hints[item.id]
+                    for item in ordered[:limit]
+                },
             )
 
         while True:
@@ -1679,6 +1706,37 @@ class MemoryRuntime:
                 return failure_result("memory_provider_timeout")
             if isinstance(result, OperationFailed):
                 return failure_result(result.error)
+            if (
+                total_count is None
+                and page > 1
+                and (page - 1) * _MEMORY_LIST_PROVIDER_PAGE_SIZE
+                >= result.total_count
+            ):
+                last_page = max(
+                    1,
+                    (
+                        result.total_count
+                        + _MEMORY_LIST_PROVIDER_PAGE_SIZE
+                        - 1
+                    )
+                    // _MEMORY_LIST_PROVIDER_PAGE_SIZE,
+                )
+                page = max(1, last_page - 1)
+                warnings.extend(result.warnings)
+                continue
+            if total_count is not None and result.total_count != total_count:
+                return (
+                    (),
+                    result.total_count,
+                    tuple(
+                        dict.fromkeys(
+                            (*warnings, *result.warnings, "memory_list_partial")
+                        )
+                    ),
+                    True,
+                    False,
+                    {},
+                )
             total_count = result.total_count
             warnings.extend(result.warnings)
             for item in result.items:
@@ -1687,6 +1745,7 @@ class MemoryRuntime:
                     boundary,
                 ):
                     items_by_id[item.id] = item
+                    item_page_hints[item.id] = page
 
             ordered = _order_project_memory_list_items(items_by_id.values())
             exhausted = (
@@ -1707,10 +1766,14 @@ class MemoryRuntime:
         ordered = _order_project_memory_list_items(items_by_id.values())
         return (
             tuple(ordered[:limit]),
-            total_count,
+            total_count or 0,
             tuple(dict.fromkeys(warnings)),
             len(ordered) > limit,
             True,
+            {
+                item.id: item_page_hints[item.id]
+                for item in ordered[:limit]
+            },
         )
 
     def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
@@ -3614,10 +3677,23 @@ def _memory_list_catalog_fingerprint(
 def _encode_memory_list_cursor(
     fingerprint: str,
     boundaries: dict[str, tuple[str, str] | None],
+    page_hints: dict[str, int],
 ) -> str:
+    if set(page_hints) != set(boundaries) or any(
+        isinstance(page_hint, bool)
+        or not isinstance(page_hint, int)
+        or not 1 <= page_hint <= _MEMORY_LIST_PROVIDER_MAX_PAGE
+        or (boundaries[project_id] is None and page_hint != 1)
+        for project_id, page_hint in page_hints.items()
+    ):
+        raise ValueError("invalid Memory list page hints")
     encoded_boundaries = {
         project_id: (
-            {"t": boundary[0], "i": _encode_memory_list_boundary_id(boundary[1])}
+            {
+                "t": boundary[0],
+                "i": _encode_memory_list_boundary_id(boundary[1]),
+                "p": page_hints[project_id],
+            }
             if boundary is not None
             else None
         )
@@ -3644,9 +3720,12 @@ def _decode_memory_list_cursor(
     *,
     projects: tuple[str, ...],
     fingerprint: str,
-) -> dict[str, tuple[str, str] | None]:
+) -> tuple[dict[str, tuple[str, str] | None], dict[str, int]]:
     if cursor is None:
-        return {project_id: None for project_id in projects}
+        return (
+            {project_id: None for project_id in projects},
+            {project_id: 1 for project_id in projects},
+        )
     if (
         not isinstance(cursor, str)
         or not cursor
@@ -3673,16 +3752,21 @@ def _decode_memory_list_cursor(
     ):
         raise ValueError("invalid Memory list cursor")
     boundaries: dict[str, tuple[str, str] | None] = {}
+    page_hints: dict[str, int] = {}
     for project_id in projects:
         value = payload["b"][project_id]
         if value is None:
             boundaries[project_id] = None
+            page_hints[project_id] = 1
             continue
         if (
             not isinstance(value, dict)
-            or set(value) != {"t", "i"}
+            or set(value) != {"t", "i", "p"}
             or not isinstance(value.get("t"), str)
             or len(value["t"]) > 64
+            or isinstance(value.get("p"), bool)
+            or not isinstance(value.get("p"), int)
+            or not 1 <= value["p"] <= _MEMORY_LIST_PROVIDER_MAX_PAGE
         ):
             raise ValueError("invalid Memory list cursor")
         try:
@@ -3691,7 +3775,8 @@ def _decode_memory_list_cursor(
         except ValueError:
             raise ValueError("invalid Memory list cursor") from None
         boundaries[project_id] = (value["t"], boundary_id)
-    return boundaries
+        page_hints[project_id] = value["p"]
+    return boundaries, page_hints
 
 
 def _encode_memory_list_boundary_id(value: str) -> str:

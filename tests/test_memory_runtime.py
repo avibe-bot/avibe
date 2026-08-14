@@ -4153,6 +4153,163 @@ async def test_list_all_episodes_cursor_survives_insert_and_delete_between_pages
 
 
 @pytest.mark.asyncio
+async def test_list_all_episodes_cursor_uses_bounded_provider_page_hint() -> None:
+    base = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+
+    def item(index: int) -> MemoryListItem:
+        return MemoryListItem(
+            id=f"entry-{index:05d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=(base - timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            project="default",
+        )
+
+    requested_pages: list[int] = []
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            requested_pages.append(page)
+            start = (page - 1) * page_size + 1
+            entries = tuple(item(index) for index in range(start, start + page_size))
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=len(entries),
+                total_count=20_000,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    boundary = item(9_980)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": (boundary.timestamp, boundary.id)},
+        {"default": 499},
+    )
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
+
+    assert requested_pages == [498, 499, 500]
+    assert [entry["id"] for entry in payload["items"]] == ["entry-09981"]
+    assert payload["next_cursor"]
+    _, page_hints = memory_runtime._decode_memory_list_cursor(
+        payload["next_cursor"],
+        projects=projects,
+        fingerprint=fingerprint,
+    )
+    assert page_hints == {"default": 500}
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_repositions_page_hint_after_large_shrink() -> None:
+    surviving = tuple(
+        MemoryListItem(
+            id=f"survivor-{index}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=f"2026-08-13T0{index}:00:00Z",
+            project="default",
+        )
+        for index in range(5)
+    )
+    requested_pages: list[int] = []
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            requested_pages.append(page)
+            start = (page - 1) * page_size
+            selected = surviving[start : start + page_size]
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(surviving),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": ("2026-08-14T12:00:00Z", "removed-boundary")},
+        {"default": 499},
+    )
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=5)
+
+    assert requested_pages == [498, 1]
+    assert [entry["id"] for entry in payload["items"]] == [
+        entry.id for entry in reversed(surviving)
+    ]
+    assert payload["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_retries_when_total_changes_mid_window() -> None:
+    entries = [
+        MemoryListItem(
+            id=f"entry-{index:03d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=f"2026-08-14T12:{59 - index:02d}:00Z",
+            project="default",
+        )
+        for index in range(21)
+    ]
+    mutated = False
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            nonlocal mutated
+            if page == 2 and not mutated:
+                entries.pop(0)
+                mutated = True
+            start = (page - 1) * page_size
+            selected = tuple(entries[start : start + page_size])
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    inconsistent = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+    retried = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=inconsistent["next_cursor"],
+        limit=20,
+    )
+
+    assert inconsistent["items"] == []
+    assert inconsistent["warnings"] == ["memory_list_partial"]
+    assert inconsistent["total_count"] is None
+    assert inconsistent["next_cursor"]
+    assert [entry["id"] for entry in retried["items"]] == [
+        entry.id for entry in entries
+    ]
+    assert retried["next_cursor"] is None
+
+
+@pytest.mark.asyncio
 async def test_list_all_episodes_rejects_cursor_after_catalog_change() -> None:
     class _ListModule:
         async def list_episodes(self, *, project_id: str, page: int, page_size: int, **_kwargs):
@@ -4422,14 +4579,22 @@ def test_memory_list_cursor_bound_covers_maximum_valid_catalog() -> None:
     }
     fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
 
-    cursor = memory_runtime._encode_memory_list_cursor(fingerprint, boundaries)
+    page_hints = {
+        project_id: memory_runtime._MEMORY_LIST_PROVIDER_MAX_PAGE
+        for project_id in projects
+    }
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        boundaries,
+        page_hints,
+    )
 
     assert len(cursor.encode("ascii")) <= memory_runtime.MEMORY_LIST_CURSOR_MAX_BYTES
     assert memory_runtime._decode_memory_list_cursor(
         cursor,
         projects=projects,
         fingerprint=fingerprint,
-    ) == boundaries
+    ) == (boundaries, page_hints)
 
 
 @pytest.mark.asyncio
@@ -4444,6 +4609,7 @@ async def test_list_all_episodes_rejects_surrogate_boundary_id() -> None:
                 "default": {
                     "t": "2026-08-14T12:00:00Z",
                     "i": "\ud800",
+                    "p": 1,
                 }
             },
         },
