@@ -57,6 +57,8 @@ class MigrationHost(Protocol):
     now: Callable[[], datetime]
     migration_claude_oauth_probe: Optional[Callable[[], bool]]
 
+    def _native_slot_reservation(self, vendor: str) -> object | None: ...
+
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig: ...
 
@@ -683,6 +685,16 @@ async def apply_native_migration(
         updated = host._clone_config(previous)
         existing_ids = {source.id for source in updated.sources}
         if any(item.source_id in existing_ids for item in selected):
+            raise MigrationConflictError
+        held_vendors = {
+            item.vendor
+            for item in selected
+            if item.proposed_action == "keep_native"
+            and host._native_slot_reservation(item.vendor) is not None
+        }
+        if held_vendors:
+            # A pending native OAuth already owns the shared CLI credential.
+            # Do not scan/provision a second native Source under that hold.
             raise MigrationConflictError
 
         provisioned: list[tuple[str, str]] = []

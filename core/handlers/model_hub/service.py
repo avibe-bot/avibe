@@ -4015,36 +4015,34 @@ class ModelHubService:
         reserved_source_id: str | None = None
         if oauth_channel == "native_cli":
             await self._refresh_expired_native_slot_reservation(vendor)
-            existing = self._existing_native_source(self.store.load(), vendor)
-            reserved = self._native_slot_reservation(vendor)
-            if existing is not None or reserved is not None:
-                # This request owns a new nonce claim, so release it before
-                # rejecting the occupied singleton. A committed/in-flight
-                # nonce has already returned above and never reaches here.
-                if client_nonce is not None:
-                    self.oauth_flows.release_nonce(
-                        client_nonce,
-                        vendor,
-                        oauth_channel,
+            async with self._mutation_lock:
+                existing = self._existing_native_source(self.store.load(), vendor)
+                reserved = self._native_slot_reservation(vendor)
+                if existing is not None or reserved is not None:
+                    # This request owns a new nonce claim, so release it before
+                    # rejecting the occupied singleton. A committed/in-flight
+                    # nonce has already returned above and never reaches here.
+                    if client_nonce is not None:
+                        self.oauth_flows.release_nonce(
+                            client_nonce,
+                            vendor,
+                            oauth_channel,
+                        )
+                    occupant = (
+                        existing.id
+                        if existing is not None
+                        else cast(_NativeSlotReservation, reserved).source_id
                     )
-                occupant = (
-                    existing.id
-                    if existing is not None
-                    else cast(_NativeSlotReservation, reserved).source_id
-                )
-                raise ModelHubError(
-                    "native_source_already_exists",
-                    status=409,
-                    detail="modelHub.errors.native_subscription_slot_taken",
-                    data={"existing_source_id": occupant},
-                )
-            # Hold the singleton before any provider work: a second tab that
-            # reached only this far would otherwise open its own authorization
-            # and overwrite the shared CLI credential behind the first login.
-            # Nothing awaits between the check above and this reservation, so
-            # the pair is atomic for every concurrent caller.
-            reserved_source_id = _source_id()
-            self._reserve_native_slot(vendor, reserved_source_id)
+                    raise ModelHubError(
+                        "native_source_already_exists",
+                        status=409,
+                        detail="modelHub.errors.native_subscription_slot_taken",
+                        data={"existing_source_id": occupant},
+                    )
+                # Hold the singleton before external provider work. The lock
+                # serializes this check with migration's native Source writer.
+                reserved_source_id = _source_id()
+                self._reserve_native_slot(vendor, reserved_source_id)
 
         async def start_and_remember() -> dict:
             pending_source_id = reserved_source_id or _source_id()
