@@ -1353,7 +1353,7 @@ def editor_config_write_payload(payload: dict) -> dict:
     """Keep only the messaging preferences an Editor may persist."""
 
     if not isinstance(payload, dict):
-        raise ValueError("Config payload must be an object")
+        raise ValueError("editor_config_write_invalid")
     unknown = set(payload) - _EDITOR_CONFIG_WRITE_FIELDS
     if unknown:
         raise ValueError("editor_config_write_forbidden")

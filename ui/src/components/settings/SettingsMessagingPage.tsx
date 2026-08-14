@@ -304,7 +304,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={includeTimeInfoEnabled}
               onClick={() =>
-                void persist({ ...config, include_time_info: !includeTimeInfoEnabled })
+                void persist(
+                  { ...config, include_time_info: !includeTimeInfoEnabled },
+                  { include_time_info: !includeTimeInfoEnabled },
+                )
               }
             />
           }
@@ -317,7 +320,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={Boolean(config.include_user_info)}
               onClick={() =>
-                void persist({ ...config, include_user_info: !config.include_user_info })
+                void persist(
+                  { ...config, include_user_info: !config.include_user_info },
+                  { include_user_info: !config.include_user_info },
+                )
               }
             />
           }
@@ -340,7 +346,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <CompactSelect
               value={config.ack_mode || 'typing'}
               onChange={(event) =>
-                void persist({ ...config, ack_mode: event.target.value || 'typing' })
+                void persist(
+                  { ...config, ack_mode: event.target.value || 'typing' },
+                  { ack_mode: event.target.value || 'typing' },
+                )
               }
               className="w-40"
             >
@@ -360,10 +369,13 @@ export const SettingsMessagingPage: React.FC = () => {
             <CompactSelect
               value={config.agent_progress_style || 'off'}
               onChange={(event) =>
-                void persist({
-                  ...config,
-                  agent_progress_style: event.target.value || 'off',
-                })
+                void persist(
+                  {
+                    ...config,
+                    agent_progress_style: event.target.value || 'off',
+                  },
+                  { agent_progress_style: event.target.value || 'off' },
+                )
               }
               className="w-40"
             >
@@ -445,7 +457,10 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={config.show_duration !== false}
-              onClick={() => void persist({ ...config, show_duration: !config.show_duration })}
+              onClick={() => void persist(
+                { ...config, show_duration: !config.show_duration },
+                { show_duration: !config.show_duration },
+              )}
             />
           }
         />
@@ -467,7 +482,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={config.reply_enhancements !== false}
               onClick={() =>
-                void persist({ ...config, reply_enhancements: !config.reply_enhancements })
+                void persist(
+                  { ...config, reply_enhancements: !config.reply_enhancements },
+                  { reply_enhancements: !config.reply_enhancements },
+                )
               }
             />
           }

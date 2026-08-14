@@ -205,4 +205,14 @@ describe('SettingsMessagingPage locality gating', () => {
       audio_asr: { enabled: false, enabled_configured: true },
     });
   });
+
+  it('sends only the changed acknowledgement field when an Editor changes ack mode', async () => {
+    const user = userEvent.setup();
+    renderPage(remoteEditor);
+
+    const select = await screen.findByDisplayValue('dashboard.ackTyping');
+    await user.selectOptions(select, 'message');
+
+    expect(api.saveConfig).toHaveBeenCalledWith({ ack_mode: 'message' });
+  });
 });

@@ -1138,3 +1138,9 @@ def test_editor_config_write_payload_keeps_messaging_fields_only():
 def test_editor_config_write_payload_rejects_owner_fields(payload):
     with pytest.raises(ValueError, match="editor_config_write_forbidden"):
         api.editor_config_write_payload(payload)
+
+
+@pytest.mark.parametrize("payload", [[1], "ack_mode", 1, None])
+def test_editor_config_write_payload_rejects_non_object_with_stable_code(payload):
+    with pytest.raises(ValueError, match="editor_config_write_invalid"):
+        api.editor_config_write_payload(payload)
