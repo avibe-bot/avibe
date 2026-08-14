@@ -89,7 +89,6 @@ class NativeOAuthAdapter(OAuthAdapter, Protocol):
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus: ...
 
 
-
 class NativeOAuthUnavailableError(RuntimeError):
     pass
 
@@ -122,6 +121,7 @@ class UnavailableNativeOAuthAdapter:
 
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus:
         raise NativeOAuthUnavailableError
+
 
 class OAuthFlowRegistry:
     """Persist non-secret OAuth identity and own nonce claim transitions."""

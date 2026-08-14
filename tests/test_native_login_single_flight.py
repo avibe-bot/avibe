@@ -62,3 +62,36 @@ async def test_im_web_and_model_hub_use_the_same_flow_registry() -> None:
     )
     assert (await adapter.oauth_status(web_flow.flow_id)).flow_id == web_flow.flow_id
     await adapter.cancel_oauth(web_flow.flow_id)
+
+
+@pytest.mark.asyncio
+async def test_model_hub_drives_the_shared_web_flow_through_submit_and_cancel() -> None:
+    service = AgentAuthService(_Controller())
+    client = object()
+    service._start_claude_control_flow = AsyncMock(
+        return_value=(client, "https://claude.ai/oauth/authorize", None)
+    )
+    service._wait_for_claude_completion_web = AsyncMock()
+    service._send_claude_callback = AsyncMock()
+    service._terminate_web_flow = AsyncMock()
+    adapter = AgentAuthNativeOAuthAdapter(
+        service,
+        auth_status_reader=lambda _backend: {"active_auth_mode": "oauth"},
+    )
+
+    state = await adapter.start_oauth("source", "anthropic")
+    flow = service._flows_by_id[state.flow_id]
+    assert (await adapter.oauth_status(state.flow_id)).flow_id == flow.flow_id
+
+    submitted = await adapter.submit_oauth(state.flow_id, "authorization#state")
+    assert submitted.state == "verifying"
+    service._send_claude_callback.assert_awaited_once_with(
+        client, "authorization", "state"
+    )
+    assert service._flows_by_id[state.flow_id] is flow
+
+    await adapter.cancel_oauth(state.flow_id)
+    service._terminate_web_flow.assert_awaited_once_with(
+        flow, final_state="cancelled"
+    )
+    assert state.flow_id not in service._flows_by_id

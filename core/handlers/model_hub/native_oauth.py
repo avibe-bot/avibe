@@ -69,6 +69,7 @@ class AgentAuthService(Protocol):
         account_label: str | None,
     ) -> None: ...
 
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -335,6 +336,7 @@ class AgentAuthNativeOAuthAdapter:
             signed_in=_signed_in(backend, status),
             account_label=_account_label(status),
         )
+
 
 def create_native_oauth_adapter() -> AgentAuthNativeOAuthAdapter:
     """Resolve the shared web-login service and sanctioned auth status readers."""

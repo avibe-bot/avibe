@@ -51,6 +51,31 @@ def _spawn_sites(tree: ast.Module) -> list[tuple[str, ast.Call]]:
     return sites
 
 
+def _internal_call_graph(
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+) -> dict[str, set[str]]:
+    return {
+        name: {
+            called
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            if (called := _call_name(call)) in functions
+        }
+        for name, function in functions.items()
+    }
+
+
+def _reachable(graph: dict[str, set[str]], root: str) -> set[str]:
+    reached = {root}
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        for called in graph[current] - reached:
+            reached.add(called)
+            pending.append(called)
+    return reached
+
+
 def test_one_registry_and_one_start_path_are_structural_invariants() -> None:
     tree = ast.parse(SERVICE.read_text(encoding="utf-8"))
     functions = {function.name: function for function in _functions(tree)}
@@ -74,7 +99,11 @@ def test_one_registry_and_one_start_path_are_structural_invariants() -> None:
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Attribute) and target.attr in {"_flows", "_web_flows", "_flows_by_id"} for target in node.targets)
+        and any(
+            isinstance(target, ast.Attribute)
+            and target.attr in {"_flows", "_web_flows", "_flows_by_id"}
+            for target in node.targets
+        )
     ]
     assert not assignments, "a second flow registry was reintroduced"
 
@@ -90,22 +119,47 @@ def test_one_registry_and_one_start_path_are_structural_invariants() -> None:
 
 def test_every_discovered_spawn_site_is_reachable_from_shared_start_path() -> None:
     tree = ast.parse(SERVICE.read_text(encoding="utf-8"))
+    functions = {function.name: function for function in _functions(tree)}
+    graph = _internal_call_graph(functions)
     sites = _spawn_sites(tree)
     assert sites
-    start = next(function for function in _functions(tree) if function.name == "_start_auth_flow")
-    called_by_start = {
-        _call_name(call)
+    spawn_functions = {function_name for function_name, _spawn in sites}
+    guarded_region = _reachable(graph, "_start_auth_flow")
+    assert spawn_functions <= guarded_region
+
+    reverse_graph = {name: set() for name in functions}
+    for caller, callees in graph.items():
+        for callee in callees:
+            reverse_graph[callee].add(caller)
+    reaches_spawn = set(spawn_functions)
+    pending = list(spawn_functions)
+    while pending:
+        current = pending.pop()
+        for caller in reverse_graph[current] - reaches_spawn:
+            reaches_spawn.add(caller)
+            pending.append(caller)
+
+    # The shared start is the only entry into the internal region that can
+    # reach a provider spawn. A new side caller of any helper in that region
+    # therefore fails without this test knowing the helper's name.
+    for function_name in (reaches_spawn & guarded_region) - {"_start_auth_flow"}:
+        assert reverse_graph[function_name] <= guarded_region
+
+    start = functions["_start_auth_flow"]
+    claim_lines = [
+        call.lineno
+        for call in ast.walk(start)
+        if isinstance(call, ast.Call) and _call_name(call) == "_claim_shared_native_flow"
+    ]
+    assert len(claim_lines) == 1
+    guarded_entry_lines = [
+        call.lineno
         for call in ast.walk(start)
         if isinstance(call, ast.Call)
-    }
-    for function_name, _spawn in sites:
-        assert function_name == "_start_auth_flow" or function_name in {
-            "_start_codex_process",
-            "_start_claude_control_flow",
-            "_start_opencode_process",
-            "_start_opencode_oauth_web",
-        }
-        assert function_name == "_start_auth_flow" or function_name in called_by_start
+        and _call_name(call) in reaches_spawn - {"_start_auth_flow"}
+    ]
+    assert guarded_entry_lines
+    assert claim_lines[0] < min(guarded_entry_lines)
 
 
 def test_model_hub_adapter_has_no_live_flow_registry_or_slot_api() -> None:
