@@ -8,8 +8,9 @@ Extracts special syntaxes from agent reply text:
 2. **File links** – Markdown links whose URL starts with ``file://``
    e.g. ``[screenshot](file:///tmp/shot.png)``
 
-3. **Quick-reply buttons** – A ``---`` separator followed by
-   ``[button text]`` tokens separated by ``|``
+3. **Quick-reply buttons** – A trailing row of ``[button text]`` tokens
+   separated by ``|``. The preferred form starts with a ``---`` separator;
+   pipe-separated rows are also accepted without it for compatibility.
    e.g. ``---\\n[👌好的] | [✅提交PR] | [先review一下]``
 """
 
@@ -293,6 +294,25 @@ _BUTTON_BLOCK_RE = re.compile(
     r"\s*$",  # trailing whitespace / end of string
 )
 
+# Compatibility form for replies that omit the ``---`` line. Keep this more
+# restrictive than the preferred form: it must be one trailing line with at
+# least two tokens and an explicit pipe, so ordinary ``[bracketed text]`` and
+# reference links remain message content.
+_BUTTON_LINE_TOKEN = (
+    r"(?:\[[^\]\r\n]+\]"
+    + _LINK_SUFFIX
+    + r"|<https?://[^|>\r\n]+\|[^>\r\n]+>)"
+)
+_UNSEPARATED_BUTTON_ROW_RE = re.compile(
+    r"\r?\n"
+    r"([ \t]*"
+    + _BUTTON_LINE_TOKEN
+    + r"[ \t]*(?:[|｜][ \t]*"
+    + _BUTTON_LINE_TOKEN
+    + r"[ \t]*)+(?:[|｜][ \t]*)?)"
+    r"(?:\r?\n[ \t]*)*$"
+)
+
 # Individual button tokens. Link variants are accepted for compatibility only;
 # the bracket label (or Slack link text) remains the quick-reply payload.
 _BUTTON_TOKEN_RE = re.compile(
@@ -306,6 +326,65 @@ _BUTTON_TOKEN_RE = re.compile(
 # (Detection matches the whole block instead of scanning for ``|``, which a URL
 # may itself contain.)
 _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+")
+_LINK_ONLY_BUTTON_ROW_RE = re.compile(
+    r"\s*(?:\[[^\]\r\n]+\]\((?:<https?://[^>\r\n]+>|"
+    + _PLAIN_URL
+    + r")\)|<https?://[^|>\r\n]+\|[^>\r\n]+>)\s*"
+    r"(?:[|｜]\s*(?:\[[^\]\r\n]+\]\((?:<https?://[^>\r\n]+>|"
+    + _PLAIN_URL
+    + r")\)|<https?://[^|>\r\n]+\|[^>\r\n]+>)\s*)+"
+)
+
+
+def _is_markdown_table_delimiter_line(line: str) -> bool:
+    """Return whether *line* is a Markdown table delimiter row."""
+    if "|" not in line:
+        return False
+    cells = line.strip().strip("|").split("|")
+    return len(cells) >= 2 and all(
+        re.fullmatch(r"\s*:?\-+:?\s*", cell) for cell in cells
+    )
+
+
+def _is_markdown_table_delimiter_before(markdown_mask: str, start: int) -> bool:
+    """Return whether a separator-free row belongs to the preceding table."""
+    prefix = markdown_mask[:start]
+    if prefix.endswith("\n"):
+        return False
+    lines = prefix.splitlines()
+    if not lines or "|" not in lines[-1]:
+        return False
+
+    # Walk through contiguous table rows so the final row of a multi-row table
+    # is not mistaken for a quick-reply footer.
+    index = len(lines) - 1
+    while index >= 0 and "|" in lines[index]:
+        if _is_markdown_table_delimiter_line(lines[index]):
+            return index > 0 and "|" in lines[index - 1]
+        index -= 1
+    return False
+
+
+def _markdown_container_level_at(text: str, start: int) -> int:
+    """Return the CommonMark container nesting level for a candidate row."""
+    newline = re.match(r"\r\n|\r|\n", text[start:])
+    if newline is None:
+        return 0
+
+    line_offsets = [0]
+    line_offsets.extend(
+        match.end() for match in re.finditer(r"\r\n|\r|\n", text)
+    )
+    candidate_position = start + newline.end()
+    line_index = bisect_left(line_offsets, candidate_position + 1) - 1
+    for token in _BLOCK_MARKDOWN.parse(text):
+        if (
+            token.type == "inline"
+            and token.map is not None
+            and token.map[0] <= line_index < token.map[1]
+        ):
+            return token.level
+    return 0
 
 # Silent output blocks are intentionally simple and model-facing. Once a real
 # opener is found outside code, its contents are opaque until the closing tag.
@@ -334,7 +413,11 @@ _SECRET_REQUEST_RE = re.compile(r"\$<([A-Za-z_][A-Za-z0-9_]*)>")
 
 
 def process_reply(
-    text: str, *, include_quick_replies: bool = True, keep_file_links: bool = False
+    text: str,
+    *,
+    include_quick_replies: bool = True,
+    allow_unseparated_quick_replies: bool = True,
+    keep_file_links: bool = False,
 ) -> EnhancedReply:
     """Parse *text* and return an ``EnhancedReply``.
 
@@ -346,6 +429,9 @@ def process_reply(
     workbench needs the links in place so it can rewrite them to media-proxy URLs
     for inline rendering; IM keeps the default (links stripped to plain labels and
     uploaded to the platform separately).
+
+    ``allow_unseparated_quick_replies`` gates only the compatibility syntax;
+    explicit ``---`` button blocks retain their existing behavior.
     """
     text, markdown_mask = _strip_silent_blocks_with_mask(text)
     visible_text = text
@@ -360,7 +446,11 @@ def process_reply(
             markdown_mask,
         )
     if include_quick_replies:
-        buttons, text_clean = _extract_buttons(text_no_files, mask_no_files)
+        buttons, text_clean = _extract_buttons(
+            text_no_files,
+            mask_no_files,
+            allow_unseparated=allow_unseparated_quick_replies,
+        )
     else:
         buttons, text_clean = [], text_no_files
     return EnhancedReply(
@@ -1369,13 +1459,19 @@ def _raw_html_end(
 def _extract_buttons(
     text: str,
     markdown_mask: str | None = None,
+    *,
+    allow_unseparated: bool = True,
 ) -> Tuple[List[QuickReplyButton], str]:
     """Extract trailing quick-reply buttons and return ``(buttons, cleaned_text)``."""
     mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
-    masked_match = _BUTTON_BLOCK_RE.search(mask)
+    pattern = _BUTTON_BLOCK_RE
+    masked_match = pattern.search(mask)
+    if masked_match is None and allow_unseparated:
+        pattern = _UNSEPARATED_BUTTON_ROW_RE
+        masked_match = pattern.search(mask)
     if masked_match is None:
         return [], text
-    m = _BUTTON_BLOCK_RE.fullmatch(
+    m = pattern.fullmatch(
         text,
         masked_match.start(),
         masked_match.end(),
@@ -1383,7 +1479,31 @@ def _extract_buttons(
     if m is None:
         return [], text
 
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and not text[: m.start()].strip():
+        return [], text
+
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE:
+        code_ranges, _, blocking_ranges = _markdown_block_ranges(text)
+        html_block_ranges = [
+            source_range
+            for source_range in blocking_ranges
+            if source_range not in code_ranges
+        ]
+        if any(start <= m.start(1) < end for start, end in html_block_ranges):
+            return [], text
+        if _markdown_container_level_at(text, m.start()) > 1:
+            return [], text
+
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and _is_markdown_table_delimiter_before(
+        mask, m.start()
+    ):
+        return [], text
+
     block = m.group(1)
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and _LINK_ONLY_BUTTON_ROW_RE.fullmatch(
+        block.strip()
+    ):
+        return [], text
     # A block made up solely of plain Markdown links with no ``|``/``｜``
     # separator is a genuine reference-link section (``---\n[Release notes](…)``,
     # possibly several on their own lines), not a button group — leave the text
@@ -1402,8 +1522,20 @@ def _extract_buttons(
     if not buttons:
         return [], text
 
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and len(buttons) > 5:
+        return [], text
+
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and len(buttons) < 2:
+        return [], text
+
     # Enforce a reasonable upper bound on button count
     buttons = buttons[:5]
 
     cleaned = text[: m.start()]
     return buttons, cleaned
+
+
+def strip_quick_reply_buttons(text: str) -> str:
+    """Remove a trailing quick-reply row while preserving all other markup."""
+    _, cleaned = _extract_buttons(text)
+    return cleaned

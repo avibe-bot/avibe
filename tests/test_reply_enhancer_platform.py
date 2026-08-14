@@ -599,6 +599,44 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_unseparated_button_row_in_code(self):
+        text = "```markdown\n[Yes] | [No]\n```"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_unseparated_button_row_in_raw_html(self):
+        text = "<div>\n[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_accepts_row_after_closed_raw_html_block(self):
+        reply = process_reply("<script>\ncontent\n</script>\n[A] | [B]")
+
+        self.assertEqual(reply.text, "<script>\ncontent\n</script>")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
+    def test_process_reply_preserves_oversized_separator_free_row(self):
+        text = "Grades:\n[A] | [B] | [C] | [D] | [E] | [F]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_ignores_indented_code_when_scanning_table_context(self):
+        text = "    Head | Status\n    --- | ---\n[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, "    Head | Status\n    --- | ---")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
     def test_silent_parser_preserves_inline_code_and_trailing_report_byte_for_byte(self):
         trailing_report = "\n".join(
             [
@@ -1449,6 +1487,22 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([file.path for file in reply.files], ["/tmp/report.txt"])
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_can_disable_only_separator_free_parsing(self):
+        reply = process_reply(
+            "Done.\n[A] | [B]",
+            allow_unseparated_quick_replies=False,
+        )
+
+        self.assertEqual(reply.text, "Done.\n[A] | [B]")
+        self.assertEqual(reply.buttons, [])
+
+        explicit = process_reply(
+            "Done.\n---\n[A] | [B]",
+            allow_unseparated_quick_replies=False,
+        )
+        self.assertEqual(explicit.text, "Done.")
+        self.assertEqual([button.text for button in explicit.buttons], ["A", "B"])
+
     def test_process_reply_accepts_markdown_link_style_quick_reply_button(self):
         reply = process_reply(
             "Done.\n\n---\n"
@@ -1462,6 +1516,43 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             [":eyes: 看 PR", ":rocket: 等评审完合并", ":test_tube: 先回归测一遍"],
         )
 
+    def test_process_reply_preserves_bodyless_pipe_row_without_rule(self):
+        text = "[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_whitespace_only_body_without_rule(self):
+        text = "\n[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_final_row_of_markdown_table(self):
+        text = (
+            "Option | Status\n"
+            "--- | ---\n"
+            "[Docs](https://example.com) | [Open]\n"
+            "[Issue](https://example.com/1) | [Closed]"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_short_markdown_table_delimiter(self):
+        text = "Option | Status\n- | -\n[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_process_reply_accepts_slack_angle_link_style_quick_reply_button(self):
         reply = process_reply(
             "Done.\n\n---\n"
@@ -1474,6 +1565,113 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             [button.text for button in reply.buttons],
             [":eyes: 看 PR", ":rocket: 等评审完合并", ":test_tube: 先回归测一遍"],
         )
+
+    def test_process_reply_accepts_pipe_separated_buttons_without_rule(self):
+        reply = process_reply("Done.\n[查看冲突] | [继续修复]")
+
+        self.assertEqual(reply.text, "Done.")
+        self.assertEqual(
+            [button.text for button in reply.buttons],
+            ["查看冲突", "继续修复"],
+        )
+
+    def test_process_reply_accepts_buttons_after_blank_line(self):
+        reply = process_reply("Table | Value\n\n[A] | [B]")
+
+        self.assertEqual(reply.text, "Table | Value")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
+    def test_process_reply_preserves_lazy_markdown_container_continuations(self):
+        for text in (
+            "> Compare these states:\n[A] | [B]",
+            "- Compare these states:\n[A] | [B]",
+            "1. Compare these states:\n[A] | [B]",
+        ):
+            with self.subTest(text=text):
+                reply = process_reply(text)
+
+                self.assertEqual(reply.text, text)
+                self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_accepts_fullwidth_pipe_without_rule(self):
+        reply = process_reply("Done.\n[A] ｜ [B]")
+
+        self.assertEqual(reply.text, "Done.")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
+    def test_process_reply_accepts_trailing_pipe_without_rule(self):
+        for text in ("Done.\n[A] | [B] |", "Done.\n[A] ｜ [B] ｜"):
+            with self.subTest(text=text):
+                reply = process_reply(text)
+
+                self.assertEqual(reply.text, "Done.")
+                self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
+    def test_process_reply_preserves_single_bracket_line_without_rule(self):
+        text = "Use this value:\n[example]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_unseparated_row_with_blank_button_label(self):
+        text = "Checkbox states:\n[ ] | [Checked]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_plain_link_without_rule(self):
+        text = "Done.\n[Release notes](https://example.com)"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_separator_free_markdown_link_list(self):
+        text = (
+            "Links\n"
+            "[Documentation](https://example.com/docs) | "
+            "[Issues](https://example.com/issues)"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_separator_free_slack_link_list(self):
+        text = (
+            "Links\n"
+            "[Documentation](<https://example.com/docs>) | "
+            "<https://example.com/issues|Issues>"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_markdown_table_last_row(self):
+        text = (
+            "Option | Status\n"
+            "--- | ---\n"
+            "[Docs](https://example.com) | [Issue](https://example.com/1)"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_accepts_unseparated_buttons_with_crlf(self):
+        reply = process_reply("Done\r\n[A] | [B]\r\n")
+
+        self.assertEqual(reply.text, "Done")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
 
     def test_process_reply_ignores_bare_angle_link_as_quick_reply_button(self):
         text = "Done.\n\n---\n<https://github.com/avibe-bot/avibe/pull/298>"

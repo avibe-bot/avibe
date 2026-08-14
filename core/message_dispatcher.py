@@ -2146,11 +2146,18 @@ class ConsolidatedMessageDispatcher:
                 return None
         if current_runtime_turn or output_semantics.detached:
             self._schedule_agent_run_activity(context, output_semantics)
+        quick_reply_target = routed_delivery_context(context)
         raw_text = text
         enhanced = None
         if visible_output_type and level != "silent":
             quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
-            enhanced = process_reply(raw_text, include_quick_replies=quick_replies_on)
+            enhanced = process_reply(
+                raw_text,
+                include_quick_replies=quick_replies_on,
+                allow_unseparated_quick_replies=self._supports_quick_replies(
+                    quick_reply_target
+                ),
+            )
             text = enhanced.visible_text
         else:
             text = strip_silent_blocks(raw_text)
@@ -2452,6 +2459,9 @@ class ConsolidatedMessageDispatcher:
                         background_enhanced = process_reply(
                             raw_text,
                             include_quick_replies=quick_replies_on,
+                            allow_unseparated_quick_replies=self._supports_quick_replies(
+                                target_context
+                            ),
                             keep_file_links=True,
                         )
                         persisted_output = persist_agent_message(
@@ -2863,7 +2873,12 @@ class ConsolidatedMessageDispatcher:
                         # render the button group (IM channels render native buttons
                         # from the same ``enhanced.buttons``).
                         avibe_enhanced = process_reply(
-                            raw_text, include_quick_replies=quick_replies_on, keep_file_links=True
+                            raw_text,
+                            include_quick_replies=quick_replies_on,
+                            allow_unseparated_quick_replies=self._supports_quick_replies(
+                                target_context
+                            ),
+                            keep_file_links=True,
                         )
                         persisted_output = persist_agent_message(
                             target_context,
