@@ -279,6 +279,36 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
+  // The wiring §4.5 was missing, end to end. `repair.ts` had decided the remedy
+  // and `OAuthConnectDialog` had run the re-login journey since it shipped, but no
+  // mount connected them, so a stopped subscription rendered its cause and
+  // stopped. The proof is the request: from the row a user can reach, one tap and
+  // one confirm reach `POST …/reauth` for THAT source.
+  it('reaches the re-auth request from a stopped subscription row', async () => {
+    const blocked: Source = {
+      ...nativeSubscription,
+      state: { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.oauth_expired' },
+    };
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'starting' as const,
+      presentation: { expects: 'none' as const },
+    };
+    const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    renderPage([blocked]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
+    expect(reauth).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+
+    await waitFor(() => expect(reauth).toHaveBeenCalledWith(blocked.id));
+  });
+
   it('lands the operational overview without waiting for event history', async () => {
     const pendingEvents = deferred<[]>();
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);

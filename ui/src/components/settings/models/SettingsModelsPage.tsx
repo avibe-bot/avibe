@@ -291,6 +291,14 @@ export const SettingsModelsPage: React.FC = () => {
   const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
   const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
   const [subscriptionVendor, setSubscriptionVendor] = React.useState<string | null>(null);
+  // The source a re-login is FOR, held as the snapshot `OAuthConnectDialog`
+  // documents its `reauth` prop to be: a native re-auth writes 需处理 onto the row
+  // before the login starts, so re-reading the live row mid-flow would rewrite
+  // the dialog's own subject. Separate from `subscriptionVendor` because the two
+  // journeys start from different surfaces — this one from the source detail,
+  // which replaces the overview that holds 添加订阅 — and only the create path
+  // owns the success-landing timer and reconcile flag below.
+  const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
   const subscriptionPickerRefs = React.useRef<Partial<Record<'anthropic' | 'openai', HTMLButtonElement | null>>>({});
   const subscriptionPickerHandoffRef = React.useRef(false);
@@ -882,6 +890,24 @@ export const SettingsModelsPage: React.FC = () => {
     setSubscriptionVendor(null);
     window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
   }, []);
+  /**
+   * A re-login's whole obligation to this page: re-read everything.
+   *
+   * Not `subscriptionAdded`, even though the reauth journey also calls back with
+   * no source. That callback's no-source branch can be CONSUMED by the create
+   * path's success flag, and a reauth has no success landing to coalesce with —
+   * it terminates on the row it started from. And the read has to be the wide
+   * one: `_materialize_reauth` can leave other agents without a source, so
+   * `/agents` and the chains behind it are stale too, not just this row.
+   */
+  const sourceReauthed = React.useCallback(() => { void refresh(); }, [refresh]);
+  const closeReauth = React.useCallback(() => {
+    setReauthSource(null);
+    // Back to the detail heading rather than to the button that opened this: a
+    // repair that worked unmounts that button (the row is no longer stopped), and
+    // Radix would restore focus to a node that is gone — i.e. to <body>.
+    window.setTimeout(() => sourceDetailHeadingRef.current?.focus(), 0);
+  }, []);
   const closeSubscriptionPicker = React.useCallback(() => {
     subscriptionPickerHandoffRef.current = false;
     setSubscriptionPickerOpen(false);
@@ -923,7 +949,7 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} headingRef={sourceDetailHeadingRef} trackMutation={trackSourceMutation(selectedSource.id)} />
+            ? <SourceDetailPanel source={selectedSource} headingRef={sourceDetailHeadingRef} trackMutation={trackSourceMutation(selectedSource.id)} onReauth={setReauthSource} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">
@@ -1009,6 +1035,16 @@ export const SettingsModelsPage: React.FC = () => {
           sources={sources}
           onClose={closeSubscription}
           onConnected={subscriptionAdded}
+        />
+      )}
+      {reauthSource && (
+        <OAuthConnectDialog
+          open
+          vendor={reauthSource.vendor}
+          reauth={reauthSource}
+          sources={sources}
+          onClose={closeReauth}
+          onConnected={sourceReauthed}
         />
       )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
