@@ -152,7 +152,12 @@ def test_background_watch_skill_resolves_local_waiters_and_persists_managed_pr_s
     assert 'REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"' in body
     assert '"$REPO_ROOT/skills/background-watch-hook/SKILL.md"' in body
     assert '"$REPO_ROOT/.agents/skills/background-watch-hook/SKILL.md"' in body
-    assert '"${OPENCODE_HOME:-$HOME/.opencode}/skills"' in body
+    assert '"${OPENCODE_HOME:-$HOME/.opencode}/skills/background-watch-hook/SKILL.md"' in body
+    assert (
+        '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/background-watch-hook/SKILL.md"' in body
+    )
+    assert "CLAUDE_HOME" not in body
+    assert "find \"$SKILL_ROOT\"" not in body
     assert 'WAIT_PR="$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py"' in body
     assert 'WAIT_PR_HELP="$(uv run --no-project "$WAIT_PR" --help 2>&1)"' in body
     assert "--workflow" in body

@@ -220,15 +220,16 @@ if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
   done
 fi
 if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
-  for SKILL_ROOT in \
-    "${CODEX_HOME:-$HOME/.codex}/skills" \
-    "${AGENTS_HOME:-$HOME/.agents}/skills" \
-    "${CLAUDE_HOME:-$HOME/.claude}/skills" \
-    "${OPENCODE_HOME:-$HOME/.opencode}/skills" \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills"; do
-    [ -d "$SKILL_ROOT" ] || continue
-    BACKGROUND_WATCH_HOOK_SKILL_FILE="$(find "$SKILL_ROOT" -path '*/background-watch-hook/SKILL.md' -print -quit)"
-    [ -n "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ] && break
+  for SKILL_FILE in \
+    "${CODEX_HOME:-$HOME/.codex}/skills/background-watch-hook/SKILL.md" \
+    "${AGENTS_HOME:-$HOME/.agents}/skills/background-watch-hook/SKILL.md" \
+    "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/background-watch-hook/SKILL.md" \
+    "${OPENCODE_HOME:-$HOME/.opencode}/skills/background-watch-hook/SKILL.md" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/background-watch-hook/SKILL.md"; do
+    if [ -f "$SKILL_FILE" ]; then
+      BACKGROUND_WATCH_HOOK_SKILL_FILE="$SKILL_FILE"
+      break
+    fi
   done
 fi
 test -f "$BACKGROUND_WATCH_HOOK_SKILL_FILE"
