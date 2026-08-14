@@ -31,6 +31,7 @@ from config.v2_config import (
     canonical_opencode_menu_identity,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
+    validate_model_hub_source_client_nonce,
 )
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
@@ -149,6 +150,11 @@ class ModelHubError(Exception):
         self.data = dict(data or {})
         self.blockers = tuple(blockers)
         self.turn_outcome = turn_outcome
+
+
+class CredentialCleanupUnsettledError(ModelHubError):
+    def __init__(self):
+        super().__init__("engine_down", status=503)
 
 
 class EngineUnavailableError(RuntimeError):
@@ -441,7 +447,7 @@ async def _require_credential_cleanup(
     """Refuse to settle when cleanup is neither complete nor durable."""
 
     if not await service._rollback_credential(source_id, credential_ref):
-        raise ModelHubError("engine_down", status=503)
+        raise CredentialCleanupUnsettledError
 
 
 async def _rollback_replacement_before_settling(
@@ -587,6 +593,7 @@ class ModelHubService:
         self._oauth_start_tasks: dict[
             tuple[str, str, OAuthChannel], asyncio.Task[dict]
         ] = {}
+        self._source_create_nonces: set[str] = set()
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
@@ -750,6 +757,16 @@ class ModelHubService:
         ensure_writable = getattr(self.store, "ensure_writable", None)
         if callable(ensure_writable):
             ensure_writable()
+
+    def _claim_source_create_nonce_locked(self, client_nonce: str) -> None:
+        if any(
+            source.client_nonce == client_nonce
+            for source in self.store.load().sources
+        ):
+            raise ModelHubError("source_nonce_conflict", status=409)
+        if client_nonce in self._source_create_nonces:
+            raise ModelHubError("source_create_in_progress", status=409)
+        self._source_create_nonces.add(client_nonce)
 
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
@@ -2145,6 +2162,7 @@ class ModelHubService:
             "key",
             "oauth_flow_ref",
             "protocol_order",
+            "client_nonce",
         }:
             raise ModelHubError("discovery_failed")
         forbidden = {
@@ -2201,6 +2219,14 @@ class ModelHubService:
 
         credential_value = payload.get("key")
         oauth_ref = payload.get("oauth_flow_ref")
+        try:
+            client_nonce = (
+                validate_model_hub_source_client_nonce(payload.get("client_nonce"))
+                if "client_nonce" in payload
+                else None
+            )
+        except ValueError:
+            raise ModelHubError("discovery_failed") from None
         if credential_value is not None:
             if not isinstance(credential_value, str):
                 raise ModelHubError("discovery_failed")
@@ -2212,6 +2238,8 @@ class ModelHubService:
         if kind == "api_key" and oauth_ref is not None:
             raise ModelHubError("discovery_failed")
         if kind == "api_key" and not credential_value:
+            raise ModelHubError("discovery_failed")
+        if kind != "api_key" and client_nonce is not None:
             raise ModelHubError("discovery_failed")
 
         if oauth_ref:
@@ -2229,87 +2257,104 @@ class ModelHubService:
         if kind == "subscription":
             raise ModelHubError("flow_not_found", status=404)
 
-        observation = await self._require_proven_source_payload(
-            {
-                "vendor": vendor,
-                "base_url": base_url,
-                "key": credential_value,
-                "protocol_order": payload.get("protocol_order"),
-            }
-        )
-        source = ModelHubSourceConfig(
-            id=_source_id(),
-            kind=kind,
-            vendor=vendor,
-            display_name=display_name,
-            protocol=cast(Literal["anthropic", "openai_responses", "openai_chat"], observation.protocol),
-            base_url=base_url,
-            supply_channel=channel,
-            billing=billing,
-            state=ModelHubSourceStateConfig(status="standby"),
-            usage=ModelHubSourceUsageConfig(),
-            models=manual_models,
-            created_at=self.now().isoformat(),
-            credential_ref="cred_preflight",
-        )
-        if observation.discovery is ObservationDiscovery.SUCCEEDED:
-            self._apply_discovered_models(
-                source,
-                manual_models,
-                list(observation.model_ids),
-                allow_empty=True,
-            )
-        elif observation.discovery is ObservationDiscovery.FAILED:
-            source.state = ModelHubSourceStateConfig(
-                status="error",
-                detail_key="models.source.error.unclassified",
-            )
-
-        # AC-29 requires the canonical Source validator to run before any
-        # permanent credential is provisioned. The placeholder is never saved.
+        nonce_claimed = False
+        release_nonce = True
         try:
+            if client_nonce is not None:
+                async with self._mutation_lock:
+                    self._claim_source_create_nonce_locked(client_nonce)
+                    nonce_claimed = True
+            observation = await self._require_proven_source_payload(
+                {
+                    "vendor": vendor,
+                    "base_url": base_url,
+                    "key": credential_value,
+                    "protocol_order": payload.get("protocol_order"),
+                }
+            )
+            source = ModelHubSourceConfig(
+                id=_source_id(),
+                kind=kind,
+                vendor=vendor,
+                display_name=display_name,
+                protocol=cast(
+                    Literal["anthropic", "openai_responses", "openai_chat"],
+                    observation.protocol,
+                ),
+                base_url=base_url,
+                supply_channel=channel,
+                billing=billing,
+                state=ModelHubSourceStateConfig(status="standby"),
+                usage=ModelHubSourceUsageConfig(),
+                models=manual_models,
+                created_at=self.now().isoformat(),
+                client_nonce=client_nonce,
+                credential_ref="cred_preflight",
+            )
+            if observation.discovery is ObservationDiscovery.SUCCEEDED:
+                self._apply_discovered_models(
+                    source,
+                    manual_models,
+                    list(observation.model_ids),
+                    allow_empty=True,
+                )
+            elif observation.discovery is ObservationDiscovery.FAILED:
+                source.state = ModelHubSourceStateConfig(
+                    status="error",
+                    detail_key="models.source.error.unclassified",
+                )
+
+            # AC-29 requires the canonical Source validator to run before any
+            # permanent credential is provisioned. The placeholder is never saved.
+            try:
+                source = ModelHubSourceConfig.from_payload(source.to_payload())
+            except (TypeError, ValueError):
+                raise ModelHubError("discovery_failed") from None
+
+            rollback_credential_ref = await self._engine_call(
+                self.adapter.provision_credential(
+                    vendor,
+                    source.protocol,
+                    cast(str, credential_value),
+                    source.base_url,
+                )
+            )
+            source.credential_ref = rollback_credential_ref
+            source.masked_credential = _mask_credential(cast(str, credential_value))
             source = ModelHubSourceConfig.from_payload(source.to_payload())
-        except (TypeError, ValueError):
-            raise ModelHubError("discovery_failed") from None
-
-        rollback_credential_ref = await self._engine_call(
-            self.adapter.provision_credential(
-                vendor,
-                source.protocol,
-                cast(str, credential_value),
-                source.base_url,
-            )
-        )
-        source.credential_ref = rollback_credential_ref
-        source.masked_credential = _mask_credential(cast(str, credential_value))
-        source = ModelHubSourceConfig.from_payload(source.to_payload())
-        persisted = False
-        try:
-            async with self._mutation_lock:
-                await self._commit_new_source_locked(source)
-                persisted = True
-            return self._source_creation_result(source.to_payload())
-        except asyncio.CancelledError:
-            persisted = self._persisted_credential(
-                self.store.load(),
-                source.id,
-                rollback_credential_ref,
-            )
-            if not persisted:
-                await _rollback_credential_before_settling(
-                    self,
+            persisted = False
+            try:
+                async with self._mutation_lock:
+                    await self._commit_new_source_locked(source)
+                    persisted = True
+                return self._source_creation_result(source.to_payload())
+            except asyncio.CancelledError:
+                persisted = self._persisted_credential(
+                    self.store.load(),
                     source.id,
                     rollback_credential_ref,
                 )
+                if not persisted:
+                    await _rollback_credential_before_settling(
+                        self,
+                        source.id,
+                        rollback_credential_ref,
+                    )
+                raise
+            except Exception:
+                if not persisted:
+                    await _require_credential_cleanup(
+                        self,
+                        source.id,
+                        rollback_credential_ref,
+                    )
+                raise
+        except CredentialCleanupUnsettledError:
+            release_nonce = False
             raise
-        except Exception:
-            if not persisted:
-                await _require_credential_cleanup(
-                    self,
-                    source.id,
-                    rollback_credential_ref,
-                )
-            raise
+        finally:
+            if nonce_claimed and release_nonce:
+                self._source_create_nonces.discard(cast(str, client_nonce))
 
     async def replace_credential(self, source_id: str, payload: object) -> dict:
         if (

@@ -711,6 +711,248 @@ def test_discovery_probe_failure_is_not_reported_as_engine_down(tmp_path):
     assert store.config.sources == []
 
 
+def test_api_key_create_route_persists_client_nonce_for_list_reconciliation(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    request_body = {
+        "kind": "api_key",
+        "vendor": "custom",
+        "display_name": "Relay",
+        "base_url": "https://relay.example/v1",
+        "key": "sk-test-source-create-nonce",
+        "client_nonce": "scn_01j5w8z7p4n6q2rt",
+    }
+
+    response = client.post(
+        "/api/models/sources",
+        json=request_body,
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert response.status_code == 201
+    body = response.get_json()
+    _assert_envelope(body)
+    assert body["source"]["client_nonce"] == request_body["client_nonce"]
+    _assert_valid("source.schema.json", body["source"])
+    assert store.config.sources[0].client_nonce == request_body["client_nonce"]
+    assert adapter.secret_lengths == [
+        len(request_body["key"]),
+        len(request_body["key"]),
+    ]
+    assert request_body["key"] not in json.dumps(body)
+
+    listed = client.get("/api/models/sources", base_url=base_url).get_json()
+    assert [source["client_nonce"] for source in listed["sources"]] == [
+        request_body["client_nonce"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "client_nonce",
+    [None, "scn_short", "SCN_01j5w8z7p4n6q2rt", "scn_01j5w8z7p4n6q2r!"],
+)
+def test_source_create_rejects_invalid_client_nonce_before_upstream(
+    tmp_path,
+    client_nonce,
+):
+    service, store, adapter = _service(tmp_path)
+
+    with pytest.raises(ModelHubError) as rejected:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "custom",
+                    "key": "sk-test-invalid-source-create-nonce",
+                    "client_nonce": client_nonce,
+                }
+            )
+        )
+
+    assert rejected.value.code == "discovery_failed"
+    assert adapter.secret_lengths == []
+    assert store.config.sources == []
+
+
+def test_source_create_nonce_covers_in_flight_committed_and_deleted_states(tmp_path):
+    async def scenario():
+        class BlockingObservationAdapter(FakeAdapter):
+            def __init__(self):
+                super().__init__()
+                self.observation_started = asyncio.Event()
+                self.release_observation = asyncio.Event()
+                self.block_once = True
+
+            async def observe_source(
+                self,
+                vendor,
+                base_url,
+                credential_ref,
+                protocol_order,
+            ):
+                if self.block_once:
+                    self.block_once = False
+                    self.observation_started.set()
+                    await self.release_observation.wait()
+                return await super().observe_source(
+                    vendor,
+                    base_url,
+                    credential_ref,
+                    protocol_order,
+                )
+
+        store = MemoryStore()
+        adapter = BlockingObservationAdapter()
+        service = ModelHubService(
+            store=store,
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+            revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        )
+        payload = {
+            "kind": "api_key",
+            "vendor": "custom",
+            "display_name": "Relay",
+            "base_url": "https://relay.example/v1",
+            "key": "sk-test-source-create-state-machine",
+            "client_nonce": "scn_01j5w8z7p4n6q2rt",
+        }
+
+        first = asyncio.create_task(service.create_source(payload))
+        await adapter.observation_started.wait()
+        before_retry_work = list(adapter.secret_lengths)
+        with pytest.raises(ModelHubError) as in_flight:
+            await service.create_source(payload)
+        assert in_flight.value.code == "source_create_in_progress"
+        assert in_flight.value.status == 409
+        assert adapter.secret_lengths == before_retry_work
+
+        adapter.release_observation.set()
+        committed = await first
+        after_commit_work = list(adapter.secret_lengths)
+        with pytest.raises(ModelHubError) as conflict:
+            await service.create_source(payload)
+        assert conflict.value.code == "source_nonce_conflict"
+        assert conflict.value.status == 409
+        assert adapter.secret_lengths == after_commit_work
+        assert [
+            source["client_nonce"]
+            for source in service.list_sources()
+            if source.get("client_nonce") == payload["client_nonce"]
+        ] == [payload["client_nonce"]]
+
+        await service.delete_source(committed["source"]["id"], force=True)
+        recreated = await service.create_source(payload)
+        assert recreated["source"]["id"] != committed["source"]["id"]
+        assert recreated["source"]["client_nonce"] == payload["client_nonce"]
+
+    asyncio.run(scenario())
+
+
+def test_source_create_nonce_releases_only_after_credential_cleanup(tmp_path):
+    async def scenario():
+        adapter = FakeAdapter()
+        adapter.observation = SourceObservation(
+            outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+            reachable=True,
+            authenticated=False,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            model_ids=(),
+        )
+        service = ModelHubService(
+            store=MemoryStore(),
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+            revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        )
+        payload = {
+            "kind": "api_key",
+            "vendor": "custom",
+            "key": "sk-test-source-create-retry",
+            "client_nonce": "scn_01j5w8z7p4n6q2rt",
+        }
+
+        with pytest.raises(ModelHubError) as rejected:
+            await service.create_source(payload)
+        assert rejected.value.code == "discovery_failed"
+        assert adapter.revoked == ["cred_test001"]
+
+        adapter.observation = None
+        created = await service.create_source(payload)
+        assert created["source"]["client_nonce"] == payload["client_nonce"]
+
+    asyncio.run(scenario())
+
+
+def test_source_create_nonce_retains_unsettled_cleanup_until_restart(tmp_path):
+    async def scenario():
+        class CleanupFailingAdapter(FakeAdapter):
+            async def revoke_credential(self, credential_ref):
+                raise RuntimeError("cleanup unavailable")
+
+        class UnwritableRevocations(CredentialRevocationJournal):
+            def add(self, source_id, credential_ref, *, operation="revoke_credential"):
+                raise OSError("journal unavailable")
+
+        store = MemoryStore()
+        adapter = CleanupFailingAdapter()
+        adapter.observation = SourceObservation(
+            outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+            reachable=True,
+            authenticated=False,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            model_ids=(),
+        )
+        service = ModelHubService(
+            store=store,
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+            revocations=UnwritableRevocations(tmp_path / "revocations.json"),
+        )
+        payload = {
+            "kind": "api_key",
+            "vendor": "custom",
+            "key": "sk-test-source-create-cleanup",
+            "client_nonce": "scn_01j5w8z7p4n6q2rt",
+        }
+
+        with pytest.raises(ModelHubError) as cleanup_failed:
+            await service.create_source(payload)
+        assert cleanup_failed.value.code == "engine_down"
+        upstream_work = list(adapter.secret_lengths)
+
+        with pytest.raises(ModelHubError) as retained:
+            await service.create_source(payload)
+        assert retained.value.code == "source_create_in_progress"
+        assert adapter.secret_lengths == upstream_work
+
+        restarted_adapter = FakeAdapter()
+        restarted = ModelHubService(
+            store=store,
+            adapter=restarted_adapter,
+            events=BoundedEventLog(tmp_path / "restarted-events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "restarted-oauth-flows.json"),
+            revocations=CredentialRevocationJournal(
+                tmp_path / "restarted-revocations.json"
+            ),
+        )
+        created = await restarted.create_source(payload)
+        assert created["source"]["client_nonce"] == payload["client_nonce"]
+
+    asyncio.run(scenario())
+
+
 def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
     """Integration (2026-07-24): list_agents() carries the read-only builtin_models /
     standard_vendors projections straight from the backend modules, so the UI never

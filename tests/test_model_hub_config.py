@@ -441,6 +441,30 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
         _assert_valid("agent-supply.schema.json", serialized)
 
 
+def test_source_client_nonce_round_trips_and_is_unique():
+    first_payload = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    first_payload["client_nonce"] = "scn_01j5w8z7p4n6q2rt"
+    first = ModelHubSourceConfig.from_payload(first_payload)
+
+    assert first.client_nonce == first_payload["client_nonce"]
+    assert first.to_payload()["client_nonce"] == first_payload["client_nonce"]
+    _assert_valid("source.schema.json", first.to_payload())
+
+    for invalid in (None, "scn_short", "SCN_01j5w8z7p4n6q2rt", "scn_01j5w8z7p4n6q2r!"):
+        with pytest.raises(ValueError, match="client_nonce"):
+            ModelHubSourceConfig.from_payload(
+                {**first_payload, "client_nonce": invalid}
+            )
+
+    second_payload = copy.deepcopy(first_payload)
+    second_payload["id"] = "src_relay9c2x"
+    duplicate = ModelHubConfig(
+        sources=[first, ModelHubSourceConfig.from_payload(second_payload)]
+    )
+    with pytest.raises(ValueError, match="duplicate client nonces"):
+        ModelHubConfig.from_payload(duplicate.to_payload())
+
+
 def test_every_frozen_schema_example_is_valid_and_json_round_trips():
     for path in sorted(CONTRACTS.glob("*.schema.json")):
         schema = json.loads(path.read_text(encoding="utf-8"))
@@ -1233,6 +1257,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         **_schema("source.schema.json")["examples"][0],
         "supply_channel": "hub",
         "credential_ref": "cred_serializer_test",
+        "client_nonce": "scn_01j5w8z7p4n6q2rt",
     }
     hub_payload = {
         "sources": [source_example],
