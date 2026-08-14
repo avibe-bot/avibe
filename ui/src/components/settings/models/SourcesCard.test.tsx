@@ -29,7 +29,7 @@ describe('SourcesCard footer', () => {
     const user = userEvent.setup();
     render(
       <I18nextProvider i18n={i18n}>
-        <SourcesCard read={readyRegion([])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} />
+        <SourcesCard read={readyRegion([])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
       </I18nextProvider>,
     );
 
@@ -44,25 +44,28 @@ describe('SourcesCard footer', () => {
 
   it('draws the two Frame 01 commands without restoring the retired vendor menu', async () => {
     const onAddApiKey = vi.fn();
+    const onAddSubscription = vi.fn();
     render(
       <I18nextProvider i18n={i18n}>
-        <SourcesCard read={readyRegion([])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={onAddApiKey} />
+        <SourcesCard read={readyRegion([])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={onAddApiKey} onAddSubscription={onAddSubscription} />
       </I18nextProvider>,
     );
 
     const subscription = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
-    expect((subscription as HTMLButtonElement).disabled).toBe(true);
+    expect((subscription as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByRole('button', { name: /^Add source$|^添加来源$/i })).toBeNull();
 
     await userEvent.click(screen.getByRole('button', { name: /Add API key|添加 API Key/i }));
     expect(onAddApiKey).toHaveBeenCalledOnce();
+    await userEvent.click(subscription);
+    expect(onAddSubscription).toHaveBeenCalledOnce();
   });
 
   it('keeps the last good source rows visible with an F2 retry after a later read fails', async () => {
     const onRetry = vi.fn();
     render(
       <I18nextProvider i18n={i18n}>
-        <SourcesCard read={failRegionRead(readyRegion([retained]))} onRetry={onRetry} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} />
+        <SourcesCard read={failRegionRead(readyRegion([retained]))} onRetry={onRetry} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} />
       </I18nextProvider>,
     );
 

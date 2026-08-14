@@ -536,8 +536,12 @@ export const terminalArrivalMovedRows = (action: FlowAction): boolean =>
  * Dropping it is bounded either way — the caller keeps polling, and the deadline at
  * the top of each tick is the dialog's own verdict when nothing ever answers.
  */
-export const pollFailureSettles = (submitOutstanding: boolean, serverNamed: boolean): boolean =>
-  !submitOutstanding && serverNamed;
+export const pollFailureSettles = (
+  submitOutstanding: boolean,
+  serverNamed: boolean,
+  code?: string,
+): boolean =>
+  !submitOutstanding && serverNamed && code !== 'engine_down' && code !== 'modelHub.errors.engine_down';
 
 /**
  * Whether the failure that just arrived is the one now ON SCREEN.

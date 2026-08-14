@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { oauthFailureKey, serverText } from './serverCopy';
+import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText } from './serverCopy';
 
 const t = (lng: 'en' | 'zh'): TFunction => {
   const i18n = createInstance();
@@ -117,5 +117,22 @@ describe('oauthFailureKey', () => {
     const reauth = t('zh')(oauthFailureKey('discovery_failed', 'reauth')) as string;
     expect(reauth).not.toContain('创建');
     expect(t('en')(oauthFailureKey('discovery_failed', 'reauth')) as string).not.toMatch(/creat/i);
+  });
+});
+
+describe('oauthStartFailureKey', () => {
+  it('surfaces the native singleton race with the dedicated already-bound copy', () => {
+    expect(oauthStartFailureKey(NATIVE_SUBSCRIPTION_EXISTS_FAILURE)).toBe(
+      'settings.models.addSub.error.alreadyBound',
+    );
+  });
+
+  it('keeps unknown start failures retryable without inventing a cause', () => {
+    expect(oauthStartFailureKey(undefined)).toBe('settings.models.addSub.error.startFailed');
+  });
+
+  it('uses the dedicated gateway outage copy for engine-down starts', () => {
+    expect(oauthStartFailureKey('engine_down')).toBe('settings.models.addSub.error.engineDown');
+    expect(oauthStartFailureKey('modelHub.errors.engine_down')).toBe('settings.models.addSub.error.engineDown');
   });
 });

@@ -864,6 +864,12 @@
           "unavailableDue": "暂不可用 · 已到重试时间"
         }
       },
+      "subscriptionPicker": {
+        "title": "选择要连接的订阅",
+        "detail": "选择要添加到 Model Hub 的账号订阅。",
+        "anthropic": { "title": "Claude 订阅", "detail": "Claude Pro / Max" },
+        "openai": { "title": "ChatGPT 订阅", "detail": "ChatGPT Plus / Pro" }
+      },
       "sources": {
         "title": "来源",
         "info": "可用于网关路由的账号与凭据",
@@ -1071,7 +1077,9 @@
           "auth.detail": "检查 API Key 是否有效",
           "address": "地址不对:404 Not Found",
           "network": "无法连接到该地址(不可达或超时)",
-          "unclassified": "没连成,原因认不出来",
+          "undetermined": "已连接，但无法确认这是哪种模型接口",
+          "inventory": "接口已确认，但暂时没拿到型号清单",
+          "unclassified": "连接失败，请检查地址和 API Key 后重试",
           "engineDown": "网关没有响应,请重试",
           "save": "没能确认这个来源已经保存"
         },

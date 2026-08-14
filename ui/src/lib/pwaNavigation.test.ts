@@ -44,6 +44,63 @@ function directWindowOpenCount(url: URL): number {
   return count;
 }
 
+function seversOpener(node: ts.Node): boolean {
+  let found = false;
+  const visit = (child: ts.Node) => {
+    if (
+      ts.isBinaryExpression(child) &&
+      child.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(child.left) &&
+      child.left.name.text === 'opener' &&
+      child.right.kind === ts.SyntaxKind.NullKeyword
+    ) {
+      found = true;
+    }
+    ts.forEachChild(child, visit);
+  };
+  ts.forEachChild(node, visit);
+  return found;
+}
+
+/**
+ * Preallocated blank tabs that keep an `opener` are reverse-tabnabbing holes:
+ * whatever is navigated into them later can drive this window. Report each
+ * such tab with whether the function that opened it severs the reference.
+ */
+function blankTabOpeners(url: URL): { line: number; severed: boolean }[] {
+  const path = fileURLToPath(url);
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(url, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const found: { line: number; severed: boolean }[] = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === 'window' &&
+      node.expression.name.text === 'open' &&
+      node.arguments.length > 0 &&
+      ts.isStringLiteral(node.arguments[0]) &&
+      node.arguments[0].text === 'about:blank'
+    ) {
+      let scope: ts.Node = node;
+      while (scope.parent && !ts.isFunctionLike(scope)) scope = scope.parent;
+      found.push({
+        line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+        severed: seversOpener(scope),
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -182,14 +239,25 @@ describe('programmatic PWA navigation', () => {
       .sort((left, right) => left.path.localeCompare(right.path));
 
     expect(directCalls).toEqual([
+      { path: 'components/settings/models/providerTab.ts', count: 1 },
       { path: 'components/workbench/ShowPageLaunchControl.tsx', count: 1 },
       { path: 'lib/pwaNavigation.ts', count: 1 },
     ]);
 
-    const preallocatedTab = readFileSync(
-      new URL('../components/workbench/ShowPageLaunchControl.tsx', import.meta.url),
-      'utf8',
+  });
+
+  it('severs the opener of every preallocated blank tab', () => {
+    const sourceRoot = new URL('../', import.meta.url);
+    const rootPath = fileURLToPath(sourceRoot);
+    const tabs = sourceFiles(sourceRoot).flatMap((url) =>
+      blankTabOpeners(url).map(({ line, severed }) => ({
+        site: `${fileURLToPath(url).slice(rootPath.length)}:${line}`,
+        severed,
+      })),
     );
-    expect(preallocatedTab).toContain("window.open('about:blank', '_blank')");
+
+    // The pattern must exist somewhere, or this asserts nothing at all.
+    expect(tabs.length).toBeGreaterThan(0);
+    expect(tabs.filter(({ severed }) => !severed)).toEqual([]);
   });
 });

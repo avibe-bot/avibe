@@ -1,9 +1,10 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { Info, Loader2, MoreHorizontal, Plus, RefreshCw, X } from 'lucide-react';
+import { Info, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
@@ -11,7 +12,9 @@ import { GuardGapList } from './GuardGapList';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import { handOffProviderTab } from './providerTab';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
+import { REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { tierMutationPayload, type TierMutationIntent } from './tierMutation';
 import { useDeadlineClock } from './useDeadlineClock';
@@ -199,11 +202,27 @@ const DraftTiers: React.FC<{
 export const SourceDetailPanel: React.FC<{
   source: Source;
   trackMutation: TrackSourceMutation;
-}> = ({ source, trackMutation }) => {
+  /**
+   * Start the re-login journey for this source. REQUIRED, and required for the
+   * reason §4.5 exists: `repair.ts` decided the one-tap remedy and
+   * `OAuthConnectDialog` has run the re-auth journey since it shipped, but no
+   * mount ever connected them, so a stopped subscription rendered its cause and
+   * stopped — the dead end that sentence forbids. Optional here, the same mount
+   * could forget again silently.
+   *
+   * The journey itself belongs to the caller rather than to this panel: a
+   * re-login can strand OTHER agents' models (`interrupted_pairs`), so what it
+   * invalidates is wider than the one row this panel owns.
+   */
+  onReauth: (source: Source) => void;
+  /** Stable focus target for callers that navigate into this detail surface. */
+  headingRef?: React.Ref<HTMLHeadingElement>;
+}> = ({ source, trackMutation, onReauth, headingRef }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
   const [busy, setBusy] = React.useState(false);
+  const [confirmingReauth, setConfirmingReauth] = React.useState(false);
   const [manualDraft, setManualDraft] = React.useState<{ modelId: string; tiers: string[]; failed: boolean; retryRead: boolean } | null>(null);
   const [guard, setGuard] = React.useState<GuardedAction | null>(null);
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
@@ -386,13 +405,20 @@ export const SourceDetailPanel: React.FC<{
     native: source.supply_channel === 'native_cli',
   });
   const host = enteredHost(source);
+  // `repairAction` is the authority on which remedy a stopped source has, so the
+  // condition is 「this source's one tap IS a re-login」 rather than a status list
+  // this file would have to keep in step with it. `retest` needs no entry of its
+  // own — it is the same `POST …/refresh` the 重新拉取 button beside this one
+  // already runs — and `replace_key` has no dialog in the UI yet (ledgered as
+  // follow-up), so neither renders here.
+  const repair = repairAction(source);
 
   return (
     <div className="model-hub-source-detail">
       <section className="model-hub-source-bar flex flex-col border border-border bg-surface sm:flex-row sm:items-center">
         <span className={cn('model-hub-source-tile flex shrink-0 items-center justify-center', ACCENT_TILE[accent])}><Icon className={cn('size-[18px]', ACCENT_ICON[accent])} /></span>
         <div className="min-w-0 flex-1">
-          <h2 className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
+          <h2 ref={headingRef} tabIndex={-1} className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
           {(state.key || source.last_discovered_at) && <p className={cn('mt-1 flex flex-wrap items-center gap-x-2 gap-y-1', state.textClass)}>
             {state.key && <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] rounded-full', state.dotClass)} />{t(state.key, state.values)}</span>}
             {source.last_discovered_at && <span className="model-hub-source-age text-muted">{t('settings.models.sourceDetail.status.listUpdated', { time: formatRelativeTime(source.last_discovered_at, t) })}</span>}
@@ -400,6 +426,7 @@ export const SourceDetailPanel: React.FC<{
           <p className="model-hub-source-summary mt-1 truncate font-mono">{t(host ? 'settings.models.sourceDetail.summary' : 'settings.models.gateway.modelCount', { host, count: source.models.length })}</p>
         </div>
         <div className="flex shrink-0 gap-2">
+          {repair === 'reauth' && <Button size="sm" className="model-hub-source-action" disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
           {source.supply_channel === 'hub' && <Button variant="outline" size="sm" className="model-hub-source-action" disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
           {source.kind === 'api_key' && <Button variant="secondary" size="sm" className="model-hub-source-action model-hub-ink-mint" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
         </div>
@@ -456,6 +483,31 @@ export const SourceDetailPanel: React.FC<{
         )}
       </section>
       <p className="model-hub-source-footnote leading-relaxed">{t('settings.models.sourceDetail.footnote')}</p>
+      {/* Confirmed before the journey opens, not inside it: `OAuthConnectDialog`
+          POSTs the re-auth as it mounts, and on a native source that call is the
+          irreversible half — `mark_native_irreversible_start` empties every
+          sibling source on the shared CLI. `reauthBodyKey` is what makes one
+          confirm true on both channels; a single sentence over both warns a hub
+          user about a loss that does not happen and stays silent about the one
+          that does. */}
+      <ConfirmDialog
+        open={confirmingReauth}
+        onOpenChange={setConfirmingReauth}
+        title={t('settings.models.repair.reauthTitle', { name: source.display_name })}
+        description={t(reauthBodyKey(source))}
+        confirmLabel={t('settings.models.repair.reauthConfirm') as string}
+        destructive={reauthCost(source) === 'immediate'}
+        onConfirm={() => {
+          // This click is the journey's only user gesture: the dialog it opens POSTs
+          // as it mounts, and a browser grants the provider tab to the gesture that
+          // asked for it, not to the response one round trip later. Allocate here and
+          // hand it over, or the provider handoff is popup-blocked and the user has
+          // to notice the fallback link.
+          handOffProviderTab();
+          setConfirmingReauth(false);
+          onReauth(source);
+        }}
+      />
       <DialogPrimitive.Root open={guard !== null} onOpenChange={(open) => !open && !busy && setGuard(null)}>
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />

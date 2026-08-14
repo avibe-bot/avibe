@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
-import { modelsApi } from './modelsApi';
+import { ApiCallError, modelsApi } from './modelsApi';
 import { CONTRACT_VERSION, SOURCE_DISPLAY_NAME_MAX_LENGTH, SOURCE_PROTOCOLS, type Source, type SourceObservation } from './types';
 
 const observed = (patch: Partial<SourceObservation> = {}): SourceObservation => ({
@@ -317,5 +317,85 @@ describe('AddApiKeyDialog', () => {
     await user.type(name, 'Fixed relay');
     expect(screen.getByRole('button', { name: /^Add$|^添加$/i })).toBeTruthy();
     expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('renders the safe observation cause when create rejects after probing', async () => {
+    const failure = new ApiCallError(
+      'discovery_failed',
+      'modelHub.errors.discovery_failed',
+      true,
+      [],
+      [],
+      [],
+      422,
+      observed({
+        outcome: 'authentication_failed',
+        authenticated: 'rejected',
+        protocol: null,
+        discovery: 'not_attempted',
+        models: [],
+      }),
+    );
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(failure);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    expect(await screen.findByText(i18n.t('settings.models.addKey.fail.auth'))).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
+  });
+
+  it('re-enters the classified observation state when create rejects with inventory evidence', async () => {
+    const failure = new ApiCallError(
+      'discovery_failed',
+      'modelHub.errors.discovery_failed',
+      true,
+      [],
+      [],
+      [],
+      422,
+      observed({ discovery: 'failed', models: [] }),
+    );
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(failure);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    expect(await screen.findByText(/model list did not come back|没拿到它的型号清单/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Add anyway|仍要添加/i })).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
+  });
+
+  it('re-enters the classified observation state when create rejects with ambiguous evidence', async () => {
+    const failure = new ApiCallError(
+      'discovery_failed',
+      'modelHub.errors.discovery_failed',
+      true,
+      [],
+      [],
+      [],
+      422,
+      observed({
+        outcome: 'ambiguous',
+        reachable: true,
+        authenticated: 'authenticated',
+        protocol: null,
+        discovery: 'not_attempted',
+        models: [],
+      }),
+    );
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(observed());
+    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(failure);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    expect(await screen.findByText(/cannot tell which interface|无法判断是哪种接口/i)).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeNull();
   });
 });

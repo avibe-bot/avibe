@@ -864,6 +864,12 @@
           "unavailableDue": "Unavailable · the retry is due"
         }
       },
+      "subscriptionPicker": {
+        "title": "Choose a subscription to connect",
+        "detail": "Choose the account subscription you want to add to Model Hub.",
+        "anthropic": { "title": "Claude subscription", "detail": "Claude Pro / Max" },
+        "openai": { "title": "ChatGPT subscription", "detail": "ChatGPT Plus / Pro" }
+      },
       "sources": {
         "title": "Sources",
         "info": "Accounts and credentials available to gateway routes",
@@ -1071,7 +1077,9 @@
           "auth.detail": "Check whether the API key is valid",
           "address": "Wrong address: 404 Not Found",
           "network": "Could not connect to this address (unreachable or timed out)",
-          "unclassified": "It did not connect, and the cause could not be identified",
+          "undetermined": "Connected, but we could not identify the model interface",
+          "inventory": "The interface was confirmed, but its model list did not come back",
+          "unclassified": "Connection failed. Check the address and API key, then retry",
           "engineDown": "The gateway is not responding — try again",
           "save": "The source is not confirmed saved"
         },

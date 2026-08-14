@@ -13,8 +13,15 @@ import { createPendingWrites } from './asyncLifetime';
 import { modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { GuardGapList } from './GuardGapList';
+import { repairAction } from './repair';
 import { SourceDetailPanel } from './SourceDetailPanel';
-import type { Source } from './types';
+import {
+  COOLDOWN_DETAIL_KEYS,
+  ERROR_DETAIL_KEYS,
+  NEEDS_ACTION_DETAIL_KEYS,
+  SOURCE_STATUSES,
+} from './types';
+import type { Source, SourceDetailKey, SourceKind, SupplyChannel } from './types';
 
 const source: Source = {
   id: 'src_detail',
@@ -29,6 +36,22 @@ const source: Source = {
   state: { status: 'active', retry_at: null, detail_key: null },
   models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
 };
+
+const noReauth = () => {
+  throw new Error('this source has no re-login entry to reach');
+};
+
+/**
+ * A stopped subscription whose cause IS the credential — `repairAction` rule 1,
+ * so the one tap is a re-login. Parameterized by channel because that is the one
+ * thing the two blocked subscriptions do not share: what starting the login costs.
+ */
+const blockedSubscription = (supply_channel: SupplyChannel): Source => ({
+  ...source,
+  kind: 'subscription',
+  supply_channel,
+  state: { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.oauth_expired' },
+});
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -60,7 +83,7 @@ const serializedTrack = (): MutationScheduler => {
 const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <SourceDetailPanel source={{ ...source, adopted_by: adoptedBy }} trackMutation={immediateTrack} />
+      <SourceDetailPanel source={{ ...source, adopted_by: adoptedBy }} trackMutation={immediateTrack} onReauth={noReauth} />
     </I18nextProvider>
   </ToastProvider>,
 );
@@ -79,7 +102,7 @@ const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; scheduler?: 
     }));
   });
   return current
-    ? <SourceDetailPanel source={current} trackMutation={trackMutation} />
+    ? <SourceDetailPanel source={current} trackMutation={trackMutation} onReauth={noReauth} />
     : <p data-testid="source-gone">Source gone</p>;
 };
 
@@ -99,6 +122,20 @@ afterEach(() => {
 });
 
 describe('SourceDetailPanel', () => {
+  it('exposes a stable, programmatically focusable heading for committed navigation', () => {
+    const headingRef = React.createRef<HTMLHeadingElement>();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceDetailPanel source={source} headingRef={headingRef} trackMutation={immediateTrack} onReauth={noReauth} />
+      </I18nextProvider>,
+    );
+
+    expect(headingRef.current).toBe(screen.getByRole('heading', { name: source.display_name }));
+    expect(headingRef.current?.tabIndex).toBe(-1);
+    headingRef.current?.focus();
+    expect(document.activeElement).toBe(headingRef.current);
+  });
+
   it('keeps the detail surface to inventory, entry kind, tiers, and refetch', () => {
     renderPanel();
     expect(screen.queryByText(/latency|延迟|enrollment|protocol|协议/i)).toBeNull();
@@ -113,7 +150,7 @@ describe('SourceDetailPanel', () => {
   });
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} trackMutation={immediateTrack} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
@@ -149,7 +186,7 @@ describe('SourceDetailPanel', () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([reconciled]);
     const applySource = vi.fn().mockResolvedValue(undefined);
     const trackMutation: TrackSourceMutation = (work) => work(source, settlement({ source: applySource }));
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
@@ -360,7 +397,7 @@ describe('SourceDetailPanel', () => {
     const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
     const onMutation = vi.fn().mockResolvedValue(undefined);
     const trackMutation: TrackSourceMutation = (work) => work(source, settlement({ source: onMutation }));
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
@@ -406,7 +443,7 @@ describe('SourceDetailPanel', () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
     const onGone = vi.fn().mockResolvedValue(undefined);
     const trackMutation: TrackSourceMutation = (work) => work(source, settlement({ gone: onGone }));
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
@@ -414,6 +451,72 @@ describe('SourceDetailPanel', () => {
     await waitFor(() => expect(onGone).toHaveBeenCalledWith(source.id, { kind: 'gone', sources: [], snapshot: 1 }));
     expect(remove).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
+  });
+
+  // The property, not the rows that satisfy it today: the entry is offered exactly
+  // when `repairAction` — the module that owns 「which remedy this source has」 —
+  // names a re-login. Seeding is complete by construction, so a status, cause,
+  // kind or channel added later is swept without editing this test: the two
+  // vocabularies are the const arrays `contractLocaleKeys` pins to the schema, and
+  // the two unions are enumerated through `satisfies`, which stops compiling when
+  // a member appears.
+  it('offers the re-login entry exactly where repairAction names one', () => {
+    const kinds = Object.keys({ subscription: 0, api_key: 0 } satisfies Record<SourceKind, 0>) as SourceKind[];
+    const channels = Object.keys({ native_cli: 0, hub: 0 } satisfies Record<SupplyChannel, 0>) as SupplyChannel[];
+    const causes: (SourceDetailKey | null)[] = [
+      null,
+      ...COOLDOWN_DETAIL_KEYS,
+      ...NEEDS_ACTION_DETAIL_KEYS,
+      ...ERROR_DETAIL_KEYS,
+    ];
+    const shapes = SOURCE_STATUSES.flatMap((status) => causes.flatMap((detail_key) => kinds.flatMap(
+      (kind) => channels.map((supply_channel): Source => ({
+        ...source,
+        kind,
+        supply_channel,
+        state: { status, retry_at: null, detail_key },
+      })),
+    )));
+
+    for (const shape of shapes) {
+      const view = render(
+        <I18nextProvider i18n={i18n}>
+          <SourceDetailPanel source={shape} trackMutation={immediateTrack} onReauth={vi.fn()} />
+        </I18nextProvider>,
+      );
+      const offered = screen.queryAllByRole('button', { name: /^Sign in$|^重新登录$/i }).length > 0;
+      expect(offered, JSON.stringify({ kind: shape.kind, channel: shape.supply_channel, ...shape.state }))
+        .toBe(repairAction(shape) === 'reauth');
+      view.unmount();
+    }
+  });
+
+  it('confirms a native re-login with the cost it pays at start before handing the source up', async () => {
+    const native = blockedSubscription('native_cli');
+    const onReauth = vi.fn();
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={native} trackMutation={immediateTrack} onReauth={onReauth} /></I18nextProvider>);
+
+    await userEvent.click(screen.getByRole('button', { name: /^Sign in$|^重新登录$/i }));
+
+    // The confirm has to come BEFORE the journey opens: the dialog POSTs the
+    // re-auth as it mounts, and on native that call is the irreversible half.
+    expect(await screen.findByText(/as soon as you start|旧的登录立即失效/i)).toBeTruthy();
+    expect(onReauth).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+
+    expect(onReauth).toHaveBeenCalledWith(native);
+  });
+
+  it('warns a hub re-login about the cost it can pay, not the one it cannot', async () => {
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={blockedSubscription('hub')} trackMutation={immediateTrack} onReauth={vi.fn()} /></I18nextProvider>);
+
+    await userEvent.click(screen.getByRole('button', { name: /^Sign in$|^重新登录$/i }));
+
+    expect(await screen.findByText(/go through|没成功/i)).toBeTruthy();
+    // A hub re-login writes nothing at start, so the native sentence would warn
+    // about a loss that does not happen.
+    expect(screen.queryByText(/as soon as you start|旧的登录立即失效/i)).toBeNull();
   });
 
 });

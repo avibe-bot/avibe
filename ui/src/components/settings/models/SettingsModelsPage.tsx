@@ -1,11 +1,13 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, Info, LoaderCircle, Route } from 'lucide-react';
+import { ArrowLeft, Gauge, Info, LoaderCircle, Route, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { AdvancedRow } from './AdvancedRow';
 import { EnableGatewayDialog } from './EnableGatewayDialog';
 import { GatewayModule } from './GatewayModule';
@@ -286,6 +288,28 @@ export const SettingsModelsPage: React.FC = () => {
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [installOpen, setInstallOpen] = React.useState(false);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
+  const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
+  const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
+  const [subscriptionVendor, setSubscriptionVendor] = React.useState<string | null>(null);
+  // The source a re-login is FOR, held as the snapshot `OAuthConnectDialog`
+  // documents its `reauth` prop to be: a native re-auth writes 需处理 onto the row
+  // before the login starts, so re-reading the live row mid-flow would rewrite
+  // the dialog's own subject. Separate from `subscriptionVendor` because the two
+  // journeys start from different surfaces — this one from the source detail,
+  // which replaces the overview that holds 添加订阅 — and only the create path
+  // owns the success-landing timer and reconcile flag below.
+  const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
+  const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const subscriptionPickerRefs = React.useRef<Partial<Record<'anthropic' | 'openai', HTMLButtonElement | null>>>({});
+  const subscriptionPickerHandoffRef = React.useRef(false);
+  const subscriptionCloseTimer = React.useRef<number | null>(null);
+  // A successful OAuth terminal reports the same moved rows twice: first with
+  // the created source, then as the generic stale-row notification. The source
+  // callback owns the one full reconciliation; consume the trailing notification
+  // so it cannot launch a second refresh that overwrites a successful landing.
+  const subscriptionSuccessReconcileRef = React.useRef(false);
+  const sourceDetailHeadingRef = React.useRef<HTMLHeadingElement>(null);
+  const focusSourceDetailPendingRef = React.useRef(false);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
@@ -831,6 +855,77 @@ export const SettingsModelsPage: React.FC = () => {
       reconcile: refresh,
     });
   };
+  const subscriptionAdded = React.useCallback((source?: Source) => {
+    if (!source) {
+      if (subscriptionSuccessReconcileRef.current) {
+        subscriptionSuccessReconcileRef.current = false;
+        return;
+      }
+      void refresh();
+      return;
+    }
+    // Keep the success panel readable until its existing handoff timer closes it;
+    // the effect below then moves focus into the committed source detail surface.
+    focusSourceDetailPendingRef.current = true;
+    sourceEntityAuthority.landLatest(source);
+    selectSource(source.id);
+    subscriptionSuccessReconcileRef.current = true;
+    void refresh();
+    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
+    subscriptionCloseTimer.current = window.setTimeout(() => {
+      subscriptionCloseTimer.current = null;
+      setSubscriptionVendor(null);
+    }, 1400);
+  }, [refresh, selectSource, sourceEntityAuthority]);
+  React.useEffect(() => {
+    if (!focusSourceDetailPendingRef.current || subscriptionVendor !== null || !selectedSourceId || !selectedSource) return;
+    focusSourceDetailPendingRef.current = false;
+    window.requestAnimationFrame(() => sourceDetailHeadingRef.current?.focus());
+  }, [selectedSource, selectedSourceId, subscriptionVendor]);
+  const closeSubscription = React.useCallback(() => {
+    if (subscriptionCloseTimer.current !== null) {
+      window.clearTimeout(subscriptionCloseTimer.current);
+      subscriptionCloseTimer.current = null;
+    }
+    setSubscriptionVendor(null);
+    window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
+  }, []);
+  /**
+   * A re-login's whole obligation to this page: re-read everything.
+   *
+   * Not `subscriptionAdded`, even though the reauth journey also calls back with
+   * no source. That callback's no-source branch can be CONSUMED by the create
+   * path's success flag, and a reauth has no success landing to coalesce with —
+   * it terminates on the row it started from. And the read has to be the wide
+   * one: `_materialize_reauth` can leave other agents without a source, so
+   * `/agents` and the chains behind it are stale too, not just this row.
+   */
+  const sourceReauthed = React.useCallback(() => { void refresh(); }, [refresh]);
+  const closeReauth = React.useCallback(() => {
+    setReauthSource(null);
+    // Back to the detail heading rather than to the button that opened this: a
+    // repair that worked unmounts that button (the row is no longer stopped), and
+    // Radix would restore focus to a node that is gone — i.e. to <body>.
+    window.setTimeout(() => sourceDetailHeadingRef.current?.focus(), 0);
+  }, []);
+  const closeSubscriptionPicker = React.useCallback(() => {
+    subscriptionPickerHandoffRef.current = false;
+    setSubscriptionPickerOpen(false);
+  }, []);
+  const focusSubscriptionPickerOption = React.useCallback((index: number) => {
+    const bounded = Math.max(0, Math.min(index, 1));
+    setSubscriptionPickerIndex(bounded);
+    const vendor = (['anthropic', 'openai'] as const)[bounded];
+    subscriptionPickerRefs.current[vendor]?.focus();
+  }, []);
+  const openSubscriptionPicker = React.useCallback(() => {
+    subscriptionPickerHandoffRef.current = false;
+    setSubscriptionPickerIndex(0);
+    setSubscriptionPickerOpen(true);
+  }, []);
+  React.useEffect(() => () => {
+    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
+  }, []);
 
   return (
     <ModelHubShell
@@ -854,7 +949,7 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} trackMutation={trackSourceMutation(selectedSource.id)} />
+            ? <SourceDetailPanel source={selectedSource} headingRef={sourceDetailHeadingRef} trackMutation={trackSourceMutation(selectedSource.id)} onReauth={setReauthSource} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">
@@ -862,7 +957,7 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'sources' ? <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
-                        <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
+                        <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={openSubscriptionPicker} subscriptionTriggerRef={subscriptionTriggerRef} />
                         <div className="hidden lg:block" aria-hidden="true" />
                         <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
@@ -874,6 +969,84 @@ export const SettingsModelsPage: React.FC = () => {
                   </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
                 </div>}
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
+      <Dialog open={subscriptionPickerOpen} onOpenChange={(open) => open ? setSubscriptionPickerOpen(true) : closeSubscriptionPicker()}>
+        <DialogContent
+          className="max-w-[420px]"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            window.requestAnimationFrame(() => subscriptionPickerRefs.current[(['anthropic', 'openai'] as const)[subscriptionPickerIndex]]?.focus());
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (subscriptionPickerHandoffRef.current) {
+              subscriptionPickerHandoffRef.current = false;
+              return;
+            }
+            window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{t('settings.models.subscriptionPicker.title')}</DialogTitle>
+            <DialogDescription>{t('settings.models.subscriptionPicker.detail')}</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2 sm:grid-cols-2" onKeyDown={(event) => {
+            if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+              event.preventDefault();
+              focusSubscriptionPickerOption(subscriptionPickerIndex + 1);
+            } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+              event.preventDefault();
+              focusSubscriptionPickerOption(subscriptionPickerIndex - 1);
+            } else if (event.key === 'Home') {
+              event.preventDefault();
+              focusSubscriptionPickerOption(0);
+            } else if (event.key === 'End') {
+              event.preventDefault();
+              focusSubscriptionPickerOption(1);
+            }
+          }}>
+            {(['anthropic', 'openai'] as const).map((vendor, index) => (
+              <Button
+                key={vendor}
+                ref={(node) => { subscriptionPickerRefs.current[vendor] = node; }}
+                type="button"
+                variant="outline"
+                className="h-auto justify-start gap-3 px-3 py-3 text-left"
+                tabIndex={subscriptionPickerIndex === index ? 0 : -1}
+                onClick={() => {
+                  subscriptionPickerHandoffRef.current = true;
+                  setSubscriptionPickerOpen(false);
+                  setSubscriptionVendor(vendor);
+                }}
+              >
+                <span className="model-hub-accent-tile--mint grid size-8 shrink-0 place-items-center rounded-lg"><Sparkles className="model-hub-accent-ink--mint size-4" /></span>
+                <span className="flex flex-col items-start">
+                  <span className="font-semibold">{t(`settings.models.subscriptionPicker.${vendor}.title`)}</span>
+                  <span className="text-[11px] text-muted">{t(`settings.models.subscriptionPicker.${vendor}.detail`)}</span>
+                </span>
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+      {subscriptionVendor && (
+        <OAuthConnectDialog
+          open
+          vendor={subscriptionVendor}
+          sources={sources}
+          onClose={closeSubscription}
+          onConnected={subscriptionAdded}
+        />
+      )}
+      {reauthSource && (
+        <OAuthConnectDialog
+          open
+          vendor={reauthSource.vendor}
+          reauth={reauthSource}
+          sources={sources}
+          onClose={closeReauth}
+          onConnected={sourceReauthed}
+        />
+      )}
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
       <RouteChainDialog
         selection={routeSelection}

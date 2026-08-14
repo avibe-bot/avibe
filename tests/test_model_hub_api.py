@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import json
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,7 +34,10 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
-from core.handlers.model_hub.oauth import NativeOAuthSourceStatus, OAuthFlowRegistry
+from core.handlers.model_hub.oauth import (
+    NativeOAuthSourceStatus,
+    OAuthFlowRegistry,
+)
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     CONTRACT_VERSION,
@@ -1052,6 +1058,58 @@ def test_native_oauth_rejects_duplicate_source_before_adapter(tmp_path):
     assert exc_info.value.code == "native_source_already_exists"
     assert exc_info.value.data == {"existing_source_id": existing.id}
     assert adapter.oauth_start_calls == []
+
+
+def test_nonce_oauth_start_replays_committed_flow_before_native_slot_conflict(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    request = {
+        "vendor": "anthropic",
+        "channel": "native_cli",
+        "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+    }
+    first = asyncio.run(service.oauth_start(request))["flow"]
+    existing = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Claude subscription",
+        protocol="anthropic",
+        supply_channel="native_cli",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+    )
+    store.config.sources.append(existing)
+    _refresh_fixture_routes(store.config)
+
+    replayed = asyncio.run(service.oauth_start(request))["flow"]
+
+    assert replayed == first
+    assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
+
+
+def test_native_oauth_malformed_start_keeps_flow_id_when_cleanup_fails(tmp_path):
+    """A malformed provider response remains reconcilable if cancel fails."""
+    service, _store, adapter = _service(tmp_path)
+    original_start = adapter.start_oauth
+
+    async def malformed_start(source_id, vendor):
+        flow = await original_start(source_id, vendor)
+        return OAuthFlowState(
+            **{**flow.__dict__, "source_id": "src_provider_mismatch"}
+        )
+
+    adapter.start_oauth = malformed_start
+    adapter.fail_cancel = True
+    with pytest.raises(ModelHubError) as failed:
+        asyncio.run(
+            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        )
+
+    assert failed.value.code == "engine_down"
+    # The flow id the provider was started under stays the cleanup handle even
+    # though its own response disagreed about the source it belongs to.
+    assert adapter.cancelled == ["oaf_00000001"]
 
 
 def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):
@@ -3364,6 +3422,116 @@ def test_nonce_oauth_start_owner_cancellation_releases_waiter_and_tuple(tmp_path
     assert len(adapter.oauth_start_calls) == 1
 
 
+def test_oauth_start_keeps_every_owner_await_inside_the_installed_task(tmp_path):
+    """A claimed nonce stays awaitable and releasable from the claim onward.
+
+    The claim is what a concurrent same-tuple retry looks for, and the only
+    release is ``start_and_remember``'s own ``finally``. An owner await placed
+    before the task is installed therefore strands the tuple until restart, so
+    this asserts the property rather than the one pre-check that broke it: on the
+    owner path from claim to install there is nothing to wait on at all.
+    """
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ModelHubService.oauth_start)))
+    body = tree.body[0].body
+    claim = next(i for i, stmt in enumerate(body) if "claim_nonce" in ast.unparse(stmt))
+    install = next(
+        i for i, stmt in enumerate(body)
+        if "_oauth_start_tasks[nonce_key] = task" in ast.unparse(stmt)
+    )
+
+    for stmt in body[claim + 1:install]:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # The task's own awaits are the safe ones: it is installed before it
+            # is awaited, and it owns the release.
+            continue
+        if isinstance(stmt, ast.If) and ast.unparse(stmt.test) == "nonce_key is None":
+            # No nonce, no claim — nothing for a retry to await or for a
+            # cancellation to leak.
+            continue
+        waits = [
+            node for node in ast.walk(stmt)
+            if isinstance(node, (ast.Await, ast.AsyncWith, ast.AsyncFor))
+        ]
+        assert not waits, f"owner awaits before its task is installed: {ast.unparse(stmt)}"
+
+
+def test_nonce_oauth_start_coalesces_a_retry_while_the_native_slot_read_waits(tmp_path):
+    """The member the structure guard above exists for, end to end."""
+
+    async def run_concurrent_start():
+        service, _, adapter = _service(tmp_path)
+        request = {
+            "vendor": "anthropic",
+            "channel": "native_cli",
+            "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+        }
+        # Migration holds the same lock the native-slot read needs, which is the
+        # wait this test is about.
+        await service._mutation_lock.acquire()
+        owner = asyncio.create_task(service.oauth_start(request))
+        await asyncio.sleep(0)
+        retry = asyncio.create_task(service.oauth_start(dict(request)))
+        await asyncio.sleep(0)
+
+        assert owner.done() is False
+        assert retry.done() is False
+
+        service._mutation_lock.release()
+        first, second = await asyncio.gather(owner, retry)
+        return first, second, adapter
+
+    first, second, adapter = asyncio.run(run_concurrent_start())
+
+    assert first == second
+    assert len(adapter.oauth_start_calls) == 1
+
+
+def test_native_oauth_start_recovers_the_vendor_after_failure_and_cancel(tmp_path):
+    """A login that never reached the CLI leaves nothing behind to unblock."""
+
+    async def run_recovery():
+        service, _, adapter = _service(tmp_path)
+        original_start = adapter.start_oauth
+
+        async def failing_start(source_id, vendor):
+            raise RuntimeError("provider start failed")
+
+        adapter.start_oauth = failing_start
+        with pytest.raises(ModelHubError) as failure:
+            await service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        assert failure.value.code == "engine_down"
+
+        provider_started = asyncio.Event()
+        release_provider = asyncio.Event()
+
+        async def blocked_start(source_id, vendor):
+            provider_started.set()
+            await release_provider.wait()
+            return await original_start(source_id, vendor)
+
+        adapter.start_oauth = blocked_start
+        pending = asyncio.create_task(
+            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        )
+        await provider_started.wait()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        release_provider.set()
+        await asyncio.sleep(0)
+        adapter.start_oauth = original_start
+        recovered = await service.oauth_start(
+            {"vendor": "anthropic", "channel": "native_cli"}
+        )
+        return recovered, adapter
+
+    recovered, adapter = asyncio.run(run_recovery())
+
+    assert recovered["flow"]["vendor"] == "anthropic"
+    assert len(adapter.oauth_start_calls) == 1
+
+
 def test_cancel_materializes_terminal_successful_hub_reauth(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
@@ -3561,6 +3729,37 @@ def test_expired_oauth_flow_is_rejected_before_submit(tmp_path):
     assert exc_info.value.code == "flow_expired"
     assert adapter.secret_lengths == []
     assert service.oauth_flows.channel(flow["flow_id"]) is None
+
+
+@pytest.mark.parametrize("suffix", ["+00:00", "Z", ""])
+@pytest.mark.parametrize("iso,expired", [("2026-07-23T02:59:00", True), ("2026-07-23T03:01:00", False)])
+def test_a_flow_deadline_decides_the_same_way_however_it_was_written(tmp_path, iso, suffix, expired):
+    """Seed every shape a provider can write the deadline in.
+
+    The service clock is UTC-aware, so a naive timestamp compared against it
+    raises ``TypeError`` instead of answering — turning "is this flow still
+    open?" into a 500 on a path whose whole job is to answer it.
+    """
+
+    service, _, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "expires_at_iso": f"{iso}{suffix}",
+        }
+    )
+
+    submit = lambda: asyncio.run(  # noqa: E731
+        service.oauth_submit({"flow_id": flow["flow_id"], "value": "code"})
+    )
+    if expired:
+        with pytest.raises(ModelHubError) as exc_info:
+            submit()
+        assert exc_info.value.code == "flow_expired"
+    else:
+        submit()
+        assert adapter.secret_lengths == [4]
 
 
 def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tmp_path):

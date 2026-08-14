@@ -317,7 +317,18 @@ def _source_id() -> str:
 
 
 def _parse_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    """Parse a timestamp into something comparable with this service's clock.
+
+    Every parsed value is compared against ``self.now()``, which is UTC-aware.
+    A provider or an older persisted record may still carry a naive ISO string,
+    and comparing the two raises ``TypeError`` rather than answering the
+    question — so read a naive timestamp as the UTC it was written as.
+    """
+
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _mask_credential(value: str) -> str:
@@ -618,6 +629,24 @@ class ModelHubService:
                 backend,
                 source_after_cooldown_recovery(source, self.now()),
             )
+        )
+
+    @staticmethod
+    def _existing_native_source(
+        config: ModelHubConfig,
+        vendor: str,
+    ) -> ModelHubSourceConfig | None:
+        backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
+        if backend is None:
+            return None
+        return next(
+            (
+                source
+                for source in config.sources
+                if source.supply_channel == "native_cli"
+                and source_eligible_for_backend(source, cast(BackendName, backend))
+            ),
+            None,
         )
 
     async def _engine_call(self, awaitable):
@@ -928,14 +957,15 @@ class ModelHubService:
         self,
         flow: OAuthFlowState,
         channel: OAuthChannel,
-    ) -> None:
+    ) -> bool:
         if channel == "hub":
             await self._discard_unbound_hub_flow(flow)
-            return
+            return True
         try:
             await self.native_oauth_adapter.cancel_oauth(flow.flow_id)
         except Exception:
-            pass
+            return False
+        return True
 
     async def _discover(self, source: ModelHubSourceConfig) -> list[str]:
         if not source.credential_ref:
@@ -1051,9 +1081,27 @@ class ModelHubService:
             observation.outcome is not ObservationOutcome.OBSERVED
             or observation.protocol is None
         ):
+            detail_by_outcome = {
+                ObservationOutcome.AMBIGUOUS: "modelHub.errors.ambiguous_source",
+                ObservationOutcome.UNREACHABLE: "modelHub.errors.source_unreachable",
+                ObservationOutcome.AUTHENTICATION_FAILED: "modelHub.errors.authentication_failed",
+                ObservationOutcome.ADAPTER_ERROR: "modelHub.errors.observation_failed",
+                ObservationOutcome.TIMEOUT: "modelHub.errors.source_timeout",
+            }
+            # An adapter error may carry authoritative reachability (for example,
+            # a reachable endpoint returning an unsupported response), or no
+            # reachability evidence at all after an unclassified adapter failure.
+            # Only the former justifies copy that says we connected.
+            detail = detail_by_outcome.get(observation.outcome)
+            if (
+                observation.outcome is ObservationOutcome.ADAPTER_ERROR
+                and observation.reachable is None
+            ):
+                detail = "modelHub.errors.adapter_error"
             raise ModelHubError(
                 "discovery_failed",
                 status=422,
+                detail=detail,
                 data={"observation": self._observation_payload(observation)},
             )
         return observation
@@ -1442,6 +1490,29 @@ class ModelHubService:
                     return existing.to_payload()
                 if existing is not None:
                     raise ModelHubError("migration_item_conflict", status=409)
+                if channel == "native_cli":
+                    occupied = self._existing_native_source(previous, vendor)
+                    if occupied is not None:
+                        # A second provider flow can finish after the first one
+                        # committed. Re-check under the mutation lock and clean
+                        # the losing native flow before surfacing the singleton
+                        # conflict, so it cannot materialize a second Source.
+                        cleanup_confirmed = await self._discard_started_oauth_flow(
+                            flow,
+                            channel,
+                        )
+                        if not cleanup_confirmed:
+                            raise ModelHubError("engine_down", status=503)
+                        try:
+                            self.oauth_flows.forget(oauth_ref)
+                        except OSError:
+                            pass
+                        raise ModelHubError(
+                            "native_source_already_exists",
+                            status=409,
+                            detail="modelHub.errors.native_subscription_exists",
+                            data={"existing_source_id": occupied.id},
+                        )
                 account_label: str | None = None
                 state = ModelHubSourceStateConfig(status="standby")
                 discovered: list[str] | None
@@ -3778,25 +3849,6 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=400) from None
         oauth_channel = cast(OAuthChannel, channel)
         self._ensure_config_writable()
-        if oauth_channel == "native_cli":
-            backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
-            if backend is not None:
-                existing = next(
-                    (
-                        source
-                        for source in self.store.load().sources
-                        if source.supply_channel == "native_cli"
-                        and source_eligible_for_backend(source, cast(BackendName, backend))
-                    ),
-                    None,
-                )
-                if existing is not None:
-                    raise ModelHubError(
-                        "native_source_already_exists",
-                        status=409,
-                        data={"existing_source_id": existing.id},
-                    )
-
         nonce_key: tuple[str, str, OAuthChannel] | None = None
         if client_nonce is not None:
             try:
@@ -3818,11 +3870,41 @@ class ModelHubService:
                     raise ModelHubError("engine_down", status=503)
                 return await asyncio.shield(task)
 
+        # Everything the owner can wait on lives inside this coroutine, and that
+        # is the invariant rather than an accident of layout: the claim above is
+        # what a concurrent same-tuple retry looks for, and the ONLY release is
+        # this coroutine's own ``finally``. So an owner await placed out here —
+        # the native-slot read used to be one — strands the tuple until restart:
+        # the retry finds a pending claim with no task and gets ``engine_down``,
+        # and a cancelled owner never reaches the release at all.
+        # ``test_oauth_start_keeps_every_owner_await_inside_the_installed_task``
+        # holds the shape so the next pre-check cannot re-open the window.
         async def start_and_remember() -> dict:
             pending_source_id = _source_id()
             flow: OAuthFlowState | None = None
             flow_cleanup_done = False
+            flow_cleanup_attempted = False
             try:
+                if oauth_channel == "native_cli":
+                    async with self._mutation_lock:
+                        # The sanctioned CLI keeps one credential per vendor, so
+                        # a second native Source would describe a credential the
+                        # first one already owns. The lock serializes this read
+                        # with migration's native Source writer and with the
+                        # re-check in ``_create_oauth_source``, so a flow that
+                        # started before the first Source was persisted still
+                        # cannot materialize a sibling.
+                        occupied = self._existing_native_source(
+                            self.store.load(),
+                            vendor,
+                        )
+                    if occupied is not None:
+                        raise ModelHubError(
+                            "native_source_already_exists",
+                            status=409,
+                            detail="modelHub.errors.native_subscription_exists",
+                            data={"existing_source_id": occupied.id},
+                        )
                 flow = await self._oauth_call(
                     self._oauth_adapter(oauth_channel).start_oauth(
                         pending_source_id,
@@ -3830,12 +3912,22 @@ class ModelHubService:
                     )
                 )
                 if flow.source_id != pending_source_id or flow.vendor != vendor:
-                    await self._discard_started_oauth_flow(flow, oauth_channel)
-                    flow_cleanup_done = True
+                    flow_cleanup_attempted = True
+                    flow_cleanup_done = await self._discard_started_oauth_flow(
+                        flow,
+                        oauth_channel,
+                    )
+                    if not flow_cleanup_done:
+                        raise ModelHubError("engine_down", status=503)
                     raise ModelHubError("flow_not_found", status=502)
                 if client_nonce is not None and flow.expires_at_iso is None:
-                    await self._discard_started_oauth_flow(flow, oauth_channel)
-                    flow_cleanup_done = True
+                    flow_cleanup_attempted = True
+                    flow_cleanup_done = await self._discard_started_oauth_flow(
+                        flow,
+                        oauth_channel,
+                    )
+                    if not flow_cleanup_done:
+                        raise ModelHubError("engine_down", status=503)
                     raise ModelHubError("flow_not_found", status=502)
                 self.oauth_flows.remember(
                     flow.flow_id,
@@ -3849,7 +3941,12 @@ class ModelHubService:
                 )
             except BaseException as error:
                 try:
-                    if flow is not None and not flow_cleanup_done:
+                    if (
+                        flow is not None
+                        and not flow_cleanup_done
+                        and not flow_cleanup_attempted
+                    ):
+                        flow_cleanup_attempted = True
                         await self._discard_started_oauth_flow(
                             flow,
                             oauth_channel,

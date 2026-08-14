@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +38,20 @@ const retainedSource: Source = {
   state: { status: 'standby', retry_at: null, detail_key: null },
   masked_credential: null,
   models: [],
+};
+
+const nativeSubscription: Source = {
+  ...retainedSource,
+  id: 'src_native_subscription',
+  kind: 'subscription',
+  supply_channel: 'native_cli',
+  display_name: 'Claude native login',
+};
+
+/** The row every re-auth journey starts from: a subscription that stopped. */
+const blockedSubscription: Source = {
+  ...nativeSubscription,
+  state: { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.oauth_expired' },
 };
 
 const takeoverAgent: AgentSupply = {
@@ -98,6 +114,16 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
+  it('coalesces the OAuth success landing with its trailing stale-row notification', () => {
+    const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
+    const start = page.indexOf('const subscriptionAdded');
+    const callback = page.slice(start, page.indexOf('React.useEffect(() => {', start));
+
+    expect(callback).toMatch(/if \(!source\) \{[\s\S]*?subscriptionSuccessReconcileRef\.current/);
+    expect(callback).toMatch(/sourceEntityAuthority\.landLatest\(source\)[\s\S]*?subscriptionSuccessReconcileRef\.current = true;[\s\S]*?void refresh\(\)/);
+    expect((callback.match(/void refresh\(\)/g) ?? []).length).toBe(2);
+  });
+
   it('renders Frame 09 without tabs when every backend is direct and no source exists', async () => {
     renderPage([]);
 
@@ -181,6 +207,168 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getAllByRole('tab')).toHaveLength(2);
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeNull();
+  });
+
+  it('opens the subscription vendor picker and OAuth flow from the Sources card', async () => {
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+
+    expect((await screen.findByRole('dialog')).textContent).toMatch(/Add Claude subscription|添加 anthropic 订阅/i);
+  });
+
+  it('supports roving keyboard navigation in the subscription vendor picker', async () => {
+    renderPage([retainedSource]);
+
+    const user = userEvent.setup();
+    await screen.findByText('Retained source');
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await user.click(trigger);
+    const picker = await screen.findByRole('dialog');
+    const claude = within(picker).getByRole('button', { name: /Claude subscription|Claude 订阅/i });
+    const chatgpt = within(picker).getByRole('button', { name: /ChatGPT subscription|ChatGPT 订阅/i });
+
+    await waitFor(() => expect(document.activeElement).toBe(claude));
+    expect(claude.getAttribute('tabindex')).toBe('0');
+    expect(chatgpt.getAttribute('tabindex')).toBe('-1');
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(chatgpt);
+    await user.keyboard('{Home}');
+    expect(document.activeElement).toBe(claude);
+    await user.keyboard('{End}');
+    expect(document.activeElement).toBe(chatgpt);
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(claude);
+  });
+
+  it('restores the Add subscription trigger when the vendor picker is dismissed', async () => {
+    renderPage([retainedSource]);
+
+    const user = userEvent.setup();
+    await screen.findByText('Retained source');
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await user.click(trigger);
+    await screen.findByRole('dialog');
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it('opens an occupied native vendor with the gateway option selected', async () => {
+    renderPage([nativeSubscription]);
+
+    const user = userEvent.setup();
+    await screen.findByText('Claude native login');
+    await user.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    await user.click(await screen.findByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+
+    const native = await screen.findByRole('radio', { name: /Native|原生/i });
+    const hub = screen.getByRole('radio', { name: /Gateway|网关/i });
+    expect(native.getAttribute('aria-disabled')).toBe('true');
+    expect(hub.getAttribute('aria-checked')).toBe('true');
+    await waitFor(() => expect(document.activeElement).toBe(hub));
+  });
+
+  it('returns focus to Add subscription when the OAuth flow is cancelled', async () => {
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await userEvent.click(trigger);
+    await userEvent.click(screen.getByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+    const cancelButtons = screen.getAllByRole('button', { name: /^Cancel$|^取消$/i });
+    await userEvent.click(cancelButtons[cancelButtons.length - 1]);
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  // The wiring §4.5 was missing, end to end. `repair.ts` had decided the remedy
+  // and `OAuthConnectDialog` had run the re-login journey since it shipped, but no
+  // mount connected them, so a stopped subscription rendered its cause and
+  // stopped. The proof is the request: from the row a user can reach, one tap and
+  // one confirm reach `POST …/reauth` for THAT source.
+  it('reaches the re-auth request from a stopped subscription row', async () => {
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'starting' as const,
+      presentation: { expects: 'none' as const },
+    };
+    const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    renderPage([blockedSubscription]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
+    expect(reauth).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+
+    await waitFor(() => expect(reauth).toHaveBeenCalledWith(blockedSubscription.id));
+  });
+
+  // The confirm IS this journey's gesture — the dialog it opens POSTs as it mounts,
+  // so nothing after it can be granted a tab. Asserted where the user feels it: the
+  // provider page lands in the tab, instead of behind a blocked popup and a link
+  // the user has to notice.
+  it('lands the provider page in the tab the re-auth confirmation opened', async () => {
+    const authUrl = 'https://provider.example/authorize?code=1';
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'awaiting_action' as const,
+      presentation: { expects: 'paste_callback_url' as const, auth_url: authUrl },
+    };
+    vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    const tab = { closed: false, opener: {} as unknown, location: { href: '' } };
+    const open = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    renderPage([blockedSubscription]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+
+    expect(open).toHaveBeenCalledWith('about:blank', '_blank');
+    expect(tab.opener).toBeNull();
+    await waitFor(() => expect(tab.location.href).toBe(authUrl));
+  });
+
+  // A failed re-auth has already spent the irreversible half — the sibling sources
+  // are already marked. Sending the user back to the row to agree to that cost a
+  // second time, for the only gesture that can undo it, is the one journey where a
+  // second confirmation is worse than none.
+  it('retries a failed re-auth in place, without asking to confirm again', async () => {
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'starting' as const,
+      presentation: { expects: 'none' as const },
+    };
+    const reauth = vi
+      .spyOn(modelsApi, 'reauthSource')
+      .mockRejectedValueOnce(new Error('start failed'))
+      .mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    renderPage([blockedSubscription]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+
+    const retry = await screen.findByRole('button', { name: /^Retry$|^重试$/i });
+    expect(screen.queryByRole('button', { name: /^Start sign-in$|^开始登录$/i })).toBeNull();
+    await userEvent.click(retry);
+
+    await waitFor(() => expect(reauth).toHaveBeenCalledTimes(2));
   });
 
   it('lands the operational overview without waiting for event history', async () => {

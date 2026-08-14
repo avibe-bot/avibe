@@ -443,6 +443,8 @@ export type OAuthPresentation = {
 
 export type OAuthFlow = {
   flow_id: string;
+  /** Exact client correlation echoed by nonce-backed OAuth starts. */
+  client_nonce?: string | null;
   /**
    * What the flow is FOR, and therefore what its terminal success response
    * carries: `create` → `{flow, source, adopted_by}`, `reauth` →

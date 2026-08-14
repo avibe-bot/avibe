@@ -5,7 +5,7 @@ import {
 } from './types';
 
 export type AddApiKeyOrigin = 'add' | 'pull';
-export type AddApiKeyFailure = 'auth' | 'network' | 'unclassified' | 'engineDown';
+export type AddApiKeyFailure = 'auth' | 'network' | 'interface' | 'unclassified' | 'engineDown';
 
 export type ObservationVerdict =
   | { kind: 'ready'; observation: SourceObservation }
@@ -42,7 +42,7 @@ export function classifyObservation(observation: SourceObservation): Observation
     case 'timeout':
       return { kind: 'failure', cause: 'network' };
     case 'adapter_error':
-      return { kind: 'failure', cause: 'unclassified' };
+      return { kind: 'failure', cause: observation.reachable ? 'interface' : 'unclassified' };
   }
 }
 
