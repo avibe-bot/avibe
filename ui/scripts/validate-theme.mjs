@@ -492,51 +492,83 @@ const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*\
 // whatever that selector paints next: edit this same stroke from 20% to 100% and an
 // opaque mint ships under a pin granted to a hairline. That is the identical defect a
 // per-file mark count had -- a pin has to name the construct it was granted for, and
-// for a declaration the construct is its value. Retinting a pinned wash now fails
-// twice over, as an unpinned mark and as a stale pin, and the error prints the key to
-// re-pin with. Resolved rather than authored, so an alias cannot smuggle an accent in
-// under an innocuous-looking key.
+// for a declaration the construct is its value, together with the accents that value
+// can reach. Retinting a pinned wash now fails twice over, as an unpinned mark and as
+// a stale pin, and the error prints the key to re-pin with.
 const ACCEPTED_ACCENT_WASHES = new Map([
-  ['model hub .model-hub-rail-line stroke: color-mix(in srgb, var(--mint) 20%, transparent)', 'decorative rail behind the wires: a 20% tint, not a mark -- the wires it sits under carry the meaning'],
+  ['model hub .model-hub-rail-line stroke: color-mix(in srgb, var(--mint) 20%, transparent) -> mint', 'decorative rail behind the wires: a 20% tint, not a mark -- the wires it sits under carry the meaning'],
 ]);
 
-// What a declaration actually paints. A custom property is not a colour, it is a
-// name for one, and `--wire-color: var(--mint)` + `stroke: var(--wire-color)` paints
-// bare mint while naming neither. modelHubSurface.css already routes 20 accents
-// through --model-hub-* aliases, so this is one refactor away rather than
-// hypothetical. Aliases are resolved to their values before the check reads them.
+// What a declaration actually paints. A custom property is not a colour, it is a name
+// for one, and `--wire-color: var(--mint)` + `stroke: var(--wire-color)` paints bare
+// mint while naming neither. modelHubSurface.css already routes ~20 accents through
+// --model-hub-* aliases, so this is one refactor away rather than hypothetical.
 //
-// The depth cap is a cycle guard, not a limit on nesting anyone writes: CSS permits
-// `--a: var(--b); --b: var(--a)`, and a resolver that trusts its input would spin.
-const ALIAS_DEPTH = 10;
-
-function resolveAliases(source) {
-  const aliases = new Map();
+// Every definition of a name counts, not the last one. This file defines 11 properties
+// twice, once per theme -- `--model-hub-wash-channel` is `8 8 18` in dark and
+// `255 255 255` in light -- so a name-to-value map is not a simplification of this
+// file, it is a misreading of it. A last-write-wins resolver would read a light
+// `stroke: var(--wire)` through a `.dark { --wire: ... }` override and clear it on the
+// strength of a value the browser never paints there.
+//
+// Resolving the cascade for real means specificity, at-rules and order: a CSS engine,
+// inside a guard, and one whose bugs would be silent clears. The guard does not need
+// one, because it is not asking what colour this paints. It is asking whether ANY
+// definition can put a bare accent here -- so the union over all of them is the
+// answer, ambiguity fails closed, and a theme-specific accent gets reported instead of
+// averaged away.
+//
+// Accents reachable from a name, memoised, with the in-progress entry doubling as the
+// cycle cut: CSS permits `--a: var(--b); --b: var(--a)`, and a resolver that trusts
+// its input would spin. Cutting the cycle can under-report a cyclic definition, which
+// is correct rather than a hole -- a var() cycle is invalid at computed-value time, so
+// the browser paints nothing there either.
+function accentAliasIndex(source) {
+  const definitions = new Map();
   postcss.parse(source).walkDecls((decl) => {
     if (decl.prop.startsWith('--')) {
-      aliases.set(decl.prop, normalizeCssValue(decl.value));
+      const values = definitions.get(decl.prop) ?? new Set();
+      values.add(normalizeCssValue(decl.value));
+      definitions.set(decl.prop, values);
     }
   });
 
-  return (value) => {
-    let resolved = value;
-    for (let depth = 0; depth < ALIAS_DEPTH; depth += 1) {
-      const next = resolved.replace(/var\(\s*(--[\w-]+)\s*\)/g, (whole, name) => (
-        // An accent token is the leaf this check is looking for -- resolving it to a
-        // hex would hide the very name the error message has to report.
-        ACCENT_NAMES.includes(name.slice(2)) ? whole : aliases.get(name) ?? whole
-      ));
-      if (next === resolved) {
-        return resolved;
-      }
-      resolved = next;
+  const reached = new Map();
+
+  const accentsOfName = (name) => {
+    if (reached.has(name)) {
+      return reached.get(name);
     }
-    return resolved;
+    reached.set(name, new Set());
+    const found = new Set();
+    for (const value of definitions.get(name) ?? []) {
+      for (const accent of accentsOfValue(value)) {
+        found.add(accent);
+      }
+    }
+    reached.set(name, found);
+    return found;
   };
+
+  function accentsOfValue(value) {
+    const found = new Set();
+    for (const [, name] of value.matchAll(/var\(\s*(--[\w-]+)\s*\)/g)) {
+      if (ACCENT_NAMES.includes(name.slice(2))) {
+        found.add(name.slice(2));
+      } else {
+        for (const accent of accentsOfName(name)) {
+          found.add(accent);
+        }
+      }
+    }
+    return found;
+  }
+
+  return accentsOfValue;
 }
 
 function assertMarksTakeTheInk(source, name) {
-  const resolve = resolveAliases(source);
+  const accentsOfValue = accentAliasIndex(source);
   const seen = new Set();
 
   postcss.parse(source).walkDecls((decl) => {
@@ -544,26 +576,30 @@ function assertMarksTakeTheInk(source, name) {
       return;
     }
 
-    const value = resolve(normalizeCssValue(decl.value));
-    if (!BARE_ACCENT_VAR.test(value)) {
+    const value = normalizeCssValue(decl.value);
+    const accents = [...accentsOfValue(value)].sort();
+    if (accents.length === 0) {
       return;
     }
 
     const selector = decl.selector ?? decl.parent?.selector;
-    const key = `${name} ${selector} ${decl.prop}: ${value}`;
+    // The pin names the declaration as written AND what it can reach. Value alone
+    // would let `--wire: var(--mint-ink)` become `var(--mint)` under a pin granted to
+    // the ink, since `stroke: var(--wire)` reads the same either way.
+    const key = `${name} ${selector} ${decl.prop}: ${value} -> ${accents.join(', ')}`;
     seen.add(key);
     if (ACCEPTED_ACCENT_WASHES.has(key)) {
       return;
     }
 
-    const accent = BARE_ACCENT_VAR.exec(value)[1];
+    const direct = BARE_ACCENT_VAR.test(value);
     throw new Error(
-      `${name}: ${selector} paints ${decl.prop} with var(--${accent}), the fill${
-        value === normalizeCssValue(decl.value) ? '' : ` (via ${normalizeCssValue(decl.value)})`}. `
+      `${name}: ${selector} paints ${decl.prop} with ${accents.map((accent) => `var(--${accent})`).join(' and ')}`
+      + `, the fill${direct ? '' : ` -- reached through ${value}, in this file or a theme override of it`}. `
       + 'A stroke or an SVG fill is a mark on the bare canvas -- no label is printed on it, so the '
-      + `pairing that licenses a vivid fill does not apply. Use var(--${accent}-ink), which is the same `
-      + 'value in dark and a legible one in light. If this one is decoration rather than a mark, say so '
-      + `in ACCEPTED_ACCENT_WASHES under '${key}' -- a translucent value is not evidence on its own.`,
+      + 'pairing that licenses a vivid fill does not apply. Use the -ink token, which is the same value '
+      + 'in dark and a legible one in light. If this one is decoration rather than a mark, say so in '
+      + `ACCEPTED_ACCENT_WASHES under '${key}' -- a translucent value is not evidence on its own.`,
     );
   });
 
@@ -756,6 +792,23 @@ function classStrings(file, source) {
 // which is the bar its ink clears and its fill does not.
 const MARK_UTILITIES = ['bg', 'fill', 'stroke'];
 
+// `bg-mint/100` is not a wash. It is `bg-mint` spelled with a modifier -- same token,
+// same opacity, same 2.35:1 -- and a `/` in the lookahead let it leave the scan
+// entirely. So the modifier is read rather than treated as an exit: fully opaque is
+// the fill, and a genuinely translucent one is a derived colour this guard does not
+// reason about, the same way it does not reason about `bg-mint-soft`.
+//
+// This is deliberately NOT the CSS half's rule, where a wash needs a written pin. The
+// asymmetry is in the inventory, not in the principle. modelHubSurface.css has one
+// translucent accent paint, so pinning it costs one line; `src/` has ~370
+// `bg-<accent>/10`-style washes sitting behind content. 370 pins would not make
+// anything legible, it would make this guard something people route around, and a
+// guard that is routed around checks nothing. The two cases also fail differently:
+// a translucent mark is invisible in both themes, which whoever writes it sees
+// immediately, while an opaque one looks right in dark and goes illegible only in
+// light -- unseen, which is the whole reason this guard exists.
+const FULLY_OPAQUE_MODIFIER = /^\/(?:100|\[1\]|\[1\.0+\]|\[100%\])$/;
+
 // The Tailwind state the utility containing `index` is gated behind: `hover:`,
 // `md:hover:`, or '' for none. Scoped to the one utility rather than the class string,
 // so two utilities sharing a string can be compared. Any whitespace separates
@@ -786,7 +839,7 @@ const labelCovers = (haystack, label, fillPrefix) => {
 
 function assertUnlabeledFillsTakeTheInk(root) {
   const bare = new RegExp(
-    `\\b(?:${MARK_UTILITIES.join('|')})-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-/])`,
+    `\\b(?:${MARK_UTILITIES.join('|')})-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-])(/[\\w.%[\\]]+)?`,
     'g',
   );
   const found = new Map();
@@ -804,6 +857,10 @@ function assertUnlabeledFillsTakeTheInk(root) {
     for (const { text, owner, scope, line } of classStrings(file, fs.readFileSync(file, 'utf8'))) {
       for (const match of text.matchAll(bare)) {
         const accent = match[1];
+        const modifier = match[2];
+        if (modifier && !FULLY_OPAQUE_MODIFIER.test(modifier)) {
+          continue;
+        }
         const label = FILL_LABEL.get(accent);
         const fillPrefix = variantPrefix(text, match.index);
         if (label && (labelCovers(text, `-${label}`, fillPrefix)
