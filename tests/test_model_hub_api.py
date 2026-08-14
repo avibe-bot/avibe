@@ -2945,7 +2945,16 @@ def test_completed_hub_reauth_revokes_replacement_after_source_disappears(
     store.config.sources.append(source)
     _refresh_fixture_routes(store.config)
     flow = asyncio.run(service.reauth_source(source.id, {"acknowledge_irreversible": True}))["flow"]
-    asyncio.run(service.delete_source(source.id, force=True))
+    with pytest.raises(ModelHubError) as delete_refusal:
+        asyncio.run(service.delete_source(source.id))
+    asyncio.run(
+        service.delete_source(
+            source.id,
+            force=True,
+            confirmed_remove_hops=delete_refusal.value.data["would_remove_hops"],
+            confirmed_interruptions=delete_refusal.value.data["would_interrupt"],
+        )
+    )
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -3072,6 +3081,11 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
 
     assert refused.status_code == 409
     refusal = refused.get_json()
+    route_hop_schema = _schema("guard-refusal.schema.json")["definitions"][
+        "RouteHopRef"
+    ]
+    for hop in refusal["would_remove_hops"]:
+        Draft7Validator(route_hop_schema).validate(hop)
     assert refusal["error"] == "source_model_in_route_chain"
     assert refusal["would_remove_hops"]
     assert all(
@@ -3090,16 +3104,51 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
             "agents": [],
         },
     ]
-    committed = client.put(
+    unconfirmed = client.put(
         f"/api/models/sources/{created['id']}/credential",
         json={**request_body, "force": True},
+        headers=headers,
+        base_url=base_url,
+    )
+    assert unconfirmed.status_code == 409
+    assert unconfirmed.get_json()["would_remove_hops"] == refusal["would_remove_hops"]
+    assert unconfirmed.get_json()["would_interrupt"] == refusal["would_interrupt"]
+
+    stale_confirmation = client.put(
+        f"/api/models/sources/{created['id']}/credential",
+        json={
+            **request_body,
+            "force": True,
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"][:-1],
+        },
+        headers=headers,
+        base_url=base_url,
+    )
+    assert stale_confirmation.status_code == 409
+    assert stale_confirmation.get_json()["error"] == refusal["error"]
+    assert stale_confirmation.get_json()["would_remove_hops"] == refusal[
+        "would_remove_hops"
+    ]
+    assert stale_confirmation.get_json()["would_interrupt"] == refusal[
+        "would_interrupt"
+    ]
+
+    committed = client.put(
+        f"/api/models/sources/{created['id']}/credential",
+        json={
+            **request_body,
+            "force": True,
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"],
+        },
         headers=headers,
         base_url=base_url,
     ).get_json()
 
     assert committed["removed_hops"] == refusal["would_remove_hops"]
     assert committed["interrupted"] == refusal["would_interrupt"]
-    assert committed["source"]["credential_ref"] == "cred_route_3"
+    assert committed["source"]["credential_ref"] == "cred_route_5"
     removed_identities = {
         (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"])
         for hop in committed["removed_hops"]
@@ -3110,7 +3159,13 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
         for menu_model, route in agent.routes.items()
         for hop in route.hops
     )
-    assert adapter.revoked == ["cred_test001", "cred_route_2", "cred_route_1"]
+    assert adapter.revoked == [
+        "cred_test001",
+        "cred_route_2",
+        "cred_route_3",
+        "cred_route_4",
+        "cred_route_1",
+    ]
 
 
 def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
@@ -4209,7 +4264,12 @@ def test_base_url_change_guards_and_prunes_invalid_exact_hops(
 
     committed = client.patch(
         f"/api/models/sources/{source['id']}",
-        json={"base_url": replacement_url, "force": True},
+        json={
+            "base_url": replacement_url,
+            "force": True,
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"],
+        },
         headers=headers,
         base_url=origin,
     ).get_json()

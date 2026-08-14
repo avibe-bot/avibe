@@ -38,11 +38,18 @@ async def dispatch_model_hub_rpc(
             payload.get("reauth"),
         )
     if operation == "delete_source":
-        return await service.delete_source(payload.get("source_id"), force=payload.get("force") is True)
+        return await service.delete_source(
+            payload.get("source_id"),
+            force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
+        )
     if operation == "refresh_source":
         return await service.refresh_source(
             payload.get("source_id"),
             force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
         )
     if operation == "list_agents":
         return await asyncio.to_thread(service.list_agents)
@@ -80,6 +87,8 @@ async def dispatch_model_hub_rpc(
             payload.get("source_id"),
             payload.get("model_id"),
             force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
         )
     if operation == "list_events":
         return service.list_events(limit=payload.get("limit", 20), before=payload.get("before"))

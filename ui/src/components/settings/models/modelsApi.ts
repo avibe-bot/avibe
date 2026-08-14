@@ -106,8 +106,8 @@ export type ModelsApi = {
    *  it clears the blocker and returns the source to standby. v3 adds no second
    *  「recover」 endpoint, so this is the whole retry affordance. */
   refreshSource(id: string, confirmation?: GuardConfirmation): Promise<SourceRefresh>;
-  /** Delete a source. `force` overrides the only-supplier guard. */
-  deleteSource(id: string, force?: boolean): Promise<void>;
+  /** Delete a source. A destructive retry echoes the server's exact guard plan. */
+  deleteSource(id: string, confirmation?: GuardConfirmation): Promise<void>;
   /** Replace the credential of a hub-channel api_key source. The normal guarded
    *  mutation tail reports every route hop removed and model interrupted. */
   replaceCredential(id: string, body: CredentialReplace): Promise<CredentialReplacement>;
@@ -389,15 +389,20 @@ const liveApi: ModelsApi = {
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
   refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
-  deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=true' : ''}`, jsonInit('DELETE')).then(() => undefined),
+  deleteSource: (id, confirmation) => call(
+    `/api/models/sources/${encodeURIComponent(id)}${confirmation ? '?force=true' : ''}`,
+    jsonInit('DELETE', confirmation ? {
+      would_remove_hops: confirmation.would_remove_hops,
+      would_interrupt: confirmation.would_interrupt,
+    } : undefined),
+  ).then(() => undefined),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
   // and carry no `contract_version` — the same closed-body rule as putAgentSources.
   replaceCredential: (id, body) => call<CredentialReplacementResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(credentialReplacement),
-  // The acknowledgement is unconditional by design: the server enforces it for
-  // native sources pre-login, and api.md's per-channel truth makes a hub grant
-  // replacement equally irreversible once new material is written. One confirm,
-  // no channel branch.
+  // The OAuth acknowledgement is unconditional because beginning reauth may
+  // irreversibly replace grant material. It does not stand in for destructive
+  // supply consent: guarded inventory mutations separately echo the server plan.
   reauthSource: (id) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })).then((r) => (r.flow ?? r) as OAuthFlow),
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
   getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
@@ -677,14 +682,14 @@ class MockStore {
     return gaps;
   }
 
-  deleteSource(id: string, force = false) {
+  deleteSource(id: string, confirmation?: GuardConfirmation) {
     this.syncAgents();
     const remaining = this.sources.filter((s) => s.id !== id);
     // `source_last_supplier` — the code the contract actually sends here.
     // `mode_switch_blocked` belongs to the mode route, and a client written
     // against it retried nothing on a real refusal.
     const gaps = this.wouldInterrupt(remaining);
-    if (gaps.length > 0 && !force)
+    if (gaps.length > 0 && !confirmation)
       throw new ApiCallError('source_last_supplier', undefined, true, gaps);
     this.sources = remaining;
     // Orders and the rollup are recomputed on the next read (syncAgents).
@@ -1330,7 +1335,7 @@ const mockApi: ModelsApi = {
   createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
   patchSource: (id, patch) => mockStore.patchSource(id, patch),
   refreshSource: (id, confirmation) => mockStore.refreshSource(id, confirmation),
-  deleteSource: (id, force) => mockStore.deleteSource(id, force),
+  deleteSource: (id, confirmation) => mockStore.deleteSource(id, confirmation),
   replaceCredential: (id, body) => mockStore.replaceCredential(id, body),
   reauthSource: (id) => mockStore.reauthSource(id),
   listAgents: () => mockStore.listAgents(),

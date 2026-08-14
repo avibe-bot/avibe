@@ -1338,6 +1338,8 @@ class ModelHubService:
         discovered: list[str],
         *,
         force: bool,
+        confirmed_remove_hops: object,
+        confirmed_interruptions: object,
     ) -> tuple[list[dict], list[dict]]:
         """Apply one successful inventory observation and commit it atomically."""
 
@@ -1354,6 +1356,8 @@ class ModelHubService:
             updated,
             source.id,
             force=force,
+            confirmed_remove_hops=confirmed_remove_hops,
+            confirmed_interruptions=confirmed_interruptions,
         )
         await self._commit_synced(previous, updated)
         return removed_hops, interrupted
@@ -2314,7 +2318,8 @@ class ModelHubService:
     async def replace_credential(self, source_id: str, payload: object) -> dict:
         if (
             not isinstance(payload, dict)
-            or set(payload) - {"key", "force"}
+            or set(payload)
+            - {"key", "force", "would_remove_hops", "would_interrupt"}
             or set(payload) < {"key"}
             or not isinstance(payload.get("key"), str)
             or not str(payload["key"]).strip()
@@ -2362,6 +2367,8 @@ class ModelHubService:
                     source,
                     discovered,
                     force=force,
+                    confirmed_remove_hops=payload.get("would_remove_hops"),
+                    confirmed_interruptions=payload.get("would_interrupt"),
                 )
                 committed = True
             except asyncio.CancelledError:
@@ -2408,7 +2415,14 @@ class ModelHubService:
     async def patch_source(self, source_id: str, payload: dict) -> dict:
         if (
             not isinstance(payload, dict)
-            or set(payload) - {"display_name", "base_url", "force"}
+            or set(payload)
+            - {
+                "display_name",
+                "base_url",
+                "force",
+                "would_remove_hops",
+                "would_interrupt",
+            }
             or ("force" in payload and not isinstance(payload["force"], bool))
         ):
             raise ModelHubError("discovery_failed")
@@ -2467,6 +2481,8 @@ class ModelHubService:
                         source,
                         discovered,
                         force=force,
+                        confirmed_remove_hops=payload.get("would_remove_hops"),
+                        confirmed_interruptions=payload.get("would_interrupt"),
                     )
                     committed = True
                 except asyncio.CancelledError:
@@ -2609,10 +2625,11 @@ class ModelHubService:
                 "menu_model": menu_model,
                 "source_id": source_id,
                 "model_id": hop.model_id,
+                "position": position,
             }
             for backend in MODEL_HUB_BACKENDS
             for menu_model, route in config.agents[backend].routes.items()
-            for hop in route.hops
+            for position, hop in enumerate(route.hops, start=1)
             if hop.source_id == source_id
             and inspect_exact_hop(
                 config,
@@ -2658,36 +2675,77 @@ class ModelHubService:
         source_id: str,
         *,
         force: bool,
+        confirmed_remove_hops: object,
+        confirmed_interruptions: object,
     ) -> tuple[list[dict], list[dict]]:
         would_remove_hops = self._invalidated_route_hops(updated, source_id)
         would_interrupt = self._introduced_interruptions(previous, updated)
-        if (would_remove_hops or would_interrupt) and not force:
-            raise ModelHubError(
-                (
-                    "source_model_in_route_chain"
-                    if would_remove_hops
-                    else "source_last_supplier"
-                ),
-                status=409,
-                data={
-                    "would_remove_hops": would_remove_hops,
-                    "would_interrupt": would_interrupt,
-                },
-            )
+        self._require_guard_plan(
+            force=force,
+            confirmed_remove_hops=confirmed_remove_hops,
+            confirmed_interruptions=confirmed_interruptions,
+            would_remove_hops=would_remove_hops,
+            would_interrupt=would_interrupt,
+            error=(
+                "source_model_in_route_chain"
+                if would_remove_hops
+                else "source_last_supplier"
+            ),
+        )
         if would_remove_hops:
             self._prune_invalidated_route_hops(updated, would_remove_hops)
         return would_remove_hops, would_interrupt
 
-    async def delete_source(self, source_id: str, *, force: bool = False) -> dict:
+    @staticmethod
+    def _require_guard_plan(
+        *,
+        force: bool,
+        confirmed_remove_hops: object,
+        confirmed_interruptions: object,
+        would_remove_hops: list[dict],
+        would_interrupt: list[dict],
+        error: str,
+    ) -> None:
+        if not (would_remove_hops or would_interrupt):
+            return
+        if (
+            force
+            and _same_json_value(confirmed_remove_hops, would_remove_hops)
+            and _same_json_value(confirmed_interruptions, would_interrupt)
+        ):
+            return
+        raise ModelHubError(
+            error,
+            status=409,
+            data={
+                "would_remove_hops": would_remove_hops,
+                "would_interrupt": would_interrupt,
+            },
+        )
+
+    async def delete_source(
+        self,
+        source_id: str,
+        *,
+        force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
+    ) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, source_id)
             removed_hops = [
-                {"backend": backend, "menu_model": model_id, "source_id": source_id, "model_id": hop.model_id}
+                {
+                    "backend": backend,
+                    "menu_model": model_id,
+                    "source_id": source_id,
+                    "model_id": hop.model_id,
+                    "position": position,
+                }
                 for backend in MODEL_HUB_BACKENDS
                 for model_id, route in config.agents[backend].routes.items()
-                for hop in route.hops
+                for position, hop in enumerate(route.hops, start=1)
                 if hop.source_id == source_id
             ]
             config.sources = [item for item in config.sources if item.id != source_id]
@@ -2706,21 +2764,18 @@ class ModelHubService:
                 config,
                 newly_empty_routes=newly_empty_routes,
             )
-            if removed_hops and not force:
-                raise ModelHubError(
-                    "source_in_route_chain",
-                    status=409,
-                    data={
-                        "would_remove_hops": removed_hops,
-                        "would_interrupt": would_interrupt,
-                    },
-                )
-            if would_interrupt and not force:
-                raise ModelHubError(
-                    "source_last_supplier",
-                    status=409,
-                    data={"would_remove_hops": [], "would_interrupt": would_interrupt},
-                )
+            self._require_guard_plan(
+                force=force,
+                confirmed_remove_hops=confirmed_remove_hops,
+                confirmed_interruptions=confirmed_interruptions,
+                would_remove_hops=removed_hops,
+                would_interrupt=would_interrupt,
+                error=(
+                    "source_in_route_chain"
+                    if removed_hops
+                    else "source_last_supplier"
+                ),
+            )
             self._prune_unavailable_agent_references(config)
             if source.credential_ref:
                 self.revocations.add(source.id, source.credential_ref)
@@ -2752,7 +2807,14 @@ class ModelHubService:
                 self.revocations.remove(source.id, source.credential_ref)
             return {"removed_hops": removed_hops, "interrupted": would_interrupt}
 
-    async def refresh_source(self, source_id: str, *, force: bool = False) -> dict:
+    async def refresh_source(
+        self,
+        source_id: str,
+        *,
+        force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
+    ) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
@@ -2767,6 +2829,8 @@ class ModelHubService:
                     source,
                     model_ids,
                     force=force,
+                    confirmed_remove_hops=confirmed_remove_hops,
+                    confirmed_interruptions=confirmed_interruptions,
                 )
             except ModelHubError as exc:
                 if exc.code != "discovery_failed":
@@ -3217,6 +3281,8 @@ class ModelHubService:
         model_id: object,
         *,
         force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
     ) -> dict:
         if not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable")
@@ -3235,10 +3301,11 @@ class ModelHubService:
                     "menu_model": menu_model,
                     "source_id": source.id,
                     "model_id": model_id,
+                    "position": position,
                 }
                 for backend in MODEL_HUB_BACKENDS
                 for menu_model, route in config.agents[backend].routes.items()
-                for hop in route.hops
+                for position, hop in enumerate(route.hops, start=1)
                 if hop.source_id == source.id and hop.model_id == model_id
             ]
             source.models = [
@@ -3247,15 +3314,18 @@ class ModelHubService:
                 if item.id != model_id
             ]
             would_interrupt = self._introduced_interruptions(previous, config)
-            if (removed_hops or would_interrupt) and not force:
-                raise ModelHubError(
-                    "source_model_in_route_chain" if removed_hops else "source_last_supplier",
-                    status=409,
-                    data={
-                        "would_remove_hops": removed_hops,
-                        "would_interrupt": would_interrupt,
-                    },
-                )
+            self._require_guard_plan(
+                force=force,
+                confirmed_remove_hops=confirmed_remove_hops,
+                confirmed_interruptions=confirmed_interruptions,
+                would_remove_hops=removed_hops,
+                would_interrupt=would_interrupt,
+                error=(
+                    "source_model_in_route_chain"
+                    if removed_hops
+                    else "source_last_supplier"
+                ),
+            )
             if force and removed_hops:
                 for agent in config.agents.values():
                     for route in agent.routes.values():

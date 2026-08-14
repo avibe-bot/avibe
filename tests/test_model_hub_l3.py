@@ -3451,6 +3451,8 @@ def test_live_handle_settlement_survives_concurrent_source_deletion(
             live_handles=[handle],
         )
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        with pytest.raises(ModelHubError) as delete_refusal:
+            await service.delete_source(source.id)
         turn_id = f"turn_deleted_live_{kind.value}"
         gateway = ModelHubTurnGateway(service)
         base_url, token = await gateway.endpoint(
@@ -3475,7 +3477,16 @@ def test_live_handle_settlement_survives_concurrent_source_deletion(
                     )
                 )
                 await asyncio.wait_for(handle.started.wait(), timeout=1)
-                await service.delete_source(source.id, force=True)
+                await service.delete_source(
+                    source.id,
+                    force=True,
+                    confirmed_remove_hops=delete_refusal.value.data[
+                        "would_remove_hops"
+                    ],
+                    confirmed_interruptions=delete_refusal.value.data[
+                        "would_interrupt"
+                    ],
+                )
                 handle.release()
                 response = await asyncio.wait_for(response_task, timeout=1)
                 payload = await response.read()

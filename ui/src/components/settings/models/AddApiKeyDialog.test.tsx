@@ -513,10 +513,120 @@ describe('AddApiKeyDialog', () => {
     await waitFor(() => expect(replace).toHaveBeenCalledTimes(2));
     expect(replace.mock.calls).toEqual([
       [blockedSource.id, { key: 'sk-force' }],
-      [blockedSource.id, { key: 'sk-force', force: true }],
+      [blockedSource.id, {
+        key: 'sk-force',
+        force: true,
+        would_remove_hops: [hop],
+        would_interrupt: [gap],
+      }],
     ]);
     expect(await screen.findByText(/^Removed hops$|^已移除的跳$/i)).toBeTruthy();
     expect(screen.getByText(/now have no usable source|现在没有可用来源/i)).toBeTruthy();
+  });
+
+  it('requires confirmation again when the server recomputes a different replacement plan', async () => {
+    const firstHop: RouteHopRef = {
+      backend: 'claude',
+      menu_model: 'sonnet',
+      position: 1,
+      source_id: blockedSource.id,
+      model_id: 'claude-sonnet-4-5',
+    };
+    const nextHop: RouteHopRef = {
+      backend: 'codex',
+      menu_model: 'gpt-5',
+      position: 2,
+      source_id: blockedSource.id,
+      model_id: 'gpt-5.4',
+    };
+    const replace = vi.spyOn(modelsApi, 'replaceCredential')
+      .mockRejectedValueOnce(new ApiCallError(
+        'source_model_in_route_chain',
+        undefined,
+        true,
+        [],
+        [],
+        [firstHop],
+      ))
+      .mockRejectedValueOnce(new ApiCallError(
+        'source_model_in_route_chain',
+        undefined,
+        true,
+        [],
+        [],
+        [nextHop],
+      ))
+      .mockResolvedValueOnce({
+        source: { ...blockedSource, state: { status: 'active' } },
+        removed_hops: [nextHop],
+        interrupted: [],
+      });
+    renderReplacement();
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-changing-plan');
+    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+    await user.click(await screen.findByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
+
+    expect(await screen.findByText(/^gpt-5\.4/)).toBeTruthy();
+    expect(replace.mock.calls[1][1]).toEqual({
+      key: 'sk-changing-plan',
+      force: true,
+      would_remove_hops: [firstHop],
+      would_interrupt: [],
+    });
+
+    await user.click(screen.getByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
+
+    await waitFor(() => expect(replace).toHaveBeenCalledTimes(3));
+    expect(replace.mock.calls[2][1]).toEqual({
+      key: 'sk-changing-plan',
+      force: true,
+      would_remove_hops: [nextHop],
+      would_interrupt: [],
+    });
+  });
+
+  it.each([
+    {
+      inventoryState: 'clear',
+      current: {
+        ...blockedSource,
+        state: { status: 'standby' as const, retry_at: null, detail_key: null },
+      },
+      repaired: true,
+      settlementFails: true,
+    },
+    {
+      inventoryState: 'blocked',
+      current: blockedSource,
+      repaired: false,
+      settlementFails: false,
+    },
+  ])('derives an ambiguous replacement outcome from a $inventoryState inventory read', async ({ current, repaired, settlementFails }) => {
+    vi.spyOn(modelsApi, 'replaceCredential').mockRejectedValueOnce(
+      new ApiCallError('bad_response', undefined, false),
+    );
+    const settled = replacementSettlement({
+      readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [current] }),
+      ...(settlementFails ? { source: vi.fn().mockRejectedValue(new Error('surface refresh failed')) } : {}),
+    });
+    renderReplacement(blockedSource, settled);
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-ambiguous');
+    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+
+    if (repaired) {
+      expect(await screen.findByText(i18n.t('settings.models.repair.repaired'))).toBeTruthy();
+      expect(screen.queryByRole('button', { name: /^Retry$|^重试$/i })).toBeNull();
+    } else {
+      expect(await screen.findByText(/Couldn't replace the key|更换失败/i)).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
+    }
+    expect(settled.readInventory).toHaveBeenCalledOnce();
+    expect(settled.source).toHaveBeenCalledWith(current);
+    expect(settled.unread).not.toHaveBeenCalled();
   });
 
   it.each([

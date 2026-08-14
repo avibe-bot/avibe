@@ -308,6 +308,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
 
   const submitReplacement = React.useCallback(async (force: boolean) => {
     if (props.mode !== 'replace' || !apiKey.trim() || replacePhase.kind === 'submitting') return;
+    const confirmation = force && replacePhase.kind === 'guard'
+      ? {
+          force: true as const,
+          would_remove_hops: replacePhase.hops,
+          would_interrupt: replacePhase.gaps,
+        }
+      : null;
+    if (force && !confirmation) return;
     const key = apiKey.trim();
     const seq = continuation.begin();
     setReplacePhase({ kind: 'submitting' });
@@ -315,7 +323,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       try {
         const answer = await modelsApi.replaceCredential(
           latest.id,
-          force ? { key, force: true } : { key },
+          confirmation ? { key, ...confirmation } : { key },
         );
         const outcome: ReplaceOutcome = answer.removed_hops.length > 0 || answer.interrupted.length > 0
           ? { kind: 'impact', hops: answer.removed_hops, gaps: answer.interrupted }
@@ -339,14 +347,42 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           }));
           return;
         }
-        const failureClass = classifyModelHubFailure(failure);
-        if (failure?.code === 'source_not_found') await settlement.gone(latest.id);
-        else if (mayHaveWritten(failure)) await settlement.unread();
-        else settlement.release();
+        let failureClass = classifyModelHubFailure(failure);
+        if (failure?.code === 'source_not_found') {
+          await settlement.gone(latest.id);
+        } else if (mayHaveWritten(failure)) {
+          try {
+            const inventory = await settlement.readInventory();
+            const current = inventory.sources.find((source) => source.id === latest.id);
+            if (!current) {
+              failureClass = 'authoritative-terminal';
+              await settlement.gone(latest.id, inventory);
+            } else {
+              try {
+                await settlement.source(current);
+              } catch {
+                // The inventory read is the mutation evidence; a trailing surface
+                // refresh must not turn a committed replacement back into Retry.
+              }
+              if (!wasBlocked(current.state)) {
+                const landed = continuation.settle(seq, () => setReplacePhase({
+                  kind: 'done',
+                  outcome: { kind: 'repaired' },
+                }));
+                if (landed === 'landed') {
+                  replaceCloseTimer.current = window.setTimeout(onClose, 1400);
+                }
+                return;
+              }
+            }
+          } catch {
+            await settlement.unread();
+          }
+        } else settlement.release();
         continuation.settle(seq, () => setReplacePhase({ kind: 'failure', failureClass }));
       }
     });
-  }, [apiKey, continuation, onClose, props, replacePhase.kind]);
+  }, [apiKey, continuation, onClose, props, replacePhase]);
 
   const cancel = React.useCallback(() => {
     if (replaceMode) {
