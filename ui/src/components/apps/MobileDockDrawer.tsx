@@ -144,7 +144,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
             }}
             className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-3 py-6 text-[12.5px] font-medium text-muted transition-colors hover:border-cyan/60 hover:text-foreground"
           >
-            <LayoutGrid className="size-4 shrink-0 text-cyan" />
+            <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />
             <span>{t('apps.dock.emptyHint')}</span>
           </button>
         ) : (
@@ -216,7 +216,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
             }}
             className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-3 py-3 text-[12.5px] font-medium text-muted transition-colors hover:border-cyan/60 hover:text-foreground"
           >
-            <LayoutGrid className="size-4 shrink-0 text-cyan" />
+            <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />
             <span>{t('apps.launcher.openLibrary')}</span>
           </button>
         )}
@@ -262,7 +262,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                 void undock(menu.item.id);
                 setMenu(null);
               }}
-              className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[14px] font-medium text-destructive transition hover:bg-destructive/[0.08]"
+              className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[14px] font-medium text-destructive-ink transition hover:bg-destructive/[0.08]"
             >
               <PinOff className="size-[18px] shrink-0" />
               {t('apps.dock.unpin')}
@@ -274,7 +274,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                   if (menu.item.kind === 'showpage') void unpin(menu.item.sessionId);
                   setMenu(null);
                 }}
-                className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[14px] font-medium text-destructive transition hover:bg-destructive/[0.08]"
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[14px] font-medium text-destructive-ink transition hover:bg-destructive/[0.08]"
               >
                 <Minus className="size-[18px] shrink-0" />
                 {t('library.apps.remove')}

@@ -32,7 +32,7 @@ export const SettingsLogsPage: React.FC<{ standalone?: boolean }> = ({ standalon
           <span>›</span>
           <span>{t('settings.tabs.diagnostics')}</span>
           <span>›</span>
-          <span className="text-mint">{t('settings.logsTitle')}</span>
+          <span className="text-mint-ink">{t('settings.logsTitle')}</span>
         </div>
       }
     >

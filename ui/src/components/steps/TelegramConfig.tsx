@@ -157,7 +157,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
             <StepHeader
               step={1}
               title={t('telegramConfig.step1Title')}
-              icon={<MessageSquare size={16} className="text-cyan" />}
+              icon={<MessageSquare size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[1]}
               onToggle={() => toggleStep(1)}
             />
@@ -181,11 +181,11 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
                     size="sm"
                     onClick={() => copyCommand('/newbot')}
                   >
-                    {copiedCommand === '/newbot' ? <Check size={14} className="text-mint" /> : <Copy size={14} />}
+                    {copiedCommand === '/newbot' ? <Check size={14} className="text-mint-ink" /> : <Copy size={14} />}
                     {copiedCommand === '/newbot' ? t('telegramConfig.copiedCommand') : t('telegramConfig.copyNewBotCommand')}
                   </Button>
                 </div>
-                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan">
+                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan-ink">
                   <strong>{t('slackConfig.tip')}:</strong> {t('telegramConfig.step1Tip')}
                 </div>
               </div>
@@ -197,7 +197,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
             <StepHeader
               step={2}
               title={t('telegramConfig.step2Title')}
-              icon={<KeyRound size={16} className="text-cyan" />}
+              icon={<KeyRound size={16} className="text-cyan-ink" />}
               completed={isValid}
               expanded={expandedSteps[2]}
               onToggle={() => toggleStep(2)}
@@ -213,7 +213,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
 
                 <div className="space-y-2 pt-1">
                   <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                    <KeyRound size={14} className="text-cyan" />
+                    <KeyRound size={14} className="text-cyan-ink" />
                     {t('telegramConfig.botToken')}
                   </label>
                   <Input
@@ -248,7 +248,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
                       className={clsx(
                         'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium',
                         authResult.ok
-                          ? 'border-mint/30 bg-mint/[0.08] text-mint'
+                          ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
                           : 'border-danger/30 bg-danger/10 text-danger'
                       )}
                     >
@@ -268,7 +268,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
             <StepHeader
               step={3}
               title={t('telegramConfig.step3Title')}
-              icon={<Shield size={16} className="text-cyan" />}
+              icon={<Shield size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[3]}
               onToggle={() => toggleStep(3)}
             />
@@ -296,7 +296,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
                           onClick={() => copyCommand(item.command)}
                           className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-foreground/[0.04] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition hover:border-border-strong"
                         >
-                          {copiedCommand === item.command ? <Check size={12} className="text-mint" /> : <Copy size={12} />}
+                          {copiedCommand === item.command ? <Check size={12} className="text-mint-ink" /> : <Copy size={12} />}
                           <code className="font-mono">
                             {copiedCommand === item.command ? t('telegramConfig.copiedCommand') : item.command}
                           </code>
@@ -305,10 +305,10 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
                     </div>
                   ))}
                 </div>
-                <div className="rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-[12px] leading-[1.55] text-gold">
+                <div className="rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-[12px] leading-[1.55] text-gold-ink">
                   <strong>{t('telegramConfig.step3TipTitle')}:</strong> {t('telegramConfig.step3Tip')}
                 </div>
-                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan">
+                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan-ink">
                   <strong>{t('slackConfig.tip')}:</strong> {t('telegramConfig.step3ExtraTip')}
                 </div>
               </div>
@@ -320,7 +320,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
             <StepHeader
               step={4}
               title={t('telegramConfig.step4Title')}
-              icon={<Settings2 size={16} className="text-cyan" />}
+              icon={<Settings2 size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[4]}
               onToggle={() => toggleStep(4)}
             />
@@ -344,7 +344,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
                 <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-background px-3 py-2.5">
                   <div className="pr-4">
                     <div className="flex items-center gap-2 text-[12px] font-semibold text-foreground">
-                      <SplitSquareVertical size={14} className="text-cyan" />
+                      <SplitSquareVertical size={14} className="text-cyan-ink" />
                       {t('telegramConfig.forumAutoTopic')}
                     </div>
                     <p className="mt-0.5 text-[11px] text-muted">{t('telegramConfig.forumAutoTopicHint')}</p>
@@ -389,7 +389,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
             </p>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
-            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
+            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedCount} / 4
             </span>
             <div className="flex gap-1">

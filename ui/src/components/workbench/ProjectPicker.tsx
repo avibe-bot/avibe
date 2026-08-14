@@ -46,7 +46,7 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({ projects, targetId
               disabled={disabled}
               className={clsx(
                 'h-auto shrink-0 gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium',
-                active ? 'border-mint/40 bg-mint-soft text-mint hover:bg-mint-soft hover:text-mint' : 'text-foreground',
+                active ? 'border-mint/40 bg-mint-soft text-mint-ink hover:bg-mint-soft hover:text-mint-ink' : 'text-foreground',
               )}
             >
               {active ? <FolderOpen className="size-3.5" /> : <Folder className="size-3.5" />}

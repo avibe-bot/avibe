@@ -730,7 +730,7 @@ export const EditorApp: React.FC<{
                   <button
                     type="button"
                     onClick={openFolder}
-                    className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint transition hover:bg-mint/[0.14]"
+                    className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint-ink transition hover:bg-mint/[0.14]"
                   >
                     <FolderOpen className="size-3.5" />
                     {t('apps.editor.openFolder')}
@@ -783,9 +783,9 @@ export const EditorApp: React.FC<{
                         className="flex items-center gap-1.5"
                       >
                         {tab.kind === 'preview' ? (
-                          previewRenderKind(tab.name) === 'image' ? <ImageIcon className="size-3.5 text-violet" /> : <FileText className="size-3.5 text-violet" />
+                          previewRenderKind(tab.name) === 'image' ? <ImageIcon className="size-3.5 text-violet-ink" /> : <FileText className="size-3.5 text-violet-ink" />
                         ) : (
-                          <CodeXml className="size-3.5 text-cyan" />
+                          <CodeXml className="size-3.5 text-cyan-ink" />
                         )}
                         {tab.name}
                         {dirty[tab.id] && <span className="size-1.5 rounded-full bg-mint" />}
@@ -898,8 +898,8 @@ const Welcome: React.FC<{
   // needed. Kept in state only so a 404'd file can be dropped from the view below.
   const [recents, setRecents] = useState<EditorRecents>(() => loadEditorRecents());
   const actions: { Icon: typeof FolderOpen; color: string; label: string; onClick: () => void; sc?: string }[] = [
-    { Icon: FolderOpen, color: 'text-cyan', label: t('apps.editor.openFolder'), onClick: onOpenFolder, sc: '⌘O' },
-    { Icon: FilePlus, color: 'text-mint', label: t('apps.fileBrowser.newFile'), onClick: onNewFile, sc: '⌘N' },
+    { Icon: FolderOpen, color: 'text-cyan-ink', label: t('apps.editor.openFolder'), onClick: onOpenFolder, sc: '⌘O' },
+    { Icon: FilePlus, color: 'text-mint-ink', label: t('apps.fileBrowser.newFile'), onClick: onNewFile, sc: '⌘N' },
   ];
   const hasRecents = recents.folders.length > 0 || recents.files.length > 0;
 
@@ -918,7 +918,7 @@ const Welcome: React.FC<{
       <div className="flex max-h-full w-[440px] max-w-full flex-col gap-6 overflow-y-auto">
         <div className="flex items-center gap-3.5">
           <span className="grid size-14 place-items-center rounded-2xl border border-cyan/60 bg-cyan-soft">
-            <CodeXml className="size-7 text-cyan" />
+            <CodeXml className="size-7 text-cyan-ink" />
           </span>
           <div className="flex flex-col gap-1">
             <div className="text-[24px] font-bold text-foreground">{t('apps.editor.label')}</div>
@@ -941,10 +941,10 @@ const Welcome: React.FC<{
           // Folders first, then files — each a compact row: name + its containing directory (dimmed).
           <div className="flex flex-col gap-0.5">
             {recents.folders.map((path) => (
-              <RecentRow key={`d:${path}`} Icon={FolderOpen} iconColor="text-cyan" name={recentPathLabel(path)} dir={parentDir(path)} onClick={() => onOpenRecentFolder(path)} />
+              <RecentRow key={`d:${path}`} Icon={FolderOpen} iconColor="text-cyan-ink" name={recentPathLabel(path)} dir={parentDir(path)} onClick={() => onOpenRecentFolder(path)} />
             ))}
             {recents.files.map((file) => (
-              <RecentRow key={`f:${file.path}`} Icon={FileText} iconColor="text-violet" name={file.name} dir={parentDir(file.path)} onClick={() => void openRecentFile(file)} />
+              <RecentRow key={`f:${file.path}`} Icon={FileText} iconColor="text-violet-ink" name={file.name} dir={parentDir(file.path)} onClick={() => void openRecentFile(file)} />
             ))}
           </div>
         ) : (

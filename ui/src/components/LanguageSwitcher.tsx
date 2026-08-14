@@ -99,7 +99,7 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
                 )}
               >
                 <span>{lang.label}</span>
-                {active && <Check size={14} className="text-mint" />}
+                {active && <Check size={14} className="text-mint-ink" />}
               </button>
             );
           })}

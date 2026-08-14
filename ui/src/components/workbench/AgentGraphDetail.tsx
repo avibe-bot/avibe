@@ -241,7 +241,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
             <button
               type="button"
               onClick={() => onSelectNode(lineage.spawnedBy!)}
-              className="inline-flex items-center gap-1.5 text-mint hover:underline"
+              className="inline-flex items-center gap-1.5 text-mint-ink hover:underline"
             >
               <CornerLeftUp className="size-3" />
               {callerTitle(lineage.spawnedBy)}
@@ -255,7 +255,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
         </Fact>
         <Fact label={t('agents.graph.detail.reportsTo')}>
           {lineage.callbackTo ? (
-            <span className="inline-flex items-center gap-1.5 text-cyan">
+            <span className="inline-flex items-center gap-1.5 text-cyan-ink">
               <CornerDownRight className="size-3" />
               {callerTitle(lineage.callbackTo)}
               <span className="text-muted">· {t(`agents.graph.detail.callback.${lineage.callbackStatus ?? 'pending'}`)}</span>
@@ -276,7 +276,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
             <span className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
               {t('agents.graph.detail.runsTitle')}
             </span>
-            <Link to="/harness?tab=runs" className="text-[11px] font-medium text-cyan hover:underline">
+            <Link to="/harness?tab=runs" className="text-[11px] font-medium text-cyan-ink hover:underline">
               {t('agents.graph.detail.viewAllInHarness')}
             </Link>
           </div>
@@ -305,7 +305,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
         {node.openable_in_chat && (
           <Link
             to={`/chat/${encodeURIComponent(node.session_id)}`}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-mint/40 bg-mint-soft text-[13px] font-semibold text-mint transition hover:brightness-110"
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-mint/40 bg-mint-soft text-[13px] font-semibold text-mint-ink transition hover:brightness-110"
           >
             <MessageSquare className="size-3.5" />
             {t('agents.graph.detail.openChat')}
@@ -368,10 +368,10 @@ function runStatus(status: string): AgentGraphStatus {
 }
 
 function statusPillClass(tone: string): string {
-  if (tone === 'mint') return 'border-mint/40 bg-mint-soft text-mint';
-  if (tone === 'gold') return 'border-gold/40 bg-gold/10 text-gold';
-  if (tone === 'cyan') return 'border-cyan/40 bg-cyan-soft text-cyan';
-  if (tone === 'destructive') return 'border-destructive/40 bg-destructive/10 text-destructive';
+  if (tone === 'mint') return 'border-mint/40 bg-mint-soft text-mint-ink';
+  if (tone === 'gold') return 'border-gold/40 bg-gold/10 text-gold-ink';
+  if (tone === 'cyan') return 'border-cyan/40 bg-cyan-soft text-cyan-ink';
+  if (tone === 'destructive') return 'border-destructive/40 bg-destructive/10 text-destructive-ink';
   return 'border-border-strong bg-foreground/[0.04] text-muted';
 }
 

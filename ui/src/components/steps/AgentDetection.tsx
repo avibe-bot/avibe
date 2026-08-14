@@ -379,7 +379,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                       </Button>
                       {installResults[name]?.message && (
                         <span
-                          className={clsx('text-[11px]', installResults[name].ok ? 'text-mint' : 'text-danger')}
+                          className={clsx('text-[11px]', installResults[name].ok ? 'text-mint-ink' : 'text-danger')}
                         >
                           {installResults[name].message}
                         </span>
@@ -392,7 +392,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                   <div>
                     <button
                       onClick={() => toggleOutput(name)}
-                      className="inline-flex items-center gap-1 text-[11px] text-cyan transition hover:text-cyan/80"
+                      className="inline-flex items-center gap-1 text-[11px] text-cyan-ink transition hover:text-cyan-ink/80"
                     >
                       {expandedOutputs[name] ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                       {t('agentDetection.showOutput')}
@@ -478,7 +478,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             </p>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
-            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
+            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {enabledCount} active
             </span>
           </div>
@@ -503,7 +503,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           )}
           <div className="flex flex-1 flex-col items-end gap-1.5 sm:flex-none">
             {opencodeNeedsPermission && (
-              <p className="text-right text-[12px] text-gold">
+              <p className="text-right text-[12px] text-gold-ink">
                 {t('agentDetection.permissionGateHint')}
               </p>
             )}

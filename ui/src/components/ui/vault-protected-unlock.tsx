@@ -73,8 +73,8 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
   if (vault.status === 'error') {
     return (
       <div className="flex flex-col gap-2 rounded-2xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
-        <span className="font-medium text-destructive">{t('vaults.protectedUnlock.errorTitle')}</span>
-        {vault.error && <span className="text-xs text-destructive">{friendlyError(t, vault.error)}</span>}
+        <span className="font-medium text-destructive-ink">{t('vaults.protectedUnlock.errorTitle')}</span>
+        {vault.error && <span className="text-xs text-destructive-ink">{friendlyError(t, vault.error)}</span>}
         <Button type="button" variant="secondary" size="sm" className="self-start" onClick={() => run(vault.refresh)} disabled={busy}>
           {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
           {t('vaults.protectedUnlock.retry')}
@@ -85,7 +85,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
 
   if (vault.status === 'unlocked') {
     return (
-      <div className="flex items-center gap-2 rounded-2xl border border-mint/40 bg-mint-soft px-4 py-3 text-sm text-mint">
+      <div className="flex items-center gap-2 rounded-2xl border border-mint/40 bg-mint-soft px-4 py-3 text-sm text-mint-ink">
         <ShieldCheck className="size-4 shrink-0" />
         <span className="font-medium">{t('vaults.protectedUnlock.unlocked')}</span>
         <Button type="button" variant="ghost" size="sm" className="ml-auto h-7 text-muted" onClick={vault.lock} disabled={busy}>
@@ -104,7 +104,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
       <div className={PANEL}>
         <div className="flex flex-col items-center gap-4">
           <span className="flex size-13 items-center justify-center rounded-2xl bg-mint-soft">
-            <ShieldCheck className="size-7 text-mint" />
+            <ShieldCheck className="size-7 text-mint-ink" />
           </span>
           <div className="flex flex-col items-center gap-1.5">
             <span className="text-center text-[17px] font-bold text-foreground">{t('vaults.protectedUnlock.setupTitle')}</span>
@@ -154,7 +154,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
           </button>
         )}
 
-        {vault.error && <div className="text-center text-xs text-destructive">{friendlyError(t, vault.error)}</div>}
+        {vault.error && <div className="text-center text-xs text-destructive-ink">{friendlyError(t, vault.error)}</div>}
       </div>
     );
   }
@@ -165,7 +165,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
     <div className={PANEL}>
       <div className="flex flex-col items-center gap-4">
         <span className="flex size-13 items-center justify-center rounded-2xl bg-gold/15">
-          <ScanFace className="size-7 text-gold" />
+          <ScanFace className="size-7 text-gold-ink" />
         </span>
         <div className="flex flex-col items-center gap-1.5">
           <span className="text-center text-[17px] font-bold text-foreground">{t('vaults.protectedUnlock.unlockTitle')}</span>
@@ -195,7 +195,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
 
       {/* Mint factor-safety note. */}
       <div className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5">
-        <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint" />
+        <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint-ink" />
         <span className="text-[11px] leading-snug text-foreground">{t('vaults.protectedUnlock.factorNote')}</span>
       </div>
 
@@ -209,7 +209,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
         </button>
       )}
 
-      {vault.error && <div className="text-center text-xs text-destructive">{friendlyError(t, vault.error)}</div>}
+      {vault.error && <div className="text-center text-xs text-destructive-ink">{friendlyError(t, vault.error)}</div>}
     </div>
   );
 };

@@ -289,7 +289,7 @@ export const SkillsPage: React.FC = () => {
         {projectCanManage ? (
           <>
             <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
-              <Compass className="size-3.5 text-cyan" />
+              <Compass className="size-3.5 text-cyan-ink" />
               {t('skills.browseRegistry')}
             </Button>
             <Button type="button" variant="brand" size="xs" onClick={() => setShowAdd(true)}>
@@ -315,7 +315,7 @@ export const SkillsPage: React.FC = () => {
       ) : null}
 
       {error ? (
-        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">{error}</div>
+        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">{error}</div>
       ) : null}
 
       {notInstalled ? (
@@ -367,7 +367,7 @@ export const SkillsPage: React.FC = () => {
                 ) : null}
                 <div className="flex flex-col gap-2">
                   {sectionLabel(
-                    <WandSparkles className="size-3.5 text-mint" />,
+                    <WandSparkles className="size-3.5 text-mint-ink" />,
                     t('skills.projectSectionLocal'),
                     t('skills.projectSectionLocalHint'),
                   )}
@@ -474,7 +474,7 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
             }}
             className={clsx(
               'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-              value === key ? 'bg-mint-soft text-mint' : 'text-foreground hover:bg-foreground/[0.04]',
+              value === key ? 'bg-mint-soft text-mint-ink' : 'text-foreground hover:bg-foreground/[0.04]',
             )}
           >
             <span className={clsx('size-2 rounded-full', dot(key))} />

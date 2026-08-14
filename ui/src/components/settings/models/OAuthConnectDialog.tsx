@@ -761,7 +761,7 @@ export const OAuthConnectDialog: React.FC<{
 
           {failed && (
             <div className="flex flex-col gap-2">
-              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive">
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive-ink">
                 <TriangleAlert className="mt-0.5 size-4 shrink-0" />
                 {/* errorKey may be the flow's own runtime-declared `error_key`, so
                     an unknown one degrades to 连接失败 rather than rendering itself. */}

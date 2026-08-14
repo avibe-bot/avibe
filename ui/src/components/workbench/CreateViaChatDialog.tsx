@@ -113,7 +113,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
         </button>
 
         {/* Hero icon — 64x64 violet-soft tile with glow */}
-        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet shadow-[0_0_28px_-6px_rgba(124,91,255,0.6)]">
+        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-[0_0_28px_-6px_rgba(124,91,255,0.6)]">
           <Sparkles className="size-[30px]" />
         </div>
 
@@ -159,7 +159,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
         </div>
 
         {error && (
-          <div className="w-full rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="w-full rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}

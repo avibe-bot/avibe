@@ -411,7 +411,7 @@ describe('HealthBadge', () => {
     // Muted, not pink or amber: a fault in the reporting path is not a verdict
     // that the definition itself is failing.
     expect(html).toContain('text-muted');
-    expect(html).not.toContain('text-pink');
+    expect(html).not.toContain('text-pink-ink');
     expect(html).not.toContain('text-amber');
   });
 
@@ -436,7 +436,7 @@ describe('HealthBadge', () => {
     const html = render(<HealthBadge row={watch({ health: 'failing', consecutive_failures: 4, recent_failures: 4 })} />);
 
     expect(html).toContain(`>${i18n.t('harness.health.failing')} 4<`);
-    expect(html).toContain('text-pink');
+    expect(html).toContain('text-pink-ink');
   });
 
   it('never exposes raw stderr through the default badge tooltip', () => {
@@ -485,7 +485,7 @@ describe('ProcessingHealthBadge', () => {
     expect(render(<HealthBadge row={row} />)).toBe('');
     const html = render(<ProcessingHealthBadge row={row} />);
     expect(html).toContain(`>${i18n.t('harness.processingHealth.failing')} 2<`);
-    expect(html).toContain('text-pink');
+    expect(html).toContain('text-pink-ink');
   });
 
   it('stays quiet when event processing is healthy', () => {
@@ -783,7 +783,7 @@ describe('TaskDetail command task', () => {
       '<span class="font-mono text-[11px] text-muted">0</span>',
     );
     expect(detail(task({ shell_command: 'make test', last_exit_code: 1 }))).toContain(
-      '<span class="font-mono text-[11px] text-pink">1</span>',
+      '<span class="font-mono text-[11px] text-pink-ink">1</span>',
     );
   });
 
@@ -912,7 +912,7 @@ describe('WatchDetail runtime', () => {
     [
       'enabled and stopped',
       watch({ enabled: true, process_alive: false }),
-      { runtime: true, line: '<span class="text-[12px] text-pink">process exited</span>', pid: null },
+      { runtime: true, line: '<span class="text-[12px] text-pink-ink">process exited</span>', pid: null },
     ],
     [
       'disabled and alive',
@@ -1055,7 +1055,7 @@ describe('WatchDetail runtime', () => {
     );
 
     expect(html).toContain(en.harness.failure.generic);
-    expect(html).toContain('<span class="font-mono text-[11px] text-pink">1</span>');
+    expect(html).toContain('<span class="font-mono text-[11px] text-pink-ink">1</span>');
     expect(html).toContain(raw);
     expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
   });

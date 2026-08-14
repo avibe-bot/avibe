@@ -66,10 +66,10 @@ interface AggregatedUser {
 }
 
 const AVATAR_TONES = [
-  { textCls: 'text-mint', bg: 'rgba(91,255,160,0.12)', border: 'rgba(91,255,160,0.33)' },
-  { textCls: 'text-cyan', bg: 'rgba(63,224,229,0.12)', border: 'rgba(63,224,229,0.33)' },
-  { textCls: 'text-violet', bg: 'rgba(124,91,255,0.12)', border: 'rgba(124,91,255,0.33)' },
-  { textCls: 'text-gold', bg: 'rgba(255,200,87,0.12)', border: 'rgba(255,200,87,0.33)' },
+  { textCls: 'text-mint-ink', bg: 'rgba(91,255,160,0.12)', border: 'rgba(91,255,160,0.33)' },
+  { textCls: 'text-cyan-ink', bg: 'rgba(63,224,229,0.12)', border: 'rgba(63,224,229,0.33)' },
+  { textCls: 'text-violet-ink', bg: 'rgba(124,91,255,0.12)', border: 'rgba(124,91,255,0.33)' },
+  { textCls: 'text-gold-ink', bg: 'rgba(255,200,87,0.12)', border: 'rgba(255,200,87,0.33)' },
 ];
 
 const hashCode = (s: string) => {
@@ -251,7 +251,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
 
         {/* Invite copy — appears below actions on mobile, left on desktop */}
         <div className="flex min-w-0 flex-col gap-2.5 md:flex-1">
-          <span className="inline-flex w-max items-center gap-1.5 rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 font-mono text-[10px] font-bold tracking-[0.12em] text-mint">
+          <span className="inline-flex w-max items-center gap-1.5 rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 font-mono text-[10px] font-bold tracking-[0.12em] text-mint-ink">
             <KeyRound size={11} strokeWidth={2.4} />
             {t('bindCode.badge')}
           </span>
@@ -274,7 +274,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                   type="radio"
                   checked={newType === 'one_time'}
                   onChange={() => setNewType('one_time')}
-                  className="text-mint"
+                  className="text-mint-ink"
                 />
                 {t('bindCode.oneTime')}
               </label>
@@ -283,7 +283,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                   type="radio"
                   checked={newType === 'expiring'}
                   onChange={() => setNewType('expiring')}
-                  className="text-mint"
+                  className="text-mint-ink"
                 />
                 {t('bindCode.expiring')}
               </label>
@@ -328,9 +328,9 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                         <span
                           className={clsx(
                             'rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold tracking-[0.12em]',
-                            status === 'active' && 'border-mint/40 bg-mint-soft text-mint',
+                            status === 'active' && 'border-mint/40 bg-mint-soft text-mint-ink',
                             status === 'used' && 'border-border bg-foreground/[0.04] text-muted',
-                            status === 'expired' && 'border-gold/40 bg-gold/10 text-gold',
+                            status === 'expired' && 'border-gold/40 bg-gold/10 text-gold-ink',
                             status === 'inactive' && 'border-border bg-foreground/[0.04] text-muted',
                           )}
                         >
@@ -355,7 +355,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                           title={t('bindCode.copy')}
                           className="rounded p-1.5 text-muted transition-colors hover:text-foreground"
                         >
-                          {copiedCode === bc.code ? <Check size={14} className="text-mint" /> : <Copy size={14} />}
+                          {copiedCode === bc.code ? <Check size={14} className="text-mint-ink" /> : <Copy size={14} />}
                         </button>
                         {bc.is_active && (
                           <button
@@ -392,7 +392,7 @@ const ActiveCodeBox: React.FC<{
 
   return (
     <div className="flex flex-col items-stretch gap-1 md:items-end">
-      <span className="font-mono text-[10px] font-bold tracking-[0.12em] text-gold">
+      <span className="font-mono text-[10px] font-bold tracking-[0.12em] text-gold-ink">
         {t('bindCode.activeCodeLabel')} · {expiryLabel}
       </span>
       <button
@@ -402,9 +402,9 @@ const ActiveCodeBox: React.FC<{
         style={{ borderColor: 'rgba(255,200,87,0.33)' }}
         title={t('bindCode.copy')}
       >
-        <span className="font-mono text-[18px] font-bold tracking-[0.12em] text-gold">bind {code.code}</span>
+        <span className="font-mono text-[18px] font-bold tracking-[0.12em] text-gold-ink">bind {code.code}</span>
         {copied ? (
-          <Check size={14} className="shrink-0 text-mint" />
+          <Check size={14} className="shrink-0 text-mint-ink" />
         ) : (
           <Copy size={14} className="shrink-0 text-muted" />
         )}
@@ -860,7 +860,7 @@ export const UserList: React.FC = () => {
                         className={clsx(
                           'inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors',
                           userConfig.is_admin
-                            ? 'border-gold/40 bg-gold/10 font-bold text-gold hover:bg-gold/15'
+                            ? 'border-gold/40 bg-gold/10 font-bold text-gold-ink hover:bg-gold/15'
                             : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
                         )}
                       >

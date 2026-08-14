@@ -16,7 +16,7 @@ export const SettingsPlaceholderPage: React.FC<{
     <SettingsPageShell activeTab={tab} title={t(titleKey)} subtitle={t(subtitleKey)}>
       <div className="flex flex-col gap-3 rounded-xl border border-border bg-background px-6 py-5">
         <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
-          <Sparkles className="size-4 text-cyan" />
+          <Sparkles className="size-4 text-cyan-ink" />
           {t('settings.inProgressTitle')}
         </div>
         <p className="text-[12px] leading-relaxed text-muted">{t('settings.inProgressBody')}</p>

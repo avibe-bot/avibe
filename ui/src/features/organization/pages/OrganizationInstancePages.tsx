@@ -545,7 +545,7 @@ export function InstanceAccessPage() {
         </Button>
       </div>
       <div className="flex items-center gap-3 rounded-lg border border-violet/35 bg-violet/10 p-4">
-        <Shield className="size-5 shrink-0 text-violet" />
+        <Shield className="size-5 shrink-0 text-violet-ink" />
         <div className="min-w-0 flex-1">
           <div className="text-[13px] font-semibold">{t('organization.access.ownerTitle', { owner: instance.owner_is_current_user ? t('organization.instances.you') : (instance.owner_email || t('organization.instances.ownerProtected')) })}</div>
           <div className="mt-0.5 text-[12px] text-muted">{t('organization.access.ownerBody')}</div>
@@ -568,7 +568,7 @@ export function InstanceAccessPage() {
             return (
               <div key={`${entry.kind}:${entry.value}`} className="grid gap-3 border-b border-border px-4 py-4 last:border-0 md:grid-cols-[minmax(220px,1.5fr)_150px_140px_80px] md:items-center md:px-5">
                 <div className="flex min-w-0 items-center gap-3">
-                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 text-mint"><Icon className="size-4" /></span>
+                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 text-mint-ink"><Icon className="size-4" /></span>
                   <div className="min-w-0">
                     <div className="truncate text-[12px] font-semibold">{displayPrincipal(entry.kind, entry.value, groups)}</div>
                     <div className="text-[10px] text-muted">{t(`organization.principals.${entry.kind}`)}</div>
@@ -602,7 +602,7 @@ export function InstanceAccessPage() {
                       }
                     }}
                   >
-                    <Trash2 className="size-4 text-destructive" />
+                    <Trash2 className="size-4 text-destructive-ink" />
                   </Button>
                 </div>
               </div>
@@ -1020,7 +1020,7 @@ export function InstanceProjectsPage() {
             return (
               <div key={project.project_id} className="grid gap-3 border-b border-border px-4 py-4 last:border-0 md:grid-cols-[minmax(220px,1.25fr)_160px_minmax(180px,1fr)_130px_90px] md:items-center md:px-5">
                 <div className="flex min-w-0 items-center gap-3">
-                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 text-mint"><FolderKey className="size-4" /></span>
+                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 text-mint-ink"><FolderKey className="size-4" /></span>
                   <div className="min-w-0">
                     <div className="truncate text-[12px] font-semibold">{project.display_name}</div>
                     <div className="truncate font-mono text-[10px] text-muted">{project.project_id}</div>

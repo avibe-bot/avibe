@@ -53,7 +53,7 @@ function GateState() {
     return (
       <div className="grid min-h-[100dvh] place-items-center bg-background p-6 text-center">
         <div>
-          <LoaderCircle className="mx-auto size-8 animate-spin text-mint" />
+          <LoaderCircle className="mx-auto size-8 animate-spin text-mint-ink" />
           <h1 className="mt-4 text-lg font-semibold">
             {t(gate === 'reauthorizing' ? 'organization.states.reauthorizingTitle' : 'organization.states.loadingTitle')}
           </h1>

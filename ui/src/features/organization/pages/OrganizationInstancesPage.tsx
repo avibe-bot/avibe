@@ -142,8 +142,8 @@ export function OrganizationInstancesPage() {
             >
               <div className="flex min-w-0 items-center gap-3">
                 <span className={index % 2
-                  ? 'grid size-9 shrink-0 place-items-center rounded-lg border border-violet/30 bg-violet/15 text-violet'
-                  : 'grid size-9 shrink-0 place-items-center rounded-lg border border-mint/30 bg-mint/15 text-mint'}>
+                  ? 'grid size-9 shrink-0 place-items-center rounded-lg border border-violet/30 bg-violet/15 text-violet-ink'
+                  : 'grid size-9 shrink-0 place-items-center rounded-lg border border-mint/30 bg-mint/15 text-mint-ink'}>
                   <Server className="size-4" />
                 </span>
                 <div className="min-w-0">
@@ -165,7 +165,7 @@ export function OrganizationInstancesPage() {
                   {t(instance.paired ? 'organization.instances.paired' : 'organization.instances.notPaired')}
                 </Badge>
                 <span className="inline-flex items-center gap-1 text-[11px] text-muted">
-                  <CircleDot className={instance.status === 'active' ? 'size-3 text-mint' : 'size-3'} />
+                  <CircleDot className={instance.status === 'active' ? 'size-3 text-mint-ink' : 'size-3'} />
                   {t(`organization.instances.status.${instance.status}`)}
                 </span>
               </div>

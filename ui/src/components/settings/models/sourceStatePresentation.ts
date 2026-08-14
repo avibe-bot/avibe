@@ -52,12 +52,12 @@ const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
     key: state.detail_key
       ? NEEDS_ACTION_KEY[state.detail_key as NeedsActionDetailKey] ?? state.detail_key
       : 'settings.models.state.needs_action',
-    textClass: 'text-destructive',
+    textClass: 'text-destructive-ink',
     dotClass: 'bg-destructive',
   }),
   error: () => ({
     key: 'settings.models.sourceDetail.status.error',
-    textClass: 'text-destructive',
+    textClass: 'text-destructive-ink',
     dotClass: 'bg-destructive',
   }),
 };
@@ -87,7 +87,7 @@ export const sourceStatePresentation = (
       values: adoption.native
         ? { backend: adoption.backends[0] }
         : { backends: adoption.backends.join(locale.startsWith('zh') ? '、' : ', ') },
-      textClass: adoption.native ? 'text-cyan' : 'model-hub-ink-mint',
+      textClass: adoption.native ? 'text-cyan-ink' : 'model-hub-ink-mint',
       dotClass: adoption.native ? 'bg-cyan' : 'bg-mint',
     };
   }

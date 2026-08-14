@@ -51,10 +51,10 @@ const PreviewJson = lazy(() => import('../ui/preview-json'));
 // Shared status → icon + tint. ``running`` and ``done`` are mint (success family),
 // ``failed`` destructive, ``interrupted`` gold — mirrors the design states A–E.
 const STATUS_TINT: Record<ActivityStatus, string> = {
-  running: 'text-mint',
-  done: 'text-mint',
-  failed: 'text-destructive',
-  interrupted: 'text-gold',
+  running: 'text-mint-ink',
+  done: 'text-mint-ink',
+  failed: 'text-destructive-ink',
+  interrupted: 'text-gold-ink',
 };
 
 // Status → chip/header border+background tint (shared by the collapsed chip and the
@@ -78,9 +78,9 @@ const TOOL_ICON: Record<ToolIconKind, LucideIcon> = {
 
 // File operation → badge glyph + i18n key (the mint-soft "+ 新增" style chip in A).
 const FILE_OP_META: Record<FileOp, { glyph: string; i18nKey: string; className: string }> = {
-  create: { glyph: '+', i18nKey: 'chat.agentActivity.opCreate', className: 'border-mint/30 bg-mint/[0.08] text-mint' },
-  modify: { glyph: '~', i18nKey: 'chat.agentActivity.opModify', className: 'border-cyan/30 bg-cyan/[0.08] text-cyan' },
-  delete: { glyph: '−', i18nKey: 'chat.agentActivity.opDelete', className: 'border-gold/30 bg-gold/[0.08] text-gold' },
+  create: { glyph: '+', i18nKey: 'chat.agentActivity.opCreate', className: 'border-mint/30 bg-mint/[0.08] text-mint-ink' },
+  modify: { glyph: '~', i18nKey: 'chat.agentActivity.opModify', className: 'border-cyan/30 bg-cyan/[0.08] text-cyan-ink' },
+  delete: { glyph: '−', i18nKey: 'chat.agentActivity.opDelete', className: 'border-gold/30 bg-gold/[0.08] text-gold-ink' },
 };
 
 const stepLabel = (t: (k: string, o?: Record<string, unknown>) => string, count: number): string =>
@@ -142,7 +142,7 @@ const ToolJsonDialog: React.FC<{ open: boolean; onClose: () => void; parsed: Par
             onClick={copy}
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground/80 transition-colors hover:bg-foreground/[0.06]"
           >
-            {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5" />}
+            {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
             {copied ? t('chat.agentActivity.copied') : t('chat.agentActivity.copy')}
           </button>
         </div>
@@ -328,7 +328,7 @@ const ActivityToolRow: React.FC<{ row: ActivityRow }> = ({ row }) => {
 // existing Markdown renderer in a compact style. -----
 const ActivityAssistantRow: React.FC<{ row: ActivityRow }> = ({ row }) => (
   <div className="flex items-start gap-2 px-1.5 py-1">
-    <Sparkles className="mt-0.5 size-3.5 shrink-0 text-mint" aria-hidden="true" />
+    <Sparkles className="mt-0.5 size-3.5 shrink-0 text-mint-ink" aria-hidden="true" />
     <div className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground/90 [&_p]:my-0.5 [&_pre]:max-w-full [&_pre]:overflow-x-auto">
       {row.text ? (
         <Markdown content={row.text} className="vr-markdown--inherit-size" />
@@ -457,8 +457,8 @@ export const ActivityCard: React.FC<{
             aria-expanded={expanded}
             className="flex min-w-0 flex-1 items-center gap-2 text-left"
           >
-            <Loader2 className="size-3.5 shrink-0 animate-spin text-mint" aria-hidden="true" />
-            <span className="text-[12px] font-medium text-mint">{t('chat.agentActivity.running')}</span>
+            <Loader2 className="size-3.5 shrink-0 animate-spin text-mint-ink" aria-hidden="true" />
+            <span className="text-[12px] font-medium text-mint-ink">{t('chat.agentActivity.running')}</span>
             {rows.length > 0 && <span className="text-[12px] text-muted">· {stepLabel(t, rows.length)}</span>}
             <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">{clock}</span>
           </button>
@@ -491,7 +491,7 @@ export const ActivityCard: React.FC<{
                   if (el) el.scrollTop = el.scrollHeight;
                   setFollowing(true);
                 }}
-                className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-mint/40 bg-background/90 px-2.5 py-1 text-[11px] font-medium text-mint shadow-sm backdrop-blur"
+                className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-mint/40 bg-background/90 px-2.5 py-1 text-[11px] font-medium text-mint-ink shadow-sm backdrop-blur"
               >
                 {t('chat.agentActivity.jumpToLatest')}
               </button>
@@ -566,7 +566,7 @@ export const ActivityChip: React.FC<{
         <button
           type="button"
           onClick={onRetry}
-          className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-cyan transition-colors hover:bg-surface-2"
+          className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-cyan-ink transition-colors hover:bg-surface-2"
         >
           {t('chat.agentActivity.retry')}
         </button>

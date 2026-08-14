@@ -36,10 +36,10 @@ export function ProxyUrlField({
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex w-full items-center justify-between gap-2 text-left text-[12px] font-medium text-foreground transition hover:text-cyan"
+        className="flex w-full items-center justify-between gap-2 text-left text-[12px] font-medium text-foreground transition hover:text-cyan-ink"
       >
         <span className="flex items-center gap-2">
-          <SplitSquareVertical size={14} className="text-cyan" />
+          <SplitSquareVertical size={14} className="text-cyan-ink" />
           {t(labelKey)}
           <span className="text-[11px] font-normal text-muted">
             {t('common.proxyUrlCollapsedHint')}

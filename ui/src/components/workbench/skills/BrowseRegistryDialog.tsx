@@ -76,7 +76,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#05050B]/[0.72] p-10 backdrop-blur-[6px]">
       <div className="flex w-full max-w-[760px] flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)]">
         <div className="flex items-center gap-3 border-b border-border px-5 py-4">
-          <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-cyan/40 bg-cyan-soft text-cyan">
+          <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-cyan/40 bg-cyan-soft text-cyan-ink">
             <Compass className="size-[17px]" />
           </span>
           <div className="flex flex-1 flex-col">
@@ -110,7 +110,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                 onClick={() => setTag(null)}
                 className={clsx(
                   'rounded-full border px-2.5 py-1 text-[11.5px] transition',
-                  tag === null ? 'border-mint/40 bg-mint-soft font-semibold text-mint' : 'border-border-strong text-muted hover:text-foreground',
+                  tag === null ? 'border-mint/40 bg-mint-soft font-semibold text-mint-ink' : 'border-border-strong text-muted hover:text-foreground',
                 )}
               >
                 {t('skills.browse.tagAll')}
@@ -122,7 +122,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                   onClick={() => setTag(tg)}
                   className={clsx(
                     'rounded-full border px-2.5 py-1 text-[11.5px] transition',
-                    tag === tg ? 'border-mint/40 bg-mint-soft font-semibold text-mint' : 'border-border-strong text-muted hover:text-foreground',
+                    tag === tg ? 'border-mint/40 bg-mint-soft font-semibold text-mint-ink' : 'border-border-strong text-muted hover:text-foreground',
                   )}
                 >
                   {tg}
@@ -161,7 +161,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                       ))}
                       {typeof item.stars === 'number' ? (
                         <span className="flex items-center gap-1">
-                          <Star className="size-3 text-gold" />
+                          <Star className="size-3 text-gold-ink" />
                           {item.stars}
                         </span>
                       ) : null}
@@ -169,7 +169,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                   </div>
                   {installed ? (
                     <span className="flex shrink-0 items-center gap-1.5 rounded-lg border border-border-strong bg-surface-3 px-3 py-2 text-[12px] font-medium text-muted">
-                      <Check className="size-3.5 text-mint" />
+                      <Check className="size-3.5 text-mint-ink" />
                       {t('skills.browse.installed')}
                     </span>
                   ) : (
@@ -179,7 +179,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                       // installs share one lock file and races drop entries.
                       disabled={installing !== null}
                       onClick={() => install(item)}
-                      className="flex shrink-0 items-center gap-1.5 rounded-lg border border-mint/40 bg-mint-soft px-3.5 py-2 text-[12px] font-semibold text-mint transition hover:brightness-110 disabled:opacity-60"
+                      className="flex shrink-0 items-center gap-1.5 rounded-lg border border-mint/40 bg-mint-soft px-3.5 py-2 text-[12px] font-semibold text-mint-ink transition hover:brightness-110 disabled:opacity-60"
                     >
                       {isInstalling ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
                       {t('skills.browse.add')}

@@ -123,10 +123,10 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
 
   const meta =
     type === 'provision'
-      ? { icon: <KeyRound className="size-4" />, tint: 'bg-accent/15 text-accent', title: t('vaults.request.title'), action: t('vaults.request.provide') }
+      ? { icon: <KeyRound className="size-4" />, tint: 'bg-accent/15 text-accent-ink', title: t('vaults.request.title'), action: t('vaults.request.provide') }
       : type === 'sign'
-        ? { icon: <PenTool className="size-4" />, tint: 'bg-violet/15 text-violet', title: t('vaults.approval.signTitle'), action: t('vaults.requests.review') }
-        : { icon: <LockKeyhole className="size-4" />, tint: 'bg-gold/15 text-gold', title: t('vaults.approval.accessTitle'), action: t('vaults.requests.review') };
+        ? { icon: <PenTool className="size-4" />, tint: 'bg-violet/15 text-violet-ink', title: t('vaults.approval.signTitle'), action: t('vaults.requests.review') }
+        : { icon: <LockKeyhole className="size-4" />, tint: 'bg-gold/15 text-gold-ink', title: t('vaults.approval.accessTitle'), action: t('vaults.requests.review') };
 
   if (type === 'provision' && provisionDialog?.isDismissed(request.id)) return null;
 
@@ -141,7 +141,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
             {extra > 0 ? <Badge variant="secondary">+{extra}</Badge> : null}
             {isProtected ? <Badge variant="warning">{t('vaults.protected')}</Badge> : null}
             {card.kind === 'keypair' ? (
-              <Badge variant="outline" className="gap-1 border-violet/40 bg-violet-soft text-violet">
+              <Badge variant="outline" className="gap-1 border-violet/40 bg-violet-soft text-violet-ink">
                 <Wallet className="size-3" />
                 {t('vaults.signing')}
               </Badge>

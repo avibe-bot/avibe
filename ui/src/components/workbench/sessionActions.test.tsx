@@ -60,7 +60,7 @@ describe('SessionActionMenu', () => {
   it('styles archive as destructive and shows its keyboard hint', () => {
     const html = renderMenu(fullMenu());
 
-    expect(html).toContain('text-pink');
+    expect(html).toContain('text-pink-ink');
     expect(html).toContain('⇧⌘D');
     expect(html).toContain('font-mono');
   });

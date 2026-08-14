@@ -495,7 +495,7 @@ export function OrganizationMembersPage() {
                   <Button size="icon" variant="ghost" aria-label={t('organization.actions.editMember')} onClick={() => { setEditing(member); setDialogOpen(true); }}><Pencil className="size-4" /></Button>
                 ) : null}
                 {canManage && member.role !== 'owner' && member.status !== 'removed' ? (
-                  <Button size="icon" variant="ghost" aria-label={t('organization.actions.removeMember')} onClick={() => setRemoving(member)}><Trash2 className="size-4 text-destructive" /></Button>
+                  <Button size="icon" variant="ghost" aria-label={t('organization.actions.removeMember')} onClick={() => setRemoving(member)}><Trash2 className="size-4 text-destructive-ink" /></Button>
                 ) : null}
               </div>
             </div>

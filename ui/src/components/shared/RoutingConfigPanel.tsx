@@ -277,7 +277,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                 className={clsx(
                   'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-medium transition-colors',
                   checked
-                    ? 'border-mint/40 bg-mint/15 text-mint'
+                    ? 'border-mint/40 bg-mint/15 text-mint-ink'
                     : 'border-border bg-foreground/[0.02] text-muted hover:border-border-strong hover:text-foreground'
                 )}
               >

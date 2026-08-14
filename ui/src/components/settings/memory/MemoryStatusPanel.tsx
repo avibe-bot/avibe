@@ -108,7 +108,7 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
       data-testid={`memory-anomaly-${entry.kind}`}
     >
       <div className="flex min-w-0 items-start gap-2.5">
-        <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
+        <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold-ink" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-words text-[12.5px] font-medium text-foreground">
@@ -120,7 +120,7 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
           </div>
           <div className="mt-1 font-mono text-[10.5px] text-muted">{formatMemoryStatusTimestamp(entry.occurred_at)}</div>
           {manualRequired ? (
-            <div className="mt-1.5 text-[11px] text-gold">{t('memory.processingRecord.manualRequiredReadOnly')}</div>
+            <div className="mt-1.5 text-[11px] text-gold-ink">{t('memory.processingRecord.manualRequiredReadOnly')}</div>
           ) : null}
         </div>
       </div>
@@ -150,7 +150,7 @@ const ClearInProgressCard: React.FC<{
   return (
     <div className="flex flex-col gap-3 rounded-md border border-gold/40 bg-gold/[0.06] px-4 py-3">
       <div className="flex min-w-0 items-start gap-2.5">
-        <Clock3 className="mt-0.5 size-4 shrink-0 text-gold" />
+        <Clock3 className="mt-0.5 size-4 shrink-0 text-gold-ink" />
         <div className="min-w-0">
           <div className="text-[12.5px] font-semibold text-foreground">{t('memory.processingRecord.clearInProgress.title')}</div>
           <div className="mt-0.5 text-[11px] text-muted">
@@ -264,7 +264,7 @@ export const MemoryStatusPanel: React.FC<{
 
       <section className="flex flex-col gap-2" aria-labelledby="memory-runtime-title">
         <div className="flex items-center gap-2">
-          <Database className="size-4 text-violet" />
+          <Database className="size-4 text-violet-ink" />
           <h3 id="memory-runtime-title" className="text-[13px] font-semibold text-foreground">
             {t('memory.processingRecord.runtime.title')}
           </h3>
@@ -277,7 +277,7 @@ export const MemoryStatusPanel: React.FC<{
         <Card>
           <CardContent className="flex flex-col gap-4 py-4">
             {statusError ? (
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive-ink">
                 {statusError}
               </div>
             ) : null}
@@ -371,13 +371,13 @@ export const MemoryStatusPanel: React.FC<{
               </div>
             )}
             {repairError ? (
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11.5px] text-destructive">
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11.5px] text-destructive-ink">
                 {repairError}
               </div>
             ) : null}
             {repairHealth ? (
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
-                <CheckCircle2 className={repairHealth.healthy ? 'size-3.5 text-mint' : 'size-3.5 text-gold'} />
+                <CheckCircle2 className={repairHealth.healthy ? 'size-3.5 text-mint-ink' : 'size-3.5 text-gold-ink'} />
                 <span>{t('memory.processingRecord.repair.healthResult')}</span>
                 <Badge variant={repairHealth.healthy ? 'success' : 'warning'}>
                   {repairHealth.healthy
@@ -457,11 +457,11 @@ export const MemoryStatusPanel: React.FC<{
         <Card>
           <CardContent className="py-2">
             {failuresError ? (
-              <div className="py-3 text-[12px] text-destructive">{failuresError}</div>
+              <div className="py-3 text-[12px] text-destructive-ink">{failuresError}</div>
             ) : null}
             {failures.length === 0 && !failuresError ? (
               <div className="flex items-center gap-2 py-3 text-[12px] text-muted">
-                {failuresLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5 text-mint" />}
+                {failuresLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5 text-mint-ink" />}
                 {failuresLoading ? t('memory.processingRecord.anomalies.loading') : t('memory.processingRecord.anomalies.empty')}
               </div>
             ) : failures.map((entry) => (

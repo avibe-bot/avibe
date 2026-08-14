@@ -26,9 +26,9 @@ export type SegmentedRadioOption<T extends string> = {
 export type SegmentedTone = 'mint' | 'gold' | 'cyan' | 'muted';
 
 const ACTIVE_TONES: Record<SegmentedTone, string> = {
-  mint: 'border border-mint/30 bg-mint-soft font-bold text-mint',
-  gold: 'border border-gold/40 bg-gold/10 font-bold text-gold',
-  cyan: 'border border-cyan/40 bg-cyan-soft font-bold text-cyan',
+  mint: 'border border-mint/30 bg-mint-soft font-bold text-mint-ink',
+  gold: 'border border-gold/40 bg-gold/10 font-bold text-gold-ink',
+  cyan: 'border border-cyan/40 bg-cyan-soft font-bold text-cyan-ink',
   muted: 'border border-border-strong bg-foreground/[0.06] font-bold text-foreground',
 };
 

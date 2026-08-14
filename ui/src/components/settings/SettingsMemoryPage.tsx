@@ -263,7 +263,7 @@ export const SettingsMemoryPage: React.FC = () => {
         </div>
       ) : !settings ? (
         settingsRead.error ? (
-          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
             {settingsRead.error}
           </div>
         ) : (
@@ -277,7 +277,7 @@ export const SettingsMemoryPage: React.FC = () => {
           {runtimeInstalled === false ? (
             <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
               <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
-                <Brain className="size-4 text-violet" />
+                <Brain className="size-4 text-violet-ink" />
                 {t('memory.setup.runtimeRequired')}
               </div>
               <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
@@ -350,7 +350,7 @@ export const SettingsMemoryPage: React.FC = () => {
                 {t('memory.settings.loading')}
               </div>
             ) : settingsRead.error && !settings ? (
-              <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
                 {settingsRead.error}
               </div>
             ) : (

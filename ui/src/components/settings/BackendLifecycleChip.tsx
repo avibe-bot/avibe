@@ -343,7 +343,7 @@ const StateBlock: React.FC<{
 
   if (phase === 'upgrading') {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-cyan/25 bg-cyan/10 px-3 py-2 text-sm text-cyan">
+      <div className="flex items-center gap-2 rounded-md border border-cyan/25 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
         <RefreshCw size={16} className="shrink-0 animate-spin" />
         <span>{t('backendLifecycle.upgrading')}</span>
       </div>
@@ -351,7 +351,7 @@ const StateBlock: React.FC<{
   }
   if (visual === 'update') {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold">
+      <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
         <AlertCircle size={16} className="shrink-0" />
         <span>
           {t('backendLifecycle.updateHint', {
@@ -364,7 +364,7 @@ const StateBlock: React.FC<{
   }
   if (visual === 'error') {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+      <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
         <AlertCircle size={16} className="shrink-0" />
         <span>{t('backendLifecycle.errorHint', { name })}</span>
       </div>
@@ -372,7 +372,7 @@ const StateBlock: React.FC<{
   }
   if (visual === 'ready') {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint">
+      <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint-ink">
         <Check size={16} className="shrink-0" />
         <span>{t('backendLifecycle.readyHint')}</span>
       </div>

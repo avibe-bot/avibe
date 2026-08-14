@@ -318,7 +318,7 @@ export const Dock: React.FC = () => {
             }}
             className="flex items-center gap-2 rounded-xl border border-dashed border-border px-3 py-2.5 text-[12px] font-medium text-muted transition-colors hover:border-cyan/60 hover:text-foreground"
           >
-            <LayoutGrid className="size-4 shrink-0 text-cyan" />
+            <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />
             <span className="whitespace-nowrap">{t('apps.dock.emptyHint')}</span>
           </button>
         )}
@@ -398,7 +398,7 @@ export const Dock: React.FC = () => {
           return (
             <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} width={hasTab ? 268 : 196} itemCount={menuItemCount(item)}>
               <ContextMenuItem
-                icon={<SquarePlus className="size-[15px] text-cyan" />}
+                icon={<SquarePlus className="size-[15px] text-cyan-ink" />}
                 label={t('apps.dock.newWindow')}
                 onClick={() => openNew(item)}
               />

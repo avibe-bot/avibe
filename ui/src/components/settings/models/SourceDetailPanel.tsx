@@ -34,7 +34,7 @@ const ManualModelMenu: React.FC<{
       className="w-40"
       trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="grid size-8 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
     >
-      <button type="button" role="menuitem" className="flex w-full items-center rounded-md px-2.5 py-2 text-left text-[12px] font-semibold text-destructive hover:bg-destructive/[0.08]" onClick={() => { setOpen(false); onRemove(); }}>{t('settings.models.sourceDetail.row.remove')}</button>
+      <button type="button" role="menuitem" className="flex w-full items-center rounded-md px-2.5 py-2 text-left text-[12px] font-semibold text-destructive-ink hover:bg-destructive/[0.08]" onClick={() => { setOpen(false); onRemove(); }}>{t('settings.models.sourceDetail.row.remove')}</button>
     </ResponsiveMenu>
   );
 };
@@ -154,7 +154,7 @@ const TierEditor: React.FC<{
         placeholder={t('settings.models.sourceDetail.tiers.inputHint') as string}
         className="model-hub-source-tier h-7 w-28 rounded-full border-mint/40 px-2.5"
       />
-      {failedNext && <span className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive">
+      {failedNext && <span className="model-hub-source-tier inline-flex items-center gap-1.5 text-destructive-ink">
         {t('settings.models.sourceDetail.fail.tier')}
         <button type="button" disabled={saving} onMouseDown={(event) => event.preventDefault()} onClick={() => void retry()} className="font-semibold underline underline-offset-2 disabled:opacity-50">{t('settings.models.sourceDetail.retry')}</button>
       </span>}
@@ -406,7 +406,7 @@ export const SourceDetailPanel: React.FC<{
       </section>
       {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
       {result && result.added.length === 0 && result.removed.length === 0 && <p className="model-hub-status-mint rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
-      {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive">{t('settings.models.sourceDetail.fail.refetch')}</p>}
+      {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.sourceDetail.fail.refetch')}</p>}
       <section className="model-hub-source-table overflow-hidden border border-border bg-surface">
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
           <span>{t('settings.models.sourceDetail.col.id')}</span><span>{t('settings.models.sourceDetail.col.entry')}</span><span className="flex items-center gap-1">{t('settings.models.sourceDetail.col.tiers')}<Info className="size-3" /></span><span />
@@ -417,7 +417,7 @@ export const SourceDetailPanel: React.FC<{
             <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.origin === 'discovered' ? 'auto' : 'manual'}`)}</span>
             <TierEditor model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} trackMutation={trackMutation} />
             <div className="flex items-center justify-end gap-2">
-              {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
+              {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive-ink">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
                 if (!removeFailure.retryRead) void remove(model);
                 else {
                   setBusy(true);
@@ -444,7 +444,7 @@ export const SourceDetailPanel: React.FC<{
               <Button variant="ghost" size="xs" disabled={busy} onClick={() => setManualDraft(null)}>{t('common.cancel')}</Button>
               <Button size="xs" disabled={busy || !manualDraft.modelId.trim() || source.models.some((model) => model.id === manualDraft.modelId.trim())} onClick={() => void addManualModel()}>{manualDraft.failed ? t('settings.models.sourceDetail.retry') : t('settings.models.sourceDetail.action.addModel')}</Button>
             </div>
-            {manualDraft.failed && <p className="text-[11px] text-destructive md:col-span-4">{t('settings.models.sourceDetail.fail.addModel')}</p>}
+            {manualDraft.failed && <p className="text-[11px] text-destructive-ink md:col-span-4">{t('settings.models.sourceDetail.fail.addModel')}</p>}
           </div>
         )}
         {source.kind === 'api_key' && !manualDraft && (
@@ -473,7 +473,7 @@ export const SourceDetailPanel: React.FC<{
                 <div className="model-hub-guard-list">{guard.hops.map((hop) => <div key={`${hop.backend}:${hop.menu_model}:${hop.position}:${hop.source_id}:${hop.model_id}`} className="model-hub-guard-hop"><span className="min-w-0 flex-1"><strong>{t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}</strong><span>{hop.model_id} · {t('settings.models.guard.hop.position', { n: hop.position })}</span></span></div>)}</div>
               </>}
               <GuardGapList gaps={guard.gaps} />
-              <p className={cn('model-hub-guard-hint', guard.gaps.length > 0 && 'text-destructive')}><Info aria-hidden />{t(`settings.models.guard.hint.${guard.gaps.length > 0 ? 'interrupt' : 'safe'}`)}</p>
+              <p className={cn('model-hub-guard-hint', guard.gaps.length > 0 && 'text-destructive-ink')}><Info aria-hidden />{t(`settings.models.guard.hint.${guard.gaps.length > 0 ? 'interrupt' : 'safe'}`)}</p>
             </div>}
             <footer className="model-hub-guard-foot"><Button variant="outline" className="model-hub-guard-action" onClick={() => setGuard(null)} disabled={busy}>{t('settings.models.guard.cancel')}</Button><Button variant="destructive" className="model-hub-guard-action" onClick={confirmGuard} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(`settings.models.guard.confirm.${guard?.kind === 'remove' ? 'removeModel' : 'refetch'}`)}</Button></footer>
           </DialogPrimitive.Content>

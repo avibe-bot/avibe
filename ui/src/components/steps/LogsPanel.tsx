@@ -20,8 +20,8 @@ type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'ALL';
 
 const LEVEL_PILL: Record<string, string> = {
   DEBUG: 'border-border bg-foreground/[0.04] text-muted',
-  INFO: 'border-cyan/30 bg-cyan/[0.08] text-cyan',
-  WARNING: 'border-gold/30 bg-gold/[0.08] text-gold',
+  INFO: 'border-cyan/30 bg-cyan/[0.08] text-cyan-ink',
+  WARNING: 'border-gold/30 bg-gold/[0.08] text-gold-ink',
   ERROR: 'border-danger/30 bg-danger/[0.08] text-danger',
 };
 
@@ -149,7 +149,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3">
         {!compactHeader && (
           <h2 className="inline-flex items-center gap-2 text-[24px] font-bold tracking-[-0.3px] text-foreground">
-            <FileText className="size-5 text-cyan" />
+            <FileText className="size-5 text-cyan-ink" />
             {t(titleKey)}
           </h2>
         )}
@@ -160,7 +160,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
             className={clsx(
               'inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-[12px] font-medium transition',
               autoRefresh
-                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan'
+                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan-ink'
                 : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
             )}
           >
@@ -219,7 +219,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
               className={clsx(
                 'inline-flex h-7 items-center gap-1 rounded-full border px-3 text-[11px] font-medium transition-colors',
                 selectedSource === source.key
-                  ? 'border-mint/35 bg-mint/[0.08] text-mint shadow-[0_0_12px_-4px_rgba(91,255,160,0.5)]'
+                  ? 'border-mint/35 bg-mint/[0.08] text-mint-ink shadow-[0_0_12px_-4px_rgba(91,255,160,0.5)]'
                   : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
               )}
             >
@@ -241,7 +241,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
             className={clsx(
               'inline-flex h-7 items-center gap-1 rounded-full border px-3 text-[11px] font-medium transition-colors',
               levelFilter === level
-                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan'
+                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan-ink'
                 : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
             )}
           >
@@ -263,7 +263,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
             <button
               type="button"
               onClick={scrollToTop}
-              className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan transition hover:text-cyan/80"
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan-ink transition hover:text-cyan-ink/80"
             >
               <ArrowDown className="size-3" /> {t('logs.jumpToLatest')}
             </button>
@@ -333,7 +333,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
                         log.level === 'ERROR'
                           ? 'text-danger'
                           : log.level === 'WARNING'
-                            ? 'text-gold'
+                            ? 'text-gold-ink'
                             : 'text-foreground'
                       )}
                     >

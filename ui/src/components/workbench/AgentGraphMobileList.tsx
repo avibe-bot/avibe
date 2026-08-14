@@ -57,7 +57,7 @@ export const AgentGraphMobileList: React.FC<AgentGraphMobileListProps> = ({
               onClick={() => onSelectTrigger(trigger.definition_id)}
               title={trigger.name ?? trigger.definition_id}
               className={clsx(
-                'inline-flex w-fit items-center gap-1 rounded-md border border-violet/40 bg-violet-soft px-1.5 py-0.5 text-[10px] font-medium text-violet transition hover:brightness-110',
+                'inline-flex w-fit items-center gap-1 rounded-md border border-violet/40 bg-violet-soft px-1.5 py-0.5 text-[10px] font-medium text-violet-ink transition hover:brightness-110',
                 !trigger.enabled && 'opacity-60',
               )}
             >

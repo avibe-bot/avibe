@@ -164,11 +164,14 @@ assertEqual('system dark background', systemDark.get('--background'), '#080812')
 assertEqual('system light color-scheme', systemLight.get('color-scheme'), 'light');
 assertEqual('system dark color-scheme', systemDark.get('color-scheme'), 'dark');
 
-// An accent doubles as small status text — text-mint / text-gold / text-cyan /
-// text-destructive are used app-wide — and every X / X-foreground pair is a fill
-// plus the label printed on it. Both have to clear WCAG AA for small text, in
-// both themes. Light is the fragile side: the dark palette's vivid accents read
-// at 2.5-4.2:1 on a light surface, which is what this guard exists to catch.
+// Each accent is a fill (--X, painted as a background or hairline) and an ink
+// (--X-ink, printed as small status text app-wide). They are separate tokens
+// because on a light surface they pull in opposite directions: the fill has to
+// stay vivid to read as the brand, while the ink has to go deep to stay legible.
+// Both sides are guarded, but against different backdrops — an ink against the
+// neutral surfaces it sits on, a fill against the --X-foreground label printed
+// on it. Light is the fragile side: the dark palette's vivid accents read at
+// 2.2-4.2:1 as text on a light surface, which is what this guard exists to catch.
 const AA_SMALL_TEXT = 4.5;
 
 function parseColor(value) {
@@ -225,19 +228,34 @@ function assertContrast(name, tokens, inkProp, surfaceProp) {
   }
 }
 
-const INK_TOKENS = ['--foreground', '--muted', '--mint', '--cyan', '--violet', '--gold', '--pink', '--destructive'];
+// Every accent painted as a fill also gets used as text somewhere, so each one
+// owes the palette an ink. Listing the fills (rather than deriving the pairs from
+// whatever inks happen to exist) is what makes a new accent shipped without an
+// ink a failure instead of a silent gap.
+const ACCENT_FILLS = ['--primary', '--accent', '--destructive', '--mint', '--cyan', '--violet', '--gold', '--pink'];
+const NEUTRAL_INKS = ['--foreground', '--muted'];
 const INK_SURFACES = ['--card', '--background', '--surface-3'];
 
 for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
-  for (const ink of INK_TOKENS) {
+  for (const fill of ACCENT_FILLS) {
+    assertEqual(`${theme} ${fill} is defined`, tokens.has(fill), true);
+    assertEqual(`${theme} ${fill} declares an ink`, tokens.has(`${fill}-ink`), true);
+  }
+
+  // Inks are read as small text on a bare surface, so every one of them clears AA
+  // against the darkest surface the theme owns. Derived from the token map rather
+  // than from ACCENT_FILLS so an ink added on its own is still covered.
+  const inks = [...NEUTRAL_INKS, ...[...tokens.keys()].filter((prop) => prop.endsWith('-ink'))];
+  for (const ink of inks) {
     assertEqual(`${theme} ${ink} is defined`, tokens.has(ink), true);
     for (const surface of INK_SURFACES) {
       assertContrast(`${theme} ink`, tokens, ink, surface);
     }
   }
 
-  // Every fill that declares its own foreground is checked against it, so a
-  // deepened or lightened fill can never silently strand its label.
+  // Fills are read through the label printed on them, so every fill that declares
+  // its own foreground is checked against it. A fill can then stay as vivid as the
+  // design asks without ever silently stranding that label.
   const pairs = [...tokens.keys()]
     .filter((prop) => prop.endsWith('-foreground') && tokens.has(prop.slice(0, -'-foreground'.length)))
     .map((prop) => [prop, prop.slice(0, -'-foreground'.length)]);

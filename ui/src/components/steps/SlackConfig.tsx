@@ -156,7 +156,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
             <StepHeader
               step={1}
               title={t('slackConfig.step1Title')}
-              icon={<Plus size={16} className="text-cyan" />}
+              icon={<Plus size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[1]}
               onToggle={() => toggleStep(1)}
             />
@@ -188,7 +188,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
                 </div>
                 {manifest && (
                   <details className="group">
-                    <summary className="flex cursor-pointer items-center gap-1 text-[12px] text-cyan hover:text-cyan/80">
+                    <summary className="flex cursor-pointer items-center gap-1 text-[12px] text-cyan-ink hover:text-cyan-ink/80">
                       <ChevronDown size={14} className="transition-transform group-open:rotate-180" />
                       {t('slackConfig.viewManifest')}
                     </summary>
@@ -203,7 +203,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
                     {t('common.loading')}
                   </div>
                 )}
-                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan">
+                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan-ink">
                   <strong>{t('slackConfig.tip')}:</strong> {t('slackConfig.step1Tip')}
                 </div>
               </div>
@@ -215,7 +215,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
             <StepHeader
               step={2}
               title={t('slackConfig.step2Title')}
-              icon={<Shield size={16} className="text-cyan" />}
+              icon={<Shield size={16} className="text-cyan-ink" />}
               completed={botToken.startsWith('xoxb-')}
               expanded={expandedSteps[2]}
               onToggle={() => toggleStep(2)}
@@ -231,7 +231,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
                 </ol>
                 <div className="space-y-2 pt-1">
                   <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                    <Key size={14} className="text-cyan" /> {t('slackConfig.botToken')}
+                    <Key size={14} className="text-cyan-ink" /> {t('slackConfig.botToken')}
                   </label>
                   <Input
                     type="password"
@@ -254,7 +254,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
             <StepHeader
               step={3}
               title={t('slackConfig.step3Title')}
-              icon={<Lock size={16} className="text-cyan" />}
+              icon={<Lock size={16} className="text-cyan-ink" />}
               completed={appToken.startsWith('xapp-')}
               expanded={expandedSteps[3]}
               onToggle={() => toggleStep(3)}
@@ -271,7 +271,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
                 </ol>
                 <div className="space-y-2 pt-1">
                   <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                    <Key size={14} className="text-cyan" /> {t('slackConfig.appToken')}
+                    <Key size={14} className="text-cyan-ink" /> {t('slackConfig.appToken')}
                   </label>
                   <Input
                     type="password"
@@ -285,7 +285,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
                     <code className="rounded bg-foreground/[0.06] px-1.5 py-0.5 text-foreground">xapp-</code>
                   </p>
                 </div>
-                <div className="rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-[12px] leading-[1.55] text-gold">
+                <div className="rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-[12px] leading-[1.55] text-gold-ink">
                   <strong>{t('slackConfig.important')}:</strong> {t('slackConfig.step3Warning')}
                 </div>
               </div>
@@ -297,7 +297,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
             <StepHeader
               step={4}
               title={t('slackConfig.step4Title')}
-              icon={<Hash size={16} className="text-cyan" />}
+              icon={<Hash size={16} className="text-cyan-ink" />}
               completed={!!authResult?.ok}
               expanded={expandedSteps[4]}
               onToggle={() => toggleStep(4)}
@@ -325,7 +325,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
                       className={clsx(
                         'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium',
                         authResult.ok
-                          ? 'border-mint/30 bg-mint/[0.08] text-mint'
+                          ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
                           : 'border-danger/30 bg-danger/10 text-danger'
                       )}
                     >
@@ -342,7 +342,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
                       <li>{t('slackConfig.step4Item2')}</li>
                       <li>{t('slackConfig.step4Item3')}</li>
                     </ol>
-                    <div className="rounded-lg border border-mint/30 bg-mint/[0.08] px-3 py-2 text-[12px] leading-[1.55] text-mint">
+                    <div className="rounded-lg border border-mint/30 bg-mint/[0.08] px-3 py-2 text-[12px] leading-[1.55] text-mint-ink">
                       <strong>{t('slackConfig.tip')}:</strong> {t('slackConfig.step4Tip')}
                     </div>
                   </div>
@@ -382,7 +382,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
             </p>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
-            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
+            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedCount} / 4
             </span>
             <div className="flex gap-1">

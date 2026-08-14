@@ -343,7 +343,7 @@ export const MemorySettingsPanel: React.FC<{
           <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.enableLabel')}</span>
           <span className="text-[11.5px] leading-snug text-muted">{t('memory.settings.enableHint')}</span>
           {!dependencyReady && !enabledDraft ? (
-            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11.5px] text-gold">
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11.5px] text-gold-ink">
               <ShieldAlert className="size-3.5 shrink-0" />
               {t('memory.settings.dependencyNotReady')}
               <Button asChild variant="secondary" size="xs">
@@ -387,7 +387,7 @@ export const MemorySettingsPanel: React.FC<{
       />
 
       {error ? (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
+        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       ) : null}
 
       {maintenanceError ? (

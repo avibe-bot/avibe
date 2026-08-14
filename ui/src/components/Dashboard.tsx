@@ -107,7 +107,7 @@ const CloudStatCard: React.FC<{
         href={publicUrl}
         target="_blank"
         rel="noreferrer"
-        className="pointer-events-auto relative z-10 w-fit text-[28px] font-bold leading-tight tracking-[-0.4px] text-foreground transition hover:text-mint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45"
+        className="pointer-events-auto relative z-10 w-fit text-[28px] font-bold leading-tight tracking-[-0.4px] text-foreground transition hover:text-mint-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/45"
       >
         {value}
       </a>
@@ -301,7 +301,7 @@ export const Dashboard: React.FC = () => {
             )}
           >
             <Zap
-              className={clsx('size-5', isRunning ? 'text-mint' : 'text-muted')}
+              className={clsx('size-5', isRunning ? 'text-mint-ink' : 'text-muted')}
               strokeWidth={2.25}
             />
           </div>
@@ -311,7 +311,7 @@ export const Dashboard: React.FC = () => {
                 className={clsx(
                   'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em]',
                   isRunning
-                    ? 'border-mint/30 bg-mint/[0.08] text-mint'
+                    ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
                     : 'border-border bg-foreground/[0.04] text-muted'
                 )}
               >
@@ -324,7 +324,7 @@ export const Dashboard: React.FC = () => {
                 {isRunning ? t('dashboard.runningTitle') : t('dashboard.stoppedTitle')}
               </span>
               {!doctor?.ok && (
-                <span className="inline-flex items-center rounded-full border border-gold/30 bg-gold/10 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-gold">
+                <span className="inline-flex items-center rounded-full border border-gold/30 bg-gold/10 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-gold-ink">
                   {t('dashboard.levelAttention')}
                 </span>
               )}
@@ -474,7 +474,7 @@ export const Dashboard: React.FC = () => {
                     className={clsx(
                       'inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium',
                       platform.connected
-                        ? 'border-mint/30 bg-mint/[0.08] text-mint'
+                        ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
                         : 'border-border bg-foreground/[0.04] text-muted'
                     )}
                   >
@@ -482,7 +482,7 @@ export const Dashboard: React.FC = () => {
                   </span>
                   <Link
                     to={platform.actionHref}
-                    className="inline-flex items-center gap-1 text-[12px] font-medium text-foreground transition hover:text-mint"
+                    className="inline-flex items-center gap-1 text-[12px] font-medium text-foreground transition hover:text-mint-ink"
                   >
                     {platform.actionLabel}
                     <ArrowRight className="size-3.5" strokeWidth={2.25} />
@@ -503,7 +503,7 @@ export const Dashboard: React.FC = () => {
             </div>
             <Link
               to="/admin/logs"
-              className="inline-flex items-center gap-1 text-[12px] font-medium text-foreground transition hover:text-mint"
+              className="inline-flex items-center gap-1 text-[12px] font-medium text-foreground transition hover:text-mint-ink"
             >
               {t('common.viewLogs')}
               <ArrowRight className="size-3.5" strokeWidth={2.25} />
@@ -520,7 +520,7 @@ export const Dashboard: React.FC = () => {
                   key={`${entry.timestamp}-${index}`}
                   className="flex items-start gap-3 px-6 py-3.5"
                 >
-                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.08] text-cyan">
+                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.08] text-cyan-ink">
                     <Activity className="size-3.5" strokeWidth={2.25} />
                   </div>
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">

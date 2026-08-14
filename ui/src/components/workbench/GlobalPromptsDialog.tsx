@@ -193,7 +193,7 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
               <div className="flex flex-col gap-0.5 border-b border-border bg-surface-2 px-5 py-2">
                 <span className="font-mono text-[11px] text-foreground">{activeMeta.path}</span>
                 {activeMeta.readError ? (
-                  <span className="text-[11px] leading-relaxed text-gold">{t('globalPrompts.readError')}</span>
+                  <span className="text-[11px] leading-relaxed text-gold-ink">{t('globalPrompts.readError')}</span>
                 ) : (
                   <span className="text-[11px] leading-relaxed text-muted">
                     {t('globalPrompts.tipEffect', { backend: BACKEND_LABEL[active] })}

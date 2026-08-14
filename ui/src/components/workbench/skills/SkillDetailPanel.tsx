@@ -53,14 +53,14 @@ export function SkillDetailPanel({
   return (
     <div className="flex flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
       <div className="flex items-start gap-3">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-mint/40 bg-mint-soft text-mint shadow-[0_0_18px_-6px_rgba(91,255,160,0.5)]">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-mint/40 bg-mint-soft text-mint-ink shadow-[0_0_18px_-6px_rgba(91,255,160,0.5)]">
           <WandSparkles className="size-5" />
         </span>
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-2">
             <span className="truncate text-[16px] font-bold text-foreground">{skill.name}</span>
             {updateAvailable ? (
-              <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gold/40 bg-gold/[0.12] px-1.5 font-mono text-[9px] font-bold uppercase text-gold">
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gold/40 bg-gold/[0.12] px-1.5 font-mono text-[9px] font-bold uppercase text-gold-ink">
                 <ArrowUp className="size-2.5" />
                 {t('skills.updateBadge')}
               </span>

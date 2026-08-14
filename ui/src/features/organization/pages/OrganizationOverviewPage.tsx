@@ -236,7 +236,7 @@ export function OrganizationOverviewPage() {
                     to={instanceDiagnosticsPath(instance, canManage)}
                     className="flex items-center gap-3 border-b border-border px-5 py-4 last:border-b-0 hover:bg-foreground/[0.025]"
                   >
-                    <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 font-bold text-mint">
+                    <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 font-bold text-mint-ink">
                       {instance.slug.charAt(0).toUpperCase()}
                     </div>
                     <div className="min-w-0 flex-1">
@@ -254,10 +254,10 @@ export function OrganizationOverviewPage() {
             <Card>
               <CardHeader className="flex-row items-center justify-between">
                 <CardTitle className="flex items-center gap-2">
-                  <AlertTriangle className="size-4 text-gold" />
+                  <AlertTriangle className="size-4 text-gold-ink" />
                   {t('organization.overview.needsAttention')}
                 </CardTitle>
-                <span className="rounded-full bg-gold/15 px-2 py-0.5 text-[11px] font-semibold text-gold">{attention.length}</span>
+                <span className="rounded-full bg-gold/15 px-2 py-0.5 text-[11px] font-semibold text-gold-ink">{attention.length}</span>
               </CardHeader>
               <CardContent className="p-0">
                 {attention.length === 0 ? (

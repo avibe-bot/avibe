@@ -112,7 +112,7 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
         <div className="rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">{t('memory.search.truncated')}</div>
       ) : null}
       {error ? (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
+        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       ) : !searched ? null : !items || items.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">
           {t('memory.search.empty')}

@@ -95,7 +95,7 @@ export function Combobox({
           "flex h-9 flex-1 items-center gap-2 border-mint/50 px-2.5",
         )}
       >
-        <Plus className="size-3.5 shrink-0 text-mint" />
+        <Plus className="size-3.5 shrink-0 text-mint-ink" />
         <span className="truncate text-sm text-foreground">{typed}</span>
       </span>
       <Button type="button" size="sm" onClick={() => commitCreate(typed)}>
@@ -175,15 +175,15 @@ export function Combobox({
                       key={option.value}
                       value={option.value}
                       onSelect={() => commitCreate(option.value)}
-                      className={cn(active && withFolderIcon && "bg-mint-soft text-mint data-[selected=true]:bg-mint-soft")}
+                      className={cn(active && withFolderIcon && "bg-mint-soft text-mint-ink data-[selected=true]:bg-mint-soft")}
                     >
                       {withFolderIcon ? (
                         <>
-                          <Folder className={cn("mr-2 h-4 w-4 shrink-0", active ? "text-mint" : "text-muted")} />
+                          <Folder className={cn("mr-2 h-4 w-4 shrink-0", active ? "text-mint-ink" : "text-muted")} />
                           <span className={cn("flex-1 truncate", active ? "font-semibold text-foreground" : "text-foreground")}>
                             {option.label}
                           </span>
-                          <Check className={cn("ml-2 h-4 w-4 text-mint", active ? "opacity-100" : "opacity-0")} />
+                          <Check className={cn("ml-2 h-4 w-4 text-mint-ink", active ? "opacity-100" : "opacity-0")} />
                         </>
                       ) : (
                         <>

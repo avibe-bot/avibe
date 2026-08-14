@@ -431,7 +431,7 @@ export const FileEditorPane: React.FC<{
       )}
 
       {error && (
-        <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">
+        <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive-ink">
           {error}
         </div>
       )}

@@ -41,12 +41,12 @@ import { memoryErrorMessage } from '@/lib/memoryRead';
 type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
 
 const DEP_META: Record<string, DepMeta> = {
-  askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint' },
-  avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold' },
-  'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan' },
-  'memory-runtime': { icon: Brain, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
+  askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint-ink' },
+  avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold-ink' },
+  'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan-ink' },
+  'memory-runtime': { icon: Brain, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
   tmux: { icon: SquareTerminal, tileCls: 'bg-surface-3', iconCls: 'text-foreground' },
-  node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
+  node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
 };
 
 const MEMORY_ROOT_COPY = {
@@ -181,7 +181,7 @@ export const SettingsDependenciesPage: React.FC = () => {
       ) : (
         <div className="flex flex-col gap-3.5">
           <div className="flex items-center gap-3 rounded-xl border border-mint/30 bg-mint/[0.08] px-5 py-3.5">
-            <ShieldCheck className="size-4 shrink-0 text-mint" />
+            <ShieldCheck className="size-4 shrink-0 text-mint-ink" />
             <span className="text-[13px] leading-snug text-foreground">{t('settings.dependencies.autoBanner')}</span>
           </div>
 

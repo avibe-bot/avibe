@@ -80,7 +80,7 @@ export const SettingsPageShell: React.FC<SettingsPageShellProps> = ({
                       : 'border-transparent font-medium text-muted hover:border-border-strong hover:text-foreground'
                   )}
                 >
-                  <Icon className={clsx('size-3.5', active ? 'text-mint' : 'text-muted')} />
+                  <Icon className={clsx('size-3.5', active ? 'text-mint-ink' : 'text-muted')} />
                   {t(tab.label)}
                 </Link>
               );

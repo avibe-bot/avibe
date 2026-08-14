@@ -340,7 +340,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                     )}
                   >
                     <span className="truncate">{label}</span>
-                    {active ? <Check className="size-3 text-mint" /> : <Plus className="size-3" />}
+                    {active ? <Check className="size-3 text-mint-ink" /> : <Plus className="size-3" />}
                   </button>
                 );
               })}
@@ -387,7 +387,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                       className={clsx(
                         'h-6 rounded-md border px-2.5 text-[10px] font-medium transition-colors',
                         activeCredentialPlatform === platform
-                          ? 'border-mint/40 bg-mint-soft text-mint'
+                          ? 'border-mint/40 bg-mint-soft text-mint-ink'
                           : 'border-border bg-surface-3 text-muted hover:border-border-strong'
                       )}
                     >
@@ -471,7 +471,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                           className={clsx(
                             'mt-2 rounded-md border px-2.5 py-1.5 text-[10px]',
                             currentValidationState === 'success'
-                              ? 'border-mint/30 bg-mint-soft text-mint'
+                              ? 'border-mint/30 bg-mint-soft text-mint-ink'
                               : 'border-danger/30 bg-danger/10 text-danger'
                           )}
                         >
@@ -522,12 +522,12 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
               <p className="text-[13px] leading-[1.5] text-muted">{t('platform.workbenchDesc')}</p>
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-cyan/30 bg-cyan/[0.08] px-3 py-2.5">
-              <Smartphone className="size-4 shrink-0 text-cyan" />
+              <Smartphone className="size-4 shrink-0 text-cyan-ink" />
               <span className="text-[12px] leading-[1.4] text-foreground">{t('platform.workbenchPwa')}</span>
             </div>
             <div className="mt-auto flex items-center gap-2">
-              <CircleCheckBig className="size-4 shrink-0 text-mint" />
-              <span className="text-[12px] font-semibold text-mint">{t('platform.workbenchAlwaysOn')}</span>
+              <CircleCheckBig className="size-4 shrink-0 text-mint-ink" />
+              <span className="text-[12px] font-semibold text-mint-ink">{t('platform.workbenchAlwaysOn')}</span>
             </div>
           </div>
 
@@ -581,7 +581,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                     {/* Selection indicator on the phone row only; on sm+ the
                         mint border carries the selected state (design.pen). */}
                     {active ? (
-                      <CircleCheckBig className="ml-auto size-5 shrink-0 text-mint sm:hidden" strokeWidth={2.25} />
+                      <CircleCheckBig className="ml-auto size-5 shrink-0 text-mint-ink sm:hidden" strokeWidth={2.25} />
                     ) : (
                       <Circle className="ml-auto size-5 shrink-0 text-muted/40 sm:hidden" strokeWidth={2} />
                     )}

@@ -13,7 +13,7 @@ describe('SessionPinIndicator', () => {
 
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Pinned"');
-    expect(html).toContain('text-cyan');
+    expect(html).toContain('text-cyan-ink');
     expect(html).not.toContain('<button');
   });
 });

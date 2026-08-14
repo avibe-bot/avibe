@@ -113,7 +113,7 @@ export const RecentSwitchesCard: React.FC<{
         )}
       </div>
       {((eventsRead.kind === 'degraded' && eventsRead.cause === 'read_failed') || eventsRead.kind === 'unread') && (
-        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 text-[12px] text-destructive sm:px-5">
+        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 text-[12px] text-destructive-ink sm:px-5">
           <span>{t('settings.models.toast.refreshFailed')}</span>
           <button type="button" onClick={() => void onRetry?.()} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>
         </div>

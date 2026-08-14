@@ -778,7 +778,7 @@ export const VaultSecretForm: React.FC<{
           />
           {selectedFile ? (
             <div className="flex items-center gap-2.5">
-              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-mint/40 bg-mint-soft text-mint">
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-mint/40 bg-mint-soft text-mint-ink">
                 <FileText className="size-4" />
               </span>
               <div className="flex min-w-0 flex-1 flex-col">
@@ -899,9 +899,9 @@ export const VaultSecretForm: React.FC<{
               )}
             >
               <span className="flex items-center gap-2">
-                <Icon className={cn('size-4', selected ? 'text-mint' : 'text-muted')} />
+                <Icon className={cn('size-4', selected ? 'text-mint-ink' : 'text-muted')} />
                 <span className="flex-1 text-[13.5px] font-semibold text-foreground">{title}</span>
-                {selected && <Check className="size-4 text-mint" />}
+                {selected && <Check className="size-4 text-mint-ink" />}
               </span>
               <span className="text-[11.5px] leading-snug text-muted-foreground">{desc}</span>
             </button>
@@ -952,7 +952,7 @@ export const VaultSecretForm: React.FC<{
         </div>
       )}
       {error && (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
           {error}
         </div>
       )}
@@ -1031,7 +1031,7 @@ export const VaultSecretForm: React.FC<{
         {!isKeypair && advancedSection}
 
         {error && (
-          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">{error}</div>
         )}
 
         <div className="mt-1 flex justify-end gap-2">
@@ -1056,7 +1056,7 @@ export const VaultSecretForm: React.FC<{
       <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
         {/* Name highlight — the secret the agent is waiting on (design.pen `F4N19`). */}
         <div className="flex items-center gap-3 rounded-xl bg-accent/15 p-3.5">
-          <Asterisk className="size-[18px] shrink-0 text-accent" />
+          <Asterisk className="size-[18px] shrink-0 text-accent-ink" />
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">{t('vaults.dialog.nameUpper')}</span>
             <span className="whitespace-normal break-all font-mono text-[15px] font-semibold text-foreground">{secretName}</span>
@@ -1254,7 +1254,7 @@ export const VaultSecretForm: React.FC<{
             </div>
           )}
 
-          {signingError && <span className="text-xs text-destructive">{signingError}</span>}
+          {signingError && <span className="text-xs text-destructive-ink">{signingError}</span>}
 
           {!p2Ready && (
             <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
@@ -1291,7 +1291,7 @@ export const VaultSecretForm: React.FC<{
               <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyProtectedBornHint')}</span>
             </div>
           )}
-          {keypairError && <span className="text-xs text-destructive">{keypairError}</span>}
+          {keypairError && <span className="text-xs text-destructive-ink">{keypairError}</span>}
         </div>
       )}
 

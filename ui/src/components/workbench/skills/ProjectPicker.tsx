@@ -24,7 +24,7 @@ export function ProjectPicker({ projects, value, onChange }: ProjectPickerProps)
           type="button"
           className="flex items-center gap-1.5 rounded-md border border-mint/40 bg-surface px-3 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
         >
-          <FolderGit2 className="size-3.5 text-cyan" />
+          <FolderGit2 className="size-3.5 text-cyan-ink" />
           <span className="max-w-[160px] truncate">{active?.display_name ?? t('skills.scopeProject')}</span>
           <ChevronDown className="size-3 text-muted" />
         </button>
@@ -48,9 +48,9 @@ export function ProjectPicker({ projects, value, onChange }: ProjectPickerProps)
                 on ? 'bg-mint-soft text-foreground' : 'text-foreground hover:bg-foreground/[0.04]',
               )}
             >
-              <Folder className={clsx('size-3.5 shrink-0', on ? 'text-mint' : 'text-muted')} />
+              <Folder className={clsx('size-3.5 shrink-0', on ? 'text-mint-ink' : 'text-muted')} />
               <span className="flex-1 truncate">{project.display_name}</span>
-              {on ? <Check className="size-3.5 shrink-0 text-mint" /> : null}
+              {on ? <Check className="size-3.5 shrink-0 text-mint-ink" /> : null}
             </button>
           );
         })}

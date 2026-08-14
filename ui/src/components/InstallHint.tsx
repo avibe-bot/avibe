@@ -75,7 +75,7 @@ export const InstallHint: React.FC = () => {
               type="button"
               variant="outline"
               size="sm"
-              className="h-7 gap-1 rounded-full border-gold/40 bg-gold/[0.12] px-2.5 text-[11px] font-semibold text-gold hover:bg-gold/20 hover:text-gold"
+              className="h-7 gap-1 rounded-full border-gold/40 bg-gold/[0.12] px-2.5 text-[11px] font-semibold text-gold-ink hover:bg-gold/20 hover:text-gold-ink"
             >
               <Sparkles className="size-3" />
               <span>{t('installHint.cta')}</span>
@@ -87,7 +87,7 @@ export const InstallHint: React.FC = () => {
             size="icon"
             onClick={collapse}
             aria-label={t('installHint.dismiss')}
-            className="size-6 shrink-0 text-gold/70 hover:bg-transparent hover:text-gold"
+            className="size-6 shrink-0 text-gold-ink/70 hover:bg-transparent hover:text-gold-ink"
           >
             <X className="size-3.5" />
           </Button>
@@ -97,7 +97,7 @@ export const InstallHint: React.FC = () => {
       <PopoverContent align="end" sideOffset={8} className="w-[18rem] border-gold/30">
         <div className="flex flex-col gap-2.5">
           <div className="flex items-center gap-2">
-            <span className="grid size-7 shrink-0 place-items-center rounded-lg border border-gold/40 bg-gold/[0.12] text-gold">
+            <span className="grid size-7 shrink-0 place-items-center rounded-lg border border-gold/40 bg-gold/[0.12] text-gold-ink">
               <Sparkles className="size-3.5" />
             </span>
             <div className="text-[13px] font-semibold text-foreground">{t('installHint.title')}</div>
@@ -105,11 +105,11 @@ export const InstallHint: React.FC = () => {
           <p className="text-[12px] leading-relaxed text-muted">{t('installHint.body')}</p>
           <ol className="flex flex-col gap-1.5 rounded-lg border border-border bg-foreground/[0.02] p-2.5 text-[12px] text-foreground">
             <li className="flex items-center gap-2">
-              <Share className="size-4 shrink-0 text-cyan" />
+              <Share className="size-4 shrink-0 text-cyan-ink" />
               <span>{t('installHint.step1')}</span>
             </li>
             <li className="flex items-center gap-2">
-              <Plus className="size-4 shrink-0 text-cyan" />
+              <Plus className="size-4 shrink-0 text-cyan-ink" />
               <span>{t('installHint.step2')}</span>
             </li>
           </ol>
