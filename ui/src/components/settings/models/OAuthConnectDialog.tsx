@@ -367,7 +367,7 @@ export const OAuthConnectDialog: React.FC<{
       // the guard above already makes that poll harmless, but there is no reason
       // to let it fire.
       if (isDone(step.action)) stop();
-      if (isDone(step.action)) {
+      if (terminalArrivalMovedRows(step.action)) {
         disposeProviderTab(
           step.view.failureClass ?? (step.action === 'succeed' ? 'success' : undefined),
         );
@@ -660,12 +660,12 @@ export const OAuthConnectDialog: React.FC<{
       // ignored. `failureLanded` is the part that knows.
       const failure = apiFailure(err);
       const failureClass = classifyOAuthFailure(failure);
-      disposeProviderTab(failureClass);
       const step = authority.transition({
         kind: 'error',
         errorKey: oauthFailureKey(failure?.code, journey),
         failureClass,
       });
+      if (failureLanded(step.action)) disposeProviderTab(failureClass);
       rowsBehindAreStale(failure, failureLanded(step.action));
     } finally {
       if (isCurrent()) setSubmitting(false);

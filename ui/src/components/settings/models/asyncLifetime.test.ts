@@ -983,7 +983,7 @@ describe('failureLanded — whose account of the rows is the one on screen', () 
     for (const call of carrying) expect(call).toMatch(/failureLanded\(step\.action\)/);
     // And the refetch is still owed on the ignored path: the gate is the second
     // argument, never a reason to skip the call.
-    expect(dialog).not.toMatch(/if \(failureLanded\(/);
+    expect(dialog).not.toMatch(/if \(failureLanded\([^)]*\)\)\s*rowsBehindAreStale/);
   });
 
   it('makes silence the default, and lets exactly one arrival opt out of it', () => {

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
-import { ApiCallError, modelsApi } from './modelsApi';
+import { ApiCallError, modelsApi, type OAuthResult } from './modelsApi';
 import { disposeProviderTab } from './providerTab';
 import {
   initialSubscriptionChannel,
@@ -72,6 +72,16 @@ const providerTab = () => {
     tab.closed = true;
   });
   return tab;
+};
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 };
 
 describe('add-subscription channel choice', () => {
@@ -231,6 +241,70 @@ describe('OAuth failure class behavior', () => {
     expect(status).toHaveBeenCalledWith('oaf_timeout');
     expect(reauth).toHaveBeenCalledTimes(1);
     expect(providerTab.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      label: 'failure',
+      finish: (pending: ReturnType<typeof deferred<OAuthResult>>, _flow: OAuthResult['flow']) =>
+        pending.reject(new ApiCallError('engine_down')),
+    },
+    {
+      label: 'terminal response',
+      finish: (pending: ReturnType<typeof deferred<OAuthResult>>, flow: OAuthResult['flow']) =>
+        pending.resolve({ flow: { ...flow, state: 'failed' }, created: null, repaired: null }),
+    },
+  ])('keeps Retry\'s tab when the timed-out flow ignores a late submit $label', async ({ finish }) => {
+    vi.useFakeTimers();
+    const tab = providerTab();
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    const expiredFlow: OAuthResult['flow'] = {
+      flow_id: 'oaf_late_submit',
+      intent: 'reauth',
+      vendor: 'anthropic',
+      channel: 'native_cli',
+      state: 'awaiting_action',
+      presentation: { expects: 'paste_code' },
+      expires_at: new Date(Date.now() - 61_000).toISOString(),
+    };
+    const replacementUrl = 'https://provider.example/late-submit-retry';
+    const replacementFlow: OAuthResult['flow'] = {
+      ...expiredFlow,
+      flow_id: 'oaf_late_submit_replacement',
+      presentation: { expects: 'paste_code', auth_url: replacementUrl },
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    const reauth = vi.spyOn(modelsApi, 'reauthSource')
+      .mockResolvedValueOnce(expiredFlow)
+      .mockResolvedValueOnce(replacementFlow);
+    const submit = deferred<OAuthResult>();
+    vi.spyOn(modelsApi, 'submitOAuth').mockReturnValue(submit.promise);
+    const reread = deferred<OAuthResult>();
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockReturnValue(reread.promise);
+    vi.spyOn(modelsApi, 'cancelOAuth').mockResolvedValue(undefined);
+    renderDialog({ reauth: subscription() });
+
+    await act(async () => Promise.resolve());
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'auth-code' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Submit$|^提交$/i }));
+    expect(modelsApi.submitOAuth).toHaveBeenCalledWith(expiredFlow.flow_id, 'auth-code');
+    await act(async () => vi.advanceTimersByTime(2_000));
+
+    fireEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+    expect(modelsApi.getOAuthStatus).toHaveBeenCalledWith(expiredFlow.flow_id);
+    await act(async () => {
+      finish(submit, expiredFlow);
+      await Promise.resolve();
+    });
+    expect(tab.close).not.toHaveBeenCalled();
+
+    await act(async () => {
+      reread.resolve({ flow: expiredFlow, created: null, repaired: null });
+      await Promise.resolve();
+    });
+    expect(reauth).toHaveBeenCalledTimes(2);
+    expect(tab.location.href).toBe(replacementUrl);
+    expect(tab.close).not.toHaveBeenCalled();
   });
 
   it('ignores a held-flow reread rejection after its journey is retired', async () => {
