@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.v2_config import UiConfig, V2Config
+from config.v2_config import UiConfig, V2Config, VibeCloudRemoteAccessConfig
 from core.audio_asr import AudioAsrService
 from vibe import api, remote_access
 
@@ -1156,6 +1156,60 @@ def test_non_owner_config_pairing_requires_runtime_ready_cloud(tmp_path, monkeyp
 
     assert api.non_owner_config_payload(config)["remote_access"] == {"vibe_cloud": {"paired": False}}
     assert AudioAsrService(config)._runtime_config() is None
+
+
+def test_malformed_cloud_section_disables_pairing_instead_of_failing_reads(tmp_path, monkeypatch):
+    """A cloud section holding non-strings degrades; it never breaks a config read.
+
+    Seeded over every field the dataclass declares as ``str`` rather than over
+    the three the pairing predicate reads, because the section is copied
+    verbatim out of the stored config and any of them can reach code that does
+    string work. Seeding is complete by construction, so a field added later
+    is covered without editing this test. Pairing readiness is now consulted
+    on every ``/api/config`` response, which is what makes this the difference
+    between a disabled cloud feature and a 500 on the Settings page.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    def _load(vibe_cloud: dict) -> V2Config:
+        payload = _full_config_payload()
+        payload["remote_access"] = {"provider": "vibe_cloud", "vibe_cloud": vibe_cloud}
+        return V2Config.from_payload(payload)
+
+    def _assert_degrades(config: V2Config) -> None:
+        assert config.remote_access.vibe_cloud.is_runtime_paired() is False
+        assert AudioAsrService(config)._runtime_config() is None
+        assert api.non_owner_config_payload(config)["remote_access"] == {
+            "vibe_cloud": {"paired": False}
+        }
+        assert api.client_config_payload(config)["remote_access"]["vibe_cloud"]["paired"] is False
+
+    # One credential of the wrong type: the shape that loads today and would
+    # otherwise raise ``AttributeError`` the moment anything reads the config.
+    _assert_degrades(
+        _load(
+            {
+                "enabled": True,
+                "backend_url": "https://avibe.bot",
+                "instance_id": 12345,
+                "instance_secret": "instance-secret",
+            }
+        )
+    )
+
+    string_fields = [
+        info.name for info in fields(VibeCloudRemoteAccessConfig) if info.type in (str, "str")
+    ]
+    assert string_fields
+    config = _load({"enabled": True, **{name: 12345 for name in string_fields}})
+
+    left = [
+        name
+        for name in string_fields
+        if not isinstance(getattr(config.remote_access.vibe_cloud, name), str)
+    ]
+    assert left == []
+    _assert_degrades(config)
 
 
 def test_editor_config_write_payload_keeps_messaging_fields_only():

@@ -2477,6 +2477,36 @@ class VibeCloudRemoteAccessConfig:
     edge_bind_address: str = ""
     dev_login_hint: str = ""
 
+    def __post_init__(self) -> None:
+        """Keep every field declared ``str`` a string, whatever was persisted.
+
+        ``from_payload`` copies this section's free-form fields verbatim, so a
+        hand-edited, migrated, or recovered config can hold a number where a
+        URL or credential belongs. Stated over the declared fields rather than
+        over the three the pairing predicate happens to read: any of them can
+        reach code that does string work, and ``is_runtime_paired`` is now
+        consulted on every ``/api/config`` response, which would turn one
+        malformed field into a 500 on every configuration read.
+
+        A non-string is not a usable value, so it is dropped to ``""`` and
+        logged: the cloud section degrades to "not paired" rather than being
+        repaired with a value the operator never stored. Enforced here rather
+        than in ``from_payload`` so every construction path holds the
+        invariant that the field types already claim.
+        """
+        dropped = [
+            info.name
+            for info in fields(self)
+            if info.type in (str, "str") and not isinstance(getattr(self, info.name), str)
+        ]
+        for name in dropped:
+            setattr(self, name, "")
+        if dropped:
+            logger.warning(
+                "Ignoring non-string remote_access.vibe_cloud fields: %s",
+                ", ".join(sorted(dropped)),
+            )
+
     def runtime_credentials(self) -> tuple[str, str, str] | None:
         """Return ``(backend_url, instance_id, instance_secret)``, or ``None``.
 
