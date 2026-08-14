@@ -4,12 +4,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
 from core.handlers.model_hub.adapter import OAuthFlowState
 from core.handlers.model_hub.events import BoundedEventLog
-from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
+from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter, _account_label, _signed_in
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubService, UnavailableEngineAdapter
@@ -43,6 +43,7 @@ class FakeAgentAuthService:
 
     def __init__(self):
         self.flows: dict[str, SimpleNamespace] = {}
+        self.auth_status: dict[str, Mapping[str, Any]] = {}
         self.submissions: list[tuple[str, str]] = []
         self.cancelled: list[str] = []
         self.start_calls: list[tuple[str, bool]] = []
@@ -53,7 +54,6 @@ class FakeAgentAuthService:
         *,
         force_reset: bool = True,
         owner_ref: str | None = None,
-        hold_after_success: bool = False,
         on_irreversible_start=None,
     ):
         if force_reset and on_irreversible_start is not None:
@@ -67,6 +67,10 @@ class FakeAgentAuthService:
             url=("https://claude.ai/oauth/authorize?test=true" if backend == "claude" else None),
             device_code=None,
             error=None,
+            source_id=owner_ref,
+            vendor={"claude": "anthropic", "codex": "openai"}.get(backend, "opencode"),
+            expires_at_iso="2026-07-25T00:15:00+00:00",
+            source_status={"signed_in": None, "account_label": None},
         )
         self.flows[flow_id] = flow
         return flow
@@ -83,6 +87,10 @@ class FakeAgentAuthService:
             "url": flow.url,
             "device_code": flow.device_code,
             "error": flow.error,
+            "source_id": flow.source_id,
+            "vendor": flow.vendor,
+            "expires_at_iso": flow.expires_at_iso,
+            "source_status": flow.source_status,
         }
 
     async def submit_web_code(self, flow_id: str, code: str) -> dict[str, Any]:
@@ -102,9 +110,6 @@ class FakeAgentAuthService:
         self.cancelled.append(flow_id)
         return {"ok": True}
 
-    def release_login_slot(self, flow_id: str) -> None:
-        return None
-
     def expose_codex_device_flow(self, flow_id: str) -> None:
         flow = self.flows[flow_id]
         flow.url = "https://auth.openai.com/codex/device"
@@ -112,7 +117,13 @@ class FakeAgentAuthService:
         flow.state = "awaiting_code"
 
     def complete(self, flow_id: str) -> None:
-        self.flows[flow_id].state = "success"
+        flow = self.flows[flow_id]
+        flow.state = "success"
+        status = self.auth_status.get(flow.backend, {})
+        flow.source_status = {
+            "signed_in": _signed_in(flow.backend, status),
+            "account_label": _account_label(status),
+        }
 
     def timeout(self, flow_id: str) -> None:
         flow = self.flows[flow_id]
@@ -127,6 +138,7 @@ class NativeOAuthScenarioHarness:
             "claude": {"active_auth_mode": "oauth"},
             "codex": {"active_auth_mode": "oauth"},
         }
+        self.agent_auth.auth_status = self.auth_status
         self.adapter = AgentAuthNativeOAuthAdapter(
             self.agent_auth,
             auth_status_reader=lambda backend: self.auth_status[backend],

@@ -1,111 +1,64 @@
 from __future__ import annotations
 
-import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from core.agent_auth_service import (
-    BackendLoginInProgressError,
-    _NativeLoginCoordinator,
-)
+from core.agent_auth_service import AgentAuthService, BackendLoginInProgressError
+from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
+from modules.im import MessageContext
 
 
-def test_native_login_coordinator_refuses_a_second_owner_until_settlement() -> None:
-    coordinator = _NativeLoginCoordinator()
-    owner = coordinator.claim(
-        "openai",
-        "codex",
-        flow_id="flow-owner",
-        owner_ref="source-owner",
-        hold_after_success=True,
+class _IMClient:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send_message(self, _context, text: str) -> None:
+        self.sent.append(text)
+
+
+class _Controller:
+    def __init__(self) -> None:
+        self.im_client = _IMClient()
+        self.config = SimpleNamespace(language="en")
+
+    def resolve_agent_for_context(self, _context) -> str:
+        return "codex"
+
+    def _get_settings_key(self, context) -> str:
+        return context.channel_id or "channel"
+
+    def _get_lang(self) -> str:
+        return "en"
+
+
+@pytest.mark.asyncio
+async def test_im_web_and_model_hub_use_the_same_flow_registry() -> None:
+    controller = _Controller()
+    service = AgentAuthService(controller)
+    process = SimpleNamespace(stdout=object(), returncode=0)
+    service._start_codex_process = AsyncMock(return_value=process)
+    service._read_codex_output = AsyncMock()
+    service._wait_for_completion = AsyncMock()
+
+    context = MessageContext(user_id="user", channel_id="channel")
+    await service.start_setup(context, backend="codex", force_reset=False)
+    im_flow = service._flows["channel:codex"]
+
+    assert service._web_flows is service._flows_by_id
+    assert service._web_flows[im_flow.flow_id] is im_flow
+
+    with pytest.raises(BackendLoginInProgressError):
+        await service.start_web_setup("codex", force_reset=False, owner_ref="source")
+
+    service._drop_flow(im_flow)
+    web_flow = await service.start_web_setup("codex", force_reset=False, owner_ref="source")
+    assert service._flows_by_id[web_flow.flow_id] is web_flow
+
+    adapter = AgentAuthNativeOAuthAdapter(
+        service,
+        auth_status_reader=lambda _backend: {"active_auth_mode": "oauth"},
     )
-
-    with pytest.raises(BackendLoginInProgressError) as conflict:
-        coordinator.claim(
-            "openai",
-            "codex",
-            flow_id="flow-follower",
-            owner_ref="source-follower",
-            hold_after_success=True,
-        )
-    assert conflict.value.owner_ref == "source-owner"
-    assert conflict.value.flow_id == "flow-owner"
-
-    owner.release()
-    fresh = coordinator.claim(
-        "openai",
-        "codex",
-        flow_id="flow-fresh",
-        owner_ref="source-fresh",
-        hold_after_success=False,
-    )
-    fresh.release()
-
-
-def test_recovered_native_journal_keeps_expired_and_legacy_pending_bindings(tmp_path) -> None:
-    journal = tmp_path / "model_hub_oauth_flows.json"
-    journal.write_text(
-        json.dumps(
-            {
-                # Expiry is metadata, never a release timer.
-                "legacy-old": {
-                    "channel": "native_cli",
-                    "source_id": "source-old",
-                    "vendor": "openai",
-                    "expires_at_iso": "2000-01-01T00:00:00+00:00",
-                },
-                # This released shape omitted optional fields entirely.
-                "legacy-new": {
-                    "channel": "native_cli",
-                    "source_id": "source-new",
-                    "vendor": "openai",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    coordinator = _NativeLoginCoordinator()
-    coordinator.sync_persisted(str(journal))
-
-    with pytest.raises(BackendLoginInProgressError) as first_conflict:
-        coordinator.claim(
-            "openai",
-            "codex",
-            flow_id="new-flow",
-            owner_ref="new-source",
-            hold_after_success=False,
-        )
-    assert first_conflict.value.owner_ref == "source-old"
-
-    journal.write_text(
-        json.dumps(
-            {
-                "legacy-new": {
-                    "channel": "native_cli",
-                    "source_id": "source-new",
-                    "vendor": "openai",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    coordinator.sync_persisted(str(journal))
-    with pytest.raises(BackendLoginInProgressError) as second_conflict:
-        coordinator.claim(
-            "openai",
-            "codex",
-            flow_id="new-flow",
-            owner_ref="new-source",
-            hold_after_success=False,
-        )
-    assert second_conflict.value.owner_ref == "source-new"
-
-    coordinator.release_flow("legacy-new")
-    fresh = coordinator.claim(
-        "openai",
-        "codex",
-        flow_id="new-flow",
-        owner_ref="new-source",
-        hold_after_success=False,
-    )
-    fresh.release()
+    assert (await adapter.oauth_status(web_flow.flow_id)).flow_id == web_flow.flow_id
+    await adapter.cancel_oauth(web_flow.flow_id)

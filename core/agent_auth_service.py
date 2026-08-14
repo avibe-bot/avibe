@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import errno
 import json
 import logging
 import os
 import re
 import signal
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from core.backend_failure import terminal_backend_failure_output
@@ -79,172 +78,6 @@ class BackendLoginInProgressError(RuntimeError):
         self.owner_ref = owner_ref
         self.flow_id = flow_id
         super().__init__(f"native login already in progress for {vendor}/{backend}")
-
-
-@dataclass
-class _NativeLoginHolder:
-    vendor: str
-    backend: str
-    flow_id: str
-    owner_ref: str | None
-    hold_after_success: bool
-    persisted_path: str | None = None
-
-
-class NativeLoginClaim:
-    """A process-wide, idempotent reservation for one native credential."""
-
-    def __init__(self, coordinator: "_NativeLoginCoordinator", holder: _NativeLoginHolder) -> None:
-        self._coordinator = coordinator
-        self.holder = holder
-        self.released = False
-
-    @property
-    def flow_id(self) -> str:
-        return self.holder.flow_id
-
-    @property
-    def owner_ref(self) -> str | None:
-        return self.holder.owner_ref
-
-    @property
-    def hold_after_success(self) -> bool:
-        return self.holder.hold_after_success
-
-    def release(self) -> None:
-        if self.released:
-            return
-        self.released = True
-        self._coordinator.release(self.holder.flow_id)
-
-
-@dataclass(frozen=True)
-class _SpawnContext:
-    flow_id: str
-    owner_ref: str | None
-    hold_after_success: bool
-
-
-_NATIVE_SPAWN_CONTEXT: contextvars.ContextVar[_SpawnContext | None] = contextvars.ContextVar(
-    "avibe_native_spawn_context", default=None
-)
-
-
-class _NativeLoginCoordinator:
-    """Synchronous owner of native credential reservations.
-
-    Claims are deliberately independent of flow TTLs. A recovered journal entry
-    remains occupied until its flow is explicitly settled and released.
-    """
-
-    _VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._holders_by_key: dict[tuple[str, str], dict[str, _NativeLoginHolder]] = {}
-        self._persisted_by_path: dict[str, set[str]] = {}
-
-    @classmethod
-    def _read_pending_journal(cls, path: str) -> dict[str, tuple[str, str, str | None]]:
-        try:
-            with open(path, encoding="utf-8") as stream:
-                payload = json.load(stream)
-        except (OSError, ValueError, TypeError):
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        pending: dict[str, tuple[str, str, str | None]] = {}
-        for flow_id, raw in payload.items():
-            if not isinstance(flow_id, str) or not isinstance(raw, dict):
-                continue
-            if raw.get("channel") != "native_cli":
-                continue
-            vendor = raw.get("vendor")
-            backend = cls._VENDOR_BACKENDS.get(vendor)
-            if backend is None:
-                continue
-            if raw.get("completed") is True or raw.get("terminal_state") == "cancelled":
-                continue
-            # Released versions have emitted several journal shapes. Missing
-            # optional fields are intentionally treated as a live reservation;
-            # expiry is not a release mechanism for a credential claim.
-            source_id = raw.get("source_id")
-            owner_ref = source_id if isinstance(source_id, str) and source_id else None
-            pending[flow_id] = (vendor, backend, owner_ref)
-        return pending
-
-    def sync_persisted(self, path: str | None) -> None:
-        if not path:
-            return
-        pending = self._read_pending_journal(path)
-        with self._lock:
-            previous = self._persisted_by_path.get(path, set())
-            current = set(pending)
-            for flow_id in previous - current:
-                self.release(flow_id)
-            for flow_id, (vendor, backend, owner_ref) in pending.items():
-                holders = self._holders_by_key.setdefault((vendor, backend), {})
-                if flow_id not in holders:
-                    holders[flow_id] = _NativeLoginHolder(
-                        vendor=vendor,
-                        backend=backend,
-                        flow_id=flow_id,
-                        owner_ref=owner_ref,
-                        hold_after_success=True,
-                        persisted_path=path,
-                    )
-            self._persisted_by_path[path] = current
-
-    def claim(
-        self,
-        vendor: str,
-        backend: str,
-        *,
-        flow_id: str,
-        owner_ref: str | None,
-        hold_after_success: bool,
-    ) -> NativeLoginClaim:
-        with self._lock:
-            holders = self._holders_by_key.get((vendor, backend))
-            if holders:
-                occupant = next(iter(holders.values()))
-                raise BackendLoginInProgressError(
-                    vendor,
-                    backend,
-                    owner_ref=occupant.owner_ref,
-                    flow_id=occupant.flow_id,
-                )
-            holder = _NativeLoginHolder(
-                vendor=vendor,
-                backend=backend,
-                flow_id=flow_id,
-                owner_ref=owner_ref,
-                hold_after_success=hold_after_success,
-            )
-            self._holders_by_key[(vendor, backend)] = {flow_id: holder}
-            return NativeLoginClaim(self, holder)
-
-    def release(self, flow_id: str) -> None:
-        with self._lock:
-            for key, holders in list(self._holders_by_key.items()):
-                if flow_id not in holders:
-                    continue
-                holders.pop(flow_id, None)
-                if not holders:
-                    self._holders_by_key.pop(key, None)
-                for path, flow_ids in self._persisted_by_path.items():
-                    flow_ids.discard(flow_id)
-                return
-
-    def release_flow(self, flow_id: str) -> None:
-        self.release(flow_id)
-
-    def occupied(self, vendor: str, backend: str) -> bool:
-        with self._lock:
-            return bool(self._holders_by_key.get((vendor, backend)))
-
-
-_NATIVE_LOGIN_COORDINATOR = _NativeLoginCoordinator()
 
 
 def _pick_probe_response_excerpt(stdout_text: str) -> str:
@@ -506,7 +339,7 @@ class AgentAuthFlow:
     last_status_text: str | None = None
     force_oauth: bool = False
     claude_oauth_attempt: "ClaudeOAuthAttempt | None" = None
-    native_login_claim: NativeLoginClaim | None = None
+    native_cli: bool = False
 
     @property
     def flow_key(self) -> str:
@@ -569,7 +402,37 @@ class WebAuthFlow:
     # TTL so the dict doesn't grow unboundedly across sign-in
     # attempts on a long-lived UI server.
     terminal_at: float | None = None
-    native_login_claim: NativeLoginClaim | None = None
+    # Shared flow metadata used by IM, Web Settings, and Model Hub callers.
+    # Keeping the binding on the owning flow avoids a second Model Hub runtime
+    # registry keyed by the same flow id.
+    source_id: str | None = None
+    vendor: str | None = None
+    expires_at_iso: str | None = None
+    source_signed_in: bool | None = None
+    source_account_label: str | None = None
+    native_cli: bool = False
+
+
+class AuthFlowRegistry:
+    """Single in-memory registry for every IM and Web auth flow.
+
+    ``by_key`` is an IM lookup index; ``by_id`` is the owning flow collection.
+    Web and Model Hub callers use the same ``by_id`` records as IM setup.
+    """
+
+    def __init__(self) -> None:
+        self.by_key: dict[str, AgentAuthFlow] = {}
+        self.by_id: dict[str, AgentAuthFlow | WebAuthFlow] = {}
+
+    def put(self, flow: AgentAuthFlow | WebAuthFlow, *, flow_key: str | None = None) -> None:
+        self.by_id[flow.flow_id] = flow
+        if flow_key is not None:
+            self.by_key[flow_key] = flow
+
+    def drop(self, flow: AgentAuthFlow | WebAuthFlow) -> None:
+        self.by_id.pop(flow.flow_id, None)
+        if isinstance(flow, AgentAuthFlow) and self.by_key.get(flow.flow_key) is flow:
+            self.by_key.pop(flow.flow_key, None)
 
 
 class AgentAuthService:
@@ -577,21 +440,13 @@ class AgentAuthService:
 
     def __init__(self, controller):
         self.controller = controller
-        self._flows: dict[str, AgentAuthFlow] = {}
-        self._flows_by_id: dict[str, AgentAuthFlow] = {}
+        self._flow_registry = AuthFlowRegistry()
         self._flow_lock = asyncio.Lock()
         self.setup_timeout_seconds = 900.0
-        # Web-initiated OAuth flows are keyed by ``flow_id`` only; no IM
-        # context exists for them, so they cannot live in ``_flows``.
-        self._web_flows: dict[str, WebAuthFlow] = {}
-        self._web_flow_lock = asyncio.Lock()
         self._claude_oauth_attempt_counter = 0
         self._claude_oauth_batch: ClaudeOAuthBatch | None = None
         self._claude_oauth_lock = asyncio.Lock()
         self._claude_control_flow_starts_in_flight = 0
-        self._native_spawn_claims: dict[asyncio.Task[Any], NativeLoginClaim] = {}
-        self._native_login_journal_path = self._model_hub_oauth_journal_path()
-        _NATIVE_LOGIN_COORDINATOR.sync_persisted(self._native_login_journal_path)
         self._recover_interrupted_claude_oauth_settings_backup()
         # Optional callable invoked after a successful *web* auth flow so
         # the UI-server process can ask the long-running controller to
@@ -599,106 +454,26 @@ class AgentAuthService:
         # and runs in a worker thread to avoid blocking the auth event loop.
         self._post_web_success_hook: Optional[Any] = None
 
-    @staticmethod
-    def _model_hub_oauth_journal_path() -> str:
-        try:
-            from config import paths
+    @property
+    def _flows(self) -> dict[str, AgentAuthFlow]:
+        """Compatibility view of the IM lookup index."""
+        return self._flow_registry.by_key
 
-            return str(paths.get_state_dir() / "model_hub_oauth_flows.json")
-        except Exception:  # noqa: BLE001
-            return ""
+    @property
+    def _flows_by_id(self) -> dict[str, AgentAuthFlow | WebAuthFlow]:
+        return self._flow_registry.by_id
 
-    @staticmethod
-    def _native_vendor(backend: str, provider: str | None = None) -> str:
-        if backend == "codex":
-            return "openai"
-        if backend == "claude":
-            return "anthropic"
-        return (provider or "opencode").strip().lower()
-
-    def _claim_native_login(
-        self,
-        backend: str,
-        *,
-        provider: str | None = None,
-    ) -> NativeLoginClaim:
-        context = _NATIVE_SPAWN_CONTEXT.get()
-        ephemeral = context is None
-        if context is None:
-            context = _SpawnContext(
-                flow_id=f"native-{uuid.uuid4().hex[:12]}",
-                owner_ref=None,
-                hold_after_success=False,
-            )
-        vendor = self._native_vendor(backend, provider)
-        _NATIVE_LOGIN_COORDINATOR.sync_persisted(self._native_login_journal_path)
-        claim = _NATIVE_LOGIN_COORDINATOR.claim(
-            vendor,
-            backend,
-            flow_id=context.flow_id,
-            owner_ref=context.owner_ref,
-            hold_after_success=context.hold_after_success,
-        )
-        task = asyncio.current_task()
-        if task is not None:
-            self._native_spawn_claims[task] = claim
-            if ephemeral:
-                def release_ephemeral(done: asyncio.Task[Any]) -> None:
-                    self._native_spawn_claims.pop(done, None)
-                    claim.release()
-
-                task.add_done_callback(release_ephemeral)
-        return claim
-
-    def _take_native_spawn_claim(self) -> NativeLoginClaim | None:
-        task = asyncio.current_task()
-        return self._native_spawn_claims.pop(task, None) if task is not None else None
-
-    @staticmethod
-    def _attach_native_waiter(flow: AgentAuthFlow | WebAuthFlow) -> None:
-        task = flow.waiter_task
-        claim = flow.native_login_claim
-        if task is None or claim is None:
-            return
-
-        def release_if_cancelled(done: asyncio.Task[Any]) -> None:
-            if done.cancelled() and not claim.hold_after_success:
-                claim.release()
-
-        task.add_done_callback(release_if_cancelled)
-
-    def release_login_slot(self, flow_id: str) -> None:
-        """Release a held native claim after the caller's durable write."""
-        _NATIVE_LOGIN_COORDINATOR.release_flow(flow_id)
-
-    @staticmethod
-    def _release_native_login_claim(claim: NativeLoginClaim | None) -> None:
-        if claim is not None and not claim.hold_after_success:
-            claim.release()
-
-    @staticmethod
-    def _force_release_native_login_claim(claim: NativeLoginClaim | None) -> None:
-        if claim is not None:
-            claim.release()
-
-    @staticmethod
-    def _release_web_claim_after_settlement(flow: WebAuthFlow) -> None:
-        claim = flow.native_login_claim
-        if claim is None:
-            return
-        if claim.hold_after_success and flow.state == "success":
-            return
-        if claim.hold_after_success and flow.backend == "opencode" and flow.state == "cancelled":
-            return
-        claim.release()
+    @property
+    def _web_flows(self) -> dict[str, AgentAuthFlow | WebAuthFlow]:
+        """Compatibility view; Web and IM flows share one registry by id."""
+        return self._flow_registry.by_id
 
     def _active_claude_auth_clients(self) -> list[Any]:
         clients: list[Any] = []
-        for flow in list(self._flows.values()):
-            if flow.backend != "claude" or flow.claude_client is None:
-                continue
-            clients.append(flow.claude_client)
-        for flow in list(self._web_flows.values()):
+        flows = list(self._flows_by_id.values()) + [
+            flow for flow in self._flows.values() if flow not in self._flows_by_id.values()
+        ]
+        for flow in flows:
             if flow.backend != "claude" or flow.claude_client is None:
                 continue
             clients.append(flow.claude_client)
@@ -1004,131 +779,36 @@ class AgentAuthService:
             await self._prompt_claude_login_method(context)
             return
 
-        async with self._flow_lock:
-            flow_key = self._make_flow_key(context, resolved_backend)
-            existing = self._flows.get(flow_key)
-            if existing:
-                await self._terminate_flow(existing)
+        await self._send_message(
+            context,
+            f"⏳ {self._t('command.setup.starting', backend=resolved_backend)}",
+        )
+        try:
+            flow = await self._start_auth_flow(
+                resolved_backend,
+                context=context,
+                force_reset=force_reset,
+                claude_login_method=claude_login_method,
+            )
+        except Exception as err:  # noqa: BLE001
+            logger.error("Agent auth setup failed to start for %s: %s", resolved_backend, err, exc_info=True)
+            await self._send_setup_start_failure(context, resolved_backend, str(err))
+            return
 
+        if resolved_backend == "claude":
             await self._send_message(
                 context,
-                f"⏳ {self._t('command.setup.starting', backend=resolved_backend)}",
+                self._t("command.setup.claudeInstructions", url=flow.url),
             )
-
-            flow_id = uuid.uuid4().hex[:12]
-            spawn_token = _NATIVE_SPAWN_CONTEXT.set(
-                _SpawnContext(flow_id=flow_id, owner_ref=None, hold_after_success=False)
+        elif resolved_backend == "opencode" and not flow.native_cli:
+            await self._send_message(
+                context,
+                self._t(
+                    "command.setup.opencodeInstructions",
+                    provider=flow.provider or "opencode",
+                    url=flow.url or self._get_opencode_setup_url(flow.provider),
+                ),
             )
-            native_login_claim: NativeLoginClaim | None = None
-            try:
-                if resolved_backend == "codex":
-                    process = await self._start_codex_process(force_reset=force_reset)
-                    native_login_claim = self._take_native_spawn_claim()
-                    flow = AgentAuthFlow(
-                        flow_id=flow_id,
-                        backend=resolved_backend,
-                        settings_key=self._get_settings_key(context),
-                        initiator_user_id=context.user_id,
-                        context=context,
-                        process=process,
-                        reader_task=asyncio.create_task(asyncio.sleep(0)),
-                        waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                        native_login_claim=native_login_claim,
-                    )
-                elif resolved_backend == "claude":
-                    client, manual_url, attempt = await self._start_claude_control_flow(
-                        context,
-                        force_reset=force_reset,
-                        login_with_claude_ai=claude_login_method != "console",
-                    )
-                    native_login_claim = self._take_native_spawn_claim()
-                    flow = AgentAuthFlow(
-                        flow_id=flow_id,
-                        backend=resolved_backend,
-                        settings_key=self._get_settings_key(context),
-                        initiator_user_id=context.user_id,
-                        context=context,
-                        process=None,
-                        reader_task=asyncio.create_task(asyncio.sleep(0)),
-                        waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                        claude_client=client,
-                        login_prompt_sent=True,
-                        url=manual_url,
-                        claude_oauth_attempt=attempt,
-                        native_login_claim=native_login_claim,
-                    )
-                else:
-                    provider = await self._resolve_opencode_provider(context)
-                    if self._supports_direct_opencode_api_key_setup(provider):
-                        flow = AgentAuthFlow(
-                            flow_id=uuid.uuid4().hex[:12],
-                            backend=resolved_backend,
-                            settings_key=self._get_settings_key(context),
-                            initiator_user_id=context.user_id,
-                            context=context,
-                            process=None,
-                            reader_task=asyncio.create_task(asyncio.sleep(0)),
-                            waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                            provider=provider,
-                            awaiting_code=True,
-                            login_prompt_sent=True,
-                            code_prompt_sent=True,
-                            url=self._get_opencode_setup_url(provider),
-                        )
-                    else:
-                        process, master_fd, provider = await self._start_opencode_process(context, force_reset=force_reset)
-                        native_login_claim = self._take_native_spawn_claim()
-                        flow = AgentAuthFlow(
-                            flow_id=flow_id,
-                            backend=resolved_backend,
-                            settings_key=self._get_settings_key(context),
-                            initiator_user_id=context.user_id,
-                            context=context,
-                            process=process,
-                            reader_task=asyncio.create_task(asyncio.sleep(0)),
-                            waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                            pty_master_fd=master_fd,
-                            provider=provider,
-                            native_login_claim=native_login_claim,
-                        )
-            except Exception as err:  # noqa: BLE001
-                logger.error("Agent auth setup failed to start for %s: %s", resolved_backend, err, exc_info=True)
-                self._force_release_native_login_claim(native_login_claim)
-                await self._send_setup_start_failure(context, resolved_backend, str(err))
-                return
-            finally:
-                _NATIVE_SPAWN_CONTEXT.reset(spawn_token)
-
-            self._flows[flow_key] = flow
-            self._flows_by_id[flow.flow_id] = flow
-            if resolved_backend == "codex":
-                flow.reader_task = asyncio.create_task(self._read_codex_output(process, context, resolved_backend))
-                flow.waiter_task = asyncio.create_task(self._wait_for_completion(flow))
-                self._attach_native_waiter(flow)
-            elif resolved_backend == "claude":
-                flow.waiter_task = asyncio.create_task(self._wait_for_claude_completion(flow))
-                self._attach_native_waiter(flow)
-                await self._send_message(
-                    flow.context,
-                    self._t("command.setup.claudeInstructions", url=manual_url),
-                )
-            else:
-                if self._supports_direct_opencode_api_key_setup(flow.provider):
-                    await self._send_message(
-                        flow.context,
-                        self._t(
-                            "command.setup.opencodeInstructions",
-                            provider=flow.provider or "opencode",
-                            url=flow.url or self._get_opencode_setup_url(flow.provider),
-                        ),
-                    )
-                else:
-                    assert flow.pty_master_fd is not None
-                    flow.reader_task = asyncio.create_task(
-                        self._read_pty_output(process, flow.pty_master_fd, context, resolved_backend)
-                    )
-                    flow.waiter_task = asyncio.create_task(self._wait_for_completion(flow))
-                    self._attach_native_waiter(flow)
 
     async def submit_code(self, context: MessageContext, code: str, backend_hint: str | None = None) -> None:
         """Submit follow-up code to an active auth flow."""
@@ -1378,6 +1058,162 @@ class AgentAuthService:
         fallback_text = self._t("command.setup.claudeMethodFallback")
         await self._send_message_with_keyboard(context, text, keyboard, fallback_text=fallback_text)
 
+    @staticmethod
+    def _native_vendor_for_flow(backend: str, provider: str | None = None) -> str:
+        if backend == "codex":
+            return "openai"
+        if backend == "claude":
+            return "anthropic"
+        return (provider or "opencode").strip().lower()
+
+    def _claim_shared_native_flow(
+        self,
+        backend: str,
+        *,
+        provider: str | None = None,
+        owner_ref: str | None = None,
+    ) -> None:
+        """Claim the one shared native-login path before any provider spawn."""
+        vendor = self._native_vendor_for_flow(backend, provider)
+        for flow in self._flows_by_id.values():
+            if (
+                getattr(flow, "native_cli", False)
+                and getattr(flow, "state", "starting") not in {"success", "failed", "cancelled"}
+                and flow.backend == backend
+                and (backend != "opencode" or flow.provider == provider)
+            ):
+                raise BackendLoginInProgressError(
+                    vendor,
+                    backend,
+                    owner_ref=getattr(flow, "source_id", None),
+                    flow_id=flow.flow_id,
+                )
+
+    async def _start_auth_flow(
+        self,
+        backend: str,
+        *,
+        context: MessageContext | None = None,
+        provider_id: str | None = None,
+        force_reset: bool = True,
+        owner_ref: str | None = None,
+        claude_login_method: str | None = None,
+        on_irreversible_start: Callable[[], Callable[[], None] | None] | None = None,
+    ) -> AgentAuthFlow | WebAuthFlow:
+        """Create and start the single flow model used by every caller."""
+        if backend not in self.WEB_BACKENDS:
+            raise ValueError(f"unsupported_backend:{backend}")
+        flow_key = self._make_flow_key(context, backend) if context is not None else None
+        async with self._flow_lock:
+            if flow_key is not None:
+                existing = self._flows.get(flow_key)
+                if existing is not None:
+                    await self._terminate_flow(existing)
+
+            provider = provider_id
+            if backend == "opencode" and context is not None:
+                provider = await self._resolve_opencode_provider(context)
+            native_cli = backend != "opencode" or not (
+                context is not None and self._supports_direct_opencode_api_key_setup(provider)
+            )
+            if native_cli:
+                self._claim_shared_native_flow(
+                    backend,
+                    provider=provider,
+                    owner_ref=owner_ref,
+                )
+
+            flow_id = uuid.uuid4().hex[:12]
+            expires_at_iso = (
+                datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)
+            ).isoformat()
+            if context is None:
+                flow: AgentAuthFlow | WebAuthFlow = WebAuthFlow(
+                    flow_id=flow_id,
+                    backend=backend,
+                    provider=provider,
+                    source_id=owner_ref,
+                    vendor=self._native_vendor_for_flow(backend, provider),
+                    expires_at_iso=expires_at_iso,
+                    native_cli=native_cli,
+                )
+            else:
+                flow = AgentAuthFlow(
+                    flow_id=flow_id,
+                    backend=backend,
+                    settings_key=self._get_settings_key(context),
+                    initiator_user_id=context.user_id,
+                    context=context,
+                    process=None,
+                    reader_task=asyncio.create_task(asyncio.sleep(0)),
+                    waiter_task=asyncio.create_task(asyncio.sleep(0)),
+                    provider=provider,
+                    native_cli=native_cli,
+                )
+            self._flow_registry.put(flow, flow_key=flow_key)
+            try:
+                if backend == "codex":
+                    if on_irreversible_start is None:
+                        process = await self._start_codex_process(force_reset=force_reset)
+                    else:
+                        process = await self._start_codex_process(
+                            force_reset=force_reset,
+                            on_irreversible_start=on_irreversible_start,
+                        )
+                    flow.process = process
+                    if context is None:
+                        flow.reader_task = asyncio.create_task(self._read_codex_output_web(flow))
+                        flow.waiter_task = asyncio.create_task(self._wait_for_codex_completion_web(flow))
+                    else:
+                        flow.reader_task = asyncio.create_task(self._read_codex_output(process, context, backend))
+                        flow.waiter_task = asyncio.create_task(self._wait_for_completion(flow))
+                elif backend == "claude":
+                    claude_kwargs = {
+                        "force_reset": force_reset,
+                        "login_with_claude_ai": claude_login_method != "console",
+                    }
+                    if on_irreversible_start is not None:
+                        claude_kwargs["on_irreversible_start"] = on_irreversible_start
+                    client, manual_url, attempt = await self._start_claude_control_flow(
+                        context,
+                        **claude_kwargs,
+                    )
+                    flow.claude_client = client
+                    flow.claude_oauth_attempt = attempt
+                    flow.url = manual_url
+                    flow.awaiting_code = True
+                    flow.login_prompt_sent = True
+                    flow.state = "awaiting_code"
+                    flow.waiter_task = asyncio.create_task(
+                        self._wait_for_claude_completion_web(flow)
+                        if context is None
+                        else self._wait_for_claude_completion(flow)
+                    )
+                else:
+                    if context is not None and not native_cli:
+                        flow.awaiting_code = True
+                        flow.login_prompt_sent = True
+                        flow.code_prompt_sent = True
+                        flow.url = self._get_opencode_setup_url(provider)
+                    elif context is None:
+                        await self._start_opencode_oauth_web(flow, provider_id or provider or "opencode")
+                    else:
+                        process, master_fd, provider = await self._start_opencode_process(
+                            context,
+                            force_reset=force_reset,
+                        )
+                        flow.process = process
+                        flow.pty_master_fd = master_fd
+                        flow.provider = provider
+                        flow.reader_task = asyncio.create_task(
+                            self._read_pty_output(process, master_fd, context, backend)
+                        )
+                        flow.waiter_task = asyncio.create_task(self._wait_for_completion(flow))
+            except BaseException:
+                self._flow_registry.drop(flow)
+                raise
+            return flow
+
     async def _start_codex_process(
         self,
         *,
@@ -1387,29 +1223,20 @@ class AgentAuthService:
         ] | None = None,
     ) -> asyncio.subprocess.Process:
         binary = self._get_cli_binary("codex")
-        claim = self._claim_native_login("codex")
-        transferred = False
-        try:
-            if force_reset:
-                await self._run_utility_command(
-                    binary,
-                    "logout",
-                    prepare_start=on_irreversible_start,
-                )
-            process = await asyncio.create_subprocess_exec(
+        if force_reset:
+            await self._run_utility_command(
                 binary,
-                "login",
-                "--device-auth",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                "logout",
+                prepare_start=on_irreversible_start,
             )
-            self._native_spawn_claims[asyncio.current_task()] = claim
-            transferred = True
-            return process
-        finally:
-            if not transferred:
-                claim.release()
+        return await asyncio.create_subprocess_exec(
+            binary,
+            "login",
+            "--device-auth",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
 
     async def _start_claude_control_flow(
         self,
@@ -1424,10 +1251,8 @@ class AgentAuthService:
         if not CLAUDE_SDK_AVAILABLE:
             raise ModuleNotFoundError("claude_agent_sdk is required for Claude setup flows")
 
-        claim = self._claim_native_login("claude")
         attempt: ClaudeOAuthAttempt | None = None
         client = None
-        transferred = False
         try:
             if force_reset:
                 await self._run_utility_command(
@@ -1460,17 +1285,12 @@ class AgentAuthService:
             manual_url = str(response.get("manualUrl") or "").strip()
             if not manual_url:
                 raise RuntimeError("Claude auth flow did not return a manual login URL")
-            self._native_spawn_claims[asyncio.current_task()] = claim
-            transferred = True
             return client, manual_url, attempt
         except BaseException:
             await self._finish_claude_oauth_attempt(attempt, succeeded=False)
             if client is not None:
                 await self._disconnect_claude_client(client)
             raise
-        finally:
-            if not transferred:
-                claim.release()
 
     async def _create_claude_control_client(
         self, context: Optional[MessageContext] = None
@@ -1593,22 +1413,14 @@ class AgentAuthService:
         binary = self._get_cli_binary("opencode")
         provider = await self._resolve_opencode_provider(context)
         method = self._get_opencode_login_method(provider)
-        claim = self._claim_native_login("opencode", provider=provider)
         # OpenCode auth is provider-scoped and may keep multiple credentials.
         # `opencode auth logout` can become interactive, so refresh by re-running
         # login for the target provider instead of forcing a global logout.
         master_fd: int | None = None
         slave_fd: int | None = None
-        transferred = False
         try:
             master_fd, slave_fd = os.openpty()
-            cmd = [
-                binary,
-                "auth",
-                "login",
-                "-p",
-                provider,
-            ]
+            cmd = [binary, "auth", "login", "-p", provider]
             if method:
                 cmd.extend(["-m", method])
             process = await asyncio.create_subprocess_exec(
@@ -1617,7 +1429,6 @@ class AgentAuthService:
                 stdout=slave_fd,
                 stderr=slave_fd,
             )
-            transferred = True
         except BaseException:
             if master_fd is not None:
                 os.close(master_fd)
@@ -1625,9 +1436,6 @@ class AgentAuthService:
         finally:
             if slave_fd is not None:
                 os.close(slave_fd)
-            if not transferred:
-                claim.release()
-        self._native_spawn_claims[asyncio.current_task()] = claim
         assert master_fd is not None
         return process, master_fd, provider
 
@@ -1854,7 +1662,6 @@ class AgentAuthService:
             )
         finally:
             self._drop_flow(flow)
-            self._release_native_login_claim(flow.native_login_claim)
 
     async def _wait_for_claude_completion(self, flow: AgentAuthFlow) -> None:
         try:
@@ -1913,7 +1720,6 @@ class AgentAuthService:
             if flow.claude_client is not None:
                 await self._disconnect_claude_client(flow.claude_client)
             self._drop_flow(flow)
-            self._release_native_login_claim(flow.native_login_claim)
 
     async def _verify_login(self, flow: AgentAuthFlow) -> tuple[bool, str]:
         backend = flow.backend
@@ -2299,7 +2105,6 @@ class AgentAuthService:
         if flow.claude_client is not None:
             await self._disconnect_claude_client(flow.claude_client)
         self._drop_flow(flow)
-        self._force_release_native_login_claim(flow.native_login_claim)
 
     async def _terminate_process_for_timeout(self, flow: AgentAuthFlow) -> None:
         if flow.reader_task and not flow.reader_task.done():
@@ -2317,9 +2122,7 @@ class AgentAuthService:
                 await flow.process.wait()
 
     def _drop_flow(self, flow: AgentAuthFlow) -> None:
-        if self._flows.get(flow.flow_key) is flow:
-            self._flows.pop(flow.flow_key, None)
-        self._flows_by_id.pop(flow.flow_id, None)
+        self._flow_registry.drop(flow)
 
     # ------------------------------------------------------------------
     # Web Settings → Backends OAuth flows
@@ -2353,7 +2156,6 @@ class AgentAuthService:
         force_reset: bool = True,
         provider_id: Optional[str] = None,
         owner_ref: str | None = None,
-        hold_after_success: bool = False,
         on_irreversible_start: Callable[
             [], Callable[[], None] | None
         ] | None = None,
@@ -2373,71 +2175,42 @@ class AgentAuthService:
         """
         if backend not in self.WEB_BACKENDS:
             raise ValueError(f"unsupported_backend:{backend}")
-
-        flow_id = uuid.uuid4().hex[:12]
-        flow = WebAuthFlow(flow_id=flow_id, backend=backend, state="starting")
-        if backend == "opencode":
-            flow.provider = provider_id
-
-        async with self._web_flow_lock:
-            self._web_flows[flow_id] = flow
-
-        spawn_token = _NATIVE_SPAWN_CONTEXT.set(
-            _SpawnContext(
-                flow_id=flow_id,
-                owner_ref=owner_ref,
-                hold_after_success=hold_after_success,
+        if backend == "opencode" and (not isinstance(provider_id, str) or not provider_id.strip()):
+            flow = WebAuthFlow(
+                flow_id=uuid.uuid4().hex[:12],
+                backend=backend,
+                state="failed",
+                error="opencode_provider_id_required",
             )
-        )
+            self._flow_registry.put(flow)
+            return flow
         try:
-            if backend == "codex":
-                flow.process = await self._start_codex_process(
-                    force_reset=force_reset,
-                    on_irreversible_start=on_irreversible_start,
-                )
-                flow.native_login_claim = self._take_native_spawn_claim()
-                flow.reader_task = asyncio.create_task(self._read_codex_output_web(flow))
-                flow.waiter_task = asyncio.create_task(self._wait_for_codex_completion_web(flow))
-                self._attach_native_waiter(flow)
-            elif backend == "claude":
-                client, manual_url, attempt = await self._start_claude_control_flow(
-                    context=None,
-                    force_reset=force_reset,
-                    login_with_claude_ai=True,
-                    on_irreversible_start=on_irreversible_start,
-                )
-                flow.native_login_claim = self._take_native_spawn_claim()
-                flow.claude_client = client
-                flow.claude_oauth_attempt = attempt
-                flow.url = manual_url
-                flow.awaiting_code = True
-                flow.state = "awaiting_code"
-                flow.waiter_task = asyncio.create_task(self._wait_for_claude_completion_web(flow))
-                self._attach_native_waiter(flow)
-            else:  # opencode
-                if not isinstance(provider_id, str) or not provider_id.strip():
-                    raise ValueError("opencode_provider_id_required")
-                await self._start_opencode_oauth_web(flow, provider_id.strip())
-                flow.native_login_claim = self._take_native_spawn_claim()
-        except BackendLoginInProgressError:
-            async with self._web_flow_lock:
-                if self._web_flows.get(flow_id) is flow:
-                    self._web_flows.pop(flow_id, None)
-            raise
+            flow = await self._start_auth_flow(
+                backend,
+                provider_id=provider_id,
+                force_reset=force_reset,
+                owner_ref=owner_ref,
+                on_irreversible_start=on_irreversible_start,
+            )
         except asyncio.CancelledError:
-            flow.state = "cancelled"
-            flow.error = "cancelled"
-            await self._terminate_web_flow(flow, final_state="cancelled", cancel_waiter=False)
+            raise
+        except BackendLoginInProgressError:
             raise
         except Exception as err:  # noqa: BLE001
             logger.error("Web auth start failed for %s: %s", backend, err, exc_info=True)
-            if backend == "claude":
-                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
-            flow.state = "failed"
-            flow.error = str(err)
-            await self._terminate_web_flow(flow, final_state="failed", error=str(err), cancel_waiter=False)
-        finally:
-            _NATIVE_SPAWN_CONTEXT.reset(spawn_token)
+            flow = WebAuthFlow(
+                flow_id=uuid.uuid4().hex[:12],
+                backend=backend,
+                provider=provider_id,
+                source_id=owner_ref,
+                vendor=self._native_vendor_for_flow(backend, provider_id),
+                state="failed",
+                error=str(err),
+                expires_at_iso=(
+                    datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)
+                ).isoformat(),
+            )
+            self._flow_registry.put(flow)
         return flow
 
     async def submit_web_code(self, flow_id: str, code: str) -> dict[str, Any]:
@@ -2492,7 +2265,7 @@ class AgentAuthService:
         now = time.time()
         stale: list[str] = []
         for fid, flow in self._web_flows.items():
-            if flow.native_login_claim is not None and not flow.native_login_claim.released:
+            if not isinstance(flow, WebAuthFlow):
                 continue
             if flow.state not in self._WEB_FLOW_TERMINAL_STATES:
                 continue
@@ -2519,7 +2292,7 @@ class AgentAuthService:
             and flow.terminal_at is None
         ):
             flow.terminal_at = time.time()
-        return {
+        result = {
             "ok": True,
             "flow_id": flow_id,
             "backend": flow.backend,
@@ -2529,6 +2302,22 @@ class AgentAuthService:
             "awaiting_code": flow.awaiting_code,
             "error": flow.error,
         }
+        if any(
+            getattr(flow, name, None) is not None
+            for name in ("source_id", "vendor", "expires_at_iso")
+        ):
+            result.update(
+                {
+                    "source_id": getattr(flow, "source_id", None),
+                    "vendor": getattr(flow, "vendor", None),
+                    "expires_at_iso": getattr(flow, "expires_at_iso", None),
+                    "source_status": {
+                        "signed_in": getattr(flow, "source_signed_in", None),
+                        "account_label": getattr(flow, "source_account_label", None),
+                    },
+                }
+            )
+        return result
 
     async def remove_web_auth(self, backend: str) -> dict[str, Any]:
         """Drop the stored credentials for a Claude/Codex backend.
@@ -3266,12 +3055,12 @@ class AgentAuthService:
                 await server.mark_run_inactive(session_id)
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]:
-        async with self._web_flow_lock:
+        async with self._flow_lock:
             flow = self._web_flows.get(flow_id)
         if flow is None:
             return {"ok": False, "error": "flow_not_found"}
         await self._terminate_web_flow(flow, final_state="cancelled")
-        async with self._web_flow_lock:
+        async with self._flow_lock:
             if self._web_flows.get(flow_id) is flow:
                 self._web_flows.pop(flow_id, None)
         return {"ok": True}
@@ -3356,45 +3145,34 @@ class AgentAuthService:
         method_index, prompt_answers = await self._resolve_opencode_oauth_method(
             server, provider_id
         )
-        claim = self._claim_native_login("opencode", provider=provider_id)
-        transferred = False
-        try:
-            flow.last_status_text = None
-            authorize = await server.start_provider_oauth(
+        flow.last_status_text = None
+        authorize = await server.start_provider_oauth(
+            provider_id,
+            method=method_index,
+            prompt_answers=prompt_answers,
+        )
+        url = authorize.get("url") if isinstance(authorize, dict) else None
+        instructions = authorize.get("instructions") if isinstance(authorize, dict) else None
+        if not isinstance(url, str) or not url.strip():
+            raise RuntimeError("opencode_authorize_missing_url")
+        flow.url = url.strip()
+        if isinstance(instructions, str):
+            match = self._OPENCODE_DEVICE_CODE_RE.search(instructions)
+            if match:
+                flow.device_code = match.group(1)
+            flow.last_status_text = instructions
+        flow.state = "awaiting_code"
+        # OpenCode auto-detects completion (device poll or local callback);
+        # no user-submitted code to enter. The waiter long-polls the daemon.
+        flow.awaiting_code = False
+        flow.waiter_task = asyncio.create_task(
+            self._wait_for_opencode_oauth_web(
+                flow,
                 provider_id,
-                method=method_index,
-                prompt_answers=prompt_answers,
+                method_index,
+                prompt_answers,
             )
-            url = authorize.get("url") if isinstance(authorize, dict) else None
-            instructions = authorize.get("instructions") if isinstance(authorize, dict) else None
-            if not isinstance(url, str) or not url.strip():
-                raise RuntimeError("opencode_authorize_missing_url")
-            flow.url = url.strip()
-            if isinstance(instructions, str):
-                match = self._OPENCODE_DEVICE_CODE_RE.search(instructions)
-                if match:
-                    flow.device_code = match.group(1)
-                flow.last_status_text = instructions
-            flow.state = "awaiting_code"
-            # OpenCode auto-detects completion (device poll or local callback);
-            # no user-submitted code to enter. The waiter long-polls the
-            # daemon's /callback endpoint and flips ``state`` when done.
-            flow.awaiting_code = False
-            self._native_spawn_claims[asyncio.current_task()] = claim
-            flow.native_login_claim = claim
-            flow.waiter_task = asyncio.create_task(
-                self._wait_for_opencode_oauth_web(
-                    flow,
-                    provider_id,
-                    method_index,
-                    prompt_answers,
-                )
-            )
-            self._attach_native_waiter(flow)
-            transferred = True
-        finally:
-            if not transferred:
-                claim.release()
+        )
 
     async def _submit_opencode_callback_url(self, flow: WebAuthFlow, code: str) -> dict[str, Any]:
         """Forward a manually-pasted 127.0.0.1 callback URL to OpenCode.
@@ -3467,6 +3245,7 @@ class AgentAuthService:
             # new auth state.
             await self._clear_opencode_provider_options_key_for_oauth(provider_id)
             await self._invoke_post_web_success_hook(flow.backend)
+            flow.source_signed_in = True
             flow.state = "success"
         except asyncio.TimeoutError:
             flow.state = "failed"
@@ -3483,9 +3262,6 @@ class AgentAuthService:
             )
             flow.state = "failed"
             flow.error = str(err)
-        finally:
-            self._release_web_claim_after_settlement(flow)
-
     async def _read_codex_output_web(self, flow: WebAuthFlow) -> None:
         """Parse ``codex login --device-auth`` stdout for URL + device code.
 
@@ -3550,6 +3326,7 @@ class AgentAuthService:
             if ok:
                 await self._invoke_post_web_success_hook(flow.backend)
                 await self._refresh_backend_runtime(flow.backend)
+                flow.source_signed_in = True
                 flow.state = "success"
             else:
                 flow.state = "failed"
@@ -3563,9 +3340,6 @@ class AgentAuthService:
             logger.error("Web Codex auth flow failed: %s", err, exc_info=True)
             flow.state = "failed"
             flow.error = str(err)
-        finally:
-            self._release_web_claim_after_settlement(flow)
-
     async def _wait_for_claude_completion_web(self, flow: WebAuthFlow) -> None:
         try:
             if flow.claude_client is None:
@@ -3588,6 +3362,7 @@ class AgentAuthService:
                 await self._invoke_post_web_success_hook(flow.backend)
                 await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
                 await self._refresh_backend_runtime(flow.backend)
+                flow.source_signed_in = True
                 flow.state = "success"
             else:
                 await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
@@ -3610,7 +3385,6 @@ class AgentAuthService:
             if flow.claude_client is not None:
                 await self._disconnect_claude_client(flow.claude_client)
                 flow.claude_client = None
-            self._release_web_claim_after_settlement(flow)
 
     async def _verify_web_login(
         self,
@@ -4088,10 +3862,3 @@ class AgentAuthService:
         flow.state = final_state
         if error:
             flow.error = error
-        if (
-            flow.backend != "opencode"
-            or final_state != "cancelled"
-            or flow.native_login_claim is None
-            or not flow.native_login_claim.hold_after_success
-        ):
-            self._force_release_native_login_claim(flow.native_login_claim)
