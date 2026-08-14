@@ -247,18 +247,18 @@ function contrastRatio(foreground, background) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-// Brand fill/label pairs the owner has accepted against the AA floor. Avibe's
-// accents carry the product's personality — an AI-colleague product should read as
-// alive, not muted — so the light fills keep design.pen's saturation and the white
-// label the design drew, which is the pairing the palette shipped before it was
-// briefly deepened. Text on a neutral surface is a separate token (--X-ink) and
-// keeps the full floor; only the label printed on a brand fill is accepted here.
+// Measurements the owner has accepted below the WCAG floor. Avibe's accents carry
+// the product's personality — an AI-colleague product should read as alive, not
+// muted — so every accent keeps design.pen's value, and a brand value is never
+// moved to buy contrast. What that costs is recorded here rather than hidden:
+// the white label the design drew on a vivid light fill, and the mint focus ring
+// at 50% over the light surfaces. Owner decision 2026-08-14.
 //
-// These are pinned, not skipped. Each entry records the ratio the pair was accepted
-// at and the guard fails when the measured ratio moves off it, so an exemption still
-// catches drift: nudge either token and this list goes stale loudly, forcing a fresh
-// decision instead of quietly sliding further down. Owner decision 2026-08-14.
-const ACCEPTED_BRAND_PAIRS = new Map([
+// These are pinned, not skipped. Each entry records the ratio it was accepted at and
+// the guard fails when the measured ratio moves off it, so an exemption still catches
+// drift: nudge either token and this list goes stale loudly, forcing a fresh decision
+// instead of quietly sliding further down.
+const ACCEPTED_BRAND_RATIOS = new Map([
   ['light fill: --primary-foreground on --primary', 2.54],
   ['light fill: --accent-foreground on --accent', 3.68],
   ['light fill: --gold-foreground on --gold', 3.19],
@@ -267,43 +267,53 @@ const ACCEPTED_BRAND_PAIRS = new Map([
   // it and this guard could not see it. Naming --violet-foreground brings it under
   // the same pin as the rest instead of leaving it undeclared.
   ['dark fill: --violet-foreground on --violet', 4.38],
+  // The light ring is design.pen's mint at 50%, which composites to ~1.5:1 — a hint
+  // drawn beside a focused control, not the only cue for it. Dark needs no entry: the
+  // same token over the dark surfaces clears the non-text floor on its own.
+  ['light ring: --ring over --card', 1.61],
+  ['light ring: --ring over --background', 1.55],
+  ['light ring: --ring over --surface-3', 1.53],
 ]);
 const PIN_TOLERANCE = 0.01;
-const consultedBrandPairs = new Set();
+const consultedBrandRatios = new Set();
+
+// One ledger and one pin rule for every accepted measurement, whatever floor it was
+// measured against: text and non-text differ only in the floor passed in, so a second
+// exemption path can never drift away from this one.
+function assertRatio(name, measured, ratio, floor) {
+  const key = `${name}: ${measured}`;
+  const accepted = ACCEPTED_BRAND_RATIOS.get(key);
+  if (accepted !== undefined) {
+    consultedBrandRatios.add(key);
+    if (Math.abs(ratio - accepted) > PIN_TOLERANCE) {
+      throw new Error(
+        `${key} is ${ratio.toFixed(2)}:1, but ACCEPTED_BRAND_RATIOS pins it at ${accepted.toFixed(2)}:1. ` +
+          'This measurement is exempt from the WCAG floor by an owner decision taken at that exact ratio, ' +
+          'so moving either token needs a fresh decision — re-pin it here once the new value is intended.',
+      );
+    }
+    return;
+  }
+  if (ratio < floor) {
+    throw new Error(`${key} is ${ratio.toFixed(2)}:1, below WCAG AA ${floor}:1`);
+  }
+}
 
 function assertContrast(name, tokens, inkProp, surfaceProp) {
   const ink = requireMeasurableColor(name, inkProp, tokens.get(inkProp));
   const surface = requireMeasurableColor(name, surfaceProp, tokens.get(surfaceProp));
 
-  const ratio = contrastRatio(ink, surface);
-  const key = `${name}: ${inkProp} on ${surfaceProp}`;
-  const accepted = ACCEPTED_BRAND_PAIRS.get(key);
-  if (accepted !== undefined) {
-    consultedBrandPairs.add(key);
-    if (Math.abs(ratio - accepted) > PIN_TOLERANCE) {
-      throw new Error(
-        `${key} is ${ratio.toFixed(2)}:1, but ACCEPTED_BRAND_PAIRS pins it at ${accepted.toFixed(2)}:1. ` +
-          'This pair is exempt from the AA floor by an owner decision taken at that exact ratio, so moving ' +
-          'either token needs a fresh decision — re-pin it here once the new value is intended.',
-      );
-    }
-    return;
-  }
-  if (ratio < AA_SMALL_TEXT) {
-    throw new Error(
-      `${name}: ${inkProp} on ${surfaceProp} is ${ratio.toFixed(2)}:1, below WCAG AA ${AA_SMALL_TEXT}:1`,
-    );
-  }
+  assertRatio(name, `${inkProp} on ${surfaceProp}`, contrastRatio(ink, surface), AA_SMALL_TEXT);
 }
 
-// A pair that no longer exists must not keep its exemption: the tokens it excused
-// may have been renamed or dropped, and a stale entry would silently excuse whatever
-// takes that name next.
-function assertEveryAcceptedPairStillExists() {
-  const stale = [...ACCEPTED_BRAND_PAIRS.keys()].filter((key) => !consultedBrandPairs.has(key));
+// A measurement that no longer exists must not keep its exemption: the tokens it
+// excused may have been renamed or dropped, and a stale entry would silently excuse
+// whatever takes that name next.
+function assertEveryAcceptedRatioStillExists() {
+  const stale = [...ACCEPTED_BRAND_RATIOS.keys()].filter((key) => !consultedBrandRatios.has(key));
   if (stale.length > 0) {
     throw new Error(
-      `ACCEPTED_BRAND_PAIRS lists ${stale.join(', ')}, which no theme declares. Drop the entry.`,
+      `ACCEPTED_BRAND_RATIOS lists ${stale.join(', ')}, which no theme declares. Drop the entry.`,
     );
   }
 }
@@ -341,6 +351,19 @@ for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
   for (const fill of ACCENT_FILLS) {
     assertEqual(`${theme} ${fill} is defined`, tokens.has(fill), true);
     assertEqual(`${theme} ${fill} declares an ink`, tokens.has(`${fill}-ink`), true);
+    // --X-ink names the role an accent plays (a mark or small text rather than a
+    // fill); it is not a second, deepened palette. Both roles carry design.pen's
+    // value, so the ink equals the fill, and a light accent therefore reads
+    // 2.1-4.2:1 as text — under the AA floor by the owner decision above. This
+    // identity is what keeps that decision honest: re-deepening an ink to buy
+    // contrast fails here instead of shipping a palette nobody drew.
+    if (tokens.get(`${fill}-ink`) !== tokens.get(fill)) {
+      throw new Error(
+        `${theme} ${fill}-ink is ${tokens.get(`${fill}-ink`)} but ${fill} is ${tokens.get(fill)}. `
+          + 'An accent keeps its design value in both roles; move the design value if it should '
+          + 'change, and move both.',
+      );
+    }
   }
 
   for (const [semantic, palette] of SEMANTIC_FILL_ALIASES) {
@@ -377,8 +400,15 @@ for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
 
   // Inks are read as small text on a bare surface, so every one of them clears AA
   // against the darkest surface the theme owns. Derived from the token map rather
-  // than from ACCENT_FILLS so an ink added on its own is still covered.
-  const inks = [...NEUTRAL_INKS, ...[...tokens.keys()].filter((prop) => prop.endsWith('-ink'))];
+  // than from ACCENT_FILLS so an ink added on its own is still covered. Accent inks
+  // are the exception and are covered by the identity assertion above instead: they
+  // are brand values, and a floor here would just re-deepen the palette. Every ink
+  // therefore lands under exactly one of the two rules — none under neither.
+  const accentInks = new Set(ACCENT_FILLS.map((fill) => `${fill}-ink`));
+  const inks = [
+    ...NEUTRAL_INKS,
+    ...[...tokens.keys()].filter((prop) => prop.endsWith('-ink') && !accentInks.has(prop)),
+  ];
   for (const ink of inks) {
     assertEqual(`${theme} ${ink} is defined`, tokens.has(ink), true);
     for (const surface of INK_SURFACES) {
@@ -404,11 +434,7 @@ for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
   for (const surfaceProp of INK_SURFACES) {
     const surface = requireMeasurableColor(`${theme} ring`, surfaceProp, tokens.get(surfaceProp));
     const ratio = contrastRatio(compositeOver(ring, surface), surface);
-    if (ratio < AA_NON_TEXT) {
-      throw new Error(
-        `${theme} ring: --ring over ${surfaceProp} is ${ratio.toFixed(2)}:1, below WCAG AA ${AA_NON_TEXT}:1 for non-text`,
-      );
-    }
+    assertRatio(`${theme} ring`, `--ring over ${surfaceProp}`, ratio, AA_NON_TEXT);
   }
 }
 
@@ -449,7 +475,7 @@ function assertAccentAliasesKeepTheirTokenName(source) {
 }
 
 assertAccentAliasesKeepTheirTokenName(css);
-assertEveryAcceptedPairStillExists();
+assertEveryAcceptedRatioStillExists();
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });
 const modelHubSystemDark = modelHub({ prefersLight: false, themeAttr: null });
