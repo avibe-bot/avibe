@@ -1173,6 +1173,8 @@ def register_memory_routes(app) -> None:
             page = payload.get("page")
             cursor = payload.get("cursor")
             limit = payload.get("limit", 20)
+            from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
+
             if (
                 (project is not None and not isinstance(project, str))
                 or isinstance(limit, bool)
@@ -1191,7 +1193,8 @@ def register_memory_routes(app) -> None:
                     and (
                         not isinstance(cursor, str)
                         or not cursor
-                        or len(cursor.encode("utf-8")) > 4096
+                        or len(cursor.encode("utf-8"))
+                        > MEMORY_LIST_CURSOR_MAX_BYTES
                     )
                 )
                 or (project == "all" and page is not None)

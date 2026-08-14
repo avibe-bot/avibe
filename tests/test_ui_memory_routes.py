@@ -18,6 +18,7 @@ from config.v2_config import (
     V2Config,
 )
 from core.memory.operation_lock import MemoryOperationLease
+from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_memory_routes, ui_server
 from vibe.ui_server import app
@@ -1155,7 +1156,8 @@ def test_memory_list_requires_csrf_and_forwards_ui_aggregate_cursor(
 
     monkeypatch.setattr(internal_client, "memory_list", memory_list)
     client = app.test_client()
-    payload = {"project": "all", "cursor": "cursor-token", "limit": 7}
+    cursor = "a" * MEMORY_LIST_CURSOR_MAX_BYTES
+    payload = {"project": "all", "cursor": cursor, "limit": 7}
     rejected = client.post(
         "/api/memory/list",
         json=payload,
@@ -1179,7 +1181,7 @@ def test_memory_list_requires_csrf_and_forwards_ui_aggregate_cursor(
             "user_key": "avibe:local",
             "project": "all",
             "page": None,
-            "cursor": "cursor-token",
+            "cursor": cursor,
             "limit": 7,
         }
     ]
@@ -1191,6 +1193,10 @@ def test_memory_list_requires_csrf_and_forwards_ui_aggregate_cursor(
         {"project": "all", "page": 1},
         {"project": "notes", "cursor": "cursor-token"},
         {"project": "all", "cursor": ""},
+        {
+            "project": "all",
+            "cursor": "a" * (MEMORY_LIST_CURSOR_MAX_BYTES + 1),
+        },
         {"project": "default", "page": 0},
         {"project": "default", "limit": 21},
         {"project": "default", "unknown": True},

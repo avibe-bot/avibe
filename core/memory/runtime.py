@@ -1521,14 +1521,19 @@ class MemoryRuntime:
         available_counts: dict[str, int] = {}
         project_has_more: dict[str, bool] = {}
         complete = True
-        for project_id in projects:
-            window = await self._list_project_window(
-                principal_id,
-                project_id,
-                boundary=boundaries[project_id],
-                limit=limit,
-                deadline=deadline,
+        project_windows = await asyncio.gather(
+            *(
+                self._list_project_window(
+                    principal_id,
+                    project_id,
+                    boundary=boundaries[project_id],
+                    limit=limit,
+                    deadline=deadline,
+                )
+                for project_id in projects
             )
+        )
+        for project_id, window in zip(projects, project_windows):
             if isinstance(window, OperationFailed):
                 complete = False
                 failures.append(window)
@@ -1538,8 +1543,6 @@ class MemoryRuntime:
                     else "memory_list_partial"
                 )
                 warnings.append(warning)
-                if window.error == "memory_provider_timeout":
-                    break
                 continue
             items, total_count, project_warnings, has_more, window_complete = window
             candidates.extend(items)
@@ -1625,14 +1628,19 @@ class MemoryRuntime:
         warnings: list[MemoryListWarningCode] = []
         total_count = 0
 
-        def timeout_result():
+        def failure_result(error):
             if not items_by_id:
-                return OperationFailed(error="memory_provider_timeout")
+                return OperationFailed(error=error)
             ordered = _order_project_memory_list_items(items_by_id.values())
+            warning: MemoryListWarningCode = (
+                "memory_list_truncated"
+                if error == "memory_provider_timeout"
+                else "memory_list_partial"
+            )
             return (
                 tuple(ordered[:limit]),
                 total_count,
-                tuple(dict.fromkeys((*warnings, "memory_list_truncated"))),
+                tuple(dict.fromkeys((*warnings, warning))),
                 True,
                 False,
             )
@@ -1640,7 +1648,7 @@ class MemoryRuntime:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return timeout_result()
+                return failure_result("memory_provider_timeout")
             try:
                 result = await asyncio.wait_for(
                     self.module.list_episodes(
@@ -1652,11 +1660,9 @@ class MemoryRuntime:
                     timeout=remaining,
                 )
             except asyncio.TimeoutError:
-                return timeout_result()
+                return failure_result("memory_provider_timeout")
             if isinstance(result, OperationFailed):
-                if result.error == "memory_provider_timeout":
-                    return timeout_result()
-                return result
+                return failure_result(result.error)
             total_count = result.total_count
             warnings.extend(result.warnings)
             for item in result.items:

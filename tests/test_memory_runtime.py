@@ -4298,7 +4298,17 @@ async def test_list_all_episodes_returns_retry_cursor_for_empty_partial_page() -
 
 
 @pytest.mark.asyncio
-async def test_list_all_episodes_preserves_rows_before_late_page_timeout() -> None:
+@pytest.mark.parametrize(
+    ("late_error", "expected_warning"),
+    [
+        ("memory_provider_timeout", "memory_list_truncated"),
+        ("memory_sidecar_unavailable", "memory_list_partial"),
+    ],
+)
+async def test_list_all_episodes_preserves_rows_before_late_page_failure(
+    late_error: str,
+    expected_warning: str,
+) -> None:
     entries = tuple(
         MemoryListItem(
             id=f"entry-{index:03d}",
@@ -4320,7 +4330,7 @@ async def test_list_all_episodes_preserves_rows_before_late_page_timeout() -> No
             **_kwargs,
         ) -> MemoryListPage | OperationFailed:
             if page == 2:
-                return OperationFailed(error="memory_provider_timeout")
+                return OperationFailed(error=late_error)
             return MemoryListPage(
                 items=entries,
                 page=page,
@@ -4339,6 +4349,56 @@ async def test_list_all_episodes_preserves_rows_before_late_page_timeout() -> No
     assert [entry["id"] for entry in payload["items"]] == [
         entry.id for entry in entries
     ]
+    assert payload["warnings"] == [expected_warning]
+    assert payload["total_count"] is None
+    assert payload["next_cursor"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_does_not_let_one_project_starve_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        memory_runtime,
+        "_MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS",
+        0.05,
+    )
+    healthy = MemoryListItem(
+        id="notes-entry",
+        subject="subject",
+        summary="summary",
+        body="body",
+        timestamp="2026-08-14T12:00:00Z",
+        project="notes",
+    )
+
+    class _ListModule:
+        async def list_episodes(
+            self,
+            *,
+            project_id: str,
+            page: int,
+            page_size: int,
+            **_kwargs,
+        ) -> MemoryListPage:
+            if project_id == "default":
+                await asyncio.Event().wait()
+            return MemoryListPage(
+                items=(healthy,),
+                page=page,
+                page_size=page_size,
+                count=1,
+                total_count=1,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default", "notes")
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+
+    assert [entry["id"] for entry in payload["items"]] == ["notes-entry"]
     assert payload["warnings"] == ["memory_list_truncated"]
     assert payload["total_count"] is None
     assert payload["next_cursor"]
