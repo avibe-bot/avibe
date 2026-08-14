@@ -177,6 +177,66 @@ def test_every_discovered_spawn_site_is_reachable_from_shared_start_path() -> No
     assert claim_lines[0] < min(guarded_entry_lines)
 
 
+def test_published_flow_deadline_is_owned_by_its_enforcing_waiter() -> None:
+    """One boundary must publish and enforce every auth-flow deadline."""
+    tree = ast.parse(SERVICE.read_text(encoding="utf-8"))
+    functions = {function.name: function for function in _functions(tree)}
+
+    deadline_writers = {
+        function.name
+        for function in functions.values()
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign)
+        if any(
+            isinstance(target, ast.Attribute)
+            and target.attr == "expires_at_iso"
+            for target in node.targets
+        )
+    }
+    constructor_deadlines = [
+        keyword
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        for keyword in call.keywords
+        if keyword.arg == "expires_at_iso"
+    ]
+    assert deadline_writers == {"_arm_flow_waiter"}
+    assert not constructor_deadlines
+
+    waiter_writers = {
+        function.name
+        for function in functions.values()
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign)
+        if any(
+            isinstance(target, ast.Attribute)
+            and target.attr == "waiter_task"
+            for target in node.targets
+        )
+    }
+    assert waiter_writers == {"_arm_flow_waiter"}
+
+    armed_waiters = {
+        _call_name(waiter_call)
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and _call_name(call) == "_arm_flow_waiter"
+        for argument in call.args[1:]
+        for waiter_call in ast.walk(argument)
+        if isinstance(waiter_call, ast.Call)
+        and (_call_name(waiter_call) or "").startswith("_wait_for_")
+    }
+    assert armed_waiters
+    for waiter_name in armed_waiters:
+        assert waiter_name is not None
+        timeout_reads = [
+            call
+            for call in ast.walk(functions[waiter_name])
+            if isinstance(call, ast.Call)
+            and _call_name(call) == "_remaining_flow_timeout"
+        ]
+        assert timeout_reads, f"{waiter_name} does not enforce the published deadline"
+
+
 def test_model_hub_adapter_has_no_live_flow_registry_or_slot_api() -> None:
     source = NATIVE_ADAPTER.read_text(encoding="utf-8")
     assert "self._flows" not in source

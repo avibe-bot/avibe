@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Coroutine, Optional
 
 from core.backend_failure import terminal_backend_failure_output
 from core.delivery_evidence import DeliveryEvidence, STAGE_PERSIST, STAGE_SEND
@@ -328,8 +328,8 @@ class AgentAuthFlow:
     initiator_user_id: str
     context: MessageContext
     process: asyncio.subprocess.Process | None
-    reader_task: asyncio.Task[None]
-    waiter_task: asyncio.Task[None]
+    reader_task: asyncio.Task[None] | None
+    waiter_task: asyncio.Task[None] | None
     claude_client: ClaudeSDKClient | None = None
     pty_master_fd: int | None = None
     awaiting_code: bool = False
@@ -342,6 +342,7 @@ class AgentAuthFlow:
     force_oauth: bool = False
     claude_oauth_attempt: "ClaudeOAuthAttempt | None" = None
     native_cli: bool = False
+    expires_at_iso: str | None = None
 
     @property
     def flow_key(self) -> str:
@@ -1104,6 +1105,30 @@ class AgentAuthService:
                     flow_id=flow.flow_id,
                 )
 
+    def _arm_flow_waiter(
+        self,
+        flow: AgentAuthFlow | WebAuthFlow,
+        waiter: Coroutine[Any, Any, None],
+    ) -> None:
+        """Publish and enforce one deadline from the waiter's start boundary."""
+        flow.expires_at_iso = (
+            datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)
+        ).isoformat()
+        flow.waiter_task = asyncio.create_task(waiter)
+
+    def _remaining_flow_timeout(self, flow: AgentAuthFlow | WebAuthFlow) -> float:
+        """Return the time left on the deadline advertised by this flow."""
+        if flow.expires_at_iso is None:
+            return self.setup_timeout_seconds
+        try:
+            expires_at = datetime.fromisoformat(flow.expires_at_iso)
+            return max(
+                0.0,
+                (expires_at - datetime.now(timezone.utc)).total_seconds(),
+            )
+        except (TypeError, ValueError):
+            return self.setup_timeout_seconds
+
     async def _start_auth_flow(
         self,
         backend: str,
@@ -1139,9 +1164,6 @@ class AgentAuthService:
                 )
 
             flow_id = uuid.uuid4().hex[:12]
-            expires_at_iso = (
-                datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)
-            ).isoformat()
             if context is None:
                 flow: AgentAuthFlow | WebAuthFlow = WebAuthFlow(
                     flow_id=flow_id,
@@ -1149,7 +1171,6 @@ class AgentAuthService:
                     provider=provider,
                     source_id=owner_ref,
                     vendor=self._native_vendor_for_flow(backend, provider),
-                    expires_at_iso=expires_at_iso,
                     native_cli=native_cli,
                 )
             else:
@@ -1160,8 +1181,8 @@ class AgentAuthService:
                     initiator_user_id=context.user_id,
                     context=context,
                     process=None,
-                    reader_task=asyncio.create_task(asyncio.sleep(0)),
-                    waiter_task=asyncio.create_task(asyncio.sleep(0)),
+                    reader_task=None,
+                    waiter_task=None,
                     provider=provider,
                     native_cli=native_cli,
                 )
@@ -1178,10 +1199,13 @@ class AgentAuthService:
                     flow.process = process
                     if context is None:
                         flow.reader_task = asyncio.create_task(self._read_codex_output_web(flow))
-                        flow.waiter_task = asyncio.create_task(self._wait_for_codex_completion_web(flow))
+                        self._arm_flow_waiter(
+                            flow,
+                            self._wait_for_codex_completion_web(flow),
+                        )
                     else:
                         flow.reader_task = asyncio.create_task(self._read_codex_output(process, context, backend))
-                        flow.waiter_task = asyncio.create_task(self._wait_for_completion(flow))
+                        self._arm_flow_waiter(flow, self._wait_for_completion(flow))
                 elif backend == "claude":
                     claude_kwargs = {
                         "force_reset": force_reset,
@@ -1199,10 +1223,11 @@ class AgentAuthService:
                     flow.awaiting_code = True
                     flow.login_prompt_sent = True
                     flow.state = "awaiting_code"
-                    flow.waiter_task = asyncio.create_task(
+                    self._arm_flow_waiter(
+                        flow,
                         self._wait_for_claude_completion_web(flow)
                         if context is None
-                        else self._wait_for_claude_completion(flow)
+                        else self._wait_for_claude_completion(flow),
                     )
                 else:
                     if context is not None and not native_cli:
@@ -1223,7 +1248,7 @@ class AgentAuthService:
                         flow.reader_task = asyncio.create_task(
                             self._read_pty_output(process, master_fd, context, backend)
                         )
-                        flow.waiter_task = asyncio.create_task(self._wait_for_completion(flow))
+                        self._arm_flow_waiter(flow, self._wait_for_completion(flow))
             except BaseException:
                 self._flow_registry.drop(flow)
                 raise
@@ -1639,8 +1664,12 @@ class AgentAuthService:
     async def _wait_for_completion(self, flow: AgentAuthFlow) -> None:
         try:
             assert flow.process is not None
-            await asyncio.wait_for(flow.process.wait(), timeout=self.setup_timeout_seconds)
-            await flow.reader_task
+            await asyncio.wait_for(
+                flow.process.wait(),
+                timeout=self._remaining_flow_timeout(flow),
+            )
+            if flow.reader_task is not None:
+                await flow.reader_task
             ok, detail = await self._verify_login(flow)
             if ok:
                 if flow.backend == "codex":
@@ -1684,13 +1713,14 @@ class AgentAuthService:
             if flow.claude_client is None:
                 raise RuntimeError("Claude auth flow is missing its SDK client")
 
+            timeout = self._remaining_flow_timeout(flow)
             await asyncio.wait_for(
                 self._send_claude_control_request(
                     flow.claude_client,
                     {"subtype": "claude_oauth_wait_for_completion"},
-                    timeout=self.setup_timeout_seconds,
+                    timeout=timeout,
                 ),
-                timeout=self.setup_timeout_seconds,
+                timeout=timeout,
             )
             flow.force_oauth = True
             ok, detail = await self._verify_login(flow)
@@ -2220,9 +2250,6 @@ class AgentAuthService:
                 vendor=self._native_vendor_for_flow(backend, provider_id),
                 state="failed",
                 error=str(err),
-                expires_at_iso=(
-                    datetime.now(timezone.utc) + timedelta(seconds=self.setup_timeout_seconds)
-                ).isoformat(),
             )
             self._flow_registry.put(flow)
         return flow
@@ -3190,13 +3217,14 @@ class AgentAuthService:
         # OpenCode auto-detects completion (device poll or local callback);
         # no user-submitted code to enter. The waiter long-polls the daemon.
         flow.awaiting_code = False
-        flow.waiter_task = asyncio.create_task(
+        self._arm_flow_waiter(
+            flow,
             self._wait_for_opencode_oauth_web(
                 flow,
                 provider_id,
                 method_index,
                 prompt_answers,
-            )
+            ),
         )
 
     async def _submit_opencode_callback_url(self, flow: WebAuthFlow, code: str) -> dict[str, Any]:
@@ -3260,7 +3288,7 @@ class AgentAuthService:
                 provider_id,
                 method=method_index,
                 prompt_answers=prompt_answers,
-                timeout=self.setup_timeout_seconds,
+                timeout=self._remaining_flow_timeout(flow),
             )
             flow.state = "verifying"
             # OpenCode persists into auth.json itself. Clear any Vibe-managed
@@ -3317,7 +3345,10 @@ class AgentAuthService:
     async def _wait_for_codex_completion_web(self, flow: WebAuthFlow) -> None:
         try:
             assert flow.process is not None
-            await asyncio.wait_for(flow.process.wait(), timeout=self.setup_timeout_seconds)
+            await asyncio.wait_for(
+                flow.process.wait(),
+                timeout=self._remaining_flow_timeout(flow),
+            )
             if flow.reader_task and not flow.reader_task.done():
                 try:
                     await flow.reader_task
@@ -3362,13 +3393,14 @@ class AgentAuthService:
         try:
             if flow.claude_client is None:
                 raise RuntimeError("missing_sdk_client")
+            timeout = self._remaining_flow_timeout(flow)
             await asyncio.wait_for(
                 self._send_claude_control_request(
                     flow.claude_client,
                     {"subtype": "claude_oauth_wait_for_completion"},
-                    timeout=self.setup_timeout_seconds,
+                    timeout=timeout,
                 ),
-                timeout=self.setup_timeout_seconds,
+                timeout=timeout,
             )
             flow.state = "verifying"
             ok, detail = await self._verify_web_login(
