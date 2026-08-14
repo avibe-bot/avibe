@@ -953,6 +953,110 @@ def test_source_create_nonce_retains_unsettled_cleanup_until_restart(tmp_path):
     asyncio.run(scenario())
 
 
+def test_source_create_nonce_reconciles_pending_revocations_before_retry(tmp_path):
+    async def scenario():
+        class OrderedAdapter(FakeAdapter):
+            def __init__(self):
+                super().__init__()
+                self.operations = []
+
+            async def sync_sources(self, bindings):
+                self.operations.append("sync")
+                await super().sync_sources(bindings)
+
+            async def revoke_credential(self, credential_ref):
+                self.operations.append(f"revoke:{credential_ref}")
+                await super().revoke_credential(credential_ref)
+
+            async def provision_transient_credential(self, vendor, secret, base_url):
+                self.operations.append("provision_transient")
+                return await super().provision_transient_credential(
+                    vendor,
+                    secret,
+                    base_url,
+                )
+
+        journal_path = tmp_path / "revocations.json"
+        journal = CredentialRevocationJournal(journal_path)
+        journal.add("src_failed01", "cred_orphaned")
+        adapter = OrderedAdapter()
+        service = ModelHubService(
+            store=MemoryStore(),
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth-flows.json"),
+            revocations=CredentialRevocationJournal(journal_path),
+        )
+
+        created = await service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "key": "sk-test-source-create-reconcile",
+                "client_nonce": "scn_01j5w8z7p4n6q2rt",
+            }
+        )
+
+        assert created["source"]["client_nonce"] == "scn_01j5w8z7p4n6q2rt"
+        assert adapter.operations[:3] == [
+            "sync",
+            "revoke:cred_orphaned",
+            "provision_transient",
+        ]
+        assert service.revocations.list() == []
+
+    asyncio.run(scenario())
+
+
+def test_source_create_nonce_owns_permanent_credential_through_cancellation(tmp_path):
+    async def scenario():
+        class BlockingProvisionAdapter(FakeAdapter):
+            def __init__(self):
+                super().__init__()
+                self.provision_started = asyncio.Event()
+                self.release_provision = asyncio.Event()
+
+            async def provision_credential(self, vendor, protocol, secret, base_url):
+                self.provision_started.set()
+                await self.release_provision.wait()
+                return await super().provision_credential(
+                    vendor,
+                    protocol,
+                    secret,
+                    base_url,
+                )
+
+        adapter = BlockingProvisionAdapter()
+        service = ModelHubService(
+            store=MemoryStore(),
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth-flows.json"),
+            revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        )
+        payload = {
+            "kind": "api_key",
+            "vendor": "custom",
+            "key": "sk-test-source-create-cancel",
+            "client_nonce": "scn_01j5w8z7p4n6q2rt",
+        }
+
+        create = asyncio.create_task(service.create_source(payload))
+        await adapter.provision_started.wait()
+        revoked_before_cancel = list(adapter.revoked)
+        create.cancel()
+        adapter.release_provision.set()
+        with pytest.raises(asyncio.CancelledError):
+            await create
+
+        assert adapter.revoked == [*revoked_before_cancel, "cred_test002"]
+        assert service.revocations.list() == []
+        recreated = await service.create_source(payload)
+        assert recreated["source"]["client_nonce"] == payload["client_nonce"]
+
+    asyncio.run(scenario())
+
+
 def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
     """Integration (2026-07-24): list_agents() carries the read-only builtin_models /
     standard_vendors projections straight from the backend modules, so the UI never

@@ -2264,6 +2264,8 @@ class ModelHubService:
                 async with self._mutation_lock:
                     self._claim_source_create_nonce_locked(client_nonce)
                     nonce_claimed = True
+            if self.revocations.list():
+                await self._ensure_engine_synced()
             observation = await self._require_proven_source_payload(
                 {
                     "vendor": vendor,
@@ -2311,12 +2313,16 @@ class ModelHubService:
             except (TypeError, ValueError):
                 raise ModelHubError("discovery_failed") from None
 
-            rollback_credential_ref = await self._engine_call(
-                self.adapter.provision_credential(
-                    vendor,
-                    source.protocol,
-                    cast(str, credential_value),
-                    source.base_url,
+            rollback_credential_ref = await (
+                _acquire_credential_ref_with_cancellation_ownership(
+                    self,
+                    self.adapter.provision_credential(
+                        vendor,
+                        source.protocol,
+                        cast(str, credential_value),
+                        source.base_url,
+                    ),
+                    source.id,
                 )
             )
             source.credential_ref = rollback_credential_ref
