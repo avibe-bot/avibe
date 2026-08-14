@@ -26,18 +26,22 @@ export const buttonVariants = cva(
         // shadow no longer brightens with the fill; the fill swap carries the
         // affordance. See the --primary-hover note in index.css.
         //
-        // Glow blur is 16px on all four accents (owner decision 2026-08-14: 24px read
-        // too heavy). One radius, four accents — a per-accent radius would be the same
-        // drift this variant exists to remove. design.pen has no glow on any Button, so
-        // the value is ours to hold, not the design's; keep the four in lockstep.
+        // Glow blur comes from --brand-glow-blur: 16px dark, 20px light (owner decisions
+        // 2026-08-14 — 24px read too heavy, then 16px read as nothing in light, where the
+        // same neon spreads far less over a white card). It is one token, not four: a
+        // per-accent radius would be the same drift this variant exists to remove, and
+        // routing it through a variable is what makes it theme-dependent at all — this
+        // codebase has no `light:`/`dark:` Tailwind variant, so a per-theme value is
+        // always a CSS variable. design.pen has no glow on any Button, so the value is
+        // ours to hold, not the design's; keep the four in lockstep.
         brand:
-          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_16px_-4px_rgba(91,255,160,0.6)] hover:bg-mint-hover disabled:shadow-none',
+          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_var(--brand-glow-blur)_-4px_rgba(91,255,160,0.6)] hover:bg-mint-hover disabled:shadow-none',
         'brand-cyan':
-          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_16px_-4px_rgba(63,224,229,0.6)] hover:bg-cyan-hover disabled:shadow-none',
+          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_var(--brand-glow-blur)_-4px_rgba(63,224,229,0.6)] hover:bg-cyan-hover disabled:shadow-none',
         'brand-gold':
-          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_16px_-4px_rgba(255,200,87,0.55)] hover:bg-gold-hover disabled:shadow-none',
+          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_var(--brand-glow-blur)_-4px_rgba(255,200,87,0.55)] hover:bg-gold-hover disabled:shadow-none',
         'brand-violet':
-          'gap-2 bg-violet font-bold text-violet-foreground shadow-[0_0_16px_-4px_rgba(124,91,255,0.55)] hover:bg-violet-hover disabled:shadow-none',
+          'gap-2 bg-violet font-bold text-violet-foreground shadow-[0_0_var(--brand-glow-blur)_-4px_rgba(124,91,255,0.55)] hover:bg-violet-hover disabled:shadow-none',
         secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong',
         // Outline — bg matches page surface so it sits cleanly on glow gradients.
         outline:
