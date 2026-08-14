@@ -170,6 +170,10 @@ def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_sta
     assert "independent wake signal" in body
     assert "single wake/no-wake" in body
     assert "caught up or reseeded" in body
+    assert "Omit `--sha`" in body
+    assert "Use `--forever` and one" in body
+    assert "never reseed or replace its state between rounds" in body
+    assert '--workflow lint' in body
 
 
 def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
@@ -185,5 +189,10 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
 
     assert "the `pr-delivery-loop` skill for every implementation task" in agents
     assert "use the `background-watch-hook` skill" in agents
+    assert "one durable `--forever` combined PR/CI Watch" in agents
+    assert "one durable `--forever` combined PR watch" in body
+    assert "omit `--sha`" in body
+    assert "Never reseed" in body
+    assert "never use `--forever`" not in body
     assert (ROOT / "skills/background-watch-hook/scripts/wait_pr.py").is_file()
     assert (ROOT / "skills/background-watch-hook/scripts/wait_action.py").is_file()

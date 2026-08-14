@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.16.1
+version: 0.17.0
 ---
 
 # Background Watch Hook
@@ -183,9 +183,9 @@ This skill ships bundled GitHub waiters:
 
 - `scripts/wait_pr.py`
   Waits for GitHub PR review activity, including reviews, inline review comments, PR conversation comments, PR status transitions such as `draft -> open`, `open -> merged`, or `open -> closed`, and the special Codex `+1` reaction on the PR body. It can also wait for newly opened PRs in a repository.
-  When `--sha` and one or more `--workflow` values are provided for a specific PR,
-  the same waiter also waits for every matching Actions run at that exact SHA and
-  optional branch.
+  When one or more `--workflow` values are provided for a specific PR, the same
+  waiter also watches every matching Actions run at the PR's current head and
+  optional branch. Add `--sha` only to pin a one-shot wait to one exact head.
 - `scripts/wait_issue.py`
   Waits for GitHub issue activity, either newly opened issues in a repository or new comments on a single issue.
 - `scripts/wait_action.py`
@@ -212,50 +212,49 @@ BACKGROUND_WATCH_HOOK_DIR="<directory containing the loaded SKILL.md>"
 
 ## GitHub Example Waiter
 
-For a PR delivery loop, prefer one combined `wait_pr.py` watch. It observes PR review,
-comment, reaction, thread, lifecycle, and head-change events together with selected
-Actions workflows for one exact commit. This keeps one cursor/state file and one
-follow-up Agent Run for the whole PR concern. Use `wait_pr.py` without CI arguments
-for PR-only monitoring. Use `wait_action.py` only for an Actions wait that is not
-attached to a PR.
+For a PR delivery loop, prefer one durable combined `wait_pr.py` watch. It observes
+PR review, comment, reaction, thread, lifecycle, and head-change events together
+with selected Actions workflows for the PR's current head. Use `--forever` and one
+state file for the whole loop: when a push changes the head, the next cycle fetches
+Actions for the new exact SHA without replacing the Watch or rebuilding its PR
+baseline. Use `wait_pr.py` without CI arguments for PR-only monitoring. Use
+`wait_action.py` only for an Actions wait that is not attached to a PR.
 
 ### Preferred PR + CI watch
 
-The CI arguments are one group: `--sha` and at least one repeatable `--workflow` are
-required, while `--branch`, `--max-pages`, and `--success-conclusion` are optional.
-The waiter stays quiet while a requested run is missing or still running, then reports
-the complete exact-head result when every requested workflow has terminal runs. Every
-distinct matching run ID is included, so an earlier failed rerun remains visible to
-the follow-up turn. If the PR head changes, the waiter reports that event; fetch the
-new head and re-arm with a new `--sha` rather than continuing to gate the old commit.
+At least one repeatable `--workflow` enables combined CI monitoring. Omit `--sha`
+for the normal delivery loop: each cycle resolves the PR's current head and queries
+Actions for that exact SHA. `--branch`, `--max-pages`, and `--success-conclusion`
+remain optional. Add `--sha` only when the caller intentionally wants a fixed-head
+one-shot wait. The waiter stays quiet while a requested run is missing or still
+running, then reports the complete exact-head result when every requested workflow
+has terminal runs. Every distinct matching run ID is included, so an earlier failed
+rerun remains visible to the follow-up turn.
 
 ```bash
 STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-review.json"
-HEAD_SHA="$(gh pr view 151 --repo avibe-bot/avibe --json headRefOid --jq .headRefOid)"
 BRANCH="$(gh pr view 151 --repo avibe-bot/avibe --json headRefName --jq .headRefName)"
 
 uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --repo avibe-bot/avibe --pr 151 \
-  --sha "$HEAD_SHA" --branch "$BRANCH" \
+  --branch "$BRANCH" \
   --workflow lint \
   --actionable-only \
   --state-file "$STATE_FILE" --seed-state
 
-# Push or post the review trigger only after the combined baseline is durable.
-# If the push changed the PR head after seeding, refresh both values before arming.
-# This is required even when the old SHA was used to create the baseline.
-HEAD_SHA="$(gh pr view 151 --repo avibe-bot/avibe --json headRefOid --jq .headRefOid)"
-BRANCH="$(gh pr view 151 --repo avibe-bot/avibe --json headRefName --jq .headRefName)"
-
 vibe watch add \
   --name "Watch PR 151 review and CI" \
-  --message "PR #151 has new review activity, a head change, or exact-head CI activity. Fetch the latest PR and Actions state, resolve actionable findings, and re-arm the combined waiter for any new head. Summarise the round here in one or two lines; do not post that summary as a PR comment." \
+  --forever \
+  --message "PR #151 has new review activity, a head change, or current-head CI activity. Fetch the latest PR and Actions state, resolve actionable findings, and leave this durable combined Watch armed until close-out. Summarise the round here in one or two lines; do not post that summary as a PR comment." \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe --pr 151 \
-    --sha "$HEAD_SHA" --branch "$BRANCH" \
+    --branch "$BRANCH" \
     --workflow lint \
     --actionable-only --settle 20 --state-file "$STATE_FILE" --interval 60
+
+# After the seeded Watch is confirmed live, push or post the review trigger.
+# Keep this same state file and Watch for every later head and review round.
 ```
 
 Do not combine `--new-prs` with CI arguments. A new PR has no stable exact-head
@@ -282,9 +281,14 @@ vibe watch add \
     --interval 60
 ```
 
-Before a push or review trigger, seed an owner-specific state file from the
-current complete PR snapshot. Arm the post-action watch with that exact file so
-activity that lands during the handoff remains visible.
+Before the first watched push or review trigger in the delivery loop, seed an
+owner-specific state file from the current complete PR snapshot. Arm the forever
+Watch with that exact file and confirm it is live before taking the watched action.
+After the Watch starts, never reseed or replace its state between rounds: a later
+event may already exist, and turning it into the new baseline silently drops it.
+The forever Watch promotes each delivered batch and compares the next cycle against
+that durable pre-event snapshot, including activity that landed while the Agent
+follow-up was running.
 
 Use `--catch-up` only when deliberately processing historical activity. It is
 not a substitute for the pre-action baseline in a review loop.

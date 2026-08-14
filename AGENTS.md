@@ -204,6 +204,9 @@ Source-of-truth rule:
   review-fix loop running until the review passes; use that skill's bundled PR
   and Actions waiters rather than hand-rolling one, and create the watch
   immediately without waiting to be reminded
+- keep one durable `--forever` combined PR/CI Watch for the loop: seed its state
+  once before the first review trigger, let the waiter follow the PR's current
+  head for exact-SHA Actions, and never rebuild the baseline between rounds
 - PR descriptions must name the changed capability, list affected scenario IDs
   when a catalog exists, and state which evidence layers were updated: unit,
   contract, scenario, and residual manual checks
