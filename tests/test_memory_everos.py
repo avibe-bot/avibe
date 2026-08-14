@@ -1015,6 +1015,51 @@ def test_list_episodes_rejects_nonempty_page_beyond_total_count() -> None:
         asyncio.run(run())
 
 
+def test_list_episodes_rejects_ascending_provider_page() -> None:
+    def episode(episode_id: str, timestamp: str) -> dict[str, object]:
+        return {
+            "id": episode_id,
+            "user_id": PRINCIPAL,
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "session_id": "provider-session",
+            "timestamp": timestamp,
+            "sender_ids": [],
+            "summary": "Summary",
+            "subject": "Subject",
+            "episode": "Body",
+            "type": "Conversation",
+        }
+
+    data = {
+        "episodes": [
+            episode("episode-older", "2026-08-14T00:00:00Z"),
+            episode("episode-newer", "2026-08-14T00:00:01Z"),
+        ],
+        "profiles": [],
+        "agent_cases": [],
+        "agent_skills": [],
+        "total_count": 2,
+        "count": 2,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"request_id": "request", "data": data})
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                PROJECT,
+                1,
+                20,
+            )
+        assert raised.value.error == "memory_provider_response_invalid"
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
+
+
 def test_profile_canonicalizes_structured_profile() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(

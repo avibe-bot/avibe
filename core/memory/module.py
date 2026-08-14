@@ -987,6 +987,10 @@ class MemoryModule:
             or isinstance(result.total_count, bool)
             or not isinstance(result.total_count, int)
             or result.total_count < result.count
+            or (
+                result.count > 0
+                and result.total_count < (page - 1) * page_size + result.count
+            )
             or any(warning != "memory_list_truncated" for warning in result.warnings)
         ):
             return OperationFailed(error="memory_provider_response_invalid")

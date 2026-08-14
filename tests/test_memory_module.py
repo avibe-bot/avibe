@@ -33,6 +33,7 @@ from core.memory.types import (
     MemoryItems,
     MemoryListItem,
     MemoryListPage,
+    MemoryListResult,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
@@ -650,6 +651,37 @@ async def test_list_episodes_enforces_scope_pagination_and_page_bounds(tmp_path:
     assert "provider-list-body-canary" not in repr(result)
 
 
+async def test_list_episodes_rejects_nonempty_page_beyond_total_count(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=(
+                MemoryListItem(
+                    id="opaque-episode-id",
+                    subject="Subject",
+                    summary="Summary",
+                    body="Processed body",
+                    timestamp="2026-08-14T02:11:12Z",
+                    project="notes",
+                ),
+            ),
+            page=1,
+            page_size=20,
+            count=1,
+            total_count=1,
+        )
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+        page=3,
+        page_size=5,
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+
 async def test_keyword_recall_skips_health_and_succeeds_without_embedding(tmp_path: Path) -> None:
     class NoHealthProvider(FakeMemoryProvider):
         async def health_snapshot(self):
@@ -1122,6 +1154,17 @@ def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
 
     assert "MemoryProviderPort" not in memory.__all__
     assert "ProviderCapture" not in memory.__all__
+
+
+def test_memory_list_result_types_are_public() -> None:
+    import core.memory as memory
+
+    assert memory.MemoryListItem is MemoryListItem
+    assert memory.MemoryListPage is MemoryListPage
+    assert memory.MemoryListResult is MemoryListResult
+    assert {"MemoryListItem", "MemoryListPage", "MemoryListResult"} <= set(
+        memory.__all__
+    )
 
 
 def test_slice2_runtime_types_remain_internal_to_the_memory_package() -> None:

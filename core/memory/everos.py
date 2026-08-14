@@ -1130,6 +1130,15 @@ def _map_episode_page(
         )
         for episode in episodes
     )
+    timestamps = tuple(
+        datetime.fromisoformat(item.timestamp.replace("Z", "+00:00"))
+        for item in items
+    )
+    if any(
+        next_timestamp > timestamp
+        for timestamp, next_timestamp in zip(timestamps, timestamps[1:])
+    ):
+        raise MemoryProviderFailure("memory_provider_response_invalid")
     warnings = (
         ("memory_list_truncated",)
         if total_count > _EVEROS_EXACT_SORT_WINDOW
