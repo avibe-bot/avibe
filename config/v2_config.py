@@ -1237,6 +1237,18 @@ def _validate_model_hub_base_url(value: object) -> Optional[str]:
     return normalize_model_hub_base_url(value)
 
 
+_MODEL_HUB_SOURCE_CLIENT_NONCE_PATTERN = re.compile(r"^scn_[a-z0-9]{16,64}$")
+
+
+def validate_model_hub_source_client_nonce(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or _MODEL_HUB_SOURCE_CLIENT_NONCE_PATTERN.fullmatch(value) is None
+    ):
+        raise ValueError("Config 'model_hub.sources.client_nonce' is invalid")
+    return value
+
+
 def _filter_dataclass_fields(dc_class, payload: dict) -> dict:
     """Filter payload to only include fields defined in dataclass."""
     valid_fields = {f.name for f in fields(dc_class)}
@@ -1948,6 +1960,7 @@ class ModelHubSourceConfig:
     state: ModelHubSourceStateConfig
     models: list[ModelHubModelConfig]
     created_at: str = MODEL_HUB_LEGACY_CREATED_AT
+    client_nonce: Optional[str] = None
     last_discovered_at: Optional[str] = None
     base_url: Optional[str] = None
     usage: Optional[ModelHubSourceUsageConfig] = None
@@ -1962,6 +1975,7 @@ class ModelHubSourceConfig:
         allowed_fields = {
             "id",
             "created_at",
+            "client_nonce",
             "last_discovered_at",
             "kind",
             "vendor",
@@ -2019,6 +2033,11 @@ class ModelHubSourceConfig:
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
         created_at = payload.get("created_at")
+        client_nonce = (
+            validate_model_hub_source_client_nonce(payload.get("client_nonce"))
+            if "client_nonce" in payload
+            else None
+        )
         last_discovered_at = payload.get("last_discovered_at")
         base_url = _validate_model_hub_base_url(base_url)
         if credential_ref is not None and not isinstance(credential_ref, str):
@@ -2056,6 +2075,7 @@ class ModelHubSourceConfig:
                 )
                 or MODEL_HUB_LEGACY_CREATED_AT
             ),
+            client_nonce=client_nonce,
             last_discovered_at=_validate_optional_datetime(
                 last_discovered_at,
                 "model_hub.sources.last_discovered_at",
@@ -2085,6 +2105,8 @@ class ModelHubSourceConfig:
             "account_label": self.account_label,
             "masked_credential": self.masked_credential,
         }
+        if self.client_nonce is not None:
+            payload["client_nonce"] = self.client_nonce
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()
         return payload
@@ -2334,6 +2356,13 @@ class ModelHubConfig:
         source_ids = [source.id for source in sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Config 'model_hub.sources' contains duplicate ids")
+        source_nonces = [
+            source.client_nonce
+            for source in sources
+            if source.client_nonce is not None
+        ]
+        if len(set(source_nonces)) != len(source_nonces):
+            raise ValueError("Config 'model_hub.sources' contains duplicate client nonces")
         for backend in MODEL_HUB_BACKENDS:
             native_sources = [
                 source
