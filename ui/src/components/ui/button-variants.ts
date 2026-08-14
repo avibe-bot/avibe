@@ -11,9 +11,10 @@ export const buttonVariants = cva(
         // Mint primary — flat, no glow shadow (design.pen Button/Default).
         default: 'gap-1.5 bg-primary text-primary-foreground hover:brightness-110',
         // Brand CTA — bright bg + brand-color glow shadow + bold text + brighten on hover.
-        // The fill is the accent itself and the label its paired *-foreground, which
-        // is the dark ink in both themes: a brand fill stays vivid under light, so it
-        // takes the same dark label there that it takes on the dark frame.
+        // The fill is the accent itself and the label its paired *-foreground: a dark
+        // ink on the dark theme's neon accents, white on light's vivid ones. Both are
+        // the design's own pairing; see the ACCEPTED_BRAND_PAIRS note in
+        // ui/scripts/validate-theme.mjs for why light's white label is deliberate.
         brand:
           'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_24px_-4px_rgba(91,255,160,0.6)] hover:brightness-105 disabled:shadow-none',
         'brand-cyan':

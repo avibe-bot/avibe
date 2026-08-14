@@ -203,21 +203,27 @@
     --popover: #ffffff;
     --popover-foreground: #0a0a14;
 
-    /* Fills keep design.pen's vivid light accents, and take a dark label the
-       way the dark theme already does — #10b981 reads 2.54:1 under white but
-       7.86:1 under #080812, so the fill never had to move. --destructive is
-       the exception: #e11d48 is 4.70:1 under white and only 4.24:1 under the
-       dark ink, so its label stays white. Inks are a separate token; see the
-       --mint-ink group. Guarded by ui/scripts/validate-theme.mjs. */
+    /* Fills keep design.pen's vivid light accents *and* its white label — the
+       pairing the product shipped before it was briefly deepened. The brand
+       pair is a product decision, not an oversight: an AI-colleague product
+       should read as alive rather than muted, so the accent stays at full
+       saturation and the label stays white the way the design drew it. That
+       costs AA on the label (white on #10b981 is 2.54:1), so
+       validate-theme.mjs exempts these pairs by *pinning* the ratio each was
+       accepted at rather than skipping them — drift in either token changes
+       the measured ratio and fails the guard until someone re-decides.
+       --destructive needs no exemption: #e11d48 under white is 4.70:1.
+       Accent-as-text on a neutral surface is a separate token and keeps the
+       full AA floor; see the --mint-ink group. Owner decision 2026-08-14. */
     --primary: #10b981;
-    --primary-foreground: #080812;
+    --primary-foreground: #ffffff;
     --primary-ink: #067a55;
     --secondary: #eef1f7;
     --secondary-foreground: #0a0a14;
     --muted: #5c6079;
     --muted-soft: #eef1f7;
     --accent: #0891b2;
-    --accent-foreground: #080812;
+    --accent-foreground: #ffffff;
     --accent-ink: #0e7490;
     --destructive: #e11d48;
     --destructive-foreground: #ffffff;
@@ -249,7 +255,7 @@
     --violet-ink: #7c3aed;
     --gold: #d97706;
     --gold-soft: rgba(217, 119, 6, 0.14);
-    --gold-foreground: #080812;
+    --gold-foreground: #ffffff;
     --gold-ink: #ae4f08;
     --pink: #dc2659;
     --pink-soft: rgba(220, 38, 89, 0.10);
@@ -305,17 +311,17 @@
   --popover: #ffffff;
   --popover-foreground: #0a0a14;
 
-  /* Vivid fill + dark label, deepened ink - see the prefers-color-scheme block
-     above. Both light blocks must stay value-identical. */
+  /* Vivid fill + white label, deepened ink - see the prefers-color-scheme
+     block above. Both light blocks must stay value-identical. */
   --primary: #10b981;
-  --primary-foreground: #080812;
+  --primary-foreground: #ffffff;
   --primary-ink: #067a55;
   --secondary: #eef1f7;
   --secondary-foreground: #0a0a14;
   --muted: #5c6079;
   --muted-soft: #eef1f7;
   --accent: #0891b2;
-  --accent-foreground: #080812;
+  --accent-foreground: #ffffff;
   --accent-ink: #0e7490;
   --destructive: #e11d48;
   --destructive-foreground: #ffffff;
@@ -338,7 +344,7 @@
   --violet-ink: #7c3aed;
   --gold: #d97706;
   --gold-soft: rgba(217, 119, 6, 0.14);
-  --gold-foreground: #080812;
+  --gold-foreground: #ffffff;
   --gold-ink: #ae4f08;
   --pink: #dc2659;
   --pink-soft: rgba(220, 38, 89, 0.10);

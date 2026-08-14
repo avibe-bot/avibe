@@ -247,14 +247,58 @@ function contrastRatio(foreground, background) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+// Brand fill/label pairs the owner has accepted against the AA floor. Avibe's
+// accents carry the product's personality — an AI-colleague product should read as
+// alive, not muted — so the light fills keep design.pen's saturation and the white
+// label the design drew, which is the pairing the palette shipped before it was
+// briefly deepened. Text on a neutral surface is a separate token (--X-ink) and
+// keeps the full floor; only the label printed on a brand fill is accepted here.
+//
+// These are pinned, not skipped. Each entry records the ratio the pair was accepted
+// at and the guard fails when the measured ratio moves off it, so an exemption still
+// catches drift: nudge either token and this list goes stale loudly, forcing a fresh
+// decision instead of quietly sliding further down. Owner decision 2026-08-14.
+const ACCEPTED_BRAND_PAIRS = new Map([
+  ['light fill: --primary-foreground on --primary', 2.54],
+  ['light fill: --accent-foreground on --accent', 3.68],
+  ['light fill: --gold-foreground on --gold', 3.19],
+]);
+const PIN_TOLERANCE = 0.01;
+const consultedBrandPairs = new Set();
+
 function assertContrast(name, tokens, inkProp, surfaceProp) {
   const ink = requireMeasurableColor(name, inkProp, tokens.get(inkProp));
   const surface = requireMeasurableColor(name, surfaceProp, tokens.get(surfaceProp));
 
   const ratio = contrastRatio(ink, surface);
+  const key = `${name}: ${inkProp} on ${surfaceProp}`;
+  const accepted = ACCEPTED_BRAND_PAIRS.get(key);
+  if (accepted !== undefined) {
+    consultedBrandPairs.add(key);
+    if (Math.abs(ratio - accepted) > PIN_TOLERANCE) {
+      throw new Error(
+        `${key} is ${ratio.toFixed(2)}:1, but ACCEPTED_BRAND_PAIRS pins it at ${accepted.toFixed(2)}:1. ` +
+          'This pair is exempt from the AA floor by an owner decision taken at that exact ratio, so moving ' +
+          'either token needs a fresh decision — re-pin it here once the new value is intended.',
+      );
+    }
+    return;
+  }
   if (ratio < AA_SMALL_TEXT) {
     throw new Error(
       `${name}: ${inkProp} on ${surfaceProp} is ${ratio.toFixed(2)}:1, below WCAG AA ${AA_SMALL_TEXT}:1`,
+    );
+  }
+}
+
+// A pair that no longer exists must not keep its exemption: the tokens it excused
+// may have been renamed or dropped, and a stale entry would silently excuse whatever
+// takes that name next.
+function assertEveryAcceptedPairStillExists() {
+  const stale = [...ACCEPTED_BRAND_PAIRS.keys()].filter((key) => !consultedBrandPairs.has(key));
+  if (stale.length > 0) {
+    throw new Error(
+      `ACCEPTED_BRAND_PAIRS lists ${stale.join(', ')}, which no theme declares. Drop the entry.`,
     );
   }
 }
@@ -346,6 +390,7 @@ function assertAccentAliasesKeepTheirTokenName(source) {
 }
 
 assertAccentAliasesKeepTheirTokenName(css);
+assertEveryAcceptedPairStillExists();
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });
 const modelHubSystemDark = modelHub({ prefersLight: false, themeAttr: null });
