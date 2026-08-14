@@ -1373,7 +1373,11 @@ async def test_opencode_poll_owner_observes_accepted_steer_before_terminalizing(
         receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
         await asyncio.sleep(0.15)
 
-        assert not poll_task.done()
+        # The poll owner now receives the in-progress snapshot once the steered
+        # user message is visible while the native session is busy, so the poll
+        # loop keeps streaming live activity instead of blocking on busy.
+        intermediate = await asyncio.wait_for(poll_task, timeout=1)
+        assert intermediate[-1]["info"]["role"] == "user"
         assert state.closing is False
         server.messages.append(
             {
@@ -1387,12 +1391,322 @@ async def test_opencode_poll_owner_observes_accepted_steer_before_terminalizing(
             }
         )
         server.status = {"type": "idle"}
-        messages = await asyncio.wait_for(poll_task, timeout=1)
+        messages = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
         assert messages[-1]["info"]["id"] == "steered-assistant"
         assert state.closing is True
         assert agent._active_requests == {primary.base_session_id: gate_task}
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_regular_turn_streams_snapshot_while_busy() -> None:
+    """A plain turn (start-armed, like ``_process_message``) must hand the
+    in-progress snapshot back to the poll loop while the native session is
+    busy, so live tool activity streams instead of blocking until idle."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "baseline-user", "role": "user"},
+                "parts": [{"type": "text", "text": "earlier prompt"}],
+            },
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            },
+            {
+                "info": {
+                    "id": "running-assistant",
+                    "role": "assistant",
+                },
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call-bash",
+                        "state": {"status": "running", "input": {"command": "ls"}},
+                    }
+                ],
+            },
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"baseline-user"}
+    state.awaiting_user_text = "primary"
+    state.awaiting_start_confirmation_deadline = time.monotonic() + 5.0
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        intermediate = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        assert intermediate[-1]["info"]["id"] == "running-assistant"
+        assert state.awaiting_active_status_observed is True
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "final-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 2},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "final response"}],
+            }
+        )
+        server.status = {"type": "idle"}
+        final = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        assert final[-1]["info"]["id"] == "final-assistant"
+        assert state.closing is True
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_regular_turn_waits_for_unconfirmed_start() -> None:
+    """While the inserted user message is not yet visible, a busy session must
+    keep waiting within the start-confirmation deadline (the 204-then-busy
+    race guard), not hand an empty snapshot back to the poll loop."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            }
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"primary-user"}
+    state.awaiting_user_text = "primary"
+    state.awaiting_start_confirmation_deadline = time.monotonic() + 5.0
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.awaiting_active_status_observed is False
+
+        server.messages.append(
+            {
+                "info": {"id": "steer-user-1", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            }
+        )
+        intermediate = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert intermediate[-1]["info"]["id"] == "steer-user-1"
+        assert state.awaiting_active_status_observed is True
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_restored_busy_snapshot_requires_post_boundary_evidence() -> None:
+    """A restored boundary-sampled poll must not receive a busy snapshot that
+    only contains boundary messages (the pre-restore final answer): the
+    restored poll loop would treat it as the final response and drop the
+    still-running poll."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "old-final-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "old answer"}],
+            }
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"old-final-assistant"}
+    state.awaiting_user_text = None
+    state.restored = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "running-assistant",
+                    "role": "assistant",
+                },
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call-bash",
+                        "state": {"status": "running", "input": {"command": "ls"}},
+                    }
+                ],
+            }
+        )
+        snapshot = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert snapshot[-1]["info"]["id"] == "running-assistant"
+        assert state.closing is False
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_restored_empty_boundary_still_requires_new_evidence() -> None:
+    """When the sampled reconciliation boundary is empty (only pre-prompt
+    baseline messages existed at sample time), a busy snapshot holding only
+    the baseline final answer must still be gated: an empty boundary is not
+    automatic evidence."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "old-final-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "old answer"}],
+            }
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.baseline_message_ids = {"old-final-assistant"}
+    state.awaiting_after_message_ids = set()
+    state.awaiting_user_text = None
+    state.restored = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "running-assistant",
+                    "role": "assistant",
+                },
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call-bash",
+                        "state": {"status": "running", "input": {"command": "ls"}},
+                    }
+                ],
+            }
+        )
+        snapshot = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert snapshot[-1]["info"]["id"] == "running-assistant"
+        assert state.closing is False
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_retry_keeps_completed_error_snapshots_gated() -> None:
+    """A completed assistant error must stay gated while the native session
+    still reports busy/retry: handing it to the poll loop would emit a
+    terminal failure (or a competing "continue") while OpenCode's own retry
+    is still active."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            },
+            {
+                "info": {
+                    "id": "failed-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "error": {"name": "ProviderError", "data": {"message": "boom"}},
+                },
+                "parts": [],
+            },
+        ],
+        status={"type": "retry"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = set()
+    state.awaiting_user_text = "primary"
+    state.awaiting_start_confirmation_deadline = time.monotonic() + 5.0
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.awaiting_active_status_observed is True
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "retried-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 2},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "recovered"}],
+            }
+        )
+        server.status = {"type": "busy"}
+        snapshot = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert snapshot[-1]["info"]["id"] == "retried-assistant"
+        assert state.closing is True
     finally:
         await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
 
@@ -1528,7 +1842,7 @@ async def test_opencode_accepted_prompt_waits_for_delayed_busy_registration() ->
 
     class _DelayedStartServer(_OpenCodeServer):
         async def list_messages(self, session_id: str, directory: str) -> list[dict]:
-            if self.list_calls == 3:
+            if self.list_calls == 2:
                 self.messages.append(
                     {
                         "info": {
@@ -1573,11 +1887,13 @@ async def test_opencode_accepted_prompt_waits_for_delayed_busy_registration() ->
             timeout=1,
         )
 
+        # The busy snapshot is handed back once the inserted user message is
+        # visible; the third list lands the completed final assistant.
         assert messages[-1]["info"]["id"] == "follow-up-assistant"
         assert state.terminal_status_failure_messages is None
         assert state.awaiting_after_message_ids is None
         assert state.closing is True
-        assert server.list_calls == 4
+        assert server.list_calls == 3
     finally:
         await _cancel_tasks(gate_task)
 
@@ -1619,6 +1935,16 @@ async def test_opencode_idle_waits_for_delayed_terminal_message_visibility() -> 
     state.awaiting_start_confirmation_deadline = time.monotonic() - 1
     poll_server = _SteeringAwareOpenCodeServer(server, state)
     try:
+        intermediate = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        # Busy + inserted user visible → in-progress snapshot streams back.
+        assert intermediate[-1]["info"]["id"] == "follow-up-user"
+        assert state.awaiting_active_status_observed is True
+        assert state.closing is False
+
         messages = await asyncio.wait_for(
             poll_server.list_messages("opencode-session", primary.working_path),
             timeout=1,

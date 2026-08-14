@@ -169,6 +169,35 @@ class _SteeringAwareOpenCodeServer:
             if part.get("type") == "text"
         )
 
+    @staticmethod
+    def _last_is_completed_error(messages: list[Dict[str, Any]]) -> bool:
+        if not messages:
+            return False
+        info = messages[-1].get("info", {}) or {}
+        return bool(
+            info.get("role") == "assistant"
+            and info.get("time", {}).get("completed")
+            and info.get("error")
+        )
+
+    @staticmethod
+    def _has_post_boundary_activity(
+        messages: list[Dict[str, Any]],
+        boundary_ids: set[str],
+        baseline_ids: set[str],
+    ) -> bool:
+        # Evidence means a message the restored poll loop would treat as new:
+        # outside the reconciliation boundary AND outside the pre-prompt
+        # baseline. The baseline term matters when the sampled boundary is
+        # empty (only baseline messages existed when it was sampled).
+        for message in messages:
+            message_id = (message.get("info", {}) or {}).get("id")
+            if not message_id:
+                continue
+            if message_id not in boundary_ids and message_id not in baseline_ids:
+                return True
+        return False
+
     @classmethod
     def _inserted_user_index(
         cls,
@@ -350,22 +379,62 @@ class _SteeringAwareOpenCodeServer:
                     else:
                         self._state.status_reconciliation_failures = 0
                         if status is not None and status.get("type") in {"busy", "retry"}:
-                            if (
-                                reconcile_insert
-                                and inserted_user_text is not None
-                                and self._inserted_user_index(
+                            if reconcile_initial_status and awaiting is None:
+                                self._state.awaiting_after_message_ids = (
+                                    self._completed_assistant_boundary(messages)
+                                )
+                            if reconcile_insert and (
+                                inserted_user_text is None
+                                or self._inserted_user_index(
                                     messages,
                                     awaiting,
                                     inserted_user_text,
                                 )
                                 >= 0
                             ):
-                                self._state.awaiting_active_status_observed = True
-                                self._state.awaiting_result_confirmation_deadline = None
-                            if reconcile_initial_status and awaiting is None:
-                                self._state.awaiting_after_message_ids = (
-                                    self._completed_assistant_boundary(messages)
-                                )
+                                # Start confirmed: the inserted user message is
+                                # visible while the native session reports
+                                # activity (or a restored poll sampled its
+                                # boundary during activity). Hand the in-progress
+                                # snapshot back to the poll loop so live tool
+                                # activity keeps streaming; the result-confirmation
+                                # window still guards the idle boundary below.
+                                if inserted_user_text is not None:
+                                    self._state.awaiting_active_status_observed = True
+                                    self._state.awaiting_result_confirmation_deadline = None
+                                    if final_snapshot or self._has_final_assistant_after(
+                                        messages,
+                                        awaiting,
+                                        inserted_user_text=inserted_user_text,
+                                    ):
+                                        # The final assistant already exists even
+                                        # though the session still reports busy
+                                        # (status settles after the message lands):
+                                        # settle like the idle path does.
+                                        self._clear_awaiting_reconciliation()
+                                        self._state.closing = True
+                                if self._last_is_completed_error(messages):
+                                    # Keep terminal error snapshots gated while the
+                                    # native runtime has not settled: the poll loop
+                                    # would emit its own terminal failure (or a
+                                    # competing "continue") while OpenCode's native
+                                    # retry is still active.
+                                    wait_for_insert = True
+                                elif inserted_user_text is None and not self._has_post_boundary_activity(
+                                    messages,
+                                    awaiting,
+                                    self._state.baseline_message_ids,
+                                ):
+                                    # Restored boundary-sampled polls: a busy
+                                    # snapshot holding only boundary messages
+                                    # (ending in a pre-restore final answer) must
+                                    # not be handed back, or the restored poll
+                                    # loop would re-emit the old answer and drop
+                                    # the still-running poll. Wait for post-boundary
+                                    # or in-progress evidence.
+                                    wait_for_insert = True
+                                else:
+                                    return messages
                             wait_for_insert = True
                         else:
                             self._state.reconcile_initial_status = False
