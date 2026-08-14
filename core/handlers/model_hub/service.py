@@ -2241,6 +2241,8 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
         if kind != "api_key" and client_nonce is not None:
             raise ModelHubError("discovery_failed")
+        if kind == "api_key":
+            self._observation_protocol_order(payload)
 
         if oauth_ref:
             return self._source_creation_result(

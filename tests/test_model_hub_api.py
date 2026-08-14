@@ -856,6 +856,87 @@ def test_source_create_nonce_covers_in_flight_committed_and_deleted_states(tmp_p
     asyncio.run(scenario())
 
 
+def test_source_create_validates_probe_order_before_every_nonce_state(tmp_path):
+    async def scenario():
+        class BlockingObservationAdapter(FakeAdapter):
+            def __init__(self):
+                super().__init__()
+                self.observation_started = asyncio.Event()
+                self.release_observation = asyncio.Event()
+                self.block_once = True
+
+            async def observe_source(
+                self,
+                vendor,
+                base_url,
+                credential_ref,
+                protocol_order,
+            ):
+                if self.block_once:
+                    self.block_once = False
+                    self.observation_started.set()
+                    await self.release_observation.wait()
+                return await super().observe_source(
+                    vendor,
+                    base_url,
+                    credential_ref,
+                    protocol_order,
+                )
+
+        adapter = BlockingObservationAdapter()
+        service = ModelHubService(
+            store=MemoryStore(),
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth-flows.json"),
+            revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        )
+        payload = {
+            "kind": "api_key",
+            "vendor": "custom",
+            "key": "sk-test-source-create-probe-order",
+            "client_nonce": "scn_01j5w8z7p4n6q2rt",
+        }
+        malformed = {**payload, "protocol_order": ["anthropic"]}
+
+        unclaimed_work = list(adapter.secret_lengths)
+        with pytest.raises(ModelHubError) as unclaimed:
+            await service.create_source(
+                {
+                    **malformed,
+                    "client_nonce": "scn_01j5w8z7p4n6q2ru",
+                }
+            )
+        assert unclaimed.value.code == "discovery_failed"
+        assert adapter.secret_lengths == unclaimed_work
+
+        first = asyncio.create_task(service.create_source(payload))
+        await adapter.observation_started.wait()
+        in_flight_work = list(adapter.secret_lengths)
+        with pytest.raises(ModelHubError) as in_flight:
+            await service.create_source(malformed)
+        assert in_flight.value.code == "discovery_failed"
+        assert adapter.secret_lengths == in_flight_work
+
+        adapter.release_observation.set()
+        await first
+        committed_work = list(adapter.secret_lengths)
+        with pytest.raises(ModelHubError) as committed:
+            await service.create_source(malformed)
+        assert committed.value.code == "discovery_failed"
+        assert adapter.secret_lengths == committed_work
+
+        recreated = await service.create_source(
+            {
+                **payload,
+                "client_nonce": "scn_01j5w8z7p4n6q2ru",
+            }
+        )
+        assert recreated["source"]["client_nonce"] == "scn_01j5w8z7p4n6q2ru"
+
+    asyncio.run(scenario())
+
+
 def test_source_create_nonce_releases_only_after_credential_cleanup(tmp_path):
     async def scenario():
         adapter = FakeAdapter()
