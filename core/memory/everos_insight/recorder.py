@@ -27,7 +27,7 @@ from core.memory.confined_filesystem import (
 
 JsonPrimitive: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
-ProviderKind: TypeAlias = Literal["llm", "multimodal_llm", "embedding"]
+ProviderKind: TypeAlias = Literal["llm", "multimodal_llm", "embedding", "rerank"]
 
 _ATTACHMENT_OMITTED = "[ATTACHMENT_OMITTED]"
 _LLM_MESSAGE_BYTES = 16 * 1024
@@ -831,7 +831,7 @@ def _validate_call(call: ProviderCallInput) -> None:
         value = getattr(call, name)
         if not isinstance(value, str) or not value:
             raise ValueError(f"{name} must be a non-empty string")
-    if call.kind not in {"llm", "multimodal_llm", "embedding"}:
+    if call.kind not in {"llm", "multimodal_llm", "embedding", "rerank"}:
         raise ValueError("unsupported provider call kind")
     for name in ("started_at_ms", "duration_ms", "dropped_before"):
         value = getattr(call, name)

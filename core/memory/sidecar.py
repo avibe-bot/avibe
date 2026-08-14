@@ -375,6 +375,9 @@ def _processing_healthy_from_child_environment() -> bool:
         embedding_base_url=os.environ.get("EVEROS_EMBEDDING__BASE_URL"),
         embedding_model=os.environ.get("EVEROS_EMBEDDING__MODEL"),
         embedding_api_key=os.environ.get("EVEROS_EMBEDDING__API_KEY"),
+        rerank_base_url=os.environ.get("EVEROS_RERANK__BASE_URL"),
+        rerank_model=os.environ.get("EVEROS_RERANK__MODEL"),
+        rerank_api_key=os.environ.get("EVEROS_RERANK__API_KEY"),
     )
     return asyncio.run(provider.processing_healthy())
 

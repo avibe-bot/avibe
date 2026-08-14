@@ -1403,10 +1403,19 @@ class MemoryEndpointConfig:
 class MemoryProcessingConfig:
     llm: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
     embedding: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
+    rerank: Optional[MemoryEndpointConfig] = None
 
     def validate(self) -> None:
         self.llm.validate(name="llm")
         self.embedding.validate(name="embedding")
+        if self.rerank is not None:
+            self.rerank.validate(name="rerank")
+            if not any((self.rerank.base_url, self.rerank.model, self.rerank.api_key)):
+                self.rerank = None
+            elif not self.rerank.complete():
+                raise ValueError(
+                    "Memory rerank endpoint must include base_url, model, and api_key"
+                )
 
 
 @dataclass
@@ -1542,12 +1551,15 @@ def memory_config_to_payload(
             "has_api_key": bool(key),
         }
 
+    processing = {
+        "llm": endpoint_payload(memory.processing.llm),
+        "embedding": endpoint_payload(memory.processing.embedding),
+    }
+    if memory.processing.rerank is not None:
+        processing["rerank"] = endpoint_payload(memory.processing.rerank)
     payload = {
         "enabled": memory.enabled,
-        "processing": {
-            "llm": endpoint_payload(memory.processing.llm),
-            "embedding": endpoint_payload(memory.processing.embedding),
-        },
+        "processing": processing,
         "diagnostics": {
             "log_provider_calls": memory.diagnostics.log_provider_calls,
         },
@@ -1581,6 +1593,12 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
         processing_payload.get("embedding", {}),
         name="memory.processing.embedding",
     )
+    rerank_payload = None
+    if "rerank" in processing_payload:
+        rerank_payload = _optional_memory_object(
+            processing_payload["rerank"],
+            name="memory.processing.rerank",
+        )
     diagnostics_payload = _optional_memory_object(
         payload.get("diagnostics", {}),
         name="memory.diagnostics",
@@ -1614,6 +1632,13 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
             ),
             embedding=MemoryEndpointConfig(
                 **_filter_dataclass_fields(MemoryEndpointConfig, embedding_payload)
+            ),
+            rerank=(
+                MemoryEndpointConfig(
+                    **_filter_dataclass_fields(MemoryEndpointConfig, rerank_payload)
+                )
+                if rerank_payload is not None
+                else None
             ),
         ),
         diagnostics=MemoryDiagnosticsConfig(

@@ -1606,6 +1606,7 @@
     "memory_embedding_rebuild_required": "Changing the embedding endpoint or model rebuilds the Memory index. Confirm to continue.",
     "memory_embedding_unavailable": "The embedding provider is unavailable",
     "memory_llm_unavailable": "The LLM provider is unavailable",
+    "memory_rerank_unavailable": "The reranking provider is unavailable",
     "provider_request_timed_out": "The provider request timed out.",
     "provider_response_too_large": "The provider response exceeded the safety limit.",
     "provider_unavailable": "The provider is unavailable.",
@@ -4170,7 +4171,7 @@
       },
       "providerChecks": {
         "title": "Provider checks",
-        "help": "These installation-level checks validate the configured language and embedding providers. They are not attached to any conversation.",
+        "help": "These installation-level checks validate the configured language, embedding, and optional reranking providers. They are not attached to any conversation.",
         "helpLabel": "About provider checks",
         "description": "Recent checks made while validating Memory settings or a rebuild.",
         "empty": "No provider checks recorded.",
@@ -4320,7 +4321,8 @@
       "callKind": {
         "llm": "Language model",
         "multimodalLlm": "Multimodal model",
-        "embedding": "Embedding model"
+        "embedding": "Embedding model",
+        "rerank": "Reranking model"
       },
       "callStage": {
         "processingPreflight": "Provider check",
@@ -4361,6 +4363,9 @@
       "embeddingTitle": "Embedding model",
       "embeddingHelp": "Memory uses this model to index memories so you can search them. Changing the embedding endpoint or model requires rebuilding the index.",
       "embeddingHelpLabel": "About the embedding model",
+      "rerankTitle": "Reranking model (optional)",
+      "rerankHelp": "Memory uses this model to score search results for advanced recall. Enter a reranking base URL, model name, and API key to enable it.",
+      "rerankHelpLabel": "About the reranking model",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "Model",
@@ -4395,7 +4400,8 @@
       "retryingRebuild": "Rebuilding…",
       "rebuildCompleted": "Memory index rebuild completed.",
       "rebuildFailed": "Memory index rebuild failed.",
-      "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local index. Your memories are kept."
+      "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local index. Your memories are kept.",
+      "rerankIdentityHint": "Leave all three fields empty to keep the standard Memory search tier."
     },
     "clear": {
       "button": "Clear Memory Data",

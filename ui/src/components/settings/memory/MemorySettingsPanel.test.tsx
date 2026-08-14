@@ -79,6 +79,26 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
+  it('renders the optional reranking endpoint for released settings without it', () => {
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.getByText('memory.settings.rerankTitle')).not.toBeNull();
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(3);
+    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(3);
+  });
+
   it('locks settings mutations while the page owns another mutation', () => {
     render(
       <MemorySettingsPanel

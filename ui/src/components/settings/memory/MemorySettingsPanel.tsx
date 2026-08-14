@@ -26,6 +26,13 @@ import { isMemoryOk, memoryErrorMessage } from '../../../lib/memoryRead';
 
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
 
+const EMPTY_ENDPOINT: MemoryEndpointConfig = {
+  base_url: null,
+  model: null,
+  api_key: null,
+  has_api_key: false,
+};
+
 const EndpointFields: React.FC<{
   title: string;
   help: string;
@@ -164,6 +171,7 @@ export const MemorySettingsPanel: React.FC<{
   const [enabledDraft, setEnabledDraft] = useState(settings.enabled);
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
+  const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRebuildOpen, setConfirmRebuildOpen] = useState(false);
@@ -174,6 +182,7 @@ export const MemorySettingsPanel: React.FC<{
     setEnabledDraft(settings.enabled);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
+    setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
   }, [settings]);
 
   const rebuildRequired = settings.rebuild_required === true;
@@ -196,10 +205,16 @@ export const MemorySettingsPanel: React.FC<{
       allowClear,
       false,
     );
-    if (llmPatch || embeddingPatch) {
+    const rerankPatch = buildEndpointPatch(
+      rerankDraft,
+      settings.processing.rerank ?? EMPTY_ENDPOINT,
+      allowClear,
+    );
+    if (llmPatch || embeddingPatch || rerankPatch) {
       patch.processing = {};
       if (llmPatch) patch.processing.llm = llmPatch;
       if (embeddingPatch) patch.processing.embedding = embeddingPatch;
+      if (rerankPatch) patch.processing.rerank = rerankPatch;
     }
     return patch;
   };
@@ -255,7 +270,8 @@ export const MemorySettingsPanel: React.FC<{
         setPendingPatch(null);
         const validationFailure =
           failure.error === 'memory_embedding_unavailable' ||
-          failure.error === 'memory_llm_unavailable';
+          failure.error === 'memory_llm_unavailable' ||
+          failure.error === 'memory_rerank_unavailable';
         if (!validationFailure || failure.rebuild_required === true) {
           onReloadSettings();
           onReloadMaintenance();
@@ -383,6 +399,18 @@ export const MemorySettingsPanel: React.FC<{
         onChange={setEmbeddingDraft}
         disabled={busy}
         identityHint={t('memory.settings.embeddingIdentityHint')}
+        canClearKey={canClearKeys}
+      />
+
+      <EndpointFields
+        title={t('memory.settings.rerankTitle')}
+        help={t('memory.settings.rerankHelp')}
+        helpLabel={t('memory.settings.rerankHelpLabel')}
+        draft={rerankDraft}
+        original={settings.processing.rerank ?? EMPTY_ENDPOINT}
+        onChange={setRerankDraft}
+        disabled={busy}
+        identityHint={t('memory.settings.rerankIdentityHint')}
         canClearKey={canClearKeys}
       />
 

@@ -62,6 +62,36 @@ def test_memory_rebuild_result_preserves_closed_preflight_diagnostic() -> None:
     }
 
 
+def test_memory_settings_patch_accepts_optional_complete_rerank_endpoint() -> None:
+    current = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    target, confirm_rebuild = ui_memory_routes._memory_settings_patch(
+        current,
+        {
+            "processing": {
+                "rerank": {
+                    "base_url": "https://rerank.example.test/v1/inference",
+                    "model": "rerank-model",
+                    "api_key": "rerank-secret",
+                }
+            }
+        },
+    )
+    candidate = ui_memory_routes._memory_candidate_config(current, target)
+
+    assert confirm_rebuild is False
+    assert candidate.memory.processing.rerank == MemoryEndpointConfig(
+        "https://rerank.example.test/v1/inference",
+        "rerank-model",
+        "rerank-secret",
+    )
+
+
 def _save_config(tmp_path) -> None:
     V2Config(
         mode="self_host",

@@ -123,6 +123,61 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
     assert projected["memory"]["diagnostics"] == {"log_provider_calls": True}
 
 
+def test_released_memory_config_without_rerank_loads_and_saves_without_shape_churn(
+    tmp_path,
+) -> None:
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": _complete_processing()})
+    )
+
+    assert config.memory.processing.rerank is None
+    config.save(tmp_path / "config.json")
+
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert "rerank" not in stored["memory"]["processing"]
+    assert V2Config.load(tmp_path / "config.json").memory.processing.rerank is None
+
+
+def test_memory_rerank_round_trips_without_projecting_its_key(tmp_path) -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://rerank.example.test/v1/inference",
+        "model": "rerank-model",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+    config.save(tmp_path / "config.json")
+
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    projected = config_to_payload(config)["memory"]["processing"]["rerank"]
+    assert stored["memory"]["processing"]["rerank"]["api_key"] == "rerank-secret"
+    assert projected == {
+        "base_url": "https://rerank.example.test/v1/inference",
+        "model": "rerank-model",
+        "api_key": None,
+        "has_api_key": True,
+    }
+
+
+@pytest.mark.parametrize("missing", ["base_url", "model", "api_key"])
+def test_memory_config_rejects_partially_filled_rerank(missing: str) -> None:
+    processing = _complete_processing()
+    rerank = {
+        "base_url": "https://rerank.example.test/v1/inference",
+        "model": "rerank-model",
+        "api_key": "rerank-secret",
+    }
+    rerank.pop(missing)
+    processing["rerank"] = rerank
+
+    with pytest.raises(ValueError, match="Memory rerank endpoint must include"):
+        V2Config.from_payload(
+            _payload({"enabled": False, "processing": processing})
+        )
+
+
 @pytest.mark.parametrize(
     "memory",
     [

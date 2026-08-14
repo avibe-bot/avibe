@@ -76,6 +76,50 @@ def _health_envelope(recorder) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    ("rerank", "disabled_features"),
+    [(False, ["agentic_search"]), (True, [])],
+)
+def test_health_accepts_additive_typed_capabilities_and_surfaces_rerank_state(
+    rerank: bool,
+    disabled_features: list[str],
+) -> None:
+    payload = _health_envelope({"state": "active", "reason": None})
+    payload["capabilities"]["future_capability"] = False
+    payload["capabilities"]["rerank"] = rerank
+    payload["disabled_features"] = disabled_features
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async def run():
+        return await EverOSPort(Path("/tmp/everos.sock")).health_snapshot()
+
+    with _sidecar_transport(handler):
+        snapshot = asyncio.run(run())
+
+    assert snapshot.capabilities["rerank"] is rerank
+    assert snapshot.capabilities["future_capability"] is False
+    assert snapshot.disabled_features == tuple(disabled_features)
+
+
+def test_health_rejects_a_truncated_core_capability_set() -> None:
+    payload = _health_envelope({"state": "active", "reason": None})
+    del payload["capabilities"]["parser"]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async def run():
+        return await EverOSPort(Path("/tmp/everos.sock")).health_snapshot()
+
+    with _sidecar_transport(handler):
+        with pytest.raises(MemoryProviderFailure) as raised:
+            asyncio.run(run())
+
+    assert raised.value.error == "memory_provider_response_invalid"
+
+
 def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
     requests: list[tuple[str, dict]] = []
 
@@ -870,6 +914,88 @@ def test_processing_preflight_projects_sanitized_provider_error() -> None:
     assert result.failure.diagnostic.http_status == 404
     assert result.failure.diagnostic.provider_error_code == "model_not_supported"
     assert "secret" not in result.failure.diagnostic.message
+
+
+def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(200, json={"scores": [[0.9]]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            rerank_base_url="https://rerank.example.test/v1/inference",
+            rerank_model="Qwen/Qwen3-Reranker-4B",
+            rerank_api_key="rerank-secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests] == [
+        "/v1/chat/completions",
+        "/v1/embeddings",
+        "/v1/inference/Qwen/Qwen3-Reranker-4B",
+    ]
+    assert json.loads(requests[-1].content) == {
+        "queries": ["OK"],
+        "documents": ["OK"],
+    }
+    assert requests[-1].headers["authorization"] == "Bearer rerank-secret"
+
+
+def test_processing_preflight_returns_typed_rerank_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(401, json={"error": {"code": "invalid_key"}})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            rerank_base_url="https://rerank.example.test/v1/inference",
+            rerank_model="rerank-model",
+            rerank_api_key="rerank-secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert result.failure is not None
+    assert result.failure.error == "memory_rerank_unavailable"
+    assert result.failure.diagnostic.side == "rerank"
+    assert result.failure.diagnostic.http_status == 401
+    assert result.failure.diagnostic.provider_error_code == "invalid_key"
 
 
 def test_processing_preflight_scrubs_provider_error_code() -> None:

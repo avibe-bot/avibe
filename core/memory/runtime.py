@@ -740,11 +740,13 @@ class MemoryRuntime:
         if self._store is None:
             self._insight_reader = None
             return
+        rerank = config.processing.rerank
         base_urls = tuple(
             value
             for value in (
                 config.processing.llm.base_url,
                 config.processing.embedding.base_url,
+                rerank.base_url if rerank else None,
             )
             if value
         )
@@ -753,6 +755,7 @@ class MemoryRuntime:
             for value in (
                 config.processing.llm.api_key,
                 config.processing.embedding.api_key,
+                rerank.api_key if rerank else None,
             )
             if value
         )
@@ -1919,6 +1922,9 @@ class MemoryRuntime:
             embedding_base_url=candidate.processing.embedding.base_url,
             embedding_model=candidate.processing.embedding.model,
             embedding_api_key=candidate.processing.embedding.api_key,
+            rerank_base_url=(candidate.processing.rerank.base_url if candidate.processing.rerank else None),
+            rerank_model=(candidate.processing.rerank.model if candidate.processing.rerank else None),
+            rerank_api_key=(candidate.processing.rerank.api_key if candidate.processing.rerank else None),
             preflight_call_recorder=self._record_preflight_call,
         )
         return (await provider.preflight()).payload()
@@ -1939,7 +1945,7 @@ class MemoryRuntime:
             self._call_log_db_path,
             started_at_ms=started_at_ms,
             duration_ms=duration_ms,
-            kind="embedding" if side == "embedding" else "llm",
+            kind=side,
             model=request.get("model") if isinstance(request, dict) else None,
             request=request,
             response=response,
@@ -3126,6 +3132,7 @@ class MemoryRuntime:
 
 
 def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
+    rerank = config.processing.rerank
     return {
         "llm_base_url": config.processing.llm.base_url,
         "llm_model": config.processing.llm.model,
@@ -3133,6 +3140,9 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
         "embedding_base_url": config.processing.embedding.base_url,
         "embedding_model": config.processing.embedding.model,
         "embedding_api_key": config.processing.embedding.api_key,
+        "rerank_base_url": rerank.base_url if rerank else None,
+        "rerank_model": rerank.model if rerank else None,
+        "rerank_api_key": rerank.api_key if rerank else None,
     }
 
 
