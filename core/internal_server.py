@@ -1637,6 +1637,14 @@ def create_app(
             )
         if project_id == MEMORY_SEARCH_ALL_PROJECTS:
             cursor = payload.get("cursor")
+            try:
+                cursor_bytes = (
+                    len(cursor.encode("utf-8"))
+                    if isinstance(cursor, str)
+                    else None
+                )
+            except UnicodeEncodeError:
+                cursor_bytes = MEMORY_LIST_CURSOR_MAX_BYTES + 1
             if (
                 "page" in payload
                 or (
@@ -1644,8 +1652,8 @@ def create_app(
                     and (
                         not isinstance(cursor, str)
                         or not cursor
-                        or len(cursor.encode("utf-8"))
-                        > MEMORY_LIST_CURSOR_MAX_BYTES
+                        or cursor_bytes is None
+                        or cursor_bytes > MEMORY_LIST_CURSOR_MAX_BYTES
                     )
                 )
             ):

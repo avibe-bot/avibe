@@ -936,6 +936,52 @@ def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -
     }
 
 
+def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    runtime = SimpleNamespace(
+        principal_for_user_key=Mock(
+            return_value="u-22222222222222222222222222222222"
+        ),
+        list_all_episodes_payload=AsyncMock(),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/list"
+    user_key = "avibe:local"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers={
+                    "content-type": "application/json",
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+                content='{"project":"all","cursor":"\\ud800","limit":20}',
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    runtime.list_all_episodes_payload.assert_not_awaited()
+
+
 def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES

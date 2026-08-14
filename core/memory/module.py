@@ -895,11 +895,41 @@ class MemoryModule:
     @asynccontextmanager
     async def concurrent_episode_lists(
         self,
+        *,
+        deadline: float,
     ) -> AsyncIterator[Callable[..., Awaitable[MemoryListResult]]]:
         """Fence one aggregate read while allowing its provider calls to overlap."""
 
-        async with self._lifecycle_lock:
+        def unavailable(
+            error: MemoryErrorCode,
+        ) -> Callable[..., Awaitable[MemoryListResult]]:
+            async def result(**_kwargs: Any) -> MemoryListResult:
+                return OperationFailed(error=error)
+
+            return result
+
+        if self._clear_active or self._is_maintenance_open():
+            yield unavailable("memory_clear_failed")
+            return
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            yield unavailable("memory_provider_timeout")
+            return
+        try:
+            await asyncio.wait_for(
+                self._lifecycle_lock.acquire(),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            yield unavailable("memory_provider_timeout")
+            return
+        try:
+            if self._clear_active or self._is_maintenance_open():
+                yield unavailable("memory_clear_failed")
+                return
             yield self._list_episodes_under_lifecycle
+        finally:
+            self._lifecycle_lock.release()
 
     def _list_request_error(
         self,

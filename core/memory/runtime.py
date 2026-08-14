@@ -131,12 +131,14 @@ _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
 @asynccontextmanager
 async def _concurrent_episode_lists(
     module: MemoryModule,
+    *,
+    deadline: float,
 ) -> AsyncIterator[Callable[..., Awaitable[MemoryListResult]]]:
     batch = getattr(module, "concurrent_episode_lists", None)
     if batch is None:
         yield module.list_episodes
         return
-    async with batch() as list_episodes:
+    async with batch(deadline=deadline) as list_episodes:
         yield list_episodes
 
 
@@ -1536,7 +1538,10 @@ class MemoryRuntime:
         project_has_more: dict[str, bool] = {}
         candidate_page_hints: dict[tuple[str, str], int] = {}
         complete = True
-        async with _concurrent_episode_lists(self.module) as list_episodes:
+        async with _concurrent_episode_lists(
+            self.module,
+            deadline=deadline,
+        ) as list_episodes:
             project_windows = await asyncio.gather(
                 *(
                     self._list_project_window(
@@ -1603,9 +1608,6 @@ class MemoryRuntime:
         next_boundaries = dict(boundaries)
         next_page_hints = dict(page_hints)
         next_total_hints = dict(total_hints)
-        for project_id, total_count in totals.items():
-            if next_boundaries[project_id] is not None:
-                next_total_hints[project_id] = total_count
         selected_counts = {project_id: 0 for project_id in projects}
         for item in selected:
             selected_counts[item.project] += 1
@@ -1740,7 +1742,16 @@ class MemoryRuntime:
                 return failure_result(result.error)
             if not hint_checked:
                 hint_checked = True
-                if total_hint is not None and result.total_count < total_hint:
+                if (
+                    total_hint is not None
+                    and result.total_count < total_hint
+                    and boundary is not None
+                    and result.items
+                    and all(
+                        _memory_list_after_boundary(item, boundary)
+                        for item in result.items
+                    )
+                ):
                     removed_pages = (
                         total_hint
                         - result.total_count
