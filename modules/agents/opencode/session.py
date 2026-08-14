@@ -42,7 +42,9 @@ _OPENCODE_MESSAGE_ID_RE = re.compile(r"^msg_([0-9a-fA-F]{12})")
 _OPENCODE_ID_CLOCK_BITS = 48
 _OPENCODE_ID_COUNTER_BITS = 12
 _OPENCODE_ID_CLOCK_MODULUS = 1 << _OPENCODE_ID_CLOCK_BITS
-_OPENCODE_ID_WRAP_DISTANCE = _OPENCODE_ID_CLOCK_MODULUS // 2
+_OPENCODE_ID_CLOCK_PERIOD_MS = 1 << (
+    _OPENCODE_ID_CLOCK_BITS - _OPENCODE_ID_COUNTER_BITS
+)
 _OPENCODE_TIME_ORDERED_MESSAGES_VERSION = (1, 18, 15)
 
 
@@ -111,9 +113,12 @@ def requires_message_order_repair(
 
     current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
     current_clock = (current_ms << _OPENCODE_ID_COUNTER_BITS) % _OPENCODE_ID_CLOCK_MODULUS
-    newest_by_time = max(candidates, key=lambda candidate: (candidate[2], candidate[1]))
-    newest_clock = newest_by_time[3]
-    return newest_clock > current_clock and newest_clock - current_clock > _OPENCODE_ID_WRAP_DISTANCE
+    current_cycle = current_ms // _OPENCODE_ID_CLOCK_PERIOD_MS
+    return any(
+        int(created_at) // _OPENCODE_ID_CLOCK_PERIOD_MS < current_cycle
+        and clock_value > current_clock
+        for _role, _message_id, created_at, clock_value in candidates
+    )
 
 
 class OpenCodeSessionManager:
@@ -184,6 +189,16 @@ class OpenCodeSessionManager:
             return
         payload = dict(request.context.platform_specific or {})
         payload["agent_session_id"] = agent_session_id
+        request.context.platform_specific = payload
+
+    def _set_request_native_session_id(self, request: AgentRequest, native_session_id: str) -> None:
+        payload = dict(request.context.platform_specific or {})
+        target = payload.get("agent_session_target")
+        if isinstance(target, dict):
+            payload["agent_session_target"] = {
+                **target,
+                "native_session_id": native_session_id,
+            }
         request.context.platform_specific = payload
 
     def _reserved_agent_session_id(self, request: AgentRequest) -> Optional[str]:
@@ -353,15 +368,37 @@ class OpenCodeSessionManager:
         if not repaired_session_id:
             raise RuntimeError(f"OpenCode returned no session ID while repairing wrapped history {session_id}")
 
-        self.bind_agent_session_id(
-            request,
-            request.base_session_id,
-            repaired_session_id,
+        payload = request.context.platform_specific or {}
+        target = payload.get("agent_session_target") if isinstance(payload, dict) else None
+        agent_session_id = (
+            str(target.get("id") or "").strip()
+            if isinstance(target, dict)
+            else ""
+        ) or str(payload.get("agent_session_id") or "").strip()
+        sessions = getattr(self._settings_manager, "sessions", self._settings_manager)
+        replace_native = getattr(sessions, "replace_agent_session_native", None)
+        if not agent_session_id or not callable(replace_native):
+            raise RuntimeError(
+                f"Cannot persist repaired OpenCode session {repaired_session_id}: "
+                "the Avibe session replacement API is unavailable"
+            )
+        replaced_id = replace_native(
+            agent_session_id,
+            expected_native_session_id=session_id,
+            replacement_native_session_id=repaired_session_id,
         )
+        if not replaced_id:
+            raise RuntimeError(
+                f"Cannot persist repaired OpenCode session {repaired_session_id}: "
+                f"Avibe session {agent_session_id} no longer points to {session_id}"
+            )
+        self._set_request_agent_session_id(request, replaced_id)
+        self._set_request_native_session_id(request, repaired_session_id)
         logger.warning(
-            "Reindexed OpenCode session %s as %s after detecting non-monotonic message IDs",
+            "Reindexed OpenCode session %s as %s for Avibe session %s after detecting non-monotonic message IDs",
             session_id,
             repaired_session_id,
+            replaced_id,
         )
         return repaired_session_id
 

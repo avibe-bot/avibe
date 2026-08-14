@@ -1137,6 +1137,89 @@ class SQLiteSessionsService:
             )
             return str(session_id) if result.rowcount else None
 
+    def replace_agent_session_native(
+        self,
+        *,
+        session_id: str,
+        expected_native_session_id: Any,
+        replacement_native_session_id: Any,
+    ) -> str | None:
+        """Supersede one native binding while preserving the public Session id.
+
+        Native ids remain write-once on ordinary bind paths. A backend repair is
+        different: it first snapshots the old binding as an inert superseded row,
+        then atomically replaces the active row's binding. Keeping the active row
+        id preserves its transcript, deliveries, definitions, and Workbench URL.
+        """
+
+        expected = encode_session_value(expected_native_session_id)
+        replacement = encode_session_value(replacement_native_session_id)
+        if not expected or not replacement:
+            raise ValueError("expected and replacement native session ids are required")
+
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == str(session_id)).limit(1)
+            ).mappings().first()
+            if row is None or str(row["status"] or "") == "archived":
+                return None
+
+            current = str(row["native_session_id"] or "")
+            if current == replacement:
+                return str(session_id)
+            if current != expected:
+                return None
+
+            snapshot_id = new_session_id(conn)
+            anchor = str(row["session_anchor"] or "")
+            superseded_anchor = f"{anchor}{SUPERSEDED_ANCHOR_INFIX}{snapshot_id}"
+            metadata_value = _json_loads(row["metadata_json"], {})
+            snapshot_metadata = (
+                dict(metadata_value) if isinstance(metadata_value, dict) else {}
+            )
+            snapshot_metadata["superseded_native_binding"] = {
+                "active_session_id": str(session_id),
+                "replaced_at": now,
+            }
+            snapshot = dict(row)
+            snapshot.update(
+                {
+                    "id": snapshot_id,
+                    "session_anchor": superseded_anchor,
+                    "status": "archived",
+                    "visibility": "background",
+                    "pinned": 0,
+                    "agent_status": "idle",
+                    "composer_draft_text": None,
+                    "composer_draft_updated_at": None,
+                    "metadata_json": json.dumps(
+                        snapshot_metadata,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ),
+                    "updated_at": now,
+                }
+            )
+            conn.execute(agent_sessions.insert().values(**snapshot))
+            replaced = conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == str(session_id))
+                .where(agent_sessions.c.status != "archived")
+                .where(func.coalesce(agent_sessions.c.native_session_id, "") == current)
+                .values(
+                    native_session_id=replacement,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+            if not replaced.rowcount:
+                raise RuntimeError(
+                    f"lost native session replacement for Avibe session {session_id}"
+                )
+            return str(session_id)
+
     def find_session_for_anchor(self, *, scope_key: str, session_anchor: str) -> dict[str, Any] | None:
         """Latest ``agent_sessions`` row for ``(scope, anchor)``, any backend.
 

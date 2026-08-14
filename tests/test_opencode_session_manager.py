@@ -41,6 +41,11 @@ def _opencode_message(message_id: str, role: str, created: int) -> dict:
     }
 
 
+def _legacy_opencode_message_id(created: int, counter: int = 1) -> str:
+    clock = ((created << 12) + counter) % (1 << 48)
+    return f"msg_{clock:012x}AAAA"
+
+
 def test_opencode_message_order_repair_detects_completed_id_wrap() -> None:
     messages = [
         _opencode_message("msg_fff000000001AAAA", "user", 1),
@@ -53,12 +58,30 @@ def test_opencode_message_order_repair_detects_completed_id_wrap() -> None:
 
 
 def test_opencode_message_order_repair_detects_wrap_before_first_new_message() -> None:
+    period_ms = 1 << 36
+    old_created = (2 * period_ms) - 0x10000
+    now_ms = (2 * period_ms) + 0x10000
     messages = [
-        _opencode_message("msg_fff000000001AAAA", "user", 1),
-        _opencode_message("msg_fff000000002AAAA", "assistant", 2),
+        _opencode_message(_legacy_opencode_message_id(old_created), "user", old_created),
+        _opencode_message(
+            _legacy_opencode_message_id(old_created + 1),
+            "assistant",
+            old_created + 1,
+        ),
     ]
 
-    assert requires_message_order_repair(messages, now_ms=0x10000) is True
+    assert requires_message_order_repair(messages, now_ms=now_ms) is True
+
+
+def test_opencode_message_order_repair_detects_prior_cycle_lower_half() -> None:
+    period_ms = 1 << 36
+    old_created = period_ms + 0x2000
+    now_ms = (2 * period_ms) + 0x1000
+    messages = [
+        _opencode_message(_legacy_opencode_message_id(old_created), "user", old_created),
+    ]
+
+    assert requires_message_order_repair(messages, now_ms=now_ms) is True
 
 
 def test_opencode_message_order_repair_ignores_monotonic_history() -> None:
@@ -74,7 +97,7 @@ def test_opencode_message_order_repair_ignores_monotonic_history() -> None:
 
 def test_opencode_message_order_repair_forks_and_rebinds_full_history() -> None:
     sessions = SimpleNamespace(
-        bind_agent_session=Mock(return_value="sesk8m4q2p7x"),
+        replace_agent_session_native=Mock(return_value="sesk8m4q2p7x"),
     )
     manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
     server = SimpleNamespace(
@@ -82,6 +105,13 @@ def test_opencode_message_order_repair_forks_and_rebinds_full_history() -> None:
         fork_session=AsyncMock(return_value={"id": "oc-reindexed"}),
     )
     request = _request()
+    request.context.platform_specific = {
+        "agent_session_id": "sesk8m4q2p7x",
+        "agent_session_target": {
+            "id": "sesk8m4q2p7x",
+            "native_session_id": "oc-wrapped",
+        },
+    }
     messages = [
         _opencode_message("msg_fff000000001AAAA", "user", 1),
         _opencode_message("msg_000100000001AAAA", "user", 2),
@@ -95,17 +125,16 @@ def test_opencode_message_order_repair_forks_and_rebinds_full_history() -> None:
         directory="/repo",
         message_id=None,
     )
-    sessions.bind_agent_session.assert_called_once_with(
-        "slack::channel::C1",
-        "opencode",
-        "base-1",
-        "oc-reindexed",
-        workdir="/repo",
+    sessions.replace_agent_session_native.assert_called_once_with(
+        "sesk8m4q2p7x",
+        expected_native_session_id="oc-wrapped",
+        replacement_native_session_id="oc-reindexed",
     )
+    assert request.context.platform_specific["agent_session_target"]["native_session_id"] == "oc-reindexed"
 
 
 def test_opencode_message_order_repair_skips_fixed_runtime() -> None:
-    sessions = SimpleNamespace(bind_agent_session=Mock())
+    sessions = SimpleNamespace(replace_agent_session_native=Mock())
     manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
     server = SimpleNamespace(
         get_version=AsyncMock(return_value="1.18.15"),
@@ -121,7 +150,7 @@ def test_opencode_message_order_repair_skips_fixed_runtime() -> None:
 
     assert session_id == "oc-fixed"
     server.fork_session.assert_not_awaited()
-    sessions.bind_agent_session.assert_not_called()
+    sessions.replace_agent_session_native.assert_not_called()
 
 
 def _seed_opencode_messages(tmp_path, native_session_id: str, roles: list[str]) -> None:
