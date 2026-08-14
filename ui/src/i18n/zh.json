@@ -4251,7 +4251,7 @@
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {
-      "description": "搜索你的记忆，或留空查询以浏览已处理的记忆片段。",
+      "description": "搜索你的记忆，或留空查询以浏览已处理的记忆片段。对话默认写入 Default；只有 Agent 显式指定时才会写入命名项目。",
       "placeholder": "搜索记忆——留空显示全部",
       "button": "搜索",
       "searching": "搜索中…",
@@ -4270,7 +4270,9 @@
         "episodes": "记忆片段",
         "loading": "正在加载记忆片段…",
         "empty": "此项目还没有已处理的记忆片段。",
+        "partialEmpty": "未能加载的项目中可能仍有记忆片段。请继续翻页或重试本页。",
         "loadFailed": "无法加载记忆片段。",
+        "retry": "重试本页",
         "closedTitle": "记忆已关闭",
         "closedDescription": "记忆当前不可用。请在设置中启用后重试。",
         "partial": "部分项目未能加载，本页内容可能不完整。",

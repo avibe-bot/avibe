@@ -4251,7 +4251,7 @@
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
-      "description": "Search your Memory, or leave the query empty to browse processed episodes.",
+      "description": "Search your Memory, or leave the query empty to browse processed episodes. Conversations are stored in Default unless an Agent saved a fact to a named project.",
       "placeholder": "Search memories — empty shows everything",
       "button": "Search",
       "searching": "Searching…",
@@ -4270,7 +4270,9 @@
         "episodes": "Episodes",
         "loading": "Loading episodes…",
         "empty": "No processed episodes in this project yet.",
+        "partialEmpty": "Episodes may exist in projects that could not be loaded. Continue or retry this page.",
         "loadFailed": "Couldn't load episodes.",
+        "retry": "Retry page",
         "closedTitle": "Memory closed",
         "closedDescription": "Memory is unavailable. Enable it from Settings and try again.",
         "partial": "Some projects could not be loaded. This page may be incomplete.",

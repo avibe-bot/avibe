@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Copy,
   Loader2,
+  RotateCw,
   Search as SearchIcon,
 } from 'lucide-react';
 
@@ -40,6 +41,10 @@ function episodeTitle(item: MemoryListItem): string {
   return item.subject || item.summary || item.body;
 }
 
+function episodeIdentity(item: MemoryListItem): string {
+  return JSON.stringify([item.project, item.id]);
+}
+
 function formatEpisodeTimestamp(value: string): string {
   const instant = new Date(value);
   if (Number.isNaN(instant.getTime())) return value;
@@ -64,8 +69,8 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
   const [browsePage, setBrowsePage] = useState(1);
   const [cursorByPage, setCursorByPage] = useState<Record<number, string | null>>({ 1: null });
   const browseRequestRef = useRef(0);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [selectedEpisodeKey, setSelectedEpisodeKey] = useState<string | null>(null);
+  const [copiedEpisodeKey, setCopiedEpisodeKey] = useState<string | null>(null);
   const browseMode = !query.trim();
 
   const searchRead = useCallback(
@@ -93,12 +98,14 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
         request === browseRequestRef.current
         && selected === 'all'
         && result.status === 'ok'
-        && result.next_cursor
       ) {
-        setCursorByPage((current) => ({
-          ...current,
-          [page + 1]: result.next_cursor ?? null,
-        }));
+        setCursorByPage((current) => {
+          const next = Object.fromEntries(
+            Object.entries(current).filter(([knownPage]) => Number(knownPage) <= page),
+          );
+          if (result.next_cursor) next[page + 1] = result.next_cursor;
+          return next;
+        });
       }
       return result;
     },
@@ -139,8 +146,8 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
     browseRequestRef.current += 1;
     setCursorByPage({ 1: null });
     setBrowsePage(1);
-    setSelectedId(null);
-    setCopiedId(null);
+    setSelectedEpisodeKey(null);
+    setCopiedEpisodeKey(null);
   };
 
   const runSearch = () => {
@@ -154,17 +161,25 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
     const cursor = project === 'all' ? cursorByPage[nextPage] : null;
     if (project === 'all' && cursor === undefined) return;
     setBrowsePage(nextPage);
-    setSelectedId(null);
-    setCopiedId(null);
+    setSelectedEpisodeKey(null);
+    setCopiedEpisodeKey(null);
     void browse(project, nextPage, cursor);
+  };
+
+  const retryBrowsePage = () => {
+    const cursor = project === 'all' ? cursorByPage[browsePage] : null;
+    if (project === 'all' && cursor === undefined) return;
+    setSelectedEpisodeKey(null);
+    setCopiedEpisodeKey(null);
+    void browse(project, browsePage, cursor);
   };
 
   const searchItems = searchData?.items ?? null;
   const searchWarnings = searchData?.warnings ?? [];
   const browseItems = browseData?.items ?? [];
-  const selectedEpisode = browseItems.find((item) => item.id === selectedId)
-    ?? browseItems[0]
-    ?? null;
+  const selectedEpisode = selectedEpisodeKey
+    ? (browseItems.find((item) => episodeIdentity(item) === selectedEpisodeKey) ?? null)
+    : null;
   const knownPageCount = Math.max(1, ...Object.keys(cursorByPage).map(Number));
   const totalPages = browseData?.total_count != null
     ? Math.max(1, Math.ceil(browseData.total_count / PAGE_SIZE))
@@ -298,8 +313,17 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
             </div>
           ) : null}
           {browseError ? (
-            <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
-              {browseError}
+            <div className="flex flex-col gap-3">
+              <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
+                {browseError}
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <Button variant="secondary" size="sm" onClick={retryBrowsePage}>
+                  <RotateCw className="size-3.5" />
+                  {t('memory.search.browse.retry')}
+                </Button>
+                {browsePagination}
+              </div>
             </div>
           ) : browsing || !browsed ? (
             <div className="flex min-h-32 items-center justify-center gap-2 rounded-lg border border-border bg-surface text-sm text-muted">
@@ -309,7 +333,9 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
           ) : browseItems.length === 0 ? (
             <div className="flex flex-col gap-3">
               <div className="rounded-lg border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">
-                {t('memory.search.browse.empty')}
+                {project === 'all' && browseData?.warnings.includes('memory_list_partial')
+                  ? t('memory.search.browse.partialEmpty')
+                  : t('memory.search.browse.empty')}
               </div>
               {browsePage > 1 || hasNextBrowsePage ? browsePagination : null}
             </div>
@@ -328,14 +354,15 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
               </div>
               <div className="overflow-hidden rounded-lg border border-border bg-surface">
                 {browseItems.map((item) => {
-                  const selected = item.id === selectedId;
+                  const itemKey = episodeIdentity(item);
+                  const selected = itemKey === selectedEpisodeKey;
                   return (
                     <button
-                      key={item.id}
+                      key={itemKey}
                       type="button"
                       onClick={() => {
-                        setSelectedId(item.id);
-                        setCopiedId(null);
+                        setSelectedEpisodeKey(itemKey);
+                        setCopiedEpisodeKey(null);
                       }}
                       aria-pressed={selected}
                       aria-label={t('memory.search.browse.openDetail', { title: episodeTitle(item) })}
@@ -386,15 +413,15 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
                         className="max-w-full font-mono"
                         onClick={() => {
                           void copyTextToClipboard(selectedEpisode.id).then((copied) => {
-                            if (copied) setCopiedId(selectedEpisode.id);
+                            if (copied) setCopiedEpisodeKey(episodeIdentity(selectedEpisode));
                           });
                         }}
-                        aria-label={copiedId === selectedEpisode.id
+                        aria-label={copiedEpisodeKey === episodeIdentity(selectedEpisode)
                           ? t('memory.search.browse.entryIdCopied')
                           : t('memory.search.browse.copyEntryId')}
                       >
                         <span className="max-w-[min(60vw,28rem)] truncate">{selectedEpisode.id}</span>
-                        {copiedId === selectedEpisode.id
+                        {copiedEpisodeKey === episodeIdentity(selectedEpisode)
                           ? <Check className="size-3.5 text-mint-ink" />
                           : <Copy className="size-3.5" />}
                       </Button>

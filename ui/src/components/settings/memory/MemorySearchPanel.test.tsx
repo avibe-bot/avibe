@@ -110,11 +110,23 @@ describe('MemorySearchPanel browse and search modes', () => {
       cursor: null,
       limit: 20,
     });
+    expect(screen.queryByRole('button', { name: 'memory.search.browse.copyEntryId' })).toBeNull();
+    const firstRow = screen.getByRole('button', {
+      name: 'memory.search.browse.openDetail:Release planning',
+    });
+    expect(firstRow.getAttribute('aria-pressed')).toBe('false');
+    await user.click(firstRow);
+    expect(firstRow.getAttribute('aria-pressed')).toBe('true');
     await user.click(screen.getByRole('button', { name: 'memory.search.browse.copyEntryId' }));
     expect(copyTextToClipboard).toHaveBeenCalledWith(first.id);
     expect(await screen.findByRole('button', { name: 'memory.search.browse.entryIdCopied' })).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'memory.search.browse.next' }));
+    expect(await screen.findByText(second.subject)).toBeTruthy();
+    expect(screen.queryByText(second.body)).toBeNull();
+    await user.click(screen.getByRole('button', {
+      name: 'memory.search.browse.openDetail:Follow-up',
+    }));
     expect(await screen.findByText(second.body)).toBeTruthy();
     expect(api.listMemoryEpisodes).toHaveBeenLastCalledWith('default', {
       page: 2,
@@ -160,6 +172,107 @@ describe('MemorySearchPanel browse and search modes', () => {
     }));
   });
 
+  it('[MEMORY-LIST-003] invalidates descendant aggregate cursors when an earlier page changes', async () => {
+    let pageOneReads = 0;
+    api.listMemoryEpisodes.mockImplementation((project: string, options: { cursor: string | null }) => {
+      if (project !== 'all') return Promise.resolve(listResult([]));
+      if (options.cursor === 'cursor-page-2') {
+        return Promise.resolve(listResult([
+          episode({ id: 'page-2', summary: 'Aggregate page two.' }),
+        ], { total_count: 60, next_cursor: 'cursor-page-3' }));
+      }
+      pageOneReads += 1;
+      return Promise.resolve(listResult([
+        episode({ id: `page-1-${pageOneReads}`, summary: 'Aggregate page one.' }),
+      ], {
+        total_count: 60,
+        next_cursor: pageOneReads === 1 ? 'cursor-page-2' : null,
+      }));
+    });
+    const user = userEvent.setup();
+
+    render(<MemorySearchPanel enabled />);
+    await user.selectOptions(await screen.findByLabelText('memory.search.projectLabel'), 'all');
+    await screen.findByText('Aggregate page one.');
+    await user.click(screen.getByRole('button', { name: 'memory.search.browse.next' }));
+    await screen.findByText('Aggregate page two.');
+    expect((screen.getByRole('button', { name: 'memory.search.browse.page:3' }) as HTMLButtonElement).disabled).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'memory.search.browse.page:1' }));
+    await waitFor(() => expect(pageOneReads).toBe(2));
+    expect((screen.getByRole('button', { name: 'memory.search.browse.page:2' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.search.browse.page:3' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('[MEMORY-LIST-003] keeps duplicate aggregate IDs distinct by project', async () => {
+    const defaultEpisode = episode({
+      id: 'shared-id',
+      project: 'default',
+      subject: 'Default episode',
+      summary: 'Default excerpt.',
+      body: 'Default detail body.',
+    });
+    const notesEpisode = episode({
+      id: 'shared-id',
+      project: 'notes',
+      subject: 'Notes episode',
+      summary: 'Notes excerpt.',
+      body: 'Notes detail body.',
+    });
+    api.listMemoryEpisodes.mockImplementation((project: string) => Promise.resolve(
+      project === 'all'
+        ? listResult([defaultEpisode, notesEpisode], { total_count: 2 })
+        : listResult([]),
+    ));
+    const user = userEvent.setup();
+
+    render(<MemorySearchPanel enabled />);
+    await user.selectOptions(await screen.findByLabelText('memory.search.projectLabel'), 'all');
+    const defaultRow = await screen.findByRole('button', {
+      name: 'memory.search.browse.openDetail:Default episode',
+    });
+    const notesRow = screen.getByRole('button', {
+      name: 'memory.search.browse.openDetail:Notes episode',
+    });
+    await user.click(notesRow);
+
+    expect(await screen.findByText('Notes detail body.')).toBeTruthy();
+    expect(screen.queryByText('Default detail body.')).toBeNull();
+    expect(defaultRow.getAttribute('aria-pressed')).toBe('false');
+    expect(notesRow.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('[MEMORY-LIST-005] preserves retry and navigation controls after a page failure', async () => {
+    let pageTwoAttempts = 0;
+    api.listMemoryEpisodes.mockImplementation((project: string, options: { cursor: string | null }) => {
+      if (project !== 'all') return Promise.resolve(listResult([]));
+      if (options.cursor === 'cursor-page-2') {
+        pageTwoAttempts += 1;
+        return Promise.resolve(pageTwoAttempts === 1
+          ? { status: 'failed', error: 'memory_provider_timeout' }
+          : listResult([episode({ id: 'recovered-page', summary: 'Recovered page.' })], {
+              total_count: 21,
+            }));
+      }
+      return Promise.resolve(listResult([episode({ summary: 'First aggregate page.' })], {
+        total_count: 21,
+        next_cursor: 'cursor-page-2',
+      }));
+    });
+    const user = userEvent.setup();
+
+    render(<MemorySearchPanel enabled />);
+    await user.selectOptions(await screen.findByLabelText('memory.search.projectLabel'), 'all');
+    await screen.findByText('First aggregate page.');
+    await user.click(screen.getByRole('button', { name: 'memory.search.browse.next' }));
+
+    const retry = await screen.findByRole('button', { name: 'memory.search.browse.retry' });
+    expect((screen.getByRole('button', { name: 'memory.search.browse.previous' }) as HTMLButtonElement).disabled).toBe(false);
+    await user.click(retry);
+    expect(await screen.findByText('Recovered page.')).toBeTruthy();
+    expect(pageTwoAttempts).toBe(2);
+  });
+
   it('[MEMORY-LIST-005] keeps an empty partial aggregate page resumable', async () => {
     api.listMemoryEpisodes.mockImplementation((project: string, options: { cursor: string | null }) => {
       if (project !== 'all') return Promise.resolve(listResult([]));
@@ -176,7 +289,8 @@ describe('MemorySearchPanel browse and search modes', () => {
     render(<MemorySearchPanel enabled />);
     await user.selectOptions(await screen.findByLabelText('memory.search.projectLabel'), 'all');
 
-    expect(await screen.findByText('memory.search.browse.empty')).toBeTruthy();
+    expect(await screen.findByText('memory.search.browse.partialEmpty')).toBeTruthy();
+    expect(screen.queryByText('memory.search.browse.empty')).toBeNull();
     expect(screen.getByText('memory.search.browse.partial')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'memory.search.browse.next' }));
 
