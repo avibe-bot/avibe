@@ -146,23 +146,22 @@ def test_background_watch_skill_defaults_to_current_session() -> None:
     assert "`--prefix`" not in body
 
 
-def test_background_watch_skill_resolves_local_waiters_and_persists_managed_pr_state() -> None:
+def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_state() -> None:
     body = _read("skills/background-watch-hook/SKILL.md")
 
-    assert 'REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"' in body
-    assert '"$REPO_ROOT/skills/background-watch-hook/SKILL.md"' in body
-    assert '"$REPO_ROOT/.agents/skills/background-watch-hook/SKILL.md"' in body
-    assert '"${OPENCODE_HOME:-$HOME/.opencode}/skills/background-watch-hook/SKILL.md"' in body
     assert (
-        '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/background-watch-hook/SKILL.md"' in body
+        'BACKGROUND_WATCH_HOOK_DIR="<directory containing the loaded SKILL.md>"'
+        in body
     )
-    assert "CLAUDE_HOME" not in body
-    assert "find \"$SKILL_ROOT\"" not in body
-    assert 'WAIT_PR="$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py"' in body
-    assert 'WAIT_PR_HELP="$(uv run --no-project "$WAIT_PR" --help 2>&1)"' in body
-    assert "--workflow" in body
-    assert "This skill does not install, copy, or rewrite harness skill" in body
-    assert "sync_skill.py" not in body
+    for environment_root in (
+        "CODEX_HOME",
+        "AGENTS_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "OPENCODE_HOME",
+        "XDG_CONFIG_HOME",
+        "BACKGROUND_WATCH_HOOK_SKILL_FILE",
+    ):
+        assert environment_root not in body
     assert not (ROOT / "skills/background-watch-hook/scripts/sync_skill.py").exists()
     assert body.count('--state-file "$STATE_FILE"') >= 7
     assert body.count("--seed-state") >= 3
