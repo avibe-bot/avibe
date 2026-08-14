@@ -48,6 +48,12 @@ const nativeSubscription: Source = {
   display_name: 'Claude native login',
 };
 
+/** The row every re-auth journey starts from: a subscription that stopped. */
+const blockedSubscription: Source = {
+  ...nativeSubscription,
+  state: { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.oauth_expired' },
+};
+
 const takeoverAgent: AgentSupply = {
   backend: 'codex',
   cli_present: true,
@@ -285,10 +291,6 @@ describe('SettingsModelsPage surface branches', () => {
   // stopped. The proof is the request: from the row a user can reach, one tap and
   // one confirm reach `POST …/reauth` for THAT source.
   it('reaches the re-auth request from a stopped subscription row', async () => {
-    const blocked: Source = {
-      ...nativeSubscription,
-      state: { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.oauth_expired' },
-    };
     const started = {
       flow_id: 'flow_reauth',
       intent: 'reauth' as const,
@@ -299,14 +301,74 @@ describe('SettingsModelsPage surface branches', () => {
     };
     const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
     vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
-    renderPage([blocked]);
+    renderPage([blockedSubscription]);
 
     await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
     expect(reauth).not.toHaveBeenCalled();
     await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
 
-    await waitFor(() => expect(reauth).toHaveBeenCalledWith(blocked.id));
+    await waitFor(() => expect(reauth).toHaveBeenCalledWith(blockedSubscription.id));
+  });
+
+  // The confirm IS this journey's gesture — the dialog it opens POSTs as it mounts,
+  // so nothing after it can be granted a tab. Asserted where the user feels it: the
+  // provider page lands in the tab, instead of behind a blocked popup and a link
+  // the user has to notice.
+  it('lands the provider page in the tab the re-auth confirmation opened', async () => {
+    const authUrl = 'https://provider.example/authorize?code=1';
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'awaiting_action' as const,
+      presentation: { expects: 'paste_callback_url' as const, auth_url: authUrl },
+    };
+    vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    const tab = { closed: false, opener: {} as unknown, location: { href: '' } };
+    const open = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    renderPage([blockedSubscription]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+
+    expect(open).toHaveBeenCalledWith('about:blank', '_blank');
+    expect(tab.opener).toBeNull();
+    await waitFor(() => expect(tab.location.href).toBe(authUrl));
+  });
+
+  // A failed re-auth has already spent the irreversible half — the sibling sources
+  // are already marked. Sending the user back to the row to agree to that cost a
+  // second time, for the only gesture that can undo it, is the one journey where a
+  // second confirmation is worse than none.
+  it('retries a failed re-auth in place, without asking to confirm again', async () => {
+    const started = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'starting' as const,
+      presentation: { expects: 'none' as const },
+    };
+    const reauth = vi
+      .spyOn(modelsApi, 'reauthSource')
+      .mockRejectedValueOnce(new Error('start failed'))
+      .mockResolvedValue(started);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue(started);
+    renderPage([blockedSubscription]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+
+    const retry = await screen.findByRole('button', { name: /^Retry$|^重试$/i });
+    expect(screen.queryByRole('button', { name: /^Start sign-in$|^开始登录$/i })).toBeNull();
+    await userEvent.click(retry);
+
+    await waitFor(() => expect(reauth).toHaveBeenCalledTimes(2));
   });
 
   it('lands the operational overview without waiting for event history', async () => {

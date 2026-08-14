@@ -12,6 +12,7 @@ import { GuardGapList } from './GuardGapList';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import { handOffProviderTab } from './providerTab';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
 import { sourceStatePresentation } from './sourceStatePresentation';
@@ -497,6 +498,12 @@ export const SourceDetailPanel: React.FC<{
         confirmLabel={t('settings.models.repair.reauthConfirm') as string}
         destructive={reauthCost(source) === 'immediate'}
         onConfirm={() => {
+          // This click is the journey's only user gesture: the dialog it opens POSTs
+          // as it mounts, and a browser grants the provider tab to the gesture that
+          // asked for it, not to the response one round trip later. Allocate here and
+          // hand it over, or the provider handoff is popup-blocked and the user has
+          // to notice the fallback link.
+          handOffProviderTab();
           setConfirmingReauth(false);
           onReauth(source);
         }}

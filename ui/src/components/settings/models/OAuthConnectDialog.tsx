@@ -37,6 +37,7 @@ import {
   type FlowView,
 } from './asyncLifetime';
 import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
+import { preopenProviderTab, takeHandedProviderTab } from './providerTab';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
 import {
@@ -143,25 +144,13 @@ export const OAuthConnectDialog: React.FC<{
 
   const preopenProviderWindow = React.useCallback(() => {
     if (providerWindow.current && !providerWindow.current.closed) return;
-    try {
-      const tab = window.open('about:blank', '_blank');
-      if (tab) {
-        try {
-          // The provider's authorization page is navigated into this tab, so
-          // leaving `opener` attached would let it drive this window.
-          tab.opener = null;
-        } catch {
-          // Some browser WindowProxy implementations expose a read-only opener.
-        }
-      }
-      providerWindow.current = tab;
-    } catch {
-      providerWindow.current = null;
-    }
+    providerWindow.current = preopenProviderTab();
   }, []);
 
   const closeProviderWindow = React.useCallback(() => {
-    const target = providerWindow.current;
+    // Also the tab a gesture outside this dialog handed over: an unused handoff
+    // is an unused tab, and this is already the owner that closes one.
+    const target = providerWindow.current ?? takeHandedProviderTab();
     providerWindow.current = null;
     if (!target || target.closed) return;
     try {
@@ -717,8 +706,14 @@ export const OAuthConnectDialog: React.FC<{
       && (flow.state === 'starting' || flow.state === 'awaiting_action' || flow.state === 'verifying'),
   );
   React.useEffect(() => {
-    const target = providerWindow.current;
-    if (!flowActive || !target || !presentation?.auth_url || target.closed) return;
+    if (!flowActive || !presentation?.auth_url) return;
+    // Claimed at the point of use, not when the dialog opens: the re-auth journey's
+    // tab is allocated by the confirm gesture before this component exists, and a
+    // claim taken at mount is stranded by anything that remounts (StrictMode
+    // replays effects in development) with the tab still open and unreachable.
+    // Claiming here also means a run with nothing to navigate keeps the handoff.
+    const target = providerWindow.current ?? takeHandedProviderTab();
+    if (!target || target.closed) return;
     try {
       target.location.href = presentation.auth_url;
     } catch {
@@ -1022,7 +1017,12 @@ export const OAuthConnectDialog: React.FC<{
               <span />
             )}
             <div className="flex items-center gap-2">
-              {failed && !isReauth && (
+              {/* A re-auth retry too. `retryStart` repeats the journey it is in, and
+                  on a failed re-auth the irreversible half is already spent — the
+                  siblings are already marked — so sending the user back to the row
+                  to confirm it a second time asks them to agree to a cost they have
+                  already paid, for the only gesture that can undo it. */}
+              {failed && (
                 <Button
                   variant="brand"
                   size="sm"
