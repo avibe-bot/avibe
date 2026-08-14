@@ -37,8 +37,8 @@ const subscription = (over: Partial<Source> = {}): Source => ({
   ...over,
 });
 
-const renderDialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> = {}) =>
-  render(React.createElement(
+const dialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> = {}) =>
+  React.createElement(
     ToastProvider,
     null,
     React.createElement(
@@ -53,7 +53,10 @@ const renderDialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDia
         ...props,
       }),
     ),
-  ));
+  );
+
+const renderDialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> = {}) =>
+  render(dialog(props));
 
 describe('add-subscription channel choice', () => {
   it('flips the recommendation and visible order by vendor', () => {
@@ -113,6 +116,12 @@ describe('add-subscription start recovery', () => {
 describe('OAuth failure class behavior', () => {
   it('keeps a held flow when its timeout reread is inconclusive', async () => {
     vi.useFakeTimers();
+    const providerTab = {
+      closed: false,
+      close: vi.fn(),
+      opener: {},
+    };
+    vi.spyOn(window, 'open').mockReturnValue(providerTab as unknown as Window);
     const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue({
       flow_id: 'oaf_timeout',
       intent: 'reauth',
@@ -138,6 +147,57 @@ describe('OAuth failure class behavior', () => {
 
     expect(status).toHaveBeenCalledWith('oaf_timeout');
     expect(reauth).toHaveBeenCalledTimes(1);
+    expect(providerTab.close).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a held-flow reread rejection after its journey is retired', async () => {
+    vi.useFakeTimers();
+    let rejectStatus!: (reason: unknown) => void;
+    const pendingStatus = new Promise<never>((_resolve, reject) => {
+      rejectStatus = reject;
+    });
+    const reauth = vi
+      .spyOn(modelsApi, 'reauthSource')
+      .mockResolvedValueOnce({
+        flow_id: 'oaf_retired',
+        intent: 'reauth',
+        vendor: 'anthropic',
+        channel: 'native_cli',
+        state: 'awaiting_action',
+        presentation: { expects: 'none' },
+        expires_at: new Date(Date.now() - 61_000).toISOString(),
+      })
+      .mockResolvedValueOnce({
+        flow_id: 'oaf_replacement',
+        intent: 'reauth',
+        vendor: 'anthropic',
+        channel: 'native_cli',
+        state: 'awaiting_action',
+        presentation: { expects: 'none' },
+        expires_at: '2099-01-01T00:00:00Z',
+      });
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockReturnValue(pendingStatus);
+    vi.spyOn(modelsApi, 'cancelOAuth').mockResolvedValue(undefined);
+    const retiredSource = subscription({ id: 'src_retired' });
+    const replacementSource = subscription({ id: 'src_replacement' });
+    const rendered = renderDialog({ reauth: retiredSource });
+
+    await act(async () => Promise.resolve());
+    await act(async () => vi.advanceTimersByTime(2_000));
+    fireEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+    expect(modelsApi.getOAuthStatus).toHaveBeenCalledWith('oaf_retired');
+
+    rendered.rerender(dialog({ open: false, reauth: retiredSource }));
+    rendered.rerender(dialog({ reauth: replacementSource }));
+    await act(async () => Promise.resolve());
+    expect(reauth).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      rejectStatus(new ApiCallError('source_not_found'));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole('button', { name: /^Cancel$|^取消$/i })).toBeTruthy();
   });
 
   it('does not offer Retry for an authoritative terminal failure', async () => {

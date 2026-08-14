@@ -408,6 +408,13 @@ export const OAuthConnectDialog: React.FC<{
               // to observe a near-deadline terminal result.
               return false;
             } catch (err) {
+              // The success and rejection paths belong to the same read. Once
+              // this authority is retired, neither outcome may update the view
+              // or dispose a provider tab owned by its replacement.
+              if (cancelled || flowAuthorityRef.current !== authority) return true;
+              // This reread did not start a provider journey, so the tab opened
+              // by the Retry gesture has no URL to receive.
+              closeProviderWindow();
               const failure = apiFailure(err);
               const failureClass = classifyOAuthFailure(failure);
               // An unread flow is still held. Retry may ask again, but it may not
