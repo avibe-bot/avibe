@@ -334,20 +334,17 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
           >
             {t('common.cancel')}
           </button>
-          <button
+          <Button
             type="button"
+            variant="brand"
+            size={null}
             onClick={handleSubmit}
             disabled={!canSubmit}
-            className={clsx(
-              'inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-bold transition',
-              canSubmit
-                ? 'bg-mint text-primary-foreground shadow-[0_0_14px_-4px_rgba(91,255,160,0.6)] hover:bg-mint-hover'
-                : 'cursor-not-allowed bg-muted-soft text-muted',
-            )}
+            className="gap-1.5 rounded-md px-4 py-1.5 text-[12px]"
           >
             {t('agents.create.submit')}
             <ArrowRight className="size-3.5" />
-          </button>
+          </Button>
         </div>
       </div>
     </div>

@@ -187,6 +187,12 @@
   --pink-soft: rgba(255, 91, 138, 0.10);
   --pink-ink: #ff5b8a;
 
+  /* Blur radius of the brand CTA glow, shared by all four `brand*` Button variants
+     (see button-variants.ts). One radius, four accents — a per-accent value would be
+     the drift that variant exists to remove. It lives here rather than in the class
+     because it is the one part of that glow that differs per theme. */
+  --brand-glow-blur: 16px;
+
   /* Page-family gradients (mirror design.pen 1:1). Layers ordered top-most first. */
   --gradient-console:
     radial-gradient(50% 40% at 5% 5%, rgba(91, 255, 160, 0.20), rgba(91, 255, 160, 0) 100%),
@@ -335,6 +341,10 @@
     /* Light card glow — much softer than dark. */
     --shadow-mint-card: 0 12px 24px -16px rgba(16, 185, 129, 0.20);
     --shadow-mint-card-lg: 0 16px 32px -16px rgba(16, 185, 129, 0.22);
+
+    /* Wider CTA glow than dark: the same neon spreads far less over a white card,
+       so 16px read as almost nothing here (owner decision 2026-08-14). */
+    --brand-glow-blur: 20px;
   }
 }
 
@@ -435,6 +445,10 @@
   /* Light card glow — much softer than dark. */
   --shadow-mint-card: 0 12px 24px -16px rgba(16, 185, 129, 0.20);
   --shadow-mint-card-lg: 0 16px 32px -16px rgba(16, 185, 129, 0.22);
+
+  /* Wider CTA glow than dark: the same neon spreads far less over a white card,
+     so 16px read as almost nothing here (owner decision 2026-08-14). */
+  --brand-glow-blur: 20px;
 }
 
 html,
