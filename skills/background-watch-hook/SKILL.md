@@ -223,6 +223,7 @@ if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
   for SKILL_ROOT in \
     "${CODEX_HOME:-$HOME/.codex}/skills" \
     "${AGENTS_HOME:-$HOME/.agents}/skills" \
+    "${CLAUDE_HOME:-$HOME/.claude}/skills" \
     "${OPENCODE_HOME:-$HOME/.opencode}/skills" \
     "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills"; do
     [ -d "$SKILL_ROOT" ] || continue
@@ -241,31 +242,60 @@ the canonical committed skill. The check is read-only and must pass before a
 wait starts:
 
 ```bash
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-SYNC_SKILL="$REPO_ROOT/skills/background-watch-hook/scripts/sync_skill.py"
+CALLER_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -n "${AVIBE_REPO_ROOT:-}" ]; then
+  AVIBE_REPO_ROOT="$(cd "$AVIBE_REPO_ROOT" && pwd)"
+else
+  SEARCH_ROOT="$CALLER_ROOT"
+  while :; do
+    for CANDIDATE in "$SEARCH_ROOT" "$SEARCH_ROOT/avibe"; do
+      if [ -f "$CANDIDATE/skills/background-watch-hook/scripts/sync_skill.py" ]; then
+        AVIBE_REPO_ROOT="$CANDIDATE"
+        break 2
+      fi
+    done
+    PARENT="$(dirname "$SEARCH_ROOT")"
+    [ "$PARENT" != "$SEARCH_ROOT" ] || break
+    SEARCH_ROOT="$PARENT"
+  done
+fi
+test -n "${AVIBE_REPO_ROOT:-}"
+SYNC_SKILL="$AVIBE_REPO_ROOT/skills/background-watch-hook/scripts/sync_skill.py"
 test -f "$SYNC_SKILL"
 python3 "$SYNC_SKILL" \
-  --repo-root "$REPO_ROOT" \
+  --repo-root "$AVIBE_REPO_ROOT" \
+  --caller-root "$CALLER_ROOT" \
   --check
 ```
+
+The search accepts `AVIBE_REPO_ROOT` as an explicit canonical checkout and
+otherwise walks caller ancestors for either that checkout or an `avibe`
+sibling. This keeps the preflight usable from companion and unrelated
+repositories without copying the sync helper into them.
 
 With no `--target`, the check follows the same active-skill resolution order as
 the waiter examples above. It hashes a repository-provided canonical tree
 directly, or validates the manifest of the selected harness installation. It
 also records the full tree SHA-256 and frontmatter version, and probes
 `wait_pr.py --help` for the combined `--sha`, `--workflow`, `--seed-state`,
-`--actionable-only`, and `--ignore-author` options. A non-zero result is an
-environment blocker: report the canonical path and required commit, then
-repair the installation with the same helper before arming the watch. Do not
-patch an older harness copy in place or hand-roll a substitute waiter.
+`--actionable-only`, and `--ignore-author` options. Capability probing executes
+only the committed materialization after the active tree matches; it never
+executes an unverified installation. A non-zero result is an environment
+blocker: report the canonical path and required commit, then repair the
+installation with the same helper before arming the watch. Do not patch an
+older harness copy in place or hand-roll a substitute waiter.
 
 To install the canonical committed copy into the configured harness targets:
 
 ```bash
 python3 "$SYNC_SKILL" \
-  --repo-root "$REPO_ROOT" \
+  --repo-root "$AVIBE_REPO_ROOT" \
   --install
 ```
+
+Default install destinations honor `CODEX_HOME`, `AGENTS_HOME`, `CLAUDE_HOME`,
+`OPENCODE_HOME`, and `XDG_CONFIG_HOME`. Pass one or more explicit `--target`
+values only when auditing or repairing a narrower installation set.
 
 ## GitHub Example Waiter
 

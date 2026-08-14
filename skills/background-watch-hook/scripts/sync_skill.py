@@ -29,10 +29,12 @@ REQUIRED_WAIT_PR_FLAGS = (
     "--actionable-only",
     "--ignore-author",
 )
-DEFAULT_TARGETS = (
-    Path("~/.agents/skills") / SKILL_NAME,
-    Path("~/.claude/skills") / SKILL_NAME,
-    Path("~/.opencode/skills") / SKILL_NAME,
+HARNESS_HOME_SPECS = (
+    ("CODEX_HOME", "~/.codex", Path("skills")),
+    ("AGENTS_HOME", "~/.agents", Path("skills")),
+    ("CLAUDE_HOME", "~/.claude", Path("skills")),
+    ("OPENCODE_HOME", "~/.opencode", Path("skills")),
+    ("XDG_CONFIG_HOME", "~/.config", Path("opencode/skills")),
 )
 
 
@@ -61,6 +63,20 @@ def _resolve_repo_root(repo_root: str | None) -> Path:
     if not (root / ".git").exists() and not (root / ".git").is_file():
         raise SyncError(f"Avibe repository root is not a git repository: {root}")
     return root
+
+
+def _resolve_caller_root(caller_root: str | None) -> Path:
+    if caller_root:
+        return Path(caller_root).expanduser().resolve()
+    result = subprocess.run(
+        ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return Path(result.stdout.strip()).resolve()
+    return Path.cwd().resolve()
 
 
 def _resolve_commit(repo_root: Path, requested: str | None) -> str:
@@ -154,9 +170,18 @@ def _manifest(repo_root: Path, commit: str, skill_root: Path) -> dict[str, Any]:
     }
 
 
+def _configured_skill_roots() -> list[Path]:
+    roots: list[Path] = []
+    for variable, default, relative in HARNESS_HOME_SPECS:
+        home = Path(os.environ.get(variable) or default).expanduser()
+        roots.append(home / relative)
+    return roots
+
+
 def _expanded_targets(values: list[str] | None) -> list[Path]:
-    raw_targets = list(values) if values else [str(target) for target in DEFAULT_TARGETS]
-    return [Path(value).expanduser() for value in raw_targets]
+    if values:
+        return [Path(value).expanduser() for value in values]
+    return [root / SKILL_NAME for root in _configured_skill_roots()]
 
 
 def _active_skill_file(repo_root: Path) -> Path:
@@ -168,15 +193,7 @@ def _active_skill_file(repo_root: Path) -> Path:
             repo_root / SKILL_RELATIVE_PATH / "SKILL.md",
             repo_root / ".agents/skills" / SKILL_NAME / "SKILL.md",
         ]
-        for variable, default in (
-            ("CODEX_HOME", "~/.codex"),
-            ("AGENTS_HOME", "~/.agents"),
-            ("OPENCODE_HOME", "~/.opencode"),
-            ("XDG_CONFIG_HOME", "~/.config"),
-        ):
-            root = Path(os.environ.get(variable) or default).expanduser()
-            skill_root = root / "opencode/skills" if variable == "XDG_CONFIG_HOME" else root / "skills"
-            candidates.append(skill_root / SKILL_NAME / "SKILL.md")
+        candidates.extend(root / SKILL_NAME / "SKILL.md" for root in _configured_skill_roots())
 
     for candidate in candidates:
         if candidate.is_file():
@@ -186,11 +203,9 @@ def _active_skill_file(repo_root: Path) -> Path:
 
 
 def _target_destination(target: Path) -> Path:
-    if target.is_symlink():
-        if not target.exists():
-            raise SyncError(f"installation target is a broken symlink: {target}")
-        return target.resolve()
-    return target
+    if target.is_symlink() and not target.exists():
+        raise SyncError(f"installation target is a broken symlink: {target}")
+    return target.resolve()
 
 
 def _path_key(path: Path) -> str:
@@ -210,6 +225,8 @@ def _install_target(
         or canonical_root.is_relative_to(destination)
     ):
         raise SyncError(f"refusing to install the skill over the canonical checkout: {destination}")
+    if destination.exists() and not destination.is_dir():
+        raise SyncError(f"installation target is not a directory: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging: Path | None = Path(tempfile.mkdtemp(prefix=f".{SKILL_NAME}-", dir=destination.parent))
     backup: Path | None = None
@@ -235,7 +252,11 @@ def _install_target(
         raise SyncError(f"cannot install {SKILL_NAME} into {target}: {exc}") from exc
 
 
-def _check_target(target: Path, expected: dict[str, Any]) -> list[str]:
+def _check_target(
+    target: Path,
+    expected: dict[str, Any],
+    trusted_probe_root: Path,
+) -> list[str]:
     if target.is_symlink() and not target.exists():
         return [f"{target}: broken symlink"]
     if not target.is_dir():
@@ -263,7 +284,8 @@ def _check_target(target: Path, expected: dict[str, Any]) -> list[str]:
     except OSError as exc:
         problems.append(f"{target}: cannot hash installed skill: {exc}")
 
-    problems.extend(_check_waiter_capabilities(actual_root))
+    if not problems:
+        problems.extend(_check_waiter_capabilities(trusted_probe_root))
     return problems
 
 
@@ -271,6 +293,7 @@ def _check_active_target(
     active_file: Path,
     expected: dict[str, Any],
     canonical_root: Path,
+    trusted_probe_root: Path,
 ) -> list[str]:
     active_root = active_file.parent
     if active_root == canonical_root:
@@ -283,8 +306,8 @@ def _check_active_target(
                 f"{active_root}: tree_sha256={actual_hash}, "
                 f"expected {expected['tree_sha256']}"
             ]
-        return _check_waiter_capabilities(active_root)
-    return _check_target(active_root, expected)
+        return _check_waiter_capabilities(trusted_probe_root)
+    return _check_target(active_root, expected, trusted_probe_root)
 
 
 def _check_waiter_capabilities(skill_root: Path) -> list[str]:
@@ -296,8 +319,9 @@ def _check_waiter_capabilities(skill_root: Path) -> list[str]:
             check=False,
             capture_output=True,
             text=True,
+            timeout=10,
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return [f"{skill_root}: cannot execute wait_pr.py --help: {exc}"]
     help_text = f"{help_result.stdout}\n{help_result.stderr}"
     if help_result.returncode != 0:
@@ -319,6 +343,10 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--install", action="store_true", help="Install the canonical skill into the targets")
     parser.add_argument("--repo-root", help="Avibe repository root; defaults to this checkout")
     parser.add_argument(
+        "--caller-root",
+        help="Caller repository used to resolve the active skill; defaults to the current checkout",
+    )
+    parser.add_argument(
         "--commit",
         help="Canonical git commit; defaults to the latest commit touching the skill tree",
     )
@@ -331,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         repo_root = _resolve_repo_root(args.repo_root)
+        caller_root = _resolve_caller_root(args.caller_root)
         commit = _resolve_commit(repo_root, args.commit)
         canonical_path = repo_root / SKILL_RELATIVE_PATH
         active_file = None
@@ -340,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
             canonical_root = canonical_path.resolve()
             if args.check and not args.target:
                 try:
-                    active_file = _active_skill_file(repo_root)
+                    active_file = _active_skill_file(caller_root)
                 except SyncError as exc:
                     raise SyncError(
                         f"{exc}; canonical path {canonical_path} requires commit {commit}"
@@ -383,9 +412,16 @@ def main(argv: list[str] | None = None) -> int:
                     seen.add(key)
                     checked.append(str(target))
                     if active_file is not None:
-                        problems.extend(_check_active_target(active_file, expected, canonical_root))
+                        problems.extend(
+                            _check_active_target(
+                                active_file,
+                                expected,
+                                canonical_root,
+                                canonical,
+                            )
+                        )
                     else:
-                        problems.extend(_check_target(target, expected))
+                        problems.extend(_check_target(target, expected, canonical))
                 payload = {
                     "ok": not problems,
                     "action": "check",

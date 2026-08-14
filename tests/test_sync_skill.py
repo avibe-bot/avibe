@@ -98,12 +98,15 @@ def test_install_records_commit_hash_and_check_detects_drift(tmp_path: Path) -> 
     assert checked_again.returncode == 0, checked_again.stderr
     assert json.loads(checked_again.stdout)["ok"] is True
 
+    marker = tmp_path / "untrusted-waiter-executed"
     (target / "scripts/wait_pr.py").write_text(
-        (target / "scripts/wait_pr.py").read_text(encoding="utf-8") + "\n# drift\n",
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
         encoding="utf-8",
     )
     drift = _run(repo, target, "--check")
     assert drift.returncode == 1
+    assert not marker.exists()
     drift_payload = json.loads(drift.stdout)
     assert drift_payload["ok"] is False
     assert any("tree_sha256" in problem for problem in drift_payload["problems"])
@@ -138,6 +141,30 @@ def test_install_deduplicates_harness_symlink_targets(tmp_path: Path) -> None:
     assert claude_target.is_symlink()
     assert (agents_target / ".avibe-skill-sync.json").is_file()
     assert len(json.loads(installed.stdout)["targets"]) == 1
+
+
+def test_default_install_honors_configured_harness_homes(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    homes = tmp_path / "harnesses"
+    env = {
+        "CODEX_HOME": str(homes / "codex"),
+        "AGENTS_HOME": str(homes / "agents"),
+        "CLAUDE_HOME": str(homes / "claude"),
+        "OPENCODE_HOME": str(homes / "opencode"),
+        "XDG_CONFIG_HOME": str(homes / "xdg"),
+    }
+
+    installed = _run(repo, None, "--install", env=env)
+    assert installed.returncode == 0, installed.stderr
+    expected = {
+        homes / "codex/skills/background-watch-hook",
+        homes / "agents/skills/background-watch-hook",
+        homes / "claude/skills/background-watch-hook",
+        homes / "opencode/skills/background-watch-hook",
+        homes / "xdg/opencode/skills/background-watch-hook",
+    }
+    assert {Path(target) for target in json.loads(installed.stdout)["targets"]} == expected
+    assert all((target / ".avibe-skill-sync.json").is_file() for target in expected)
 
 
 def test_check_reports_missing_target_and_required_commit(tmp_path: Path) -> None:
@@ -180,6 +207,25 @@ def test_check_follows_the_active_skill_resolution(tmp_path: Path) -> None:
     assert canonical_check.returncode == 0, canonical_check.stderr
 
 
+def test_check_resolves_the_active_skill_from_a_companion_repo(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    companion = tmp_path / "avibe-docs"
+    target = companion / ".agents/skills/background-watch-hook"
+
+    installed = _run(repo, target, "--install")
+    assert installed.returncode == 0, installed.stderr
+
+    checked = _run(
+        repo,
+        None,
+        "--caller-root",
+        str(companion),
+        "--check",
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert json.loads(checked.stdout)["targets"] == [str(target.resolve())]
+
+
 def test_install_refuses_the_canonical_checkout_and_symlink(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
     canonical = repo / "skills/background-watch-hook"
@@ -195,6 +241,29 @@ def test_install_refuses_the_canonical_checkout_and_symlink(tmp_path: Path) -> N
     linked = _run(repo, symlink, "--install")
     assert linked.returncode == 1
     assert "canonical checkout" in json.loads(linked.stdout)["error"]
+
+    parent_alias = tmp_path / "avibe-alias"
+    parent_alias.symlink_to(repo, target_is_directory=True)
+    parent_linked = _run(
+        repo,
+        parent_alias / "skills/background-watch-hook",
+        "--install",
+    )
+    assert parent_linked.returncode == 1
+    assert "canonical checkout" in json.loads(parent_linked.stdout)["error"]
+
+
+def test_install_rejects_a_regular_file_without_mutating_it(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    target = tmp_path / "home/.agents/skills/background-watch-hook"
+    target.parent.mkdir(parents=True)
+    target.write_text("corrupt installation\n", encoding="utf-8")
+
+    installed = _run(repo, target, "--install")
+    assert installed.returncode == 1
+    assert "not a directory" in json.loads(installed.stdout)["error"]
+    assert target.read_text(encoding="utf-8") == "corrupt installation\n"
+    assert not list(target.parent.glob(".background-watch-hook.old-*"))
 
 
 def test_default_commit_tracks_the_skill_tree_not_unrelated_changes(tmp_path: Path) -> None:
