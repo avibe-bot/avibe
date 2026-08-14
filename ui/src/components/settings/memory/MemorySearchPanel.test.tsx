@@ -7,11 +7,15 @@ import userEvent from '@testing-library/user-event';
 import type { MemoryListItem, MemoryListWarning } from '../../../context/ApiContext';
 import { MemorySearchPanel } from './MemorySearchPanel';
 
-const api = vi.hoisted(() => ({
-  listMemoryEpisodes: vi.fn(),
-  listMemoryProjects: vi.fn(),
-  searchMemory: vi.fn(),
-}));
+const apiHarness = vi.hoisted(() => {
+  const initial = {
+    listMemoryEpisodes: vi.fn(),
+    listMemoryProjects: vi.fn(),
+    searchMemory: vi.fn(),
+  };
+  return { current: initial, initial };
+});
+const api = apiHarness.initial;
 const copyTextToClipboard = vi.hoisted(() => vi.fn());
 const translate = vi.hoisted(() => (
   key: string,
@@ -28,7 +32,7 @@ const translate = vi.hoisted(() => (
 
 vi.mock('../../../context/ApiContext', async (loadOriginal) => {
   const original = await loadOriginal<typeof import('../../../context/ApiContext')>();
-  return { ...original, useApi: () => api };
+  return { ...original, useApi: () => apiHarness.current };
 });
 
 vi.mock('../../../lib/utils', async (loadOriginal) => {
@@ -71,6 +75,7 @@ const listResult = (
 });
 
 beforeEach(() => {
+  apiHarness.current = api;
   api.listMemoryProjects.mockResolvedValue({
     status: 'ok',
     projects: [
@@ -170,6 +175,36 @@ describe('MemorySearchPanel browse and search modes', () => {
       cursor: null,
       limit: 20,
     }));
+  });
+
+  it('[MEMORY-LIST-004] refetches the displayed page when the API identity changes', async () => {
+    const first = episode({ id: 'page-1', summary: 'Original first page.' });
+    const second = episode({ id: 'page-2', summary: 'Original second page.' });
+    api.listMemoryEpisodes.mockImplementation((_project: string, options: { page: number }) =>
+      Promise.resolve(options.page === 1
+        ? listResult([first], { total_count: 21 })
+        : listResult([second], { total_count: 21 })),
+    );
+    const user = userEvent.setup();
+    const view = render(<MemorySearchPanel enabled />);
+
+    await screen.findByText('Original first page.');
+    await user.click(screen.getByRole('button', { name: 'memory.search.browse.next' }));
+    await screen.findByText('Original second page.');
+
+    const replacementList = vi.fn().mockResolvedValue(listResult([
+      episode({ id: 'replacement-page-2', summary: 'Replacement second page.' }),
+    ], { total_count: 21 }));
+    apiHarness.current = { ...api, listMemoryEpisodes: replacementList };
+    view.rerender(<MemorySearchPanel enabled />);
+
+    expect(await screen.findByText('Replacement second page.')).toBeTruthy();
+    expect(replacementList).toHaveBeenCalledWith('default', {
+      page: 2,
+      cursor: null,
+      limit: 20,
+    });
+    expect(screen.getByText('memory.search.browse.pageSummary:2/2')).toBeTruthy();
   });
 
   it('[MEMORY-LIST-003] invalidates descendant aggregate cursors when an earlier page changes', async () => {
@@ -300,6 +335,27 @@ describe('MemorySearchPanel browse and search modes', () => {
       cursor: 'retry-cursor',
       limit: 20,
     });
+  });
+
+  it('[MEMORY-LIST-005] treats an empty truncated aggregate page as incomplete', async () => {
+    api.listMemoryEpisodes.mockImplementation((project: string) => Promise.resolve(
+      project === 'all'
+        ? listResult([], {
+            total_count: null,
+            next_cursor: 'retry-cursor',
+            warnings: ['memory_list_truncated'],
+          })
+        : listResult([]),
+    ));
+    const user = userEvent.setup();
+
+    render(<MemorySearchPanel enabled />);
+    await user.selectOptions(await screen.findByLabelText('memory.search.projectLabel'), 'all');
+
+    expect(await screen.findByText('memory.search.browse.partialEmpty')).toBeTruthy();
+    expect(screen.queryByText('memory.search.browse.empty')).toBeNull();
+    expect(screen.getByText('memory.search.browse.truncated')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'memory.search.browse.next' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('[MEMORY-LIST-007] keeps non-empty queries on the existing relevance search path', async () => {

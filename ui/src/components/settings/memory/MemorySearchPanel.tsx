@@ -69,6 +69,7 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
   const [browsePage, setBrowsePage] = useState(1);
   const [cursorByPage, setCursorByPage] = useState<Record<number, string | null>>({ 1: null });
   const browseRequestRef = useRef(0);
+  const browsePositionRef = useRef({ project: 'default', page: 1, cursor: null as string | null });
   const [selectedEpisodeKey, setSelectedEpisodeKey] = useState<string | null>(null);
   const [copiedEpisodeKey, setCopiedEpisodeKey] = useState<string | null>(null);
   const browseMode = !query.trim();
@@ -139,11 +140,16 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
 
   useEffect(() => {
     if (!enabled || !browseMode) return;
-    void browse(project, 1, null);
+    const position = browsePositionRef.current;
+    const page = position.project === project ? position.page : 1;
+    const cursor = position.project === project ? position.cursor : null;
+    browsePositionRef.current = { project, page, cursor };
+    void browse(project, page, cursor);
   }, [browse, browseMode, enabled, project]);
 
-  const resetBrowseNavigation = () => {
+  const resetBrowseNavigation = (selectedProject = project) => {
     browseRequestRef.current += 1;
+    browsePositionRef.current = { project: selectedProject, page: 1, cursor: null };
     setCursorByPage({ 1: null });
     setBrowsePage(1);
     setSelectedEpisodeKey(null);
@@ -160,6 +166,7 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
     if (nextPage < 1 || nextPage === browsePage) return;
     const cursor = project === 'all' ? cursorByPage[nextPage] : null;
     if (project === 'all' && cursor === undefined) return;
+    browsePositionRef.current = { project, page: nextPage, cursor };
     setBrowsePage(nextPage);
     setSelectedEpisodeKey(null);
     setCopiedEpisodeKey(null);
@@ -169,6 +176,7 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
   const retryBrowsePage = () => {
     const cursor = project === 'all' ? cursorByPage[browsePage] : null;
     if (project === 'all' && cursor === undefined) return;
+    browsePositionRef.current = { project, page: browsePage, cursor };
     setSelectedEpisodeKey(null);
     setCopiedEpisodeKey(null);
     void browse(project, browsePage, cursor);
@@ -177,6 +185,9 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
   const searchItems = searchData?.items ?? null;
   const searchWarnings = searchData?.warnings ?? [];
   const browseItems = browseData?.items ?? [];
+  const browseIncomplete = browseData?.warnings.some(
+    (warning) => warning === 'memory_list_partial' || warning === 'memory_list_truncated',
+  ) ?? false;
   const selectedEpisode = selectedEpisodeKey
     ? (browseItems.find((item) => episodeIdentity(item) === selectedEpisodeKey) ?? null)
     : null;
@@ -267,8 +278,9 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
         <Select
           value={project}
           onChange={(event) => {
-            if (browseMode) resetBrowseNavigation();
-            setProject(event.target.value);
+            const nextProject = event.target.value;
+            if (browseMode) resetBrowseNavigation(nextProject);
+            setProject(nextProject);
           }}
           aria-label={t('memory.search.projectLabel')}
           wrapperClassName="lg:w-52"
@@ -333,7 +345,7 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
           ) : browseItems.length === 0 ? (
             <div className="flex flex-col gap-3">
               <div className="rounded-lg border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">
-                {project === 'all' && browseData?.warnings.includes('memory_list_partial')
+                {project === 'all' && browseIncomplete
                   ? t('memory.search.browse.partialEmpty')
                   : t('memory.search.browse.empty')}
               </div>
