@@ -473,6 +473,37 @@ assertAccentAliasesKeepTheirTokenName(css);
 const ACCENT_NAMES = ACCENT_FILLS.map((fill) => fill.slice(2));
 const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*\\)`);
 
+// Naming color-mix() is not proof of translucency, and that is the whole exemption.
+// `color-mix(in srgb, var(--mint) 100%, transparent)` mentions both `color-mix` and
+// `transparent` and still renders as bare mint at 2.35:1 on the light canvas -- exactly
+// the mark this assertion exists to reject. So resolve the accent's share and exempt
+// only what a wash actually is.
+//
+// A mix shape this pattern cannot read fails loudly rather than inheriting the old
+// free pass: an unmeasured mix is not a proven-translucent one. Extending the pattern
+// is the correct response to that failure. Only the accent's own share is resolved --
+// mixing an accent into an opaque colour keeps its ratio, so such a shape is a mark
+// and must say so here rather than be waved through.
+const ACCENT_SHARE_OF_MIX = /^color-mix\(\s*in\s+[\w-]+\s*,\s*[^,]+?\s+([\d.]+)%\s*,\s*transparent\s*\)$/i;
+
+function accentShare(name, decl, value) {
+  if (!value.includes('color-mix')) {
+    return 1;
+  }
+
+  const mix = ACCENT_SHARE_OF_MIX.exec(value);
+  if (!mix) {
+    throw new Error(
+      `${name}: ${decl.selector ?? decl.parent?.selector} paints ${decl.prop} with ${value}, a `
+      + 'color-mix() this guard cannot resolve to an alpha. Only a mix proven translucent is exempt '
+      + 'from the mark rule, because an opaque mix renders as the bare fill -- teach '
+      + 'ACCENT_SHARE_OF_MIX this shape instead of letting an unmeasured mix through.',
+    );
+  }
+
+  return Number.parseFloat(mix[1]) / 100;
+}
+
 function assertMarksTakeTheInk(source, name) {
   postcss.parse(source).walkDecls((decl) => {
     if (decl.prop !== 'stroke' && decl.prop !== 'fill') {
@@ -480,7 +511,7 @@ function assertMarksTakeTheInk(source, name) {
     }
 
     const value = normalizeCssValue(decl.value);
-    if (value.includes('color-mix') || value.includes('transparent') || !BARE_ACCENT_VAR.test(value)) {
+    if (!BARE_ACCENT_VAR.test(value) || accentShare(name, decl, value) < 1) {
       return;
     }
 
@@ -535,31 +566,64 @@ const FILL_LABEL = new Map([
 
 // Control chrome the owner has not ruled on: switch/toggle tracks and progress/step
 // bars, where the fill is a large shape whose state is already carried by knob
-// position or bar length rather than by the colour being legible on its own. They
-// are pinned rather than skipped, and pinned by count, so removing one goes stale
-// loudly and adding a sixth bare mark to a listed file still fails. Repainting them
-// is a design.pen decision, not a guard decision.
+// position or bar length rather than by the colour being legible on its own.
+// Repainting them is a design.pen decision, not a guard decision.
+//
+// Each is pinned to the construct it was granted for -- the owning component plus the
+// exact class string carrying the mark -- not to a per-file tally. A count treats every
+// same-accent mark in a file as interchangeable: delete the pinned track, add an
+// unrelated bare dot, and `1` still reads as `1`, so the exemption transfers in silence
+// to a mark nobody ruled on. A signature cannot transfer. It also survives edits above
+// it and reformatting, which a line number would not, and reads as documentation of
+// what is actually exempt.
 const TRACK = 'toggle track: state is carried by knob position, not by the fill reading on its own';
 const STEP_DOTS = 'wizard step dots: progress is carried by how many are filled, not by one dot reading on its own';
+const STEP_DOT = 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.6)]';
 const ACCEPTED_BARE_FILLS = new Map([
-  ['src/components/ui/switch.tsx --primary', { marks: 1, reason: TRACK }],
-  ['src/components/settings/SettingsPrimitives.tsx --mint', { marks: 1, reason: TRACK }],
-  ['src/components/steps/PlatformSelection.tsx --mint', { marks: 1, reason: TRACK }],
-  ['src/components/visual/ProgressBar.tsx --mint', { marks: 1, reason: 'progress bar: progress is carried by bar length' }],
-  ['src/components/steps/SlackConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
-  ['src/components/steps/TelegramConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
-  ['src/components/steps/DiscordConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
-  ['src/components/steps/LarkConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
-  ['src/components/steps/WeChatConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
-  ['src/components/visual/EmbeddedConfigShell.tsx --mint', { marks: 1, reason: STEP_DOTS }],
+  ['src/components/ui/switch.tsx --primary', { reason: TRACK, marks: ['Switch: bg-primary'] }],
+  ['src/components/settings/SettingsPrimitives.tsx --mint', { reason: TRACK, marks: ['ToggleSwitch: border-mint/50 bg-mint shadow-[0_0_12px_-2px_rgba(91,255,160,0.6)]'] }],
+  ['src/components/steps/PlatformSelection.tsx --mint', { reason: TRACK, marks: ['CredentialToggle: bg-mint'] }],
+  ['src/components/visual/ProgressBar.tsx --mint', { reason: 'progress bar: progress is carried by bar length', marks: ['ProgressBar: bg-mint shadow-[0_0_12px_rgba(91,255,160,0.45)]'] }],
+  ['src/components/steps/SlackConfig.tsx --mint', { reason: STEP_DOTS, marks: [`SlackConfig: ${STEP_DOT}`] }],
+  ['src/components/steps/TelegramConfig.tsx --mint', { reason: STEP_DOTS, marks: [`TelegramConfig: ${STEP_DOT}`] }],
+  ['src/components/steps/DiscordConfig.tsx --mint', { reason: STEP_DOTS, marks: [`DiscordConfig: ${STEP_DOT}`] }],
+  ['src/components/steps/LarkConfig.tsx --mint', { reason: STEP_DOTS, marks: [`LarkConfig: ${STEP_DOT}`] }],
+  ['src/components/steps/WeChatConfig.tsx --mint', { reason: STEP_DOTS, marks: [`WeChatConfig: ${STEP_DOT}`] }],
+  ['src/components/visual/EmbeddedConfigShell.tsx --mint', { reason: STEP_DOTS, marks: [`EmbeddedConfigShell: ${STEP_DOT}`] }],
 ]);
+
+// What an exemption is bound to. Kept as one string so the pins above read as the
+// construct they excuse.
+const markSignature = (owner, text) => `${owner}: ${text}`;
 
 // Every class string in a file, paired with the scope a sibling label may live in:
 // the JSX attribute list or the object literal the string sits in, else the string
 // itself. A template literal counts as one class string -- its static head and spans
 // are one `className`, and the interpolations are visited separately.
+//
+// The dialect comes from the extension. A .ts file forced through the TSX parser reads a
+// generic arrow (`const f = <T>(x: T) => x`) as an unterminated JSX element: nine files in
+// src/ do that today, and asyncLifetime.ts surfaced 1 of its 53 string literals, so an
+// unlabeled bg-mint anywhere past the first generic would have passed unseen.
+//
+// Parse diagnostics are raised rather than ignored, because ignoring them is what made
+// that invisible: a file the parser cannot read yields no class strings, which is
+// indistinguishable from a clean file. The scan must not be able to go blind quietly.
 function classStrings(file, source) {
-  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const tsx = file.endsWith('.tsx');
+  const ast = ts.createSourceFile(
+    file, source, ts.ScriptTarget.Latest, true, tsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const [failure] = ast.parseDiagnostics;
+  if (failure) {
+    const { line } = ast.getLineAndCharacterOfPosition(failure.start);
+    throw new Error(
+      `${file}:${line + 1} does not parse as ${tsx ? 'TSX' : 'TypeScript'}: `
+      + `${ts.flattenDiagnosticMessageText(failure.messageText, ' ')}\n`
+      + 'A file the parser cannot read contributes no class strings, so every accent mark in it '
+      + 'would skip this check unseen. Fix the syntax, or give this scan the dialect it needs.',
+    );
+  }
   const strings = [];
 
   const scopeOf = (node) => {
@@ -573,9 +637,27 @@ function classStrings(file, source) {
     return node;
   };
 
+  // The nearest named declaration around a class string -- the component or helper the
+  // mark lives in. Anonymous arrows and JSX nodes in between are skipped, so a mark
+  // inside a `.map()` callback still reports the component. Half of what a pinned
+  // exemption is bound to; see markSignature.
+  const ownerOf = (node) => {
+    for (let current = node; current; current = current.parent) {
+      if (ts.isVariableDeclaration(current) && ts.isIdentifier(current.name)) {
+        return current.name.text;
+      }
+      if ((ts.isFunctionDeclaration(current) || ts.isClassDeclaration(current)
+        || ts.isMethodDeclaration(current)) && current.name) {
+        return current.name.getText(ast);
+      }
+    }
+    return '(module)';
+  };
+
   const record = (node, text) => {
     strings.push({
       text,
+      owner: ownerOf(node),
       scope: scopeOf(node).getText(ast),
       line: ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1,
     });
@@ -610,7 +692,7 @@ function assertUnlabeledFillsTakeTheInk(root) {
     .sort();
 
   for (const file of files) {
-    for (const { text, scope, line } of classStrings(file, fs.readFileSync(file, 'utf8'))) {
+    for (const { text, owner, scope, line } of classStrings(file, fs.readFileSync(file, 'utf8'))) {
       for (const match of text.matchAll(bare)) {
         const accent = match[1];
         const label = FILL_LABEL.get(accent);
@@ -619,8 +701,7 @@ function assertUnlabeledFillsTakeTheInk(root) {
         }
 
         const key = `${file} --${accent}`;
-        const entry = found.get(key) ?? { count: 0, lines: [] };
-        found.set(key, { count: entry.count + 1, lines: [...entry.lines, line] });
+        found.set(key, [...found.get(key) ?? [], { signature: markSignature(owner, text), line }]);
       }
     }
   }
@@ -631,19 +712,23 @@ function assertUnlabeledFillsTakeTheInk(root) {
       'These paint a bare accent fill with no paired *-foreground label in the same class string or on '
       + 'a sibling attribute/property, so they are marks read straight off the canvas and must use the '
       + '-ink token (bg-mint-ink, bg-gold-ink, ...):\n'
-      + unpinned.map(([key, { lines }]) => `  ${key} at line ${lines.join(', ')}`).join('\n')
+      + unpinned.map(([key, marks]) => marks.map(({ signature, line }) => `  ${key} at line ${line}\n    ${signature}`).join('\n')).join('\n')
       + '\nIf the label is real but lives on a child element, move it into the same class string. '
       + 'If a mark is deliberately exempt, pin it in ACCEPTED_BARE_FILLS with its reason.',
     );
   }
 
   for (const [key, { reason, marks }] of ACCEPTED_BARE_FILLS) {
-    const actual = found.get(key)?.count ?? 0;
-    if (actual !== marks) {
+    const actual = (found.get(key) ?? []).map(({ signature }) => signature).sort();
+    const pinned = [...marks].sort();
+    if (actual.length !== pinned.length || pinned.some((signature, index) => signature !== actual[index])) {
       throw new Error(
-        `ACCEPTED_BARE_FILLS pins ${key} at ${marks} unlabeled mark(s) (${reason}) but found ${actual}. `
-        + 'An exemption covers the marks it was granted for, not whatever appears under the same key later '
-        + '-- re-count it here once the change is intended.',
+        `ACCEPTED_BARE_FILLS pins ${key} (${reason}) to:\n`
+        + pinned.map((signature) => `    ${signature}`).join('\n')
+        + '\n  but src/ now carries:\n'
+        + (actual.length > 0 ? actual.map((signature) => `    ${signature}`).join('\n') : '    (nothing)')
+        + '\n  An exemption covers the construct it was granted for, not whatever later appears under the '
+        + 'same file and accent -- re-pin it here once the change is intended.',
       );
     }
   }
