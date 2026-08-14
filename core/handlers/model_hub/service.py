@@ -32,6 +32,7 @@ from config.v2_config import (
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
 )
+from core.agent_auth_service import BackendLoginInProgressError
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
@@ -675,6 +676,12 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=404) from None
         except (EngineUnavailableError, NativeOAuthUnavailableError):
             raise ModelHubError("engine_down", status=503) from None
+        except BackendLoginInProgressError as error:
+            raise ModelHubError(
+                error.code,
+                status=409,
+                detail="modelHub.errors.native_login_in_progress",
+            ) from None
         except ModelHubError:
             raise
         except Exception:

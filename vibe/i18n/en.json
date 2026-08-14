@@ -614,6 +614,7 @@
       "opencodeCodeRetryPrompt": "OpenCode is still waiting for the `{provider}` API key. The previous value may not have been accepted. Reply with the key directly in this chat.",
       "timedOut": "{backend} setup timed out. Start setup again to retry.",
       "success": "{backend} login is active again.",
+      "loginInProgress": "A {vendor} login for {backend} is already in progress. Finish or cancel it before starting another.",
       "failed": "{backend} setup failed: {detail}",
       "unknownFailure": "Unknown login failure."
     },
@@ -798,6 +799,7 @@
       "authentication_failed": "Authentication failed. Check whether the API key is valid.",
       "observation_failed": "Connected, but the response did not prove a valid model interface.",
       "adapter_error": "We could not confirm whether the service is reachable. Retry the connection.",
+      "native_login_in_progress": "Another native login is already in progress. Finish or cancel it, then retry.",
       "native_subscription_exists": "This vendor already has a native subscription source.",
       "source_timeout": "The connection timed out. Check the network and retry.",
       "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",

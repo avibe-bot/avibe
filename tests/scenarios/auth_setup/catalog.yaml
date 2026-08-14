@@ -246,6 +246,14 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_lost_model_hub_oauth_start_response_reuses_nonce_flow
+  - id: AUTH-SETUP-211
+    name: Same-service-instance native login conflict returns a localized recovery path
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    scope: same_service_instance
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_same_service_instance_native_login_conflict_is_localized
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered

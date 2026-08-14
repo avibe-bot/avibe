@@ -1320,6 +1320,26 @@ def test_start_oauth_web_blocks_recovery_before_service_mutation(monkeypatch):
     assert service_calls == []
 
 
+def test_start_oauth_web_localizes_native_login_conflict(monkeypatch):
+    from core.agent_auth_service import BackendLoginInProgressError
+
+    service = SimpleNamespace(
+        start_web_setup=AsyncMock(
+            side_effect=BackendLoginInProgressError("openai", "codex")
+        )
+    )
+    monkeypatch.setattr(api, "load_config", lambda: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service)
+
+    result = asyncio.run(api.start_oauth_web_async("codex"))
+
+    assert result == {
+        "ok": False,
+        "error": "native_login_in_progress",
+        "detail": "openai（codex）登录正在进行中，请先完成或取消后再重新发起。",
+    }
+
+
 def test_submit_oauth_web_code_rechecks_recovery_before_service_mutation(monkeypatch):
     fake_config = SimpleNamespace(load_warnings=("recovery required",), language="zh")
     service_calls = []

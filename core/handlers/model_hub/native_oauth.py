@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 
 from .adapter import OAuthFlowState, RetainedMaterialDisposition
@@ -19,7 +19,6 @@ _INSTRUCTIONS_KEYS = {
 }
 _TIMEOUT_ERROR_KEY = "settings.models.oauth.error.timeout"
 _GENERIC_ERROR_KEY = "settings.models.oauth.error.generic"
-_MAX_FLOWS = 100
 
 
 class AgentAuthService(Protocol):
@@ -30,6 +29,7 @@ class AgentAuthService(Protocol):
         backend: str,
         *,
         force_reset: bool = True,
+        owner_ref: str | None = None,
         on_irreversible_start: Callable[
             [], Callable[[], None] | None
         ] | None = None,
@@ -41,14 +41,13 @@ class AgentAuthService(Protocol):
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]: ...
 
-
-@dataclass
-class _FlowBinding:
-    source_id: str
-    vendor: str
-    backend: str
-    expires_at_iso: str
-    source_status: NativeOAuthSourceStatus | None = None
+    def set_flow_source_status(
+        self,
+        flow_id: str,
+        *,
+        signed_in: bool,
+        account_label: str | None,
+    ) -> None: ...
 
 
 def _utc_now() -> datetime:
@@ -126,7 +125,6 @@ class AgentAuthNativeOAuthAdapter:
         self._agent_auth_service = agent_auth_service
         self._auth_status_reader = auth_status_reader
         self._now = now
-        self._flows: dict[str, _FlowBinding] = {}
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
         return await self._start_oauth(
@@ -168,41 +166,31 @@ class AgentAuthNativeOAuthAdapter:
         flow = await self._agent_auth_service.start_web_setup(
             backend,
             force_reset=force_reset,
+            owner_ref=source_id,
             on_irreversible_start=on_irreversible_start,
         )
         flow_id = getattr(flow, "flow_id", None)
         if not isinstance(flow_id, str) or not flow_id:
             raise NativeOAuthUnavailableError
-        expires_at = self._now() + timedelta(seconds=self._agent_auth_service.setup_timeout_seconds)
-        self._remember(
-            flow_id,
-            _FlowBinding(
-                source_id=source_id,
-                vendor=vendor,
-                backend=backend,
-                expires_at_iso=expires_at.isoformat(),
-            ),
-        )
         return await self._state_from_payload(flow_id, self._flow_payload(flow))
 
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
-        binding = self._binding(flow_id)
         payload = self._agent_auth_service.get_web_flow_status(flow_id)
         if payload.get("ok") is not True:
             if payload.get("error") == "flow_not_found":
-                self._flows.pop(flow_id, None)
                 raise KeyError(flow_id)
             raise NativeOAuthUnavailableError
-        return await self._state_from_payload(flow_id, payload, binding=binding)
+        return await self._state_from_payload(flow_id, payload)
 
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState:
-        binding = self._binding(flow_id)
-        if binding.vendor != "anthropic":
+        current = self._agent_auth_service.get_web_flow_status(flow_id)
+        if current.get("ok") is not True:
+            raise KeyError(flow_id)
+        if current.get("vendor") != "anthropic":
             raise NativeOAuthUnavailableError
         result = await self._agent_auth_service.submit_web_code(flow_id, value)
         if result.get("ok") is not True:
             if result.get("error") == "flow_not_found":
-                self._flows.pop(flow_id, None)
                 raise KeyError(flow_id)
             # AgentAuthService leaves malformed/failed Claude submissions
             # retryable. Return its current declaration so the dialog stays on
@@ -211,32 +199,27 @@ class AgentAuthNativeOAuthAdapter:
         return await self.oauth_status(flow_id)
 
     async def cancel_oauth(self, flow_id: str) -> None:
-        self._binding(flow_id)
         result = await self._agent_auth_service.cancel_web_flow(flow_id)
         if result.get("ok") is not True:
             if result.get("error") == "flow_not_found":
-                self._flows.pop(flow_id, None)
                 raise KeyError(flow_id)
             raise NativeOAuthUnavailableError
-        self._flows.pop(flow_id, None)
 
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus:
-        status = self._binding(flow_id).source_status
-        if status is None:
+        payload = self._agent_auth_service.get_web_flow_status(flow_id)
+        if payload.get("ok") is not True or payload.get("state") != "success":
             raise KeyError(flow_id)
-        return status
-
-    def _binding(self, flow_id: str) -> _FlowBinding:
-        try:
-            return self._flows[flow_id]
-        except KeyError:
-            raise KeyError(flow_id) from None
-
-    def _remember(self, flow_id: str, binding: _FlowBinding) -> None:
-        self._flows.pop(flow_id, None)
-        self._flows[flow_id] = binding
-        while len(self._flows) > _MAX_FLOWS:
-            self._flows.pop(next(iter(self._flows)))
+        status = payload.get("source_status")
+        if not isinstance(status, Mapping):
+            raise KeyError(flow_id)
+        signed_in = status.get("signed_in")
+        if not isinstance(signed_in, bool):
+            signed_in = True
+        account_label = status.get("account_label")
+        return NativeOAuthSourceStatus(
+            signed_in=signed_in,
+            account_label=account_label if isinstance(account_label, str) else None,
+        )
 
     @staticmethod
     def _flow_payload(flow: Any) -> dict[str, Any]:
@@ -247,16 +230,24 @@ class AgentAuthNativeOAuthAdapter:
             "url": getattr(flow, "url", None),
             "device_code": getattr(flow, "device_code", None),
             "error": getattr(flow, "error", None),
+            "source_id": getattr(flow, "source_id", None),
+            "vendor": getattr(flow, "vendor", None),
+            "expires_at_iso": getattr(flow, "expires_at_iso", None),
+            "source_status": {
+                "signed_in": getattr(flow, "source_signed_in", None),
+                "account_label": getattr(flow, "source_account_label", None),
+            },
         }
 
     async def _state_from_payload(
         self,
         flow_id: str,
         payload: Mapping[str, Any],
-        *,
-        binding: _FlowBinding | None = None,
     ) -> OAuthFlowState:
-        binding = binding or self._binding(flow_id)
+        source_id = payload.get("source_id")
+        vendor = payload.get("vendor")
+        if not isinstance(source_id, str) or not isinstance(vendor, str):
+            raise KeyError(flow_id)
         state = {
             "awaiting_code": "awaiting_action",
             "starting": "starting",
@@ -265,9 +256,20 @@ class AgentAuthNativeOAuthAdapter:
             "failed": "failed",
             "cancelled": "cancelled",
         }.get(str(payload.get("state")), "failed")
-        if state == "success" and binding.source_status is None:
-            binding.source_status = await self._read_source_status(binding.backend)
-
+        source_status = payload.get("source_status")
+        if (
+            state == "success"
+            and (
+                not isinstance(source_status, Mapping)
+                or not isinstance(source_status.get("signed_in"), bool)
+            )
+        ):
+            resolved = await self._read_source_status(_VENDOR_BACKENDS[vendor])
+            self._agent_auth_service.set_flow_source_status(
+                flow_id,
+                signed_in=resolved.signed_in,
+                account_label=resolved.account_label,
+            )
         error_key = None
         if state == "failed":
             error_key = _TIMEOUT_ERROR_KEY if payload.get("error") == "timed_out" else _GENERIC_ERROR_KEY
@@ -276,15 +278,19 @@ class AgentAuthNativeOAuthAdapter:
 
         return OAuthFlowState(
             flow_id=flow_id,
-            source_id=binding.source_id,
-            vendor=binding.vendor,
+            source_id=source_id,
+            vendor=vendor,
             state=state,
             auth_url=payload.get("url") if isinstance(payload.get("url"), str) else None,
             device_code=(payload.get("device_code") if isinstance(payload.get("device_code"), str) else None),
-            expects="paste_code" if binding.vendor == "anthropic" else "none",
-            instructions_key=_INSTRUCTIONS_KEYS[binding.vendor],
+            expects="paste_code" if vendor == "anthropic" else "none",
+            instructions_key=_INSTRUCTIONS_KEYS[vendor],
             error_key=error_key,
-            expires_at_iso=binding.expires_at_iso,
+            expires_at_iso=(
+                payload.get("expires_at_iso")
+                if isinstance(payload.get("expires_at_iso"), str)
+                else self._now().isoformat()
+            ),
             credential_ref=None,
             channel="native_cli",
             retained_material_disposition=RetainedMaterialDisposition.NONE,
@@ -297,9 +303,6 @@ class AgentAuthNativeOAuthAdapter:
             if not isinstance(status, Mapping):
                 raise TypeError("invalid auth status")
         except Exception:  # noqa: BLE001
-            # AgentAuthService reached success only after its own CLI status
-            # probe. Preserve that verified signal when the display-status read
-            # is temporarily unavailable; account identity can remain absent.
             return NativeOAuthSourceStatus(signed_in=True, account_label=None)
         return NativeOAuthSourceStatus(
             signed_in=_signed_in(backend, status),
