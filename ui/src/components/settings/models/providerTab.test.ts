@@ -7,12 +7,33 @@ import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { handOffProviderTab, preopenProviderTab, takeHandedProviderTab } from './providerTab';
+import {
+  commitProviderTabRetry,
+  disposeProviderTab,
+  handOffProviderTab,
+  preopenProviderTab,
+  takeHandedProviderTab,
+  takeProviderTabForNavigation,
+} from './providerTab';
 
-type FakeTab = { closed: boolean; opener: unknown };
+type FakeTab = {
+  closed: boolean;
+  opener: unknown;
+  location: { href: string };
+  close: ReturnType<typeof vi.fn>;
+};
 
 function fakeTab(closed = false): FakeTab {
-  return { closed, opener: {} };
+  const tab = {
+    closed,
+    opener: {},
+    location: { href: '' },
+    close: vi.fn(),
+  };
+  tab.close.mockImplementation(() => {
+    tab.closed = true;
+  });
+  return tab;
 }
 
 /** Install a `window.open` and report what it was asked for. */
@@ -33,6 +54,38 @@ function sourceFiles(directory: URL): URL[] {
     if (entry.isDirectory()) return sourceFiles(child);
     return /\.(ts|tsx)$/.test(entry.name) && !/\.test\.(ts|tsx)$/.test(entry.name) ? [child] : [];
   });
+}
+
+function providerTabConsumerFiles(directory: URL): URL[] {
+  return sourceFiles(directory).filter((url) => {
+    const path = fileURLToPath(url);
+    return path.endsWith('/providerTab.ts') || readFileSync(url, 'utf8').includes("from './providerTab'");
+  });
+}
+
+function directCloseSites(url: URL): string[] {
+  const path = fileURLToPath(url);
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(url, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const found: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'close'
+    ) {
+      const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+      found.push(path.slice(path.lastIndexOf('/') + 1) + ':' + line);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return found;
 }
 
 /** Names a call by its identifier, so `foo()` and `obj.foo()` read the same. */
@@ -78,7 +131,7 @@ function journeyStartHandlers(url: URL): { site: string; allocates: boolean }[] 
     path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
   const starts = ['retryStart', 'onReauth', 'setPhase:flow'];
-  const allocators = ['preopenProviderWindow', 'preopenProviderTab', 'handOffProviderTab'];
+  const allocators = ['preopenProviderTab', 'handOffProviderTab'];
   const found: { site: string; allocates: boolean }[] = [];
   const visit = (node: ts.Node) => {
     if (
@@ -106,7 +159,10 @@ function journeyStartHandlers(url: URL): { site: string; allocates: boolean }[] 
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  takeHandedProviderTab();
+  // A committed retry intentionally survives one disposal, so two calls make
+  // cleanup independent of the state a failed assertion stopped at.
+  disposeProviderTab('cleanup');
+  disposeProviderTab('cleanup');
 });
 
 describe('provider tab', () => {
@@ -153,6 +209,52 @@ describe('provider tab', () => {
     expect(takeHandedProviderTab()).toBeNull();
   });
 
+  it('retains a committed Retry tab across cleanup for the replacement journey', () => {
+    const tab = fakeTab();
+    stubWindowOpen(() => tab as unknown as Window);
+
+    expect(preopenProviderTab('retry')).toBe(tab);
+    commitProviderTabRetry();
+    disposeProviderTab('cleanup');
+
+    expect(tab.close).not.toHaveBeenCalled();
+    expect(takeHandedProviderTab()).toBe(tab);
+  });
+
+  it('does not turn an initial tab into a Retry handoff', () => {
+    const tab = fakeTab();
+    stubWindowOpen(() => tab as unknown as Window);
+
+    preopenProviderTab();
+    commitProviderTabRetry();
+    disposeProviderTab('cleanup');
+
+    expect(tab.close).toHaveBeenCalledOnce();
+    expect(takeHandedProviderTab()).toBeNull();
+  });
+
+  it('disposes a Retry tab when no replacement journey was committed', () => {
+    const tab = fakeTab();
+    stubWindowOpen(() => tab as unknown as Window);
+
+    preopenProviderTab('retry');
+    disposeProviderTab('inconclusive');
+
+    expect(tab.close).toHaveBeenCalledOnce();
+    expect(takeHandedProviderTab()).toBeNull();
+  });
+
+  it('ends ownership when the provider tab is taken for navigation', () => {
+    const tab = fakeTab();
+    stubWindowOpen(() => tab as unknown as Window);
+
+    preopenProviderTab();
+    expect(takeProviderTabForNavigation()).toBe(tab);
+    disposeProviderTab('success');
+
+    expect(tab.close).not.toHaveBeenCalled();
+  });
+
   // The invariant behind both re-auth findings on b594ef986: a journey's provider
   // tab must be allocated by the gesture that starts it. The create journey's
   // gesture is inside the dialog, the re-auth journey's is the confirm outside it,
@@ -163,5 +265,13 @@ describe('provider tab', () => {
     // The pattern must exist somewhere, or this asserts nothing at all.
     expect(handlers.length).toBeGreaterThan(0);
     expect(handlers.filter(({ allocates }) => !allocates)).toEqual([]);
+  });
+
+  it('keeps every direct provider-tab close inside the lifetime owner', () => {
+    const closes = providerTabConsumerFiles(new URL('./', import.meta.url)).flatMap(directCloseSites);
+
+    // The owner must actually close a tab, or this invariant would prove nothing.
+    expect(closes.length).toBeGreaterThan(0);
+    expect(closes.filter((site) => !site.startsWith('providerTab.ts:'))).toEqual([]);
   });
 });

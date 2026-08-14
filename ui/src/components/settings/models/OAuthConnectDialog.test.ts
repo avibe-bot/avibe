@@ -8,7 +8,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
-import { ApiCallError, modelsApi } from './modelsApi';
+import { ApiCallError, modelsApi, type OAuthResult } from './modelsApi';
+import { disposeProviderTab } from './providerTab';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
@@ -19,6 +20,8 @@ import type { Source } from './types';
 
 afterEach(() => {
   cleanup();
+  disposeProviderTab('cleanup');
+  disposeProviderTab('cleanup');
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -57,6 +60,29 @@ const dialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> 
 
 const renderDialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> = {}) =>
   render(dialog(props));
+
+const providerTab = () => {
+  const tab = {
+    closed: false,
+    close: vi.fn(),
+    opener: {} as unknown,
+    location: { href: '' },
+  };
+  tab.close.mockImplementation(() => {
+    tab.closed = true;
+  });
+  return tab;
+};
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
 
 describe('add-subscription channel choice', () => {
   it('flips the recommendation and visible order by vendor', () => {
@@ -111,6 +137,73 @@ describe('add-subscription start recovery', () => {
     expect(start.mock.calls[1]).toEqual(start.mock.calls[0]);
     expect(start.mock.calls[0][2]).toMatch(/^ofn_[a-z0-9]{16,64}$/);
   });
+
+  it('keeps the Retry tab across effect cleanup and navigates the replacement flow', async () => {
+    const authUrl = 'https://provider.example/retry';
+    const tab = providerTab();
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    const reauth = vi
+      .spyOn(modelsApi, 'reauthSource')
+      .mockRejectedValueOnce(new ApiCallError('engine_down'))
+      .mockResolvedValueOnce({
+        flow_id: 'oaf_retry',
+        intent: 'reauth',
+        vendor: 'anthropic',
+        channel: 'native_cli',
+        state: 'awaiting_action',
+        presentation: { expects: 'paste_code', auth_url: authUrl },
+        expires_at: '2099-01-01T00:00:00Z',
+      });
+    renderDialog({ reauth: subscription() });
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
+
+    await waitFor(() => expect(reauth).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(tab.location.href).toBe(authUrl));
+    expect(tab.close).not.toHaveBeenCalled();
+  });
+
+  it('disposes the blank tab when acquisition is refused', async () => {
+    const tab = providerTab();
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    vi.spyOn(modelsApi, 'startOAuth').mockRejectedValue(new ApiCallError('engine_down'));
+    renderDialog();
+
+    await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
+    await screen.findByRole('button', { name: /^Retry$|^重试$/i });
+
+    expect(tab.close).toHaveBeenCalledOnce();
+    expect(tab.location.href).toBe('');
+  });
+
+  it('disposes without navigating an already-terminal nonce replay', async () => {
+    const authUrl = 'https://provider.example/stale';
+    const tab = providerTab();
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    const terminal = {
+      flow_id: 'oaf_terminal',
+      client_nonce: 'ofn_terminal',
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'failed' as const,
+      presentation: { expects: 'paste_code' as const, auth_url: authUrl },
+      error_key: 'settings.models.oauth.error.generic',
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    vi.spyOn(modelsApi, 'startOAuth').mockResolvedValue(terminal);
+    const status = vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({
+      flow: terminal,
+      created: null,
+      repaired: null,
+    });
+    renderDialog();
+
+    await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
+    await waitFor(() => expect(status).toHaveBeenCalledWith(terminal.flow_id));
+
+    expect(tab.close).toHaveBeenCalledOnce();
+    expect(tab.location.href).toBe('');
+  });
 });
 
 describe('OAuth failure class behavior', () => {
@@ -148,6 +241,70 @@ describe('OAuth failure class behavior', () => {
     expect(status).toHaveBeenCalledWith('oaf_timeout');
     expect(reauth).toHaveBeenCalledTimes(1);
     expect(providerTab.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      label: 'failure',
+      finish: (pending: ReturnType<typeof deferred<OAuthResult>>, _flow: OAuthResult['flow']) =>
+        pending.reject(new ApiCallError('engine_down')),
+    },
+    {
+      label: 'terminal response',
+      finish: (pending: ReturnType<typeof deferred<OAuthResult>>, flow: OAuthResult['flow']) =>
+        pending.resolve({ flow: { ...flow, state: 'failed' }, created: null, repaired: null }),
+    },
+  ])('keeps Retry\'s tab when the timed-out flow ignores a late submit $label', async ({ finish }) => {
+    vi.useFakeTimers();
+    const tab = providerTab();
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    const expiredFlow: OAuthResult['flow'] = {
+      flow_id: 'oaf_late_submit',
+      intent: 'reauth',
+      vendor: 'anthropic',
+      channel: 'native_cli',
+      state: 'awaiting_action',
+      presentation: { expects: 'paste_code' },
+      expires_at: new Date(Date.now() - 61_000).toISOString(),
+    };
+    const replacementUrl = 'https://provider.example/late-submit-retry';
+    const replacementFlow: OAuthResult['flow'] = {
+      ...expiredFlow,
+      flow_id: 'oaf_late_submit_replacement',
+      presentation: { expects: 'paste_code', auth_url: replacementUrl },
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    const reauth = vi.spyOn(modelsApi, 'reauthSource')
+      .mockResolvedValueOnce(expiredFlow)
+      .mockResolvedValueOnce(replacementFlow);
+    const submit = deferred<OAuthResult>();
+    vi.spyOn(modelsApi, 'submitOAuth').mockReturnValue(submit.promise);
+    const reread = deferred<OAuthResult>();
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockReturnValue(reread.promise);
+    vi.spyOn(modelsApi, 'cancelOAuth').mockResolvedValue(undefined);
+    renderDialog({ reauth: subscription() });
+
+    await act(async () => Promise.resolve());
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'auth-code' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Submit$|^提交$/i }));
+    expect(modelsApi.submitOAuth).toHaveBeenCalledWith(expiredFlow.flow_id, 'auth-code');
+    await act(async () => vi.advanceTimersByTime(2_000));
+
+    fireEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+    expect(modelsApi.getOAuthStatus).toHaveBeenCalledWith(expiredFlow.flow_id);
+    await act(async () => {
+      finish(submit, expiredFlow);
+      await Promise.resolve();
+    });
+    expect(tab.close).not.toHaveBeenCalled();
+
+    await act(async () => {
+      reread.resolve({ flow: expiredFlow, created: null, repaired: null });
+      await Promise.resolve();
+    });
+    expect(reauth).toHaveBeenCalledTimes(2);
+    expect(tab.location.href).toBe(replacementUrl);
+    expect(tab.close).not.toHaveBeenCalled();
   });
 
   it('ignores a held-flow reread rejection after its journey is retired', async () => {
