@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from core.memory.everos import (
+    _AGENTIC_TIMEOUT_HEADER,
     AddAck,
     AddRejected,
     EverOSPort,
@@ -655,9 +656,13 @@ def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     requests: list[dict] = []
+    sidecar_timeouts: list[float] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
+        sidecar_timeouts.append(
+            float(request.headers[_AGENTIC_TIMEOUT_HEADER])
+        )
         return httpx.Response(200, json={"data": {"episodes": []}})
 
     async def run():
@@ -688,6 +693,7 @@ def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
             "enable_llm_rerank": False,
         }
     ]
+    assert sidecar_timeouts == [pytest.approx(4.95)]
     telemetry = [
         record.getMessage()
         for record in caplog.records
@@ -696,6 +702,40 @@ def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
     assert len(telemetry) == 1
     assert "mode=agentic" in telemetry[0]
     assert "success=true" in telemetry[0]
+    assert "timeout=false" in telemetry[0]
+    assert "private multi-hop query" not in telemetry[0]
+
+
+def test_agentic_search_logs_mapping_failure_as_unsuccessful(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"episodes": "invalid"}})
+
+    async def run() -> MemoryProviderFailure:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).search(
+                PRINCIPAL,
+                PROJECT,
+                "private multi-hop query",
+                2,
+                method="agentic",
+                timeout_seconds=5,
+            )
+        return raised.value
+
+    caplog.set_level("INFO", logger="core.memory.everos")
+    with _sidecar_transport(handler):
+        failure = asyncio.run(run())
+
+    assert failure.error == "memory_provider_response_invalid"
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "success=false" in telemetry[0]
     assert "timeout=false" in telemetry[0]
     assert "private multi-hop query" not in telemetry[0]
 
@@ -763,6 +803,32 @@ def test_agentic_search_maps_provider_422_to_closed_capability_error() -> None:
 
     assert failure.error == "memory_capability_unavailable"
     assert "422" not in str(failure)
+
+
+def test_agentic_search_maps_sidecar_deadline_to_typed_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert float(request.headers[_AGENTIC_TIMEOUT_HEADER]) <= 5
+        return httpx.Response(
+            504,
+            json={"detail": "memory_request_timed_out"},
+        )
+
+    async def run() -> MemoryProviderFailure:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).search(
+                PRINCIPAL,
+                PROJECT,
+                "connect the clues",
+                2,
+                method="agentic",
+                timeout_seconds=5,
+            )
+        return raised.value
+
+    with _sidecar_transport(handler):
+        failure = asyncio.run(run())
+
+    assert failure.error == "memory_provider_timeout"
 
 
 def test_profile_uses_get_and_reports_empty_profile_as_non_failure() -> None:

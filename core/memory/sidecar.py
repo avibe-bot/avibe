@@ -7,13 +7,14 @@ import asyncio
 import importlib
 import json
 import logging
+import math
 import os
 import re
 import stat
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 from core.memory.artifact import EVEROS_VERSION
@@ -24,10 +25,12 @@ from core.memory.project_ids import (
 from core.memory.everos_insight import install_error_scrubbers, prepare_call_recorder
 from core.memory.everos_insight.patches import boundary_request
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
+from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 
 
 _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
+_AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
 _PRINCIPAL_PATTERN = re.compile(r"u-[0-9a-f]{32}\Z")
 _SESSION_PATTERN = re.compile(r"src--[0-9a-f]{64}--e(?:0|[1-9][0-9]*)\Z")
 logger = logging.getLogger(__name__)
@@ -83,12 +86,30 @@ def serve(uds: Path) -> None:
         )
         if rejection is not None:
             return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
+        agentic_timeout = _agentic_request_timeout(
+            request.url.path,
+            body,
+            request.headers,
+        )
+        if agentic_timeout is False:
+            return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
         if recorder is not None and request.url.path in {
             "/api/v2/memory/add",
             "/api/v2/memory/flush",
         }:
             with boundary_request():
                 return await call_next(request)
+        if isinstance(agentic_timeout, float):
+            try:
+                return await asyncio.wait_for(
+                    call_next(request),
+                    timeout=agentic_timeout,
+                )
+            except asyncio.TimeoutError:
+                return JSONResponse(
+                    {"detail": "memory_request_timed_out"},
+                    status_code=504,
+                )
         return await call_next(request)
 
     config = uvicorn.Config(
@@ -202,6 +223,32 @@ def _request_rejection(
     if path == "/api/v2/memory/search":
         return _validate_search(payload)
     return _validate_get(payload)
+
+
+def _agentic_request_timeout(
+    path: str,
+    body: bytes,
+    headers: Any,
+) -> float | Literal[False] | None:
+    if path != "/api/v2/memory/search":
+        return None
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("method") != "agentic":
+        return None
+    try:
+        timeout = float(headers.get(_AGENTIC_TIMEOUT_HEADER))
+    except (TypeError, ValueError):
+        return False
+    if (
+        not math.isfinite(timeout)
+        or timeout <= 0
+        or timeout > MAX_AGENTIC_TIMEOUT_SECONDS
+    ):
+        return False
+    return timeout
 
 
 def _valid_write_scope(payload: dict[str, Any]) -> bool:

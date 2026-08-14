@@ -209,7 +209,11 @@ keyword. Explicit vector or hybrid requests fail closed when that capability is
 missing. A request performs at most one provider search and never retries in a
 different mode.
 
-EverOS 1.2.3 does not enforce model-call and token ceilings, so agentic recall is
-currently reported as unavailable even when its required budgets are supplied.
+Agentic recall is available only through the CLI when health explicitly reports
+embedding, LLM, and rerank capabilities and does not disable `agentic_search`.
+It uses one request with a sidecar-owned wall-clock deadline of at most 30
+seconds; unavailable capabilities fail closed. EverOS 1.2.3 does not enforce
+model-call and token ceilings, so those policy fields remain a declarative
+envelope rather than an independently enforced provider budget.
 Current-session overlay can only use the trusted caller session supplied by the
 runtime; callers cannot provide arbitrary provider filters or session IDs.

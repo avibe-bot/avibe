@@ -189,9 +189,16 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
     ]
 
     class _Request:
-        def __init__(self, path: str, payload: dict[str, object]) -> None:
+        def __init__(
+            self,
+            path: str,
+            payload: dict[str, object],
+            *,
+            headers: dict[str, str] | None = None,
+        ) -> None:
             self.method = "POST"
             self.url = SimpleNamespace(path=path)
+            self.headers = headers or {}
             self._body = json.dumps(payload).encode()
 
         async def body(self) -> bytes:
@@ -218,8 +225,17 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
     }
 
     async def exercise_guard() -> None:
+        downstream_cancelled = asyncio.Event()
+
         async def call_next(request):
             return request.url.path
+
+        async def slow_agentic_call(_request):
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                downstream_cancelled.set()
+                raise
 
         assert (
             await app.guard(
@@ -231,6 +247,16 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
             await app.guard(_Request("/api/v2/memory/get", get_payload), call_next)
             == "/api/v2/memory/get"
         )
+        timed_out = await app.guard(
+            _Request(
+                "/api/v2/memory/search",
+                {**search_payload, "method": "agentic"},
+                headers={sidecar._AGENTIC_TIMEOUT_HEADER: "0.001"},
+            ),
+            slow_agentic_call,
+        )
+        assert timed_out.status_code == 504
+        assert downstream_cancelled.is_set()
 
     asyncio.run(exercise_guard())
     assert "boundary-enter" not in events
@@ -369,14 +395,24 @@ def test_sidecar_guard_accepts_agentic_but_rejects_untrusted_search_scope() -> N
         "enable_llm_rerank": False,
     }
 
+    agentic_body = json.dumps({**search, "method": "agentic"}).encode()
+    assert _request_rejection("POST", "/api/v2/memory/search", agentic_body) is None
     assert (
-        _request_rejection(
-            "POST",
+        sidecar._agentic_request_timeout(
             "/api/v2/memory/search",
-            json.dumps({**search, "method": "agentic"}).encode(),
+            agentic_body,
+            {sidecar._AGENTIC_TIMEOUT_HEADER: "30"},
         )
-        is None
+        == 30.0
     )
+    assert sidecar._agentic_request_timeout(
+        "/api/v2/memory/search", agentic_body, {}
+    ) is False
+    assert sidecar._agentic_request_timeout(
+        "/api/v2/memory/search",
+        agentic_body,
+        {sidecar._AGENTIC_TIMEOUT_HEADER: "30.1"},
+    ) is False
 
     for invalid in (
         {**search, "filters": {"session_id": "raw-session"}},

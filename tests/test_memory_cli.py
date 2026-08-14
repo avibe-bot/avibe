@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
+from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS, RecallPolicy
 from core.system_prompt_injection import _MEMORY_CLI_PROMPT
 from vibe import cli, internal_client
 
@@ -102,8 +103,6 @@ def test_memory_search_json_is_a_presentation_of_the_uds_response(monkeypatch, c
 
 
 def test_injected_agentic_memory_example_is_accepted_by_the_live_parser() -> None:
-    """Scenario: MEMORY-SEARCH-007."""
-
     example = 'vibe memory search "<query>" --mode agentic --json'
     assert f"`{example}`" in _MEMORY_CLI_PROMPT
 
@@ -113,6 +112,45 @@ def test_injected_agentic_memory_example_is_accepted_by_the_live_parser() -> Non
     assert args.query == "<query>"
     assert args.mode == "agentic"
     assert args.limit == 8
+
+
+def test_agentic_cli_builds_bounded_internal_recall_policy(
+    monkeypatch,
+    capsys,
+) -> None:
+    """Scenario: MEMORY-SEARCH-007."""
+
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def request_sync(method, path, *, payload, **_kwargs):
+        calls.append((method, path, payload))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "items": [], "warnings": []},
+        }
+
+    monkeypatch.setattr(internal_client, "_memory_request_sync", request_sync)
+    args = cli.build_parser().parse_args(
+        ["memory", "search", "connect the clues", "--mode", "agentic", "--json"]
+    )
+
+    assert cli.cmd_memory(args) == 0
+    assert len(calls) == 1
+    method, path, payload = calls[0]
+    assert method == "POST"
+    assert path == "/internal/memory/search"
+    assert payload["query"] == "connect the clues"
+    policy = RecallPolicy.from_payload(payload["policy"])
+    assert policy == RecallPolicy(
+        mode="agentic",
+        max_results=8,
+        include_profile=True,
+        include_current_session=False,
+        timeout_seconds=MAX_AGENTIC_TIMEOUT_SECONDS,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
 def test_memory_status_json_returns_a_closed_service_down_code(monkeypatch, capsys) -> None:

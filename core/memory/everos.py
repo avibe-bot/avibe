@@ -49,6 +49,8 @@ _MAX_ITEM_BYTES = 64 * 1024
 _MAX_RESPONSE_DEPTH = 8
 _MAX_RESPONSE_COLLECTION = 200
 _SIDECAR_TIMEOUT_SECONDS = 20.0
+_AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
+_SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS = 0.05
 _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
@@ -405,17 +407,33 @@ class EverOSPort:
         session_ref: ProviderSessionRef | None = None,
         timeout_seconds: float | None = None,
     ) -> tuple[MemoryItem, ...]:
-        data = await self._search_data(
-            principal_id,
-            project_id,
-            query,
-            limit,
-            method=method,
-            include_profile=include_profile,
-            session_ref=session_ref,
-            timeout_seconds=timeout_seconds,
-        )
-        return _map_search_items(data, principal_id=principal_id, limit=limit)
+        agentic_started = time.monotonic() if method == "agentic" else None
+        try:
+            data = await self._search_data(
+                principal_id,
+                project_id,
+                query,
+                limit,
+                method=method,
+                include_profile=include_profile,
+                session_ref=session_ref,
+                timeout_seconds=timeout_seconds,
+            )
+            items = _map_search_items(data, principal_id=principal_id, limit=limit)
+        except MemoryProviderFailure as failure:
+            if agentic_started is not None:
+                logger.info(
+                    "Memory search telemetry mode=agentic duration_ms=%s success=false timeout=%s",
+                    _elapsed_ms(agentic_started),
+                    str(failure.error == "memory_provider_timeout").lower(),
+                )
+            raise
+        if agentic_started is not None:
+            logger.info(
+                "Memory search telemetry mode=agentic duration_ms=%s success=true timeout=false",
+                _elapsed_ms(agentic_started),
+            )
+        return items
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
         del project_id
@@ -613,7 +631,6 @@ class EverOSPort:
         }
         if session_ref is not None:
             request["filters"] = {"session_id": session_ref.session_id}
-        agentic_started = time.monotonic() if method == "agentic" else None
         try:
             if method == "agentic":
                 request_timeout = min(
@@ -648,25 +665,7 @@ class EverOSPort:
             if not isinstance(data, dict) or not _is_bounded_json_value(data):
                 raise MemoryProviderFailure("memory_provider_response_invalid")
         except asyncio.TimeoutError as exc:
-            assert agentic_started is not None
-            logger.info(
-                "Memory search telemetry mode=agentic duration_ms=%s success=false timeout=true",
-                _elapsed_ms(agentic_started),
-            )
             raise MemoryProviderFailure("memory_provider_timeout") from exc
-        except MemoryProviderFailure as failure:
-            if agentic_started is not None:
-                logger.info(
-                    "Memory search telemetry mode=agentic duration_ms=%s success=false timeout=%s",
-                    _elapsed_ms(agentic_started),
-                    str(failure.error == "memory_provider_timeout").lower(),
-                )
-            raise
-        if agentic_started is not None:
-            logger.info(
-                "Memory search telemetry mode=agentic duration_ms=%s success=true timeout=false",
-                _elapsed_ms(agentic_started),
-            )
         return data
 
     async def _sidecar_request(
@@ -684,6 +683,13 @@ class EverOSPort:
             timeout_seconds,
             self._sidecar_timeout_seconds,
         )
+        headers = None
+        if timeout_seconds is not None:
+            sidecar_timeout = max(
+                0.001,
+                request_timeout - _SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS,
+            )
+            headers = {_AGENTIC_TIMEOUT_HEADER: str(sidecar_timeout)}
         transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))
         try:
             async with httpx.AsyncClient(
@@ -695,7 +701,12 @@ class EverOSPort:
                 ),
                 trust_env=False,
             ) as client:
-                async with client.stream(method, route, json=payload) as response:
+                async with client.stream(
+                    method,
+                    route,
+                    json=payload,
+                    headers=headers,
+                ) as response:
                     if not 200 <= response.status_code < 300:
                         logger.warning(
                             "EverOS sidecar request failed route=%s status=%s latency_ms=%s",
@@ -704,9 +715,13 @@ class EverOSPort:
                             _elapsed_ms(started),
                         )
                         raise MemoryProviderFailure(
-                            "memory_capability_unavailable"
-                            if capability_rejection and response.status_code == 422
-                            else "memory_processing_failed"
+                            "memory_provider_timeout"
+                            if timeout_seconds is not None and response.status_code == 504
+                            else (
+                                "memory_capability_unavailable"
+                                if capability_rejection and response.status_code == 422
+                                else "memory_processing_failed"
+                            )
                         )
                     if not require_json:
                         await _read_bounded_response(response)
