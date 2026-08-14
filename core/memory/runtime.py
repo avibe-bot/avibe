@@ -3617,7 +3617,7 @@ def _encode_memory_list_cursor(
 ) -> str:
     encoded_boundaries = {
         project_id: (
-            {"t": boundary[0], "i": boundary[1]}
+            {"t": boundary[0], "i": _encode_memory_list_boundary_id(boundary[1])}
             if boundary is not None
             else None
         )
@@ -3682,19 +3682,44 @@ def _decode_memory_list_cursor(
             not isinstance(value, dict)
             or set(value) != {"t", "i"}
             or not isinstance(value.get("t"), str)
-            or not isinstance(value.get("i"), str)
-            or not value["i"]
-            or len(value["i"].encode("utf-8")) > 128
-            or "\x00" in value["i"]
             or len(value["t"]) > 64
         ):
             raise ValueError("invalid Memory list cursor")
         try:
             _memory_list_instant(value["t"])
+            boundary_id = _decode_memory_list_boundary_id(value.get("i"))
         except ValueError:
             raise ValueError("invalid Memory list cursor") from None
-        boundaries[project_id] = (value["t"], value["i"])
+        boundaries[project_id] = (value["t"], boundary_id)
     return boundaries
+
+
+def _encode_memory_list_boundary_id(value: str) -> str:
+    try:
+        raw = value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("invalid Memory list boundary ID") from None
+    if not raw or len(raw) > 128 or "\x00" in value:
+        raise ValueError("invalid Memory list boundary ID")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _decode_memory_list_boundary_id(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 171:
+        raise ValueError("invalid Memory list boundary ID")
+    try:
+        padding = "=" * (-len(value) % 4)
+        raw = base64.b64decode(
+            value + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        decoded = raw.decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError):
+        raise ValueError("invalid Memory list boundary ID") from None
+    if _encode_memory_list_boundary_id(decoded) != value:
+        raise ValueError("invalid Memory list boundary ID")
+    return decoded
 
 
 def _memory_list_instant(value: str) -> datetime:

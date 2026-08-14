@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
@@ -4416,8 +4417,8 @@ def test_memory_list_cursor_bound_covers_maximum_valid_catalog() -> None:
     )
     timestamp = "2026-08-14T12:00:00." + "1" * 38 + "+00:00"
     boundaries = {
-        project_id: (timestamp, chr(ord("a") + index) * 128)
-        for index, project_id in enumerate(projects)
+        project_id: (timestamp, "\\" * 128)
+        for project_id in projects
     }
     fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
 
@@ -4429,6 +4430,41 @@ def test_memory_list_cursor_bound_covers_maximum_valid_catalog() -> None:
         projects=projects,
         fingerprint=fingerprint,
     ) == boundaries
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_rejects_surrogate_boundary_id() -> None:
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    raw = json.dumps(
+        {
+            "v": memory_runtime._MEMORY_LIST_CURSOR_VERSION,
+            "f": fingerprint,
+            "b": {
+                "default": {
+                    "t": "2026-08-14T12:00:00Z",
+                    "i": "\ud800",
+                }
+            },
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    cursor = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    class _ListModule:
+        async def list_episodes(self, **_kwargs):
+            raise AssertionError("invalid cursor reached the provider")
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: projects
+
+    result = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
+
+    assert result == {"status": "failed", "error": "memory_invalid_input"}
 
 
 @pytest.mark.asyncio
