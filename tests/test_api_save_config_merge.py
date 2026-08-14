@@ -1113,14 +1113,14 @@ def test_editor_config_write_payload_keeps_messaging_fields_only():
         {
             "audio_asr": {"enabled": False, "enabled_configured": True, "echo_transcript": False},
             "ack_mode": "message",
-            "ui": {"chat_message_font_size": 16},
+            "ui": {"chat_message_font_size": 16, "show_agent_activity": True},
         }
     )
 
     assert projected == {
         "audio_asr": {"enabled": False, "enabled_configured": True, "echo_transcript": False},
         "ack_mode": "message",
-        "ui": {"chat_message_font_size": 16},
+        "ui": {"chat_message_font_size": 16, "show_agent_activity": True},
     }
 
 
@@ -1130,6 +1130,8 @@ def test_editor_config_write_payload_keeps_messaging_fields_only():
         {"runtime": {"default_cwd": "/tmp/owned"}},
         {"audio_asr": {"enabled": False, "model": "owned-model"}},
         {"ui": {"setup_host": "0.0.0.0"}},
+        {"ui": {"instance_name": "renamed"}},
+        {"ui": {"default_instance_name": "owned"}},
         {"show_pages_prompt": False},
     ],
 )

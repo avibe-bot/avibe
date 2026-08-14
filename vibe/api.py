@@ -1313,7 +1313,13 @@ _EDITOR_CONFIG_WRITE_FIELDS = frozenset(
     }
 )
 
-_EDITOR_CONFIG_UI_WRITE_FIELDS = frozenset(_NON_OWNER_CONFIG_UI_FIELDS)
+_EDITOR_CONFIG_UI_WRITE_FIELDS = frozenset(
+    {
+        "chat_message_font_size",
+        "show_agent_activity",
+        "show_tool_calls",
+    }
+)
 _EDITOR_AUDIO_ASR_WRITE_FIELDS = frozenset(_NON_OWNER_AUDIO_ASR_FIELDS)
 
 
