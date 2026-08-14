@@ -1206,6 +1206,7 @@ def _profile_text_bytes(value: object) -> bytes | None:
 def _list_text_bytes(value: object, *, allow_empty: bool) -> bytes | None:
     if (
         not isinstance(value, str)
+        or value != value.strip()
         or (not allow_empty and not value)
         or "\x00" in value
     ):
