@@ -42,7 +42,7 @@ const baseConfig = {
   show_pages_prompt: true,
   agent_progress_style: 'off',
   audio_asr: { enabled: true, echo_transcript: true, enabled_configured: true },
-  remote_access: { vibe_cloud: { enabled: true, instance_id: 'inst_123' } },
+  remote_access: { vibe_cloud: { paired: true } },
   ui: { chat_message_font_size: 14, show_agent_activity: false, show_tool_calls: true },
   slack: { disable_link_unfurl: false },
   agents: {
@@ -108,6 +108,12 @@ function asrToggle() {
   const title = screen.getByText('dashboard.audioTranscription');
   const row = title.closest('.flex.flex-col.gap-3') ?? title.parentElement?.parentElement;
   return row?.querySelector('[role="switch"]') as HTMLButtonElement | null;
+}
+
+// Identifies a control by its SettingsRow label so coverage survives re-renders.
+function controlLabel(control: Element): string {
+  const row = control.closest('div.flex.flex-col.gap-3');
+  return row?.querySelector('div.flex.min-w-0')?.textContent ?? '';
 }
 
 function renderPage(context: InstanceAuthorizationValue) {
@@ -214,5 +220,86 @@ describe('SettingsMessagingPage locality gating', () => {
     await user.selectOptions(select, 'message');
 
     expect(api.saveConfig).toHaveBeenCalledWith({ ack_mode: 'message' });
+  });
+
+  it('hides Slack preview controls from Editors when they cannot manage the instance', async () => {
+    api.getConfig.mockResolvedValue({
+      ...baseConfig,
+      platforms: { enabled: ['slack'] },
+      platform_catalog: [{ id: 'slack', capabilities: { supports_reaction_indicator: true, supports_typing_indicator: true } }],
+    });
+    renderPage(remoteEditor);
+
+    await screen.findByText('dashboard.ackMode');
+    expect(screen.queryByText('dashboard.slackLinkPreviews')).toBeNull();
+  });
+
+  it('keeps the Slack preview control for a remote Owner and sends its own field patch', async () => {
+    // A remote Owner also saves field-specifically, so gating this control on
+    // "can use the local system" would have hidden it from a role allowed to
+    // write ``slack.*``. It is gated on instance management and carries a patch.
+    const user = userEvent.setup();
+    renderPage(remoteOwner);
+
+    await screen.findByText('dashboard.slackLinkPreviews');
+    const row = screen.getByText('dashboard.slackLinkPreviews').closest('div.flex.flex-col.gap-3');
+    await user.click(row?.querySelector('[role="switch"]') as HTMLButtonElement);
+
+    expect(api.saveConfig).toHaveBeenCalledWith({ slack: { disable_link_unfurl: true } });
+  });
+
+  it('never posts an empty patch from any control an Editor is offered', async () => {
+    // The property, not today's control list: a field-specific save carries only
+    // the control's own patch, so any control rendered without one posts ``{}``
+    // — a save that reports success and loses the change on reload. Sweeping
+    // whatever is rendered catches the next control added without a patch; an
+    // enumeration of the current controls never would.
+    const user = userEvent.setup();
+    renderPage(remoteEditor);
+    await screen.findByText('dashboard.ackMode');
+
+    const switches = () => screen.queryAllByRole('switch') as HTMLButtonElement[];
+    const selects = () => screen.queryAllByRole('combobox') as HTMLSelectElement[];
+    const exercised = new Set<string>();
+    const unsaved: string[] = [];
+    // Checked per interaction against the call the interaction itself produced:
+    // a control without a field patch either posts ``{}`` or trips the guard in
+    // ``persist`` and posts nothing, and both look identical at the end of a
+    // sweep once a later control's successful save has cleared the state.
+    const recordInteraction = async (label: string, act: () => Promise<void>) => {
+      const before = api.saveConfig.mock.calls.length;
+      exercised.add(label);
+      await act();
+      const patch = api.saveConfig.mock.calls[before]?.[0] as Record<string, unknown> | undefined;
+      if (!patch || Object.keys(patch).length === 0) unsaved.push(label);
+    };
+
+    // Two rounds, re-querying every step: toggling a parent reveals a child
+    // control (show_tool_calls) and toggling ASR off disables its echo child, so
+    // one pass can neither see nor reach the whole surface.
+    for (let round = 0; round < 2; round += 1) {
+      for (let index = 0; index < switches().length; index += 1) {
+        const control = switches()[index];
+        if (control.disabled) continue;
+        await recordInteraction(controlLabel(control), () => user.click(control));
+      }
+      for (let index = 0; index < selects().length; index += 1) {
+        const select = selects()[index];
+        const option = Array.from(select.options).find(
+          (each) => !each.disabled && each.value !== select.value,
+        );
+        if (!option) continue;
+        await recordInteraction(controlLabel(select), () =>
+          user.selectOptions(select, option.value),
+        );
+      }
+    }
+
+    const offered = [...switches(), ...selects()].filter(
+      (control) => !(control as HTMLButtonElement).disabled,
+    );
+    expect(offered.length).toBeGreaterThan(0);
+    expect(offered.map(controlLabel).filter((label) => !exercised.has(label))).toEqual([]);
+    expect(unsaved).toEqual([]);
   });
 });

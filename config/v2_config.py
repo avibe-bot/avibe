@@ -2477,6 +2477,31 @@ class VibeCloudRemoteAccessConfig:
     edge_bind_address: str = ""
     dev_login_hint: str = ""
 
+    def runtime_credentials(self) -> tuple[str, str, str] | None:
+        """Return ``(backend_url, instance_id, instance_secret)``, or ``None``.
+
+        The single definition of "this pairing can actually reach Avibe
+        Cloud". A recovered, migrated, or partially configured instance can
+        carry ``enabled`` and an ``instance_id`` while the secret every cloud
+        call needs is gone, so identifiers alone are not a readiness signal.
+        Runtime services call this to build their client; config projections
+        call ``is_runtime_paired`` to decide whether to offer the matching
+        control. One predicate, so a surface cannot promise what the runtime
+        will refuse.
+        """
+        if not self.enabled:
+            return None
+        backend_url = (self.backend_url or "").strip().rstrip("/")
+        instance_id = (self.instance_id or "").strip()
+        instance_secret = (self.instance_secret or "").strip()
+        if not backend_url or not instance_id or not instance_secret:
+            return None
+        return backend_url, instance_id, instance_secret
+
+    def is_runtime_paired(self) -> bool:
+        """Whether cloud-backed features can run against this pairing."""
+        return self.runtime_credentials() is not None
+
 
 @dataclass
 class RemoteAccessConfig:

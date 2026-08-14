@@ -78,6 +78,7 @@ export const SettingsMessagingPage: React.FC = () => {
   const api = useApi();
   const { capabilities } = useInstanceAuthorization();
   const canUseSystem = capabilities.can_use_system;
+  const canManageInstance = capabilities.can_manage_instance;
   const canEditMessaging = capabilities.can_chat || canUseSystem;
   const [config, setConfig] = useState<any>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -103,12 +104,20 @@ export const SettingsMessagingPage: React.FC = () => {
   );
 
   const persist = async (nextConfig: any, extraPatch?: Record<string, unknown>) => {
+    const fieldSpecific = !canUseSystem;
+    // A field-specific save carries only what the control passes, so a control
+    // without an explicit patch would post ``{}``: a silent success that drops
+    // the change on reload. Controls that write owner-only fields have no
+    // Editor patch by design and must be gated out below; reaching here means
+    // one was rendered anyway, so fail visibly instead of pretending to save.
+    if (fieldSpecific && !extraPatch) {
+      setSaveError(t('common.saveFailed'));
+      return;
+    }
     setConfig(nextConfig);
     setSaveError(null);
     try {
-      await api.saveConfig(buildMessagePatch(nextConfig, extraPatch, {
-        fieldSpecific: !canUseSystem,
-      }));
+      await api.saveConfig(buildMessagePatch(nextConfig, extraPatch, { fieldSpecific }));
       setSavedAt(Date.now());
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : t('common.saveFailed'));
@@ -142,8 +151,9 @@ export const SettingsMessagingPage: React.FC = () => {
   const includeTimeInfoEnabled = config.include_time_info !== false;
   const audioAsr = config.audio_asr || {};
   const audioEchoEnabled = audioAsr.echo_transcript !== false;
-  const vibeCloud = config.remote_access?.vibe_cloud || {};
-  const vibeCloudPaired = Boolean(vibeCloud.enabled && vibeCloud.instance_id);
+  // Server-computed readiness: the identifiers alone cannot answer this, since
+  // the secret the ASR runtime needs is redacted from every config response.
+  const vibeCloudPaired = Boolean(config.remote_access?.vibe_cloud?.paired);
   const audioAsrEnabled = vibeCloudPaired && audioAsr.enabled !== false;
   const chatMessageFontSize = normalizeChatMessageFontSize(config.ui?.chat_message_font_size);
   const saveChatMessageFontSize = (fontSize: number) => {
@@ -507,22 +517,26 @@ export const SettingsMessagingPage: React.FC = () => {
             }
           />
         )}
-        {slackSupportsLinkUnfurl && (
+        {/* ``slack.*`` is outside the Editor write allowlist, so this control
+            is only offered to roles that may manage the instance — a remote
+            Owner included, which is why it carries its own field patch. */}
+        {canManageInstance && slackSupportsLinkUnfurl && (
           <SettingsRow
             title={t('dashboard.slackLinkPreviews')}
             description={t('dashboard.slackLinkPreviewsHint')}
             control={
               <ToggleSwitch
                 enabled={Boolean(config.slack?.disable_link_unfurl)}
-                onClick={() =>
-                  void persist({
-                    ...config,
-                    slack: {
-                      ...(config.slack || {}),
-                      disable_link_unfurl: !config.slack?.disable_link_unfurl,
+                onClick={() => {
+                  const next = !config.slack?.disable_link_unfurl;
+                  void persist(
+                    {
+                      ...config,
+                      slack: { ...(config.slack || {}), disable_link_unfurl: next },
                     },
-                  })
-                }
+                    { slack: { disable_link_unfurl: next } },
+                  );
+                }}
               />
             }
           />

@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_config import UiConfig, V2Config
+from core.audio_asr import AudioAsrService
 from vibe import api, remote_access
 
 
@@ -1084,6 +1085,8 @@ def test_non_owner_config_keeps_asr_and_pairing_without_host_secrets(tmp_path, m
     config = V2Config.from_payload(_full_config_payload())
     config.remote_access.vibe_cloud.enabled = True
     config.remote_access.vibe_cloud.instance_id = "inst_123"
+    config.remote_access.vibe_cloud.backend_url = "https://avibe.bot"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
     config.remote_access.vibe_cloud.tunnel_token = "tunnel-secret"
     config.remote_access.vibe_cloud.session_secret = "session-secret"
     config.audio_asr.enabled = True
@@ -1097,15 +1100,62 @@ def test_non_owner_config_keeps_asr_and_pairing_without_host_secrets(tmp_path, m
         "echo_transcript": False,
         "enabled_configured": False,
     }
-    assert payload["remote_access"] == {
-        "vibe_cloud": {"enabled": True, "instance_id": "inst_123"},
-    }
+    assert payload["remote_access"] == {"vibe_cloud": {"paired": True}}
+    assert payload["platforms"]["enabled"]
+    assert payload["platform_catalog"]
     serialized = str(payload)
     assert "tunnel-secret" not in serialized
     assert "session-secret" not in serialized
+    assert "instance-secret" not in serialized
     assert "secret-model" not in serialized
     assert "runtime" not in payload
     assert "agents" not in payload
+
+
+def test_non_owner_config_projects_exactly_the_declared_surface(tmp_path, monkeypatch):
+    """The projection is the writable surface plus the context that renders it.
+
+    An equality, not a list of forbidden keys: a field added to either
+    declaration but not projected fails here, and so does any key that starts
+    leaking into non-owner responses. That is the same intent the older
+    ``"remote_access" not in payload`` check carried, stated so that it also
+    covers the keys nobody has thought of yet.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.from_payload(_full_config_payload())
+
+    payload = api.non_owner_config_payload(config)
+
+    assert set(payload) == set(api._EDITOR_CONFIG_WRITE_FIELDS) | set(
+        api._NON_OWNER_CONFIG_CONTEXT_FIELDS
+    )
+    assert set(api._EDITOR_CONFIG_UI_WRITE_FIELDS) <= set(payload["ui"])
+    assert set(api._EDITOR_AUDIO_ASR_WRITE_FIELDS) <= set(payload["audio_asr"])
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["backend_url", "instance_id", "instance_secret"],
+)
+def test_non_owner_config_pairing_requires_runtime_ready_cloud(tmp_path, monkeypatch, missing_field):
+    """Every credential the ASR runtime needs also gates the projected flag.
+
+    One case per member of the runtime requirement, so a recovered or
+    partially migrated instance can never advertise a pairing the runtime
+    refuses to use.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.from_payload(_full_config_payload())
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.backend_url = "https://avibe.bot"
+    config.remote_access.vibe_cloud.instance_id = "inst_123"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    assert api.non_owner_config_payload(config)["remote_access"] == {"vibe_cloud": {"paired": True}}
+
+    setattr(config.remote_access.vibe_cloud, missing_field, "")
+
+    assert api.non_owner_config_payload(config)["remote_access"] == {"vibe_cloud": {"paired": False}}
+    assert AudioAsrService(config)._runtime_config() is None
 
 
 def test_editor_config_write_payload_keeps_messaging_fields_only():
@@ -1144,3 +1194,22 @@ def test_editor_config_write_payload_rejects_owner_fields(payload):
 def test_editor_config_write_payload_rejects_non_object_with_stable_code(payload):
     with pytest.raises(ValueError, match="editor_config_write_invalid"):
         api.editor_config_write_payload(payload)
+
+
+def test_editor_config_write_error_code_keeps_every_failure_localizable():
+    """Any failure on an Editor write answers with a code the client can render.
+
+    The codes this module raises pass through; everything else — the English
+    sentences raised much later by ``V2Config.from_payload`` — collapses to the
+    generic invalid code, so no message can reach a non-English client
+    unlocalized just because nobody enumerated it here.
+    """
+    for code in api._EDITOR_CONFIG_WRITE_ERROR_CODES:
+        assert api.editor_config_write_error_code(ValueError(code)) == code
+
+    for exc in (
+        ValueError("Config 'ack_mode' must be one of typing, reaction, message"),
+        ValueError("Config 'agent_progress_style' must be 'off', 'concise', or 'verbose'"),
+        ValueError(""),
+    ):
+        assert api.editor_config_write_error_code(exc) == "editor_config_write_invalid"

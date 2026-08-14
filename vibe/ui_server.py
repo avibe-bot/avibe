@@ -5873,13 +5873,12 @@ async def config_post():
 
     payload = request.json or {}
     authorization_context = getattr(g, "authorization_context", None)
-    if authorization_context is not None and not authorization_context.can_manage_instance:
-        from vibe import api as vibe_api
-
+    editor_write = authorization_context is not None and not authorization_context.can_manage_instance
+    if editor_write:
         try:
-            payload = vibe_api.editor_config_write_payload(payload)
+            payload = api.editor_config_write_payload(payload)
         except ValueError as exc:
-            code = str(exc) or "editor_config_write_invalid"
+            code = api.editor_config_write_error_code(exc)
             return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
     remote_access_runtime = None
     try:
@@ -5893,6 +5892,13 @@ async def config_post():
             payload,
         )
     except ValueError as exc:
+        # Same chokepoint as the allowlist rejection above: an Editor write
+        # answers with a stable code whichever layer refused it, including
+        # value validation raised deep inside ``V2Config.from_payload``. Owner
+        # saves keep the descriptive message the Settings pages already show.
+        if editor_write:
+            code = api.editor_config_write_error_code(exc)
+            return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
         message = str(exc)
         return jsonify({"ok": False, "error": message, "message": message}), 400
     if should_reconcile_remote_access:

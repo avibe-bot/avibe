@@ -1076,7 +1076,15 @@ def save_memory_config(
 
 
 def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:
-    payload = config.remote_access.vibe_cloud.__dict__.copy()
+    vibe_cloud = config.remote_access.vibe_cloud
+    payload = vibe_cloud.__dict__.copy()
+    # Derived, never stored: whether cloud-backed features can actually run.
+    # Clients must not re-derive it from whichever identifiers survived
+    # redaction — the secret the runtime needs is stripped from every
+    # non-wizard response, so ``enabled`` plus ``instance_id`` reads as paired
+    # on an instance the runtime refuses to serve. ``from_payload`` filters
+    # unknown keys, so this cannot round-trip into the stored config.
+    payload["paired"] = vibe_cloud.is_runtime_paired()
     if not include_secrets:
         for key in ("tunnel_token", "instance_secret", "session_secret"):
             payload.pop(key, None)
@@ -1322,20 +1330,48 @@ _EDITOR_CONFIG_UI_WRITE_FIELDS = frozenset(
 )
 _EDITOR_AUDIO_ASR_WRITE_FIELDS = frozenset(_NON_OWNER_AUDIO_ASR_FIELDS)
 
+# Read-only context the shared Settings pages need in order to render the
+# writable fields above the way an Owner sees them: platform capabilities
+# decide which acknowledgement modes are offered, and cloud pairing decides
+# whether the transcription control is live. Without them a non-owner client
+# falls back to guesses (``getEnabledPlatforms`` assumes Slack) and offers
+# settings the instance does not support.
+#
+# Together with ``_EDITOR_CONFIG_WRITE_FIELDS`` this is the complete set of
+# keys a non-owner may see; ``test_non_owner_config_projects_exactly_the_declared_surface``
+# holds the projection to it, so a field added to either half fails a test
+# rather than leaking or going missing.
+_NON_OWNER_CONFIG_CONTEXT_FIELDS = frozenset(
+    {
+        "mode",
+        "version",
+        "setup_state",
+        "language",
+        "platforms",
+        "platform_catalog",
+        "remote_access",
+    }
+)
+
+_EDITOR_CONFIG_WRITE_ERROR_CODES = frozenset(
+    {
+        "editor_config_write_forbidden",
+        "editor_config_write_invalid",
+    }
+)
+
 
 def _remote_access_pairing_projection(payload: dict) -> dict:
+    """Project cloud pairing for a non-owner as the readiness boolean alone.
+
+    Below the Owner role no pairing identifier or endpoint is exposed at all —
+    only whether cloud-backed controls can work, which ``_vibe_cloud_payload``
+    already decided from the stored config.
+    """
     remote_access = payload.get("remote_access")
-    if not isinstance(remote_access, dict):
-        return {}
-    vibe_cloud = remote_access.get("vibe_cloud")
-    if not isinstance(vibe_cloud, dict):
-        return {}
-    return {
-        "vibe_cloud": {
-            "enabled": bool(vibe_cloud.get("enabled")),
-            "instance_id": vibe_cloud.get("instance_id") or "",
-        }
-    }
+    vibe_cloud = remote_access.get("vibe_cloud") if isinstance(remote_access, dict) else None
+    paired = bool(vibe_cloud.get("paired")) if isinstance(vibe_cloud, dict) else False
+    return {"vibe_cloud": {"paired": paired}}
 
 
 def _audio_asr_preference_projection(payload: dict) -> dict:
@@ -1390,6 +1426,22 @@ def editor_config_write_payload(payload: dict) -> dict:
     return projected
 
 
+def editor_config_write_error_code(exc: Exception) -> str:
+    """Return the stable client code for any failure on an Editor config write.
+
+    Stated as a property rather than as a list of recognised messages: every
+    validation failure reached while applying an Editor write is an Editor
+    write error, whichever layer raised it. Only the codes this module raises
+    survive; anything else — including value validation raised much later by
+    ``V2Config.from_payload`` — collapses to the generic invalid code, so a
+    non-English client never renders a raw English sentence.
+    """
+    message = str(exc)
+    if message in _EDITOR_CONFIG_WRITE_ERROR_CODES:
+        return message
+    return "editor_config_write_invalid"
+
+
 def non_owner_config_payload(config: V2Config) -> dict:
     """Return the configuration projection available below the Owner role.
 
@@ -1397,6 +1449,13 @@ def non_owner_config_payload(config: V2Config) -> dict:
     runtime and control-plane fields out of Viewer and Editor responses while
     leaving ordinary messaging and UI preferences available to both local and
     remote callers.
+
+    Its key set is exactly ``_EDITOR_CONFIG_WRITE_FIELDS`` (what an Editor may
+    change) plus ``_NON_OWNER_CONFIG_CONTEXT_FIELDS`` (the read-only context
+    needed to render those controls correctly). Keeping the two halves in step
+    is the invariant: a writable field that is not projected leaves the client
+    guessing, and an unprojected context field makes the shared Settings pages
+    fall back to defaults that do not match the instance.
     """
 
     payload = client_config_payload(config)
@@ -1414,6 +1473,8 @@ def non_owner_config_payload(config: V2Config) -> dict:
         "agent_progress_style": payload.get("agent_progress_style"),
         "audio_asr": _audio_asr_preference_projection(payload),
         "remote_access": _remote_access_pairing_projection(payload),
+        "platforms": payload.get("platforms"),
+        "platform_catalog": payload.get("platform_catalog"),
         "ui": {
             key: ui_payload[key]
             for key in _NON_OWNER_CONFIG_UI_FIELDS
