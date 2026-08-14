@@ -21,6 +21,8 @@ from core.memory.types import (
     CaptureAttachment,
     MemoryErrorCode,
     MemoryItem,
+    MemoryListItem,
+    MemoryListPage,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
@@ -58,6 +60,8 @@ _PROCESSING_TIMEOUT_SECONDS = 8.0
 _PREFLIGHT_TIMEOUT_SECONDS = 5.0
 _PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
 _PROFILE_QUERY = "profile"
+_MAX_LIST_PAGE_SIZE = 20
+_EVEROS_EXACT_SORT_WINDOW = 20_000
 _MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
 _RECORDER_HEALTH_FALLBACK = {"state": "degraded", "reason": "writer_failures"}
 _RECORDER_HEALTH_REASONS = {
@@ -460,6 +464,47 @@ class EverOSPort:
         # so it needs no state on this provider: one EverOSPort serves every
         # principal, and a field here is whichever concurrent read finished last.
         return () if profile is None else (profile,)
+
+    async def list_episodes(
+        self,
+        principal_id: str,
+        project_id: str,
+        page: int,
+        page_size: int,
+    ) -> MemoryListPage:
+        """Return one strictly projected EverOS episode page."""
+
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or page < 1
+            or isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or not 1 <= page_size <= _MAX_LIST_PAGE_SIZE
+        ):
+            raise MemoryProviderFailure("memory_invalid_input", retryable=False)
+        body = await self._sidecar_request(
+            "POST",
+            "/api/v2/memory/get",
+            {
+                "user_id": principal_id,
+                "app_id": _APP_ID,
+                "project_id": project_id,
+                "memory_type": "episode",
+                "page": page,
+                "page_size": page_size,
+                "sort_by": "timestamp",
+                "sort_order": "desc",
+            },
+            require_json=True,
+        )
+        return _map_episode_page(
+            body,
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
 
     async def health(self) -> bool:
         try:
@@ -1027,6 +1072,129 @@ def _map_search_items(
     return tuple(items)
 
 
+def _map_episode_page(
+    body: dict[str, Any] | None,
+    *,
+    principal_id: str,
+    project_id: str,
+    page: int,
+    page_size: int,
+) -> MemoryListPage:
+    """Validate the pinned EverOS `/get` envelope before projection."""
+
+    if not isinstance(body, dict) or set(body) != {"request_id", "data"}:
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    request_id = _strict_receipt_id(body.get("request_id"))
+    data = body.get("data")
+    data_keys = {
+        "episodes",
+        "profiles",
+        "agent_cases",
+        "agent_skills",
+        "total_count",
+        "count",
+    }
+    if (
+        not request_id
+        or not isinstance(data, dict)
+        or set(data) != data_keys
+        or not _is_bounded_json_value(data)
+    ):
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    episodes = data.get("episodes")
+    total_count = data.get("total_count")
+    count = data.get("count")
+    if (
+        not isinstance(episodes, list)
+        or len(episodes) > page_size
+        or any(data.get(key) != [] for key in ("profiles", "agent_cases", "agent_skills"))
+        or isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or total_count < 0
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count != len(episodes)
+        or total_count < count
+    ):
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+
+    items = tuple(
+        _map_list_episode(
+            episode,
+            principal_id=principal_id,
+            project_id=project_id,
+        )
+        for episode in episodes
+    )
+    warnings = (
+        ("memory_list_truncated",)
+        if total_count > _EVEROS_EXACT_SORT_WINDOW
+        else ()
+    )
+    return MemoryListPage(
+        items=items,
+        page=page,
+        page_size=page_size,
+        count=count,
+        total_count=total_count,
+        warnings=warnings,
+    )
+
+
+def _map_list_episode(
+    value: Any,
+    *,
+    principal_id: str,
+    project_id: str,
+) -> MemoryListItem:
+    item_keys = {
+        "id",
+        "user_id",
+        "app_id",
+        "project_id",
+        "session_id",
+        "timestamp",
+        "sender_ids",
+        "summary",
+        "subject",
+        "episode",
+        "type",
+    }
+    if not isinstance(value, dict) or set(value) != item_keys:
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    item_id = _strict_receipt_id(value.get("id"))
+    session_id = _strict_receipt_id(value.get("session_id"))
+    sender_ids = value.get("sender_ids")
+    subject = _safe_list_text(value.get("subject"), allow_empty=True)
+    summary = _safe_list_text(value.get("summary"), allow_empty=True)
+    episode = _safe_list_text(value.get("episode"), allow_empty=False)
+    timestamp = _record_timestamp(value.get("timestamp"))
+    if (
+        not item_id
+        or not session_id
+        or value.get("user_id") != principal_id
+        or value.get("app_id") != _APP_ID
+        or value.get("project_id") != project_id
+        or value.get("type") != "Conversation"
+        or not isinstance(sender_ids, list)
+        or len(sender_ids) > _MAX_RESPONSE_COLLECTION
+        or any(not _strict_receipt_id(sender_id) for sender_id in sender_ids)
+        or subject is None
+        or summary is None
+        or episode is None
+        or timestamp is None
+    ):
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    return MemoryListItem(
+        id=item_id,
+        subject=subject,
+        summary=summary,
+        body=episode,
+        timestamp=timestamp,
+        project=project_id,
+    )
+
+
 def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem | None:
     profiles = data.get("profiles", [])
     if not isinstance(profiles, list) or len(profiles) > _MAX_RESPONSE_COLLECTION:
@@ -1162,6 +1330,17 @@ def _safe_text(value: Any) -> str | None:
     return text
 
 
+def _safe_list_text(value: Any, *, allow_empty: bool) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if (not allow_empty and not text) or len(text.encode("utf-8")) > _MAX_ITEM_BYTES:
+        return None
+    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
+        return None
+    return text
+
+
 def _record_date(*records: dict[str, Any]) -> str | None:
     for record in records:
         for key in ("date", "created_at", "timestamp", "createdAt"):
@@ -1182,6 +1361,25 @@ def _record_date(*records: dict[str, Any]) -> str | None:
                 except ValueError:
                     continue
     return None
+
+
+def _record_timestamp(value: Any) -> str | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        try:
+            instant = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    elif isinstance(value, str) and len(value) <= 128:
+        try:
+            instant = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if instant.tzinfo is None:
+            return None
+        instant = instant.astimezone(timezone.utc)
+    else:
+        return None
+    return instant.isoformat().replace("+00:00", "Z")
 
 
 def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
@@ -1448,6 +1646,14 @@ class MemoryProviderPort(Protocol):
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
 
+    async def list_episodes(
+        self,
+        principal_id: str,
+        project_id: str,
+        page: int,
+        page_size: int,
+    ) -> MemoryListPage: ...
+
     async def health(self) -> bool: ...
 
     async def health_snapshot(self) -> ProviderHealthSnapshot: ...
@@ -1468,10 +1674,20 @@ class FakeMemoryProvider:
     processing_healthy_flag: bool = True
     search_items: tuple[MemoryItem, ...] = ()
     profile_items: tuple[MemoryItem, ...] = ()
+    list_page: MemoryListPage = field(
+        default_factory=lambda: MemoryListPage(
+            items=(),
+            page=1,
+            page_size=_MAX_LIST_PAGE_SIZE,
+            count=0,
+            total_count=0,
+        )
+    )
     captures: list[ProviderCapture] = field(default_factory=list)
     flushes: list[ProviderSessionRef] = field(default_factory=list)
     search_scopes: list[tuple[str, str]] = field(default_factory=list)
     profile_scopes: list[tuple[str, str]] = field(default_factory=list)
+    list_requests: list[tuple[str, str, int, int]] = field(default_factory=list)
     search_policies: list[
         tuple[str, bool, ProviderSessionRef | None]
     ] = field(default_factory=list)
@@ -1481,6 +1697,7 @@ class FakeMemoryProvider:
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
+    list_failure: BaseException | None = None
     health_failure: BaseException | None = None
     agentic_budget_enforced_flag: bool = False
     agentic_round: Literal["round1", "round2", "unknown"] = "unknown"
@@ -1554,6 +1771,18 @@ class FakeMemoryProvider:
         if self.profile_failure is not None:
             raise self.profile_failure
         return self.profile_items
+
+    async def list_episodes(
+        self,
+        principal_id: str,
+        project_id: str,
+        page: int,
+        page_size: int,
+    ) -> MemoryListPage:
+        self.list_requests.append((principal_id, project_id, page, page_size))
+        if self.list_failure is not None:
+            raise self.list_failure
+        return replace(self.list_page, page=page, page_size=page_size)
 
     async def health(self) -> bool:
         if self.health_failure is not None:

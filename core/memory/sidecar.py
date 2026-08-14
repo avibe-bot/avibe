@@ -546,16 +546,36 @@ def _validate_search(payload: dict[str, Any]) -> str | None:
 
 
 def _validate_get(payload: dict[str, Any]) -> str | None:
-    keys = {"user_id", "app_id", "project_id", "memory_type", "page", "page_size"}
-    if not _exact_keys(payload, keys):
+    profile_keys = {"user_id", "app_id", "project_id", "memory_type", "page", "page_size"}
+    if _exact_keys(payload, profile_keys):
+        if (
+            not _valid_principal(payload.get("user_id"))
+            or payload.get("app_id") != _APP_ID
+            or payload.get("project_id") != "default"
+            or payload.get("memory_type") != "profile"
+            or payload.get("page") != 1
+            or payload.get("page_size") != 1
+        ):
+            return "get"
+        return None
+
+    episode_keys = profile_keys | {"sort_by", "sort_order"}
+    if not _exact_keys(payload, episode_keys):
         return "get"
+    page = payload.get("page")
+    page_size = payload.get("page_size")
     if (
         not _valid_principal(payload.get("user_id"))
-        or payload.get("app_id") != _APP_ID
-        or payload.get("project_id") != "default"
-        or payload.get("memory_type") != "profile"
-        or payload.get("page") != 1
-        or payload.get("page_size") != 1
+        or not _valid_search_scope(payload)
+        or payload.get("memory_type") != "episode"
+        or isinstance(page, bool)
+        or not isinstance(page, int)
+        or page < 1
+        or isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or not 1 <= page_size <= 20
+        or payload.get("sort_by") != "timestamp"
+        or payload.get("sort_order") != "desc"
     ):
         return "get"
     return None

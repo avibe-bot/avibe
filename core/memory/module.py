@@ -50,6 +50,9 @@ from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
+    MemoryListItem,
+    MemoryListPage,
+    MemoryListResult,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
@@ -71,6 +74,7 @@ MIN_FREE_DISK_BYTES = 512 * 1024 * 1024
 MAX_PROVIDER_TIMESTAMP_MS = 4_102_444_800_000
 MAX_QUERY_BYTES = 8 * 1024
 MAX_SEARCH_LIMIT = 20
+MAX_LIST_PAGE_SIZE = 20
 DEFAULT_SEARCH_LIMIT = 8
 MAX_PROVIDER_ITEM_BYTES = 64 * 1024
 MAX_PROVIDER_RESULT_BYTES = 256 * 1024
@@ -858,6 +862,60 @@ class MemoryModule:
             limit=MAX_PROVIDER_RESULT_ITEMS,
         )
 
+    async def list_episodes(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        page: int = 1,
+        page_size: int = MAX_LIST_PAGE_SIZE,
+    ) -> MemoryListResult:
+        """Return one bounded page of processed episodes or a closed error."""
+
+        if not self._is_enabled():
+            return OperationFailed(error="memory_disabled")
+        if not is_principal_id(principal_id):
+            return OperationFailed(error="memory_access_denied")
+        if not is_new_stored_memory_project_id(project_id):
+            return OperationFailed(error="memory_access_denied")
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or page < 1
+            or isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or not 1 <= page_size <= MAX_LIST_PAGE_SIZE
+        ):
+            return OperationFailed(error="memory_invalid_input")
+        if self._clear_active or self._is_maintenance_open():
+            return OperationFailed(error="memory_clear_failed")
+
+        async with self._lifecycle_lock:
+            if not self._is_enabled():
+                return OperationFailed(error="memory_disabled")
+            try:
+                meta = await self._store_call(self._store.ensure_meta)
+            except Exception:
+                return OperationFailed(error="memory_store_unavailable")
+            if meta.clear_in_progress:
+                return OperationFailed(error="memory_clear_failed")
+            result = await self._provider_list_read(
+                lambda: self._provider.list_episodes(
+                    principal_id,
+                    project_id,
+                    page,
+                    page_size,
+                )
+            )
+        if isinstance(result, OperationFailed):
+            return result
+        return self._bounded_list_page(
+            result,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
+
     async def failure_log(self, *, limit: int = 50) -> tuple[MemoryFailureLogEntry, ...]:
         """Return terminal failure history while fencing its bounded compaction."""
 
@@ -893,6 +951,70 @@ class MemoryModule:
             return OperationFailed(error=_provider_error_code(failure, "memory_processing_failed"))
         except Exception:
             return OperationFailed(error="memory_processing_failed")
+
+    async def _provider_list_read(
+        self,
+        operation: Callable[[], Awaitable[MemoryListPage]],
+    ) -> MemoryListPage | OperationFailed:
+        try:
+            return await asyncio.wait_for(
+                operation(),
+                timeout=PROVIDER_READ_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return OperationFailed(error="memory_provider_timeout")
+        except MemoryProviderFailure as failure:
+            return OperationFailed(error=_provider_error_code(failure, "memory_processing_failed"))
+        except Exception:
+            return OperationFailed(error="memory_processing_failed")
+
+    def _bounded_list_page(
+        self,
+        result: MemoryListPage,
+        *,
+        project_id: str,
+        page: int,
+        page_size: int,
+    ) -> MemoryListResult:
+        if (
+            not isinstance(result, MemoryListPage)
+            or result.page != page
+            or result.page_size != page_size
+            or isinstance(result.count, bool)
+            or not isinstance(result.count, int)
+            or result.count != len(result.items)
+            or result.count > page_size
+            or isinstance(result.total_count, bool)
+            or not isinstance(result.total_count, int)
+            or result.total_count < result.count
+            or any(warning != "memory_list_truncated" for warning in result.warnings)
+        ):
+            return OperationFailed(error="memory_provider_response_invalid")
+        total_bytes = 0
+        for item in result.items:
+            if (
+                not isinstance(item, MemoryListItem)
+                or item.kind != "episode"
+                or item.project != project_id
+                or not _valid_list_identifier(item.id)
+                or not _valid_list_timestamp(item.timestamp)
+            ):
+                return OperationFailed(error="memory_provider_response_invalid")
+            for value, allow_empty in (
+                (item.subject, True),
+                (item.summary, True),
+                (item.body, False),
+            ):
+                encoded = _list_text_bytes(value, allow_empty=allow_empty)
+                if encoded is None:
+                    return OperationFailed(error="memory_provider_response_invalid")
+                total_bytes += len(encoded)
+            total_bytes += len(item.id.encode("utf-8"))
+            total_bytes += len(item.timestamp.encode("utf-8"))
+            total_bytes += len(item.project.encode("utf-8"))
+            if total_bytes > MAX_PROVIDER_RESULT_BYTES:
+                return OperationFailed(error="memory_provider_response_invalid")
+        return result
 
     def _bounded_items(self, items: tuple[MemoryItem, ...], *, limit: int) -> MemoryResult:
         if not isinstance(items, tuple) or len(items) > limit:
@@ -1051,6 +1173,36 @@ def _profile_text_bytes(value: object) -> bytes | None:
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
         return None
     return encoded
+
+
+def _list_text_bytes(value: object, *, allow_empty: bool) -> bytes | None:
+    if (
+        not isinstance(value, str)
+        or (not allow_empty and not value)
+        or "\x00" in value
+    ):
+        return None
+    encoded = _utf8_bytes(value)
+    if encoded is None or len(encoded) > MAX_PROVIDER_ITEM_BYTES:
+        return None
+    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
+        return None
+    return encoded
+
+
+def _valid_list_identifier(value: object) -> bool:
+    encoded = _utf8_bytes(value) if isinstance(value, str) else None
+    return bool(value) and encoded is not None and len(encoded) <= 128 and "\x00" not in value
+
+
+def _valid_list_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or len(value) > 64:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
 
 
 def _profile_bytes(profile: object) -> int | None:

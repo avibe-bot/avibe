@@ -296,8 +296,14 @@ class MemoryProfile:
 
 
 MemoryWarningCode = Literal["memory_search_partial", "memory_search_truncated"]
+MemoryListWarningCode = Literal["memory_list_partial", "memory_list_truncated"]
 CLOSED_MEMORY_WARNING_CODES = frozenset(
-    {"memory_search_partial", "memory_search_truncated"}
+    {
+        "memory_search_partial",
+        "memory_search_truncated",
+        "memory_list_partial",
+        "memory_list_truncated",
+    }
 )
 
 
@@ -363,6 +369,60 @@ class MemoryItems:
 
 
 MemoryResult: TypeAlias = MemoryItems | OperationFailed
+
+
+@dataclass(frozen=True)
+class MemoryListItem:
+    """One provider-neutral processed episode returned by a list read."""
+
+    id: str
+    subject: str
+    summary: str
+    body: str
+    timestamp: str
+    project: str
+    kind: Literal["episode"] = "episode"
+
+
+@dataclass(frozen=True)
+class MemoryListPage:
+    """One exact 1-based provider page of processed episodes."""
+
+    items: tuple[MemoryListItem, ...]
+    page: int
+    page_size: int
+    count: int
+    total_count: int
+    warnings: tuple[MemoryListWarningCode, ...] = ()
+    status: Literal["ok"] = "ok"
+
+
+MemoryListResult: TypeAlias = MemoryListPage | OperationFailed
+
+
+def memory_list_page_payload(result: MemoryListPage) -> dict[str, Any]:
+    """Serialize a validated list page into the closed transport envelope."""
+
+    return {
+        "status": result.status,
+        "items": [
+            {
+                "id": item.id,
+                "kind": item.kind,
+                "subject": item.subject,
+                "summary": item.summary,
+                "body": item.body,
+                "timestamp": item.timestamp,
+                "project": item.project,
+            }
+            for item in result.items
+        ],
+        "page": result.page,
+        "page_size": result.page_size,
+        "count": result.count,
+        "total_count": result.total_count,
+        "warnings": list(result.warnings),
+    }
 
 
 @dataclass(frozen=True)

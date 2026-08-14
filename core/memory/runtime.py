@@ -92,6 +92,7 @@ from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
+    MemoryListPage,
     MemoryResult,
     MemoryWarningCode,
     OperationFailed,
@@ -99,6 +100,7 @@ from core.memory.types import (
     RecallPolicy,
     RecallResult,
     memory_item_payload,
+    memory_list_page_payload,
 )
 from core.memory.worker import ProcessingEvent
 
@@ -1442,6 +1444,30 @@ class MemoryRuntime:
             **_result_payload(result),
             "profile_warning": "empty" if empty else None,
         }
+
+    async def list_episodes_payload(
+        self,
+        principal_id: str,
+        project_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """Return one single-project processed-episode page."""
+
+        if not self.available:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        result = await self.module.list_episodes(
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
+        if isinstance(result, OperationFailed):
+            return {"status": result.status, "error": result.error}
+        if isinstance(result, MemoryListPage):
+            return memory_list_page_payload(result)
+        return {"status": "failed", "error": "memory_processing_failed"}
 
     def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
         if not self.available:
