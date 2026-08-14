@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import json
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -116,7 +119,6 @@ class FakeAdapter:
         self.native_signed_in = True
         self.native_account_label = None
         self.oauth_start_calls = []
-        self.released_login_slots: set[str] = set()
         self.orphan_cleanup_calls = []
         self.orphan_cleanup_succeeds = False
         self.cancel_disposition = RetainedMaterialDisposition.NONE
@@ -241,25 +243,7 @@ class FakeAdapter:
             credential_ref=None,
         )
 
-    def _login_slot_holder(self, vendor):
-        # Stands in for AgentAuthService's per-vendor single flight: a live
-        # login, or a successful one whose caller has not yet said the
-        # credential is settled, still owns the vendor's CLI credential.
-        for flow_id, flow in self.flows.items():
-            if flow.vendor != vendor or flow_id in self.released_login_slots:
-                continue
-            if flow.state in {"failed", "cancelled"}:
-                continue
-            return flow
-        return None
-
-    def release_login_slot(self, flow_id):
-        self.released_login_slots.add(flow_id)
-
     async def start_oauth(self, source_id, vendor):
-        holder = self._login_slot_holder(vendor)
-        if holder is not None:
-            raise NativeLoginSlotTakenError(holder.source_id)
         self.oauth_start_calls.append((source_id, vendor))
         flow = self._flow(source_id, f"oaf_{len(self.flows) + 1:08d}")
         flow = OAuthFlowState(**{**flow.__dict__, "vendor": vendor})
@@ -273,11 +257,6 @@ class FakeAdapter:
         *,
         on_irreversible_start=None,
     ):
-        # The owner claims the login slot before any provider work, so a
-        # refused reauth never reaches the sign-out it would otherwise do.
-        holder = self._login_slot_holder(vendor)
-        if holder is not None:
-            raise NativeLoginSlotTakenError(holder.source_id)
         if on_irreversible_start is not None:
             on_irreversible_start()
         return await self.start_oauth(source_id, vendor)
@@ -3440,6 +3419,71 @@ def test_nonce_oauth_start_owner_cancellation_releases_waiter_and_tuple(tmp_path
     fresh, adapter = asyncio.run(run_cancellation_and_retry())
 
     assert fresh["flow"]["client_nonce"] == "ofn_01j5w8z7p4n6q2rt"
+    assert len(adapter.oauth_start_calls) == 1
+
+
+def test_oauth_start_keeps_every_owner_await_inside_the_installed_task(tmp_path):
+    """A claimed nonce stays awaitable and releasable from the claim onward.
+
+    The claim is what a concurrent same-tuple retry looks for, and the only
+    release is ``start_and_remember``'s own ``finally``. An owner await placed
+    before the task is installed therefore strands the tuple until restart, so
+    this asserts the property rather than the one pre-check that broke it: on the
+    owner path from claim to install there is nothing to wait on at all.
+    """
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ModelHubService.oauth_start)))
+    body = tree.body[0].body
+    claim = next(i for i, stmt in enumerate(body) if "claim_nonce" in ast.unparse(stmt))
+    install = next(
+        i for i, stmt in enumerate(body)
+        if "_oauth_start_tasks[nonce_key] = task" in ast.unparse(stmt)
+    )
+
+    for stmt in body[claim + 1:install]:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # The task's own awaits are the safe ones: it is installed before it
+            # is awaited, and it owns the release.
+            continue
+        if isinstance(stmt, ast.If) and ast.unparse(stmt.test) == "nonce_key is None":
+            # No nonce, no claim — nothing for a retry to await or for a
+            # cancellation to leak.
+            continue
+        waits = [
+            node for node in ast.walk(stmt)
+            if isinstance(node, (ast.Await, ast.AsyncWith, ast.AsyncFor))
+        ]
+        assert not waits, f"owner awaits before its task is installed: {ast.unparse(stmt)}"
+
+
+def test_nonce_oauth_start_coalesces_a_retry_while_the_native_slot_read_waits(tmp_path):
+    """The member the structure guard above exists for, end to end."""
+
+    async def run_concurrent_start():
+        service, _, adapter = _service(tmp_path)
+        request = {
+            "vendor": "anthropic",
+            "channel": "native_cli",
+            "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+        }
+        # Migration holds the same lock the native-slot read needs, which is the
+        # wait this test is about.
+        await service._mutation_lock.acquire()
+        owner = asyncio.create_task(service.oauth_start(request))
+        await asyncio.sleep(0)
+        retry = asyncio.create_task(service.oauth_start(dict(request)))
+        await asyncio.sleep(0)
+
+        assert owner.done() is False
+        assert retry.done() is False
+
+        service._mutation_lock.release()
+        first, second = await asyncio.gather(owner, retry)
+        return first, second, adapter
+
+    first, second, adapter = asyncio.run(run_concurrent_start())
+
+    assert first == second
     assert len(adapter.oauth_start_calls) == 1
 
 

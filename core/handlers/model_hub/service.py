@@ -3870,39 +3870,41 @@ class ModelHubService:
                     raise ModelHubError("engine_down", status=503)
                 return await asyncio.shield(task)
 
-        if oauth_channel == "native_cli":
-            async with self._mutation_lock:
-                # The sanctioned CLI keeps one credential per vendor, so a
-                # second native Source would describe a credential the first
-                # one already owns. The lock serializes this read with
-                # migration's native Source writer and with the re-check in
-                # ``_create_oauth_source``, so a flow that started before the
-                # first Source was persisted still cannot materialize a
-                # sibling.
-                existing = self._existing_native_source(self.store.load(), vendor)
-                if existing is not None:
-                    # This request owns a new nonce claim, so release it before
-                    # rejecting the occupied singleton. A committed/in-flight
-                    # nonce has already returned above and never reaches here.
-                    if client_nonce is not None:
-                        self.oauth_flows.release_nonce(
-                            client_nonce,
-                            vendor,
-                            oauth_channel,
-                        )
-                    raise ModelHubError(
-                        "native_source_already_exists",
-                        status=409,
-                        detail="modelHub.errors.native_subscription_exists",
-                        data={"existing_source_id": existing.id},
-                    )
-
+        # Everything the owner can wait on lives inside this coroutine, and that
+        # is the invariant rather than an accident of layout: the claim above is
+        # what a concurrent same-tuple retry looks for, and the ONLY release is
+        # this coroutine's own ``finally``. So an owner await placed out here —
+        # the native-slot read used to be one — strands the tuple until restart:
+        # the retry finds a pending claim with no task and gets ``engine_down``,
+        # and a cancelled owner never reaches the release at all.
+        # ``test_oauth_start_keeps_every_owner_await_inside_the_installed_task``
+        # holds the shape so the next pre-check cannot re-open the window.
         async def start_and_remember() -> dict:
             pending_source_id = _source_id()
             flow: OAuthFlowState | None = None
             flow_cleanup_done = False
             flow_cleanup_attempted = False
             try:
+                if oauth_channel == "native_cli":
+                    async with self._mutation_lock:
+                        # The sanctioned CLI keeps one credential per vendor, so
+                        # a second native Source would describe a credential the
+                        # first one already owns. The lock serializes this read
+                        # with migration's native Source writer and with the
+                        # re-check in ``_create_oauth_source``, so a flow that
+                        # started before the first Source was persisted still
+                        # cannot materialize a sibling.
+                        occupied = self._existing_native_source(
+                            self.store.load(),
+                            vendor,
+                        )
+                    if occupied is not None:
+                        raise ModelHubError(
+                            "native_source_already_exists",
+                            status=409,
+                            detail="modelHub.errors.native_subscription_exists",
+                            data={"existing_source_id": occupied.id},
+                        )
                 flow = await self._oauth_call(
                     self._oauth_adapter(oauth_channel).start_oauth(
                         pending_source_id,
