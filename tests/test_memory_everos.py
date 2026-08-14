@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from core.memory.everos import (
+    _AGENTIC_ROUND_HEADER,
     _AGENTIC_TIMEOUT_HEADER,
     AddAck,
     AddRejected,
@@ -663,7 +664,11 @@ def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
         sidecar_timeouts.append(
             float(request.headers[_AGENTIC_TIMEOUT_HEADER])
         )
-        return httpx.Response(200, json={"data": {"episodes": []}})
+        return httpx.Response(
+            200,
+            headers={_AGENTIC_ROUND_HEADER: "round2"},
+            json={"data": {"episodes": []}},
+        )
 
     async def run():
         provider = EverOSPort(Path("/tmp/everos.sock"))
@@ -701,6 +706,7 @@ def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
     ]
     assert len(telemetry) == 1
     assert "mode=agentic" in telemetry[0]
+    assert "round=round2" in telemetry[0]
     assert "success=true" in telemetry[0]
     assert "timeout=false" in telemetry[0]
     assert "private multi-hop query" not in telemetry[0]
@@ -710,7 +716,11 @@ def test_agentic_search_logs_mapping_failure_as_unsuccessful(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": {"episodes": "invalid"}})
+        return httpx.Response(
+            200,
+            headers={_AGENTIC_ROUND_HEADER: "round1"},
+            json={"data": {"episodes": "invalid"}},
+        )
 
     async def run() -> MemoryProviderFailure:
         with pytest.raises(MemoryProviderFailure) as raised:
@@ -735,6 +745,7 @@ def test_agentic_search_logs_mapping_failure_as_unsuccessful(
         if "telemetry" in record.getMessage()
     ]
     assert len(telemetry) == 1
+    assert "round=round1" in telemetry[0]
     assert "success=false" in telemetry[0]
     assert "timeout=false" in telemetry[0]
     assert "private multi-hop query" not in telemetry[0]
@@ -774,6 +785,7 @@ def test_agentic_search_wall_clock_timeout_is_typed_and_logged(
         if "telemetry" in record.getMessage()
     ]
     assert len(telemetry) == 1
+    assert "round=unknown" in telemetry[0]
     assert "success=false" in telemetry[0]
     assert "timeout=true" in telemetry[0]
     assert "private multi-hop query" not in telemetry[0]

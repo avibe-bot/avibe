@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,21 @@ LEGACY_PROJECT = "p-22222222222222222222222222222222"
 SESSION_ID = f"src--{'1' * 64}--e1"
 
 
+def _agentic_search_body() -> bytes:
+    return json.dumps(
+        {
+            "user_id": "u-11111111111111111111111111111111",
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "query": "connect the clues",
+            "method": "agentic",
+            "top_k": 8,
+            "include_profile": True,
+            "enable_llm_rerank": False,
+        }
+    ).encode()
+
+
 def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) -> None:
     import uvicorn
 
@@ -37,7 +53,8 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
             return _App()
 
     class _Config:
-        def __init__(self, _app, **kwargs):
+        def __init__(self, configured_app, **kwargs):
+            captured["app"] = configured_app
             captured.update(kwargs)
 
     class _Server:
@@ -58,6 +75,126 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
     sidecar.serve(tmp_path / "everos.sock")
 
     assert captured["timeout_graceful_shutdown"] == 1
+    assert isinstance(captured["app"], sidecar._RecorderHealthProjection)
+    assert isinstance(captured["app"]._app, sidecar._AgenticDeadlineProjection)
+
+
+def test_agentic_deadline_projection_cancels_owned_downstream_asgi_task() -> None:
+    downstream_cancelled = asyncio.Event()
+    sent: list[dict] = []
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _agentic_search_body(),
+            "more_body": False,
+        }
+    ]
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, downstream_receive, _send):
+        assert (await downstream_receive())["body"] == _agentic_search_body()
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            downstream_cancelled.set()
+            raise
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"0.001"),
+        ],
+    }
+
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
+
+    assert downstream_cancelled.is_set()
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 504
+    assert json.loads(sent[1]["body"]) == {"detail": "memory_request_timed_out"}
+
+
+def test_agentic_deadline_projection_returns_allowlisted_round_header() -> None:
+    sent: list[dict] = []
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _agentic_search_body(),
+            "more_body": False,
+        }
+    ]
+    round_logger = logging.getLogger("everos.memory.search.agentic")
+    round_handler = sidecar._AgenticRoundHandler()
+    round_logger.addHandler(round_handler)
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, downstream_receive, send):
+        assert (await downstream_receive())["body"] == _agentic_search_body()
+        round_logger.handle(
+            logging.LogRecord(
+                name="everos.memory.search.agentic",
+                level=logging.INFO,
+                pathname=__file__,
+                lineno=1,
+                msg={
+                    "event": "agentic_search_decision",
+                    "round": "round2",
+                    "query": "private query must not be projected",
+                },
+                args=(),
+                exc_info=None,
+            )
+        )
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b'{"data":{}}'})
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"1"),
+        ],
+    }
+
+    try:
+        asyncio.run(
+            sidecar._AgenticDeadlineProjection(downstream)(
+                scope,
+                receive,
+                capture,
+            )
+        )
+    finally:
+        round_logger.removeHandler(round_handler)
+
+    headers = dict(sent[0]["headers"])
+    assert headers[sidecar._AGENTIC_ROUND_HEADER.lower().encode()] == b"round2"
+    assert all(b"private query" not in value for value in headers.values())
 
 
 def test_sidecar_rejects_artifact_before_everos_can_persist_diagnostics(
@@ -189,16 +326,9 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
     ]
 
     class _Request:
-        def __init__(
-            self,
-            path: str,
-            payload: dict[str, object],
-            *,
-            headers: dict[str, str] | None = None,
-        ) -> None:
+        def __init__(self, path: str, payload: dict[str, object]) -> None:
             self.method = "POST"
             self.url = SimpleNamespace(path=path)
-            self.headers = headers or {}
             self._body = json.dumps(payload).encode()
 
         async def body(self) -> bytes:
@@ -225,17 +355,8 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
     }
 
     async def exercise_guard() -> None:
-        downstream_cancelled = asyncio.Event()
-
         async def call_next(request):
             return request.url.path
-
-        async def slow_agentic_call(_request):
-            try:
-                await asyncio.sleep(1)
-            except asyncio.CancelledError:
-                downstream_cancelled.set()
-                raise
 
         assert (
             await app.guard(
@@ -247,16 +368,6 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
             await app.guard(_Request("/api/v2/memory/get", get_payload), call_next)
             == "/api/v2/memory/get"
         )
-        timed_out = await app.guard(
-            _Request(
-                "/api/v2/memory/search",
-                {**search_payload, "method": "agentic"},
-                headers={sidecar._AGENTIC_TIMEOUT_HEADER: "0.001"},
-            ),
-            slow_agentic_call,
-        )
-        assert timed_out.status_code == 504
-        assert downstream_cancelled.is_set()
 
     asyncio.run(exercise_guard())
     assert "boundary-enter" not in events

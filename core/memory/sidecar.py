@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import importlib
 import json
 import logging
@@ -31,8 +32,12 @@ from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
 _AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
+_AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
 _PRINCIPAL_PATTERN = re.compile(r"u-[0-9a-f]{32}\Z")
 _SESSION_PATTERN = re.compile(r"src--[0-9a-f]{64}--e(?:0|[1-9][0-9]*)\Z")
+_AGENTIC_ROUND_STATE: contextvars.ContextVar[dict[str, str] | None] = (
+    contextvars.ContextVar("avibe_memory_agentic_round", default=None)
+)
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +59,9 @@ def serve(uds: Path) -> None:
     factory_module = importlib.import_module("everos.entrypoints.api.app")
     create_app = getattr(factory_module, "create_app")
     app = create_app()
+    round_handler = _AgenticRoundHandler()
+    round_logger = logging.getLogger("everos.memory.search.agentic")
+    round_logger.addHandler(round_handler)
     if recorder is not None:
         original_lifespan = app.router.lifespan_context
 
@@ -86,41 +94,159 @@ def serve(uds: Path) -> None:
         )
         if rejection is not None:
             return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
-        agentic_timeout = _agentic_request_timeout(
-            request.url.path,
-            body,
-            request.headers,
-        )
-        if agentic_timeout is False:
-            return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
         if recorder is not None and request.url.path in {
             "/api/v2/memory/add",
             "/api/v2/memory/flush",
         }:
             with boundary_request():
                 return await call_next(request)
-        if isinstance(agentic_timeout, float):
-            try:
-                return await asyncio.wait_for(
-                    call_next(request),
-                    timeout=agentic_timeout,
-                )
-            except asyncio.TimeoutError:
-                return JSONResponse(
-                    {"detail": "memory_request_timed_out"},
-                    status_code=504,
-                )
         return await call_next(request)
 
     config = uvicorn.Config(
-        _RecorderHealthProjection(app, recorder),
+        _RecorderHealthProjection(_AgenticDeadlineProjection(app), recorder),
         uds=str(uds),
         access_log=False,
         log_level="warning",
         log_config=None,
         timeout_graceful_shutdown=1,
     )
-    uvicorn.Server(config).run()
+    try:
+        uvicorn.Server(config).run()
+    finally:
+        round_logger.removeHandler(round_handler)
+
+
+class _AgenticRoundHandler(logging.Handler):
+    """Capture only the bounded EverOS round token in the request context."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        state = _AGENTIC_ROUND_STATE.get()
+        if state is None or not isinstance(record.msg, dict):
+            return
+        if record.msg.get("event") != "agentic_search_decision":
+            return
+        round_value = record.msg.get("round")
+        if round_value in {"round1", "round2"}:
+            state["round"] = round_value
+
+
+class _AgenticDeadlineProjection:
+    """Own and cancel the downstream ASGI task for bounded agentic search."""
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if not (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and scope.get("path") == "/api/v2/memory/search"
+        ):
+            await self._app(scope, receive, send)
+            return
+
+        request_messages, body = await _buffer_request(receive)
+        message_index = 0
+
+        async def replay_receive() -> dict[str, Any]:
+            nonlocal message_index
+            if message_index < len(request_messages):
+                message = request_messages[message_index]
+                message_index += 1
+                return message
+            return await receive()
+
+        agentic_timeout = _agentic_request_timeout(
+            scope.get("path", ""),
+            body,
+            scope.get("headers", []),
+        )
+        if agentic_timeout is False:
+            await _send_json_error(send, status=403, detail="memory_request_rejected")
+            return
+        if agentic_timeout is None:
+            await self._app(scope, replay_receive, send)
+            return
+
+        response_messages: list[dict[str, Any]] = []
+
+        async def capture_send(message: dict[str, Any]) -> None:
+            response_messages.append(message)
+
+        round_state: dict[str, str] = {}
+        token = _AGENTIC_ROUND_STATE.set(round_state)
+        try:
+            await asyncio.wait_for(
+                self._app(scope, replay_receive, capture_send),
+                timeout=agentic_timeout,
+            )
+        except asyncio.TimeoutError:
+            await _send_json_error(send, status=504, detail="memory_request_timed_out")
+            return
+        finally:
+            _AGENTIC_ROUND_STATE.reset(token)
+
+        round_value = round_state.get("round")
+        if round_value in {"round1", "round2"}:
+            _append_response_header(
+                response_messages,
+                _AGENTIC_ROUND_HEADER,
+                round_value,
+            )
+        for message in response_messages:
+            await send(message)
+
+
+async def _buffer_request(receive: Any) -> tuple[list[dict[str, Any]], bytes]:
+    messages: list[dict[str, Any]] = []
+    chunks: list[bytes] = []
+    while True:
+        message = await receive()
+        messages.append(message)
+        if message.get("type") == "http.disconnect":
+            break
+        if message.get("type") != "http.request":
+            continue
+        chunks.append(message.get("body", b""))
+        if not message.get("more_body", False):
+            break
+    return messages, b"".join(chunks)
+
+
+async def _send_json_error(send: Any, *, status: int, detail: str) -> None:
+    body = json.dumps({"detail": detail}, separators=(",", ":")).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+def _append_response_header(
+    messages: list[dict[str, Any]],
+    name: str,
+    value: str,
+) -> None:
+    encoded_name = name.lower().encode("ascii")
+    encoded_value = value.encode("ascii")
+    for index, message in enumerate(messages):
+        if message.get("type") != "http.response.start":
+            continue
+        projected = dict(message)
+        projected["headers"] = [
+            (header_name, header_value)
+            for header_name, header_value in message.get("headers", [])
+            if header_name.lower() != encoded_name
+        ]
+        projected["headers"].append((encoded_name, encoded_value))
+        messages[index] = projected
+        return
 
 
 class _RecorderHealthProjection:
@@ -239,7 +365,7 @@ def _agentic_request_timeout(
     if not isinstance(payload, dict) or payload.get("method") != "agentic":
         return None
     try:
-        timeout = float(headers.get(_AGENTIC_TIMEOUT_HEADER))
+        timeout = float(_header_value(headers, _AGENTIC_TIMEOUT_HEADER))
     except (TypeError, ValueError):
         return False
     if (
@@ -249,6 +375,22 @@ def _agentic_request_timeout(
     ):
         return False
     return timeout
+
+
+def _header_value(headers: Any, name: str) -> str | None:
+    if hasattr(headers, "get"):
+        value = headers.get(name)
+        if value is None:
+            value = headers.get(name.lower())
+        return value if isinstance(value, str) else None
+    encoded_name = name.lower().encode("ascii")
+    for header_name, header_value in headers:
+        if header_name.lower() == encoded_name:
+            try:
+                return header_value.decode("ascii")
+            except UnicodeDecodeError:
+                return None
+    return None
 
 
 def _valid_write_scope(payload: dict[str, Any]) -> bool:

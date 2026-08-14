@@ -50,6 +50,7 @@ _MAX_RESPONSE_DEPTH = 8
 _MAX_RESPONSE_COLLECTION = 200
 _SIDECAR_TIMEOUT_SECONDS = 20.0
 _AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
+_AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
 _SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS = 0.05
 _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
@@ -408,6 +409,7 @@ class EverOSPort:
         timeout_seconds: float | None = None,
     ) -> tuple[MemoryItem, ...]:
         agentic_started = time.monotonic() if method == "agentic" else None
+        telemetry: dict[str, str] = {}
         try:
             data = await self._search_data(
                 principal_id,
@@ -418,19 +420,22 @@ class EverOSPort:
                 include_profile=include_profile,
                 session_ref=session_ref,
                 timeout_seconds=timeout_seconds,
+                telemetry=telemetry,
             )
             items = _map_search_items(data, principal_id=principal_id, limit=limit)
         except MemoryProviderFailure as failure:
             if agentic_started is not None:
                 logger.info(
-                    "Memory search telemetry mode=agentic duration_ms=%s success=false timeout=%s",
+                    "Memory search telemetry mode=agentic round=%s duration_ms=%s success=false timeout=%s",
+                    telemetry.get("round", "unknown"),
                     _elapsed_ms(agentic_started),
                     str(failure.error == "memory_provider_timeout").lower(),
                 )
             raise
         if agentic_started is not None:
             logger.info(
-                "Memory search telemetry mode=agentic duration_ms=%s success=true timeout=false",
+                "Memory search telemetry mode=agentic round=%s duration_ms=%s success=true timeout=false",
+                telemetry.get("round", "unknown"),
                 _elapsed_ms(agentic_started),
             )
         return items
@@ -611,6 +616,7 @@ class EverOSPort:
         include_profile: bool,
         session_ref: ProviderSessionRef | None,
         timeout_seconds: float | None,
+        telemetry: dict[str, str],
     ) -> dict[str, Any]:
         if method not in {"keyword", "vector", "hybrid", "agentic"}:
             raise MemoryProviderFailure("memory_invalid_input", retryable=False)
@@ -648,6 +654,7 @@ class EverOSPort:
                         require_json=True,
                         capability_rejection=True,
                         timeout_seconds=request_timeout,
+                        response_metadata=telemetry,
                     ),
                     timeout=request_timeout,
                 )
@@ -677,6 +684,7 @@ class EverOSPort:
         require_json: bool,
         capability_rejection: bool = False,
         timeout_seconds: float | None = None,
+        response_metadata: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         started = time.monotonic()
         request_timeout = _positive_timeout(
@@ -707,6 +715,12 @@ class EverOSPort:
                     json=payload,
                     headers=headers,
                 ) as response:
+                    round_value = response.headers.get(_AGENTIC_ROUND_HEADER)
+                    if (
+                        response_metadata is not None
+                        and round_value in {"round1", "round2"}
+                    ):
+                        response_metadata["round"] = round_value
                     if not 200 <= response.status_code < 300:
                         logger.warning(
                             "EverOS sidecar request failed route=%s status=%s latency_ms=%s",
