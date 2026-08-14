@@ -194,6 +194,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   fixed-head one-shot wait. Use `wait_pr.py` without CI arguments for PR-only
   monitoring, and reserve `wait_action.py` for Actions targets that are not attached
   to a PR.
+- Set the durable PR Watch's per-cycle `--timeout 0`. The Harness default is
+  21600 seconds, so leaving it implicit turns six hours without PR activity into a
+  terminal timeout. The waiter's individual GitHub requests remain bounded; an idle
+  PR is expected state, not a failed cycle.
 - The one-watch invariant is scoped by owner and concern: one live lane/fix
   watch per PR, plus one independent orchestrator gate watch when work is
   delegated. Review activity and the PR's exact-head CI are one lane concern

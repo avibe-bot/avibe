@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.17.0
+version: 0.17.1
 ---
 
 # Background Watch Hook
@@ -229,7 +229,9 @@ remain optional. Add `--sha` only when the caller intentionally wants a fixed-he
 one-shot wait. The waiter stays quiet while a requested run is missing or still
 running, then reports the complete exact-head result when every requested workflow
 has terminal runs. Every distinct matching run ID is included, so an earlier failed
-rerun remains visible to the follow-up turn.
+rerun remains visible to the follow-up turn. Set the forever Watch's `--timeout 0`:
+the default 21600-second per-cycle timeout treats six quiet hours as a terminal
+failure, which is not a meaningful end condition for a PR delivery loop.
 
 ```bash
 STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-review.json"
@@ -245,6 +247,7 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
 vibe watch add \
   --name "Watch PR 151 review and CI" \
   --forever \
+  --timeout 0 \
   --message "PR #151 has new review activity, a head change, or current-head CI activity. Fetch the latest PR and Actions state, resolve actionable findings, and leave this durable combined Watch armed until close-out. Summarise the round here in one or two lines; do not post that summary as a PR comment." \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
@@ -284,6 +287,9 @@ vibe watch add \
 Before the first watched push or review trigger in the delivery loop, seed an
 owner-specific state file from the current complete PR snapshot. Arm the forever
 Watch with that exact file and confirm it is live before taking the watched action.
+Use `--timeout 0` so an ordinary quiet period cannot retire the Watch; GitHub request
+timeouts remain bounded inside the waiter itself. A nonzero per-cycle timeout is for
+a Watch whose lack of an event by that deadline is itself reportable.
 After the Watch starts, never reseed or replace its state between rounds: a later
 event may already exist, and turning it into the new baseline silently drops it.
 The forever Watch promotes each delivered batch and compares the next cycle against
@@ -342,8 +348,8 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
 vibe watch add \
   --name "Monitor PR 151 reviews" \
   --forever \
-  --timeout 21600 \
-  --lifetime-timeout 86400 \
+  --timeout 0 \
+  --lifetime-timeout 0 \
   --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
