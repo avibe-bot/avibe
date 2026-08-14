@@ -729,21 +729,25 @@ class ModelHubService:
         expires_at_iso: str | None,
         flow_id: str | None = None,
     ) -> None:
-        """Bind a held reservation to the started flow's own deadline."""
+        """Bind a held reservation to the started flow and its deadline."""
 
-        if source_id is None or expires_at_iso is None:
+        if source_id is None:
             return
         reservation = self._native_slot_reservations.get(vendor)
         if reservation is None or reservation.source_id != source_id:
             return
-        try:
-            expires_at = _parse_datetime(expires_at_iso)
-        except ValueError:
-            return
-        if (expires_at.tzinfo is None) != (self.now().tzinfo is None):
-            # Incomparable clocks would crash the next check. Leave the hold
-            # bound to this flow's settle paths instead.
-            return
+        expires_at: datetime | None = None
+        if expires_at_iso:
+            try:
+                expires_at = _parse_datetime(expires_at_iso)
+            except ValueError:
+                pass
+        if expires_at is not None and (
+            (expires_at.tzinfo is None) != (self.now().tzinfo is None)
+        ):
+            # Incomparable clocks cannot drive deadline checks. Keep the flow
+            # identity so provider status can still reconcile the hold.
+            expires_at = None
         self._native_slot_reservations[vendor] = _NativeSlotReservation(
             source_id,
             expires_at,
@@ -756,12 +760,9 @@ class ModelHubService:
         vendor: str,
     ) -> None:
         reservation = self._native_slot_reservations.get(vendor)
-        if reservation is None or reservation.expires_at is None:
+        if reservation is None or reservation.flow_id is None:
             return
-        if reservation.expires_at > self.now():
-            return
-        if reservation.flow_id is None:
-            self._release_native_slot(vendor, reservation.source_id)
+        if reservation.expires_at is not None and reservation.expires_at > self.now():
             return
         try:
             flow = await self._oauth_status(reservation.flow_id, "native_cli")
@@ -773,12 +774,17 @@ class ModelHubService:
             self._release_native_slot(vendor, reservation.source_id)
             return
         if flow.state == "success":
-            binding = self._oauth_binding(reservation.flow_id)
-            await self._materialize_completed_oauth(
-                reservation.flow_id,
-                binding,
-                flow,
-            )
+            try:
+                binding = self._oauth_binding(reservation.flow_id)
+                await self._materialize_completed_oauth(
+                    reservation.flow_id,
+                    binding,
+                    flow,
+                )
+            except ModelHubError:
+                # A flow that completed without a durable binding cannot be
+                # safely replaced. Keep the reservation fail-closed.
+                return
 
     def _release_native_slot(
         self,
@@ -1101,14 +1107,15 @@ class ModelHubService:
         self,
         flow: OAuthFlowState,
         channel: OAuthChannel,
-    ) -> None:
+    ) -> bool:
         if channel == "hub":
             await self._discard_unbound_hub_flow(flow)
-            return
+            return True
         try:
             await self.native_oauth_adapter.cancel_oauth(flow.flow_id)
         except Exception:
-            pass
+            return False
+        return True
 
     async def _discover(self, source: ModelHubSourceConfig) -> list[str]:
         if not source.credential_ref:
@@ -1603,6 +1610,7 @@ class ModelHubService:
             rollback_credential_ref: Optional[str] = None
             source_id = ""
             persisted = False
+            native_slot_safe = False
             try:
                 binding = self._oauth_binding(oauth_ref)
                 if binding.channel != channel:
@@ -1630,6 +1638,7 @@ class ModelHubService:
                         self.oauth_flows.complete(oauth_ref)
                     except (KeyError, OSError):
                         pass
+                    native_slot_safe = True
                     return existing.to_payload()
                 if existing is not None:
                     raise ModelHubError("migration_item_conflict", status=409)
@@ -1640,7 +1649,13 @@ class ModelHubService:
                         # committed. Re-check under the mutation lock and clean
                         # the losing native flow before surfacing the singleton
                         # conflict, so it cannot materialize a second Source.
-                        await self._discard_started_oauth_flow(flow, channel)
+                        cleanup_confirmed = await self._discard_started_oauth_flow(
+                            flow,
+                            channel,
+                        )
+                        if not cleanup_confirmed:
+                            raise ModelHubError("engine_down", status=503)
+                        native_slot_safe = True
                         try:
                             self.oauth_flows.forget(oauth_ref)
                         except OSError:
@@ -1743,6 +1758,7 @@ class ModelHubService:
                     previous=previous,
                 )
                 persisted = True
+                native_slot_safe = True
                 try:
                     self.oauth_flows.complete(oauth_ref)
                 except (KeyError, OSError):
@@ -1778,10 +1794,10 @@ class ModelHubService:
                         pass
                 raise
             finally:
-                if channel == "native_cli" and source_id:
-                    # The flow has consumed its authorization either way: on
-                    # success the persisted Source now holds the singleton, and
-                    # on failure nothing of this flow can reach the CLI again.
+                if channel == "native_cli" and source_id and native_slot_safe:
+                    # Release only after the Source is durable or provider
+                    # cleanup is confirmed. A materialization failure leaves
+                    # the provider-owned reservation fail-closed.
                     self._release_native_slot(vendor, source_id)
 
     @staticmethod
@@ -4055,6 +4071,7 @@ class ModelHubService:
             pending_source_id = reserved_source_id or _source_id()
             flow: OAuthFlowState | None = None
             flow_cleanup_done = False
+            flow_cleanup_attempted = False
             try:
                 flow = await self._oauth_call(
                     self._oauth_adapter(oauth_channel).start_oauth(
@@ -4062,13 +4079,32 @@ class ModelHubService:
                         vendor,
                     )
                 )
+                # Bind the provider flow before validating its echoed
+                # identity. If cleanup of a malformed response fails, the
+                # reservation still carries the flow ID for reconciliation.
+                self._hold_native_slot_until(
+                    vendor,
+                    reserved_source_id,
+                    flow.expires_at_iso,
+                    flow.flow_id,
+                )
                 if flow.source_id != pending_source_id or flow.vendor != vendor:
-                    await self._discard_started_oauth_flow(flow, oauth_channel)
-                    flow_cleanup_done = True
+                    flow_cleanup_attempted = True
+                    flow_cleanup_done = await self._discard_started_oauth_flow(
+                        flow,
+                        oauth_channel,
+                    )
+                    if not flow_cleanup_done:
+                        raise ModelHubError("engine_down", status=503)
                     raise ModelHubError("flow_not_found", status=502)
                 if client_nonce is not None and flow.expires_at_iso is None:
-                    await self._discard_started_oauth_flow(flow, oauth_channel)
-                    flow_cleanup_done = True
+                    flow_cleanup_attempted = True
+                    flow_cleanup_done = await self._discard_started_oauth_flow(
+                        flow,
+                        oauth_channel,
+                    )
+                    if not flow_cleanup_done:
+                        raise ModelHubError("engine_down", status=503)
                     raise ModelHubError("flow_not_found", status=502)
                 self.oauth_flows.remember(
                     flow.flow_id,
@@ -4080,21 +4116,16 @@ class ModelHubService:
                         flow.expires_at_iso if client_nonce is not None else None
                     ),
                 )
-                # The flow now owns the slot, so bind the hold to the deadline
-                # after which the provider can no longer reach the CLI.
-                self._hold_native_slot_until(
-                    vendor,
-                    reserved_source_id,
-                    flow.expires_at_iso,
-                    flow.flow_id,
-                )
             except BaseException as error:
-                # The start never reached a live flow, so nothing of this
-                # request can still overwrite the shared CLI credential.
-                self._release_native_slot(vendor, reserved_source_id)
+                cleanup_confirmed = flow is None or flow_cleanup_done
                 try:
-                    if flow is not None and not flow_cleanup_done:
-                        await self._discard_started_oauth_flow(
+                    if (
+                        flow is not None
+                        and not flow_cleanup_done
+                        and not flow_cleanup_attempted
+                    ):
+                        flow_cleanup_attempted = True
+                        cleanup_confirmed = await self._discard_started_oauth_flow(
                             flow,
                             oauth_channel,
                         )
@@ -4104,6 +4135,8 @@ class ModelHubService:
                     if not isinstance(error, asyncio.CancelledError):
                         raise ModelHubError("engine_down", status=503) from None
                 finally:
+                    if cleanup_confirmed:
+                        self._release_native_slot(vendor, reserved_source_id)
                     if client_nonce is not None:
                         try:
                             self.oauth_flows.release_nonce(
