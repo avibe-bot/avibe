@@ -1006,6 +1006,7 @@ class MemoryModule:
         ):
             return OperationFailed(error="memory_provider_response_invalid")
         total_bytes = 0
+        seen_ids: set[str] = set()
         previous_instant: datetime | None = None
         for item in result.items:
             instant = _list_timestamp_instant(item.timestamp) if isinstance(
@@ -1017,6 +1018,7 @@ class MemoryModule:
                 or item.kind != "episode"
                 or item.project != project_id
                 or not _valid_list_identifier(item.id)
+                or item.id in seen_ids
                 or instant is None
                 or (
                     previous_instant is not None
@@ -1024,6 +1026,7 @@ class MemoryModule:
                 )
             ):
                 return OperationFailed(error="memory_provider_response_invalid")
+            seen_ids.add(item.id)
             previous_instant = instant
             for value, allow_empty in (
                 (item.subject, True),
@@ -1229,9 +1232,9 @@ def _list_timestamp_instant(value: object) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
         return None
-    return parsed.astimezone(timezone.utc)
 
 
 def _profile_bytes(profile: object) -> int | None:

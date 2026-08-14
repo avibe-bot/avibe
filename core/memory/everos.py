@@ -1130,6 +1130,8 @@ def _map_episode_page(
         )
         for episode in episodes
     )
+    if len({item.id for item in items}) != len(items):
+        raise MemoryProviderFailure("memory_provider_response_invalid")
     timestamps = tuple(
         datetime.fromisoformat(item.timestamp.replace("Z", "+00:00"))
         for item in items
@@ -1336,7 +1338,8 @@ def _safe_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     text = value.strip()
-    if not text or len(text.encode("utf-8")) > _MAX_ITEM_BYTES:
+    raw = _utf8_bytes(text)
+    if not text or raw is None or len(raw) > _MAX_ITEM_BYTES:
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
         return None
@@ -1347,7 +1350,12 @@ def _safe_list_text(value: Any, *, allow_empty: bool) -> str | None:
     if not isinstance(value, str):
         return None
     text = value.strip()
-    if (not allow_empty and not text) or len(text.encode("utf-8")) > _MAX_ITEM_BYTES:
+    raw = _utf8_bytes(text)
+    if (
+        (not allow_empty and not text)
+        or raw is None
+        or len(raw) > _MAX_ITEM_BYTES
+    ):
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
         return None
@@ -1398,8 +1406,11 @@ def _record_timestamp(value: Any) -> str | None:
 def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
     if depth > _MAX_RESPONSE_DEPTH:
         return False
-    if value is None or isinstance(value, (str, bool)):
-        return not isinstance(value, str) or len(value.encode("utf-8")) <= _MAX_ITEM_BYTES
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        raw = _utf8_bytes(value)
+        return raw is not None and len(raw) <= _MAX_ITEM_BYTES
     if isinstance(value, (int, float)):
         return not isinstance(value, float) or math.isfinite(value)
     if isinstance(value, list):
@@ -1409,7 +1420,8 @@ def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
     if isinstance(value, dict):
         return len(value) <= _MAX_RESPONSE_COLLECTION and all(
             isinstance(key, str)
-            and len(key.encode("utf-8")) <= 128
+            and (raw := _utf8_bytes(key)) is not None
+            and len(raw) <= 128
             and _is_bounded_json_value(item, depth=depth + 1)
             for key, item in value.items()
         )
@@ -1480,7 +1492,9 @@ def _optional_string(value: str | None) -> str | None:
 def _bounded_opaque_string(value: object, *, max_bytes: int = 128) -> str | None:
     if not isinstance(value, str):
         return None
-    raw = value.encode("utf-8")
+    raw = _utf8_bytes(value)
+    if raw is None:
+        return None
     if len(raw) <= max_bytes:
         return value
     return raw[:max_bytes].decode("utf-8", errors="ignore")
@@ -1489,7 +1503,15 @@ def _bounded_opaque_string(value: object, *, max_bytes: int = 128) -> str | None
 def _strict_receipt_id(value: object, *, max_bytes: int = 128) -> str | None:
     if not isinstance(value, str):
         return None
-    return value if len(value.encode("utf-8")) <= max_bytes else None
+    raw = _utf8_bytes(value)
+    return value if raw is not None and len(raw) <= max_bytes else None
+
+
+def _utf8_bytes(value: str) -> bytes | None:
+    try:
+        return value.encode("utf-8")
+    except UnicodeError:
+        return None
 
 
 def _optional_json_object(raw: bytes | None) -> dict[str, Any] | None:

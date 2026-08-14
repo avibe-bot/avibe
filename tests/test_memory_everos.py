@@ -931,6 +931,11 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
         lambda data: data.update(episodes=[], count=0, total_count=1),
         lambda data: data["profiles"].append({"profile_data": {}}),
         lambda data: data["episodes"][0].update(timestamp="not-a-timestamp"),
+        lambda data: data["episodes"][0].update(summary="\ud800"),
+        lambda data: (
+            data["episodes"].append(dict(data["episodes"][0])),
+            data.update(total_count=2, count=2),
+        ),
     ],
 )
 def test_list_episodes_rejects_cross_scope_or_malformed_envelopes(mutation) -> None:
@@ -959,7 +964,15 @@ def test_list_episodes_rejects_cross_scope_or_malformed_envelopes(mutation) -> N
     mutation(data)
 
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"request_id": "request", "data": data})
+        body = json.dumps(
+            {"request_id": "request", "data": data},
+            ensure_ascii=True,
+        ).encode("ascii")
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        )
 
     async def run() -> None:
         with pytest.raises(MemoryProviderFailure) as raised:

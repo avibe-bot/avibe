@@ -709,6 +709,30 @@ async def test_list_episodes_rejects_nonempty_page_beyond_total_count(
             total_count=1,
             status="failed",  # type: ignore[arg-type]
         ),
+        MemoryListPage(
+            items=(
+                MemoryListItem(
+                    id="duplicate-id",
+                    subject="Subject",
+                    summary="Summary",
+                    body="Processed body one",
+                    timestamp="2026-08-14T02:11:12Z",
+                    project="notes",
+                ),
+                MemoryListItem(
+                    id="duplicate-id",
+                    subject="Subject",
+                    summary="Summary",
+                    body="Processed body two",
+                    timestamp="2026-08-14T02:11:11Z",
+                    project="notes",
+                ),
+            ),
+            page=1,
+            page_size=20,
+            count=2,
+            total_count=2,
+        ),
     ],
 )
 async def test_list_episodes_rejects_invalid_page_envelope(
@@ -754,6 +778,16 @@ async def test_list_episodes_rejects_invalid_page_envelope(
                 summary="Summary",
                 body="Processed body",
                 timestamp="2026-W33-5T02:11:12+00:00",
+                project="notes",
+            ),
+        ),
+        (
+            MemoryListItem(
+                id="overflowing-offset",
+                subject="Subject",
+                summary="Summary",
+                body="Processed body",
+                timestamp="0001-01-01T00:00:00+23:59",
                 project="notes",
             ),
         ),
