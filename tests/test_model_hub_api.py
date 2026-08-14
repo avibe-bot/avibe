@@ -1265,33 +1265,24 @@ def test_restarted_native_oauth_materialization_keeps_singleton_source(tmp_path)
             now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
             requested_model_override=store.requested_model,
         )
-        second = (
+        with pytest.raises(ModelHubError) as rejected:
             await restarted.oauth_start(
                 {"vendor": "anthropic", "channel": "native_cli"}
             )
-        )["flow"]
-        for flow in (first, second):
-            adapter.flows[flow["flow_id"]] = OAuthFlowState(
-                **{**adapter.flows[flow["flow_id"]].__dict__, "state": "success"}
-            )
-        results = await asyncio.gather(
-            restarted.oauth_status(first["flow_id"]),
-            restarted.oauth_status(second["flow_id"]),
-            return_exceptions=True,
+        adapter.flows[first["flow_id"]] = OAuthFlowState(
+            **{**adapter.flows[first["flow_id"]].__dict__, "state": "success"}
         )
-        return results, store, adapter, first, second
+        completed = await restarted.oauth_status(first["flow_id"])
+        return rejected.value, completed, store, adapter, first
 
-    results, store, adapter, first, second = asyncio.run(run_race())
+    rejected, completed, store, adapter, first = asyncio.run(run_race())
 
-    assert sum(isinstance(result, dict) for result in results) == 1
-    failures = [result for result in results if isinstance(result, ModelHubError)]
-    assert len(failures) == 1
-    assert failures[0].code == "native_source_already_exists"
-    assert failures[0].data["existing_source_id"] == store.config.sources[0].id
+    assert rejected.code == "native_source_already_exists"
+    assert rejected.data == {"existing_source_id": first["source_id"]}
+    assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
+    assert completed["flow"]["state"] == "success"
     assert len(store.config.sources) == 1
-    winner = next(result for result in results if isinstance(result, dict))
-    loser = second["flow_id"] if winner["flow"]["flow_id"] == first["flow_id"] else first["flow_id"]
-    assert adapter.cancelled == [loser]
+    assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
 
 
 def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):

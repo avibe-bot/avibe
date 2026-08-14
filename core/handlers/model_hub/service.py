@@ -291,6 +291,8 @@ class _NativeSlotReservation:
 
     source_id: str
     expires_at: datetime | None = None
+    flow_id: str | None = None
+    reconstructed: bool = False
 
 
 HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
@@ -597,6 +599,7 @@ class ModelHubService:
         # this in memory is deliberate — a restart ends every in-flight flow it
         # describes, and the materialization re-check remains the backstop.
         self._native_slot_reservations: dict[str, _NativeSlotReservation] = {}
+        self._rebuild_native_slot_reservations()
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
@@ -668,30 +671,63 @@ class ModelHubService:
         reservation = self._native_slot_reservations.get(vendor)
         if reservation is None:
             return None
-        if reservation.expires_at is not None and reservation.expires_at <= self.now():
-            # The provider flow can no longer complete, so nothing can still
-            # overwrite the shared credential even though no terminal
-            # transition was ever observed for it.
-            self._native_slot_reservations.pop(vendor, None)
-            return None
         return reservation
 
-    def _reserve_native_slot(self, vendor: str, source_id: str) -> None:
-        self._native_slot_reservations[vendor] = _NativeSlotReservation(source_id)
+    def _reserve_native_slot(
+        self,
+        vendor: str,
+        source_id: str,
+        *,
+        flow_id: str | None = None,
+    ) -> None:
+        self._native_slot_reservations[vendor] = _NativeSlotReservation(
+            source_id,
+            flow_id=flow_id,
+        )
+
+    def _rebuild_native_slot_reservations(self) -> None:
+        """Recover native create holds from the durable OAuth binding journal."""
+
+        try:
+            bindings = self.oauth_flows._read()
+        except (AttributeError, OSError, ValueError):
+            return
+        for flow_id, binding in bindings.items():
+            if (
+                binding.channel != "native_cli"
+                or binding.intent != "create"
+                or binding.completed
+                or binding.terminal_state is not None
+                or binding.vendor is None
+                or binding.source_id is None
+                or self._existing_native_source(self.store.load(), binding.vendor)
+                is not None
+            ):
+                continue
+            # The registry preserves insertion order; the newest pending flow
+            # is the only one that can own a vendor's singleton.
+            self._native_slot_reservations[binding.vendor] = _NativeSlotReservation(
+                binding.source_id,
+                _parse_datetime(binding.expires_at_iso)
+                if binding.expires_at_iso
+                else None,
+                flow_id,
+                True,
+            )
 
     def _hold_native_slot_until(
         self,
         vendor: str,
         source_id: str | None,
         expires_at_iso: str | None,
+        flow_id: str | None = None,
     ) -> None:
         """Bind a held reservation to the started flow's own deadline."""
 
         if source_id is None or expires_at_iso is None:
             return
-        if self._native_slot_reservations.get(vendor) != _NativeSlotReservation(
-            source_id
-        ):
+        reservation = self._native_slot_reservations.get(vendor)
+        if reservation is None or reservation.source_id != source_id:
             return
         try:
             expires_at = _parse_datetime(expires_at_iso)
@@ -704,7 +740,38 @@ class ModelHubService:
         self._native_slot_reservations[vendor] = _NativeSlotReservation(
             source_id,
             expires_at,
+            flow_id or reservation.flow_id,
+            reservation.reconstructed,
         )
+
+    async def _refresh_expired_native_slot_reservation(
+        self,
+        vendor: str,
+    ) -> None:
+        reservation = self._native_slot_reservations.get(vendor)
+        if reservation is None or reservation.expires_at is None:
+            return
+        if reservation.expires_at > self.now():
+            return
+        if reservation.flow_id is None or not reservation.reconstructed:
+            self._release_native_slot(vendor, reservation.source_id)
+            return
+        try:
+            flow = await self._oauth_status(reservation.flow_id, "native_cli")
+        except ModelHubError:
+            # An unavailable provider cannot prove that the CLI credential is
+            # safe to replace. Keep the hold until a terminal status is known.
+            return
+        if flow.state in {"failed", "cancelled"}:
+            self._release_native_slot(vendor, reservation.source_id)
+            return
+        if flow.state == "success":
+            binding = self._oauth_binding(reservation.flow_id)
+            await self._materialize_completed_oauth(
+                reservation.flow_id,
+                binding,
+                flow,
+            )
 
     def _release_native_slot(
         self,
@@ -3947,6 +4014,7 @@ class ModelHubService:
 
         reserved_source_id: str | None = None
         if oauth_channel == "native_cli":
+            await self._refresh_expired_native_slot_reservation(vendor)
             existing = self._existing_native_source(self.store.load(), vendor)
             reserved = self._native_slot_reservation(vendor)
             if existing is not None or reserved is not None:
@@ -4013,6 +4081,7 @@ class ModelHubService:
                     vendor,
                     reserved_source_id,
                     flow.expires_at_iso,
+                    flow.flow_id,
                 )
             except BaseException as error:
                 # The start never reached a live flow, so nothing of this
