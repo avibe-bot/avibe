@@ -2937,6 +2937,73 @@ def test_native_session_id_is_write_once_by_anchor(tmp_path: Path) -> None:
         service.close()
 
 
+def test_replace_agent_session_native_supersedes_binding_without_changing_public_session(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = service.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="opencode",
+            session_anchor="slack_C123",
+            native_session_id="native-wrapped",
+        )
+        assert session_id is not None
+
+        replaced = service.replace_agent_session_native(
+            session_id=session_id,
+            expected_native_session_id="native-wrapped",
+            replacement_native_session_id="native-repaired",
+        )
+
+        assert replaced == session_id
+        active = service.get_agent_session_by_id(session_id)
+        assert active is not None
+        assert active["session_anchor"] == "slack_C123"
+        assert active["native_session_id"] == "native-repaired"
+        assert service.find_session_for_anchor(
+            scope_key="slack::channel::C123",
+            session_anchor="slack_C123",
+        )["id"] == session_id
+        with service.engine.connect() as conn:
+            snapshots = conn.execute(
+                select(agent_sessions)
+                .where(agent_sessions.c.id != session_id)
+                .where(agent_sessions.c.session_anchor.like("slack_C123:superseded:%"))
+            ).mappings().all()
+        assert len(snapshots) == 1
+        assert snapshots[0]["native_session_id"] == "native-wrapped"
+        assert snapshots[0]["status"] == "archived"
+        assert snapshots[0]["visibility"] == "background"
+    finally:
+        service.close()
+
+
+def test_replace_agent_session_native_refuses_stale_expected_binding(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = service.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="opencode",
+            session_anchor="slack_C123",
+            native_session_id="native-current",
+        )
+        assert session_id is not None
+
+        assert service.replace_agent_session_native(
+            session_id=session_id,
+            expected_native_session_id="native-stale",
+            replacement_native_session_id="native-repaired",
+        ) is None
+        assert service.get_agent_session_by_id(session_id)["native_session_id"] == "native-current"
+        with service.engine.connect() as conn:
+            assert conn.execute(select(agent_sessions.c.id)).all() == [(session_id,)]
+    finally:
+        service.close()
+
+
 def test_sqlite_sessions_service_delete_agent_sessions_escapes_anchor_prefix(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -6739,6 +6806,12 @@ _MARKER_EXEMPT_ROUTE_WRITE_SITES = {
         "save_state": (
             "legacy import: the detected site is the INSERT path, and the upsert's "
             "set_ excludes both pinnable columns (see the note on its backend relabel)"
+        ),
+        # Native repair snapshot: the INSERT copies the old binding's complete
+        # route and metadata marker unchanged into an inert superseded row. The
+        # active-row UPDATE changes only native_session_id and timestamps.
+        "replace_agent_session_native": (
+            "native repair snapshot: route and marker are copied together unchanged"
         ),
     },
 }

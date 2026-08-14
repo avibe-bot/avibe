@@ -451,6 +451,29 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             {"x-opencode-directory": "/tmp/%E5%B0%8F%E8%AF%B4"},
         )
 
+    async def test_get_version_uses_health_endpoint(self):
+        class _HealthSession(_FakeSession):
+            def get(self, url, headers=None, timeout=None):
+                self.gets.append({"url": url, "headers": headers, "timeout": timeout})
+                return _FakeResponse(
+                    status=200,
+                    json_data={"healthy": True, "version": "1.18.5"},
+                )
+
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _HealthSession()
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        with patch.object(SERVER_MODULE.aiohttp, "ClientTimeout", return_value=object()):
+            version = await manager.get_version()
+
+        self.assertEqual(version, "1.18.5")
+        self.assertEqual(fake_session.gets[0]["url"], "http://127.0.0.1:4096/global/health")
+
     async def test_prompt_async_includes_tools_when_provided(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()
