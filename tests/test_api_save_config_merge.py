@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.v2_config import UiConfig, V2Config, VibeCloudRemoteAccessConfig
+from config.v2_config import AudioAsrConfig, UiConfig, V2Config, VibeCloudRemoteAccessConfig
 from core.audio_asr import AudioAsrService
 from vibe import api, remote_access
 
@@ -1210,6 +1210,59 @@ def test_malformed_cloud_section_disables_pairing_instead_of_failing_reads(tmp_p
     ]
     assert left == []
     _assert_degrades(config)
+
+
+def test_malformed_asr_switches_keep_the_surface_and_the_runtime_in_step(tmp_path, monkeypatch):
+    """An ASR switch is a boolean, so what Settings shows is what ASR does.
+
+    Seeded over every field the dataclass declares as ``bool`` and over the
+    JSON values that are not booleans, rather than over the three switches and
+    the falsy shapes a review happened to name: the section is copied verbatim
+    out of the posted or stored payload, and an Editor may now write it, so
+    the shape nobody enumerated is exactly the one that would slip through.
+
+    The defect is a disagreement, not a bad value. The Settings pages read
+    ``value !== false`` as on while ``AudioAsrService`` reads the same value
+    for truth, so a stored ``[]`` renders ASR as enabled while transcription
+    is off. Asserting that agreement rather than the constant it falls back to
+    keeps the test true if the fallback ever changes.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    boolean_fields = [info.name for info in fields(AudioAsrConfig) if info.type in (bool, "bool")]
+    assert boolean_fields
+
+    def _load(audio_asr: dict) -> V2Config:
+        payload = _full_config_payload()
+        payload["remote_access"] = {
+            "provider": "vibe_cloud",
+            "vibe_cloud": {
+                "enabled": True,
+                "backend_url": "https://avibe.bot",
+                "instance_id": "inst_123",
+                "instance_secret": "instance-secret",
+            },
+        }
+        payload["audio_asr"] = audio_asr
+        return V2Config.from_payload(payload)
+
+    for value in ([], [1], {}, "", "yes", 0, 1, 1.0, None):
+        config = _load({name: value for name in boolean_fields})
+        stored = config.audio_asr
+        assert [name for name in boolean_fields if not isinstance(getattr(stored, name), bool)] == [], value
+
+        projected = api.non_owner_config_payload(config)["audio_asr"]
+        # ``enabled !== false`` is what the shared Settings pages render.
+        assert AudioAsrService(config).is_available() is (projected["enabled"] is not False), value
+
+    # A switch that really is a boolean is still persisted as posted, so the
+    # agreement above cannot be produced by a route that forces one answer.
+    honest = _load({"enabled": False, "echo_transcript": False, "enabled_configured": True})
+    assert api.non_owner_config_payload(honest)["audio_asr"] == {
+        "enabled": False,
+        "echo_transcript": False,
+        "enabled_configured": True,
+    }
+    assert AudioAsrService(honest).is_available() is False
 
 
 def test_editor_config_write_payload_keeps_messaging_fields_only():

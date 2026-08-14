@@ -1383,6 +1383,38 @@ class AudioAsrConfig:
     model: str = "qwen3-asr-flash"
     max_file_bytes: Optional[int] = None
 
+    def __post_init__(self) -> None:
+        """Keep every field declared ``bool`` a boolean, whatever was written.
+
+        ``from_payload`` copies this section's switches verbatim while it
+        already normalises the scalars beside them, and an Editor may now
+        persist the section, so a stale client or a hand-edited config can put
+        ``[]`` where a switch belongs. Nothing further down coerces it: the
+        Settings pages read ``value !== false`` as on while
+        ``AudioAsrService`` reads the same value for truth, so ASR renders as
+        enabled while transcription is off — the surface and the runtime
+        disagreeing about one stored value.
+
+        Stated over the declared fields rather than over the three switches
+        that exist today, so a boolean added later is covered without editing
+        this method. A non-boolean is not a usable switch, so it falls back to
+        the declared default and is logged, matching the sibling scalars in
+        ``from_payload`` rather than rejecting the rest of the patch.
+        """
+        defaults = {info.name: info.default for info in fields(self)}
+        dropped = [
+            info.name
+            for info in fields(self)
+            if info.type in (bool, "bool") and not isinstance(getattr(self, info.name), bool)
+        ]
+        for name in dropped:
+            setattr(self, name, defaults[name])
+        if dropped:
+            logger.warning(
+                "Ignoring non-boolean audio_asr fields: %s",
+                ", ".join(sorted(dropped)),
+            )
+
 
 _MEMORY_MAX_URL_BYTES = 2048
 _MEMORY_MAX_MODEL_BYTES = 512
