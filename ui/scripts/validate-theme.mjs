@@ -515,7 +515,15 @@ const ACCENT_NAMES = ACCENT_FILLS.map((fill) => fill.slice(2));
 // what separates --mint from --mint-ink. Parsing the argument would have to survive nested
 // parens (`var(--mint, rgb(0 0 0))`) and a second comma level, and every version of that
 // is another CSS parser living inside a lookahead.
-const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*(?=[,)])`);
+//
+// One source for the boundary, parameterised by which names to capture, because round 8
+// found the same fallback hole a second time in the CSS alias resolver: that pattern was
+// written independently, required `)` immediately, and so read `--wire: var(--mint, #fff)`
+// as reaching no accent at all. Two predicates answering "does this reference name X" is
+// the defect; the alternation is the only thing that legitimately differs between them.
+const varReferenceSource = (names) => `var\\(\\s*--(${names})\\s*(?=[,)])`;
+const BARE_ACCENT_VAR = new RegExp(varReferenceSource(ACCENT_NAMES.join('|')));
+const anyVarReference = () => new RegExp(varReferenceSource('[\\w-]+'), 'g');
 
 // A wash is not exempt because of what its value looks like. It is exempt because
 // someone decided this hairline is decoration, and wrote that down here.
@@ -541,8 +549,27 @@ const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*(
 // for a declaration the construct is its value, together with the accents that value
 // can reach. Retinting a pinned wash now fails twice over, as an unpinned mark and as
 // a stale pin, and the error prints the key to re-pin with.
+// Round 8 widened the scanned properties from stroke/fill to the backgrounds as well, and
+// this map grew from 1 entry to 8. All seven new ones are 7.8-14.1% color-mix washes, so the
+// widening moved no pixels; what it closes is the next OPAQUE `background: var(--mint)`,
+// which until now was the one spelling of an unlabeled accent fill that no scan could see.
+//
+// Eight pins is still the bargain this map was built for, an order of magnitude under the
+// ~370 sites that made the Tailwind half use a threshold instead. Two shapes recur, and both
+// are undecidable here rather than wrong: a label declared on a DIFFERENT rule that happens
+// to match the same element (`class="strip strip--error"`), and a label on a child. The
+// stylesheet's own `--success` strip pairs `color: var(--mint-ink)` in-rule, which is what
+// makes the same-rule rule the idiom rather than an imposition -- and each pin below names
+// which of the two it is, so re-pinning is a decision and not a formality.
 const ACCEPTED_ACCENT_WASHES = new Map([
   ['model hub .model-hub-rail-line stroke: color-mix(in srgb, var(--mint) 20%, transparent) -> mint', 'decorative rail behind the wires: a 20% tint, not a mark -- the wires it sits under carry the meaning'],
+  ['model hub .model-hub-accent-tile--cyan background: var(--model-hub-cyan-1a) -> cyan', 'icon tile: a 10.2% wash behind a glyph the consuming element tints itself, so nothing is read off the tile'],
+  ['model hub .model-hub-accent-tile--mint background: var(--model-hub-mint-1a) -> mint', 'icon tile: a 10.2% wash behind a glyph the consuming element tints itself, so nothing is read off the tile'],
+  ['model hub .model-hub-accent-tile--gold background: var(--model-hub-gold-1a) -> gold', 'icon tile: a 10.2% wash behind a glyph the consuming element tints itself, so nothing is read off the tile'],
+  ['model hub .model-hub-accent-tile--violet background: var(--model-hub-violet-24) -> violet', 'icon tile: a 14.1% wash behind a glyph the consuming element tints itself, so nothing is read off the tile'],
+  ['model hub .model-hub-add-key-strip--error background: var(--model-hub-add-key-error-fill) -> destructive', 'advisory strip: a 7.8% wash whose text colour is declared on the base .model-hub-add-key-strip rule, which this file cannot prove co-occurs'],
+  ['model hub .model-hub-add-key-strip--advisory background: var(--model-hub-add-key-advisory-fill) -> gold', 'advisory strip: a 7.8% wash whose text colour is declared on the base .model-hub-add-key-strip rule, which this file cannot prove co-occurs'],
+  ['model hub .model-hub-adopt-failure background: var(--model-hub-danger-fill) -> destructive', 'failure banner: a 7.8% wash whose label lives on the child selectors (> svg, span span), which is not an accepted pairing scope'],
 ]);
 
 // What a declaration actually paints. A custom property is not a colour, it is a name
@@ -601,11 +628,11 @@ function accentAliasIndex(...sources) {
 
   function accentsOfValue(value) {
     const found = new Set();
-    for (const [, name] of value.matchAll(/var\(\s*(--[\w-]+)\s*\)/g)) {
-      if (ACCENT_NAMES.includes(name.slice(2))) {
-        found.add(name.slice(2));
+    for (const [, name] of value.matchAll(anyVarReference())) {
+      if (ACCENT_NAMES.includes(name)) {
+        found.add(name);
       } else {
-        for (const accent of accentsOfName(name)) {
+        for (const accent of accentsOfName(`--${name}`)) {
           found.add(accent);
         }
       }
@@ -616,12 +643,67 @@ function accentAliasIndex(...sources) {
   return accentsOfValue;
 }
 
+// What a CSS property paints, which is the CSS half of the same split MARK_UTILITIES and
+// INK_UTILITIES make on the Tailwind side. It was two property names compared inline --
+// `stroke` and `fill` -- and round 8 found the hole that shape guarantees: `background:
+// var(--mint)` in a stylesheet paints the identical pixels `bg-mint` does in a class
+// string, and the CSS half could not see it. An enumeration written at the comparison
+// site is only ever as complete as the round that wrote it; a table can be asserted.
+//
+//   canvas   -- a mark with nothing printed on it. A stroke or an SVG fill is read
+//               straight off the surface, so no pairing can license a vivid accent and
+//               the answer is always the ink (or a written pin).
+//   labelled -- an area a label can sit on. Same question as `bg-`: cleared by a legible
+//               label in the same rule, otherwise pinned.
+//   glyph    -- the label itself. Nothing sits on top of text, so like `text-mint` it
+//               takes the ink and takes no pairing.
+//
+// Hairlines (`border-color`, `outline-color`, `box-shadow`, `border`) are deliberately
+// absent for the same measured reason `border-` is absent from MARK_UTILITIES: whether a
+// 1px accent border needs the ink is design.pen's open question, recorded in the PR
+// ledger. Absence here means out of scope, and CSS_PAINT_SPELLINGS pins that meaning down
+// so a property cannot fall out of scope by never having been thought of.
+const CSS_PAINTED_SURFACE = new Map([
+  ['stroke', 'canvas'],
+  ['fill', 'canvas'],
+  ['background', 'labelled'],
+  ['background-color', 'labelled'],
+  ['background-image', 'labelled'],
+  ['color', 'glyph'],
+]);
+
+// The label side, in CSS. `color:` in the same rule paints the glyphs that sit on this
+// area, and both `--<accent>-ink` and `--<accent>-foreground` are tokens assertContrast
+// above already proves legible -- ink against the neutral surfaces, foreground against
+// the vivid fill. So a rule that paints an area with an accent and names one of them for
+// its text has stated the pairing, and the contrast of that token pair is a question this
+// file answers elsewhere rather than a second time here.
+//
+// Deliberately the same rule only, never a descendant selector. A label on a child is not
+// an accepted pairing scope on the Tailwind side either: proving `.tile p` covers `.tile`
+// means resolving the cascade and the DOM, and a guard that guesses at that clears marks
+// on the strength of a element it never saw.
+const cssLabelsTheArea = (rule, accent) => {
+  let labelled = false;
+  rule?.each?.((node) => {
+    if (node.type !== 'decl' || CSS_PAINTED_SURFACE.get(node.prop) !== 'glyph') {
+      return;
+    }
+    const value = normalizeCssValue(node.value);
+    if (new RegExp(varReferenceSource(`${accent}-(?:ink|foreground)`)).test(value)) {
+      labelled = true;
+    }
+  });
+  return labelled;
+};
+
 function assertMarksTakeTheInk(source, name, ...aliasSources) {
   const accentsOfValue = accentAliasIndex(source, ...aliasSources);
   const seen = new Set();
 
   postcss.parse(source).walkDecls((decl) => {
-    if (decl.prop !== 'stroke' && decl.prop !== 'fill') {
+    const paints = CSS_PAINTED_SURFACE.get(decl.prop);
+    if (paints === undefined) {
       return;
     }
 
@@ -631,7 +713,12 @@ function assertMarksTakeTheInk(source, name, ...aliasSources) {
       return;
     }
 
-    const selector = decl.selector ?? decl.parent?.selector;
+    const rule = decl.parent;
+    const selector = decl.selector ?? rule?.selector;
+    if (paints === 'labelled' && accents.every((accent) => cssLabelsTheArea(rule, accent))) {
+      return;
+    }
+
     // The pin names the declaration as written AND what it can reach. Value alone
     // would let `--wire: var(--mint-ink)` become `var(--mint)` under a pin granted to
     // the ink, since `stroke: var(--wire)` reads the same either way.
@@ -642,37 +729,25 @@ function assertMarksTakeTheInk(source, name, ...aliasSources) {
     }
 
     const direct = BARE_ACCENT_VAR.test(value);
+    const why = {
+      canvas: 'A stroke or an SVG fill is a mark on the bare canvas -- no label is printed on it, so the '
+        + 'pairing that licenses a vivid fill does not apply.',
+      labelled: 'Nothing in this rule prints a label on it: a paired label is a color declaration in this '
+        + 'same rule naming that accent\'s -ink or -foreground token. A label on a child element is not an accepted '
+        + 'scope -- proving it covers this area means resolving the cascade and the DOM.',
+      glyph: 'This IS the label -- and through currentColor so is every glyph under it -- so there is no '
+        + 'second token to pair it with.',
+    }[paints];
     throw new Error(
       `${name}: ${selector} paints ${decl.prop} with ${accents.map((accent) => `var(--${accent})`).join(' and ')}`
       + `, the fill${direct ? '' : ` -- reached through ${value}, in this file or a theme override of it`}. `
-      + 'A stroke or an SVG fill is a mark on the bare canvas -- no label is printed on it, so the '
-      + 'pairing that licenses a vivid fill does not apply. Use the -ink token, which is the same value '
+      + `${why} Use the -ink token, which is the same value `
       + 'in dark and a legible one in light. If this one is decoration rather than a mark, say so in '
       + `ACCEPTED_ACCENT_WASHES under '${key}' -- a translucent value is not evidence on its own.`,
     );
   });
 
   return seen;
-}
-
-// index.css comes in as a definition source, not as a scan target. A custom property is
-// global once it is on :root, so `--wire-color: var(--mint)` in the app stylesheet is
-// visible to `stroke: var(--wire-color)` here -- the browser resolves it across files and
-// an index built from this file alone would see no definition and clear the wire. The
-// union is the answer for the same reason it is within one file: the question is whether
-// ANY definition can put a bare accent on this stroke.
-const accentPaints = assertMarksTakeTheInk(modelHubCss, 'model hub', css);
-
-// A pin that outlives what it excused is a silent exemption, so every entry has to
-// match a declaration that is really there.
-for (const [key, reason] of ACCEPTED_ACCENT_WASHES) {
-  if (!accentPaints.has(key)) {
-    throw new Error(
-      `ACCEPTED_ACCENT_WASHES pins '${key}' (${reason}), but no stroke or fill paints that any more. `
-      + 'Drop the pin along with the declaration it was granted for -- or, if the declaration is still '
-      + 'there with a different value, re-pin the new one and re-read the reason against it.',
-    );
-  }
 }
 
 // The same rule in Tailwind: `bg-mint` on a 6px dot is a mark, `bg-mint` under a
@@ -682,9 +757,9 @@ for (const [key, reason] of ACCEPTED_ACCENT_WASHES) {
 //
 //   1. the same class string -- `bg-mint text-primary-foreground` (21 of the 23
 //      labelled fills in src/, including every cva variant in button-variants.ts)
-//   2. a sibling attribute or property of the same node -- an icon tile passes
+//   2. a sibling attribute of the same JSX element -- an icon tile passes
 //      `iconTileClassName="bg-gold"` beside `iconClassName="text-gold-foreground"`,
-//      and agentBackends.ts pairs `tileCls`/`iconCls` in one object literal
+//      and both land on one node
 //
 // and the label must also apply whenever the fill does. A label restricted to a state
 // the fill is not -- `bg-mint hover:text-primary-foreground` -- leaves the resting
@@ -703,6 +778,16 @@ for (const [key, reason] of ACCEPTED_ACCENT_WASHES) {
 // className="text-primary-foreground">`) is deliberately NOT a scope: no site needs it
 // today, and widening to a subtree would re-admit an unrelated nested label. Such a
 // site fails and is either merged into one class string or pinned below.
+//
+// An object literal used to be a third scope, and round 8 found it was the child scope
+// wearing different clothes. Two properties of one object are siblings in the source and
+// nothing more: `{ tileCls: 'bg-gold', iconCls: 'text-gold-foreground' }` is a PARENT and
+// its CHILD, since the consumer puts the tile class on the wrapper and the icon class on
+// the glyph inside it -- exactly the pairing the paragraph above refuses, admitted through
+// a syntactic side door. Worse, an object literal is also how mutually exclusive values are
+// written: a variant map's `success` and `danger` entries never render together, so one
+// entry's label could license another's fill. Both live shapes read as siblings, so the
+// scope is gone and the one site it carried is pinned below with what the consumer does.
 //
 // mint/cyan/pink declare no -foreground of their own; they print --primary-foreground
 // and --accent-foreground, the aliases SEMANTIC_FILL_ALIASES keeps equal. pink has no
@@ -743,6 +828,15 @@ const ACCEPTED_BARE_FILLS = new Map([
   ['src/components/steps/LarkConfig.tsx --mint', { reason: STEP_DOTS, marks: [`LarkConfig: ${STEP_DOT}`] }],
   ['src/components/steps/WeChatConfig.tsx --mint', { reason: STEP_DOTS, marks: [`WeChatConfig: ${STEP_DOT}`] }],
   ['src/components/visual/EmbeddedConfigShell.tsx --mint', { reason: STEP_DOTS, marks: [`EmbeddedConfigShell: ${STEP_DOT}`] }],
+  // Not control chrome. This is the one site the object-literal pairing scope was
+  // carrying, surfaced when round 8 closed that door: the Codex row pairs `tileCls:
+  // 'bg-gold'` with `iconCls: 'text-gold-foreground'`, which is a parent and its child,
+  // and the guard does not infer a child label at the element level either. The pairing
+  // is real -- the tile holds nothing but that icon -- so it is written here rather than
+  // derived from two neighbouring property names. Worth noting for design.pen: the other
+  // two backends give their tile a soft wash (bg-cyan-soft, bg-violet-soft) and only this
+  // one is a vivid fill, so the inconsistency is a design question, not a guard question.
+  ['src/lib/agentBackends.ts --gold', { reason: 'backend icon tile: the tile holds only the icon, which the neighbouring iconCls paints text-gold-foreground', marks: ['AGENT_BACKENDS: bg-gold'] }],
 ]);
 
 // What an exemption is bound to. Kept as one string so the pins above read as the
@@ -779,22 +873,24 @@ function classStrings(file, source) {
   }
   const strings = [];
 
-  // An object literal is a shared scope only when the class string is a property
-  // VALUE, which is what a config map looks like: `{ tileCls: 'bg-gold', iconCls:
-  // 'text-gold-foreground' }` describes one node, so the two pair. As a property KEY
-  // it is a clsx condition branch instead -- `clsx({ 'bg-mint': a, 'text-primary-
-  // foreground': b })` -- and branches that toggle independently are the opposite of
-  // evidence: the fill can render while the label's condition is false. Reading which
-  // side of the colon the string sits on separates them without an allowlist of
-  // helper names.
+  // One JSX element is a shared scope: its attributes are applied to the same node at the
+  // same time, which is what a pairing is a claim about.
+  //
+  // An object literal is not, and round 8 is where that came out. It was admitted for the
+  // config-map shape -- `{ tileCls: 'bg-gold', iconCls: 'text-gold-foreground' }` -- on the
+  // reading that such a map describes one node. Two things are wrong with it. A cva variant
+  // map is the identical syntax and means the opposite (`{ mint: 'bg-mint', ghost:
+  // 'text-foreground' }` are alternatives, never both), and telling the two apart means
+  // knowing what the consumer does with the object, which is not in the object. And even
+  // where the map really is a config map, `tileCls`/`iconCls` is a PARENT and its CHILD --
+  // so the rule was a side door into exactly the child-element pairing this guard refuses
+  // to infer at the element level. A property value now sees only itself; the one live site
+  // that relied on the door is pinned in ACCEPTED_BARE_FILLS, where the reasoning is
+  // written down instead of derived from a naming convention.
   const scopeOf = (node) => {
     const parent = node.parent;
     if (ts.isJsxAttribute(parent) || (ts.isJsxExpression(parent) && ts.isJsxAttribute(parent.parent))) {
       return ts.isJsxAttribute(parent) ? parent.parent : parent.parent.parent;
-    }
-    if (ts.isPropertyAssignment(parent) && parent.initializer === node
-      && ts.isObjectLiteralExpression(parent.parent)) {
-      return parent.parent;
     }
     return node;
   };
@@ -916,19 +1012,26 @@ const MARK_UTILITIES = ['bg', 'fill', 'stroke', 'from', 'via', 'to'];
 // is text, an underline is read as part of the glyphs it sits under, and a caret you
 // cannot find is a text field you cannot use. 0 sites today.
 //
-// The flag is which of them prints *glyphs*, because "is ink" and "can carry a label" are
+// The flag is which of them prints *the label*, because "is ink" and "can carry a label" are
 // two different questions and collapsing them opens the hole this file just closed on
 // `border-`: a `caret-primary-foreground` is a 1px bar, so licensing `bg-mint` with it
-// excuses the fill on the strength of something nobody reads a word off. Glyphs sit on
-// the fill and are read off it; a caret and an underline sit near text without being it.
+// excuses the fill on the strength of something nobody reads a word off. A label sits on
+// the fill and is read off it; a caret and an underline sit near text without being it.
+//
+// `placeholder-` prints real glyphs and still does not qualify, which is why the flag is
+// about the label rather than about glyphs. A placeholder is shown only while the field is
+// EMPTY, so it is precisely the text that is not there once there is text to read: pairing
+// it with a fill licenses that fill on the strength of something that disappears the moment
+// it would matter. The entered text takes its colour from `text-`, and that is the operand
+// this guard has to find.
 const INK_UTILITIES = new Map([
   ['text', true],
-  ['placeholder', true],
+  ['placeholder', false],
   ['decoration', false],
   ['caret', false],
 ]);
 const LABEL_UTILITIES = [...INK_UTILITIES]
-  .filter(([, printsGlyphs]) => printsGlyphs)
+  .filter(([, carriesTheLabel]) => carriesTheLabel)
   .map(([utility]) => utility);
 
 // `bg-mint/100` is not a wash. It is `bg-mint` spelled with a modifier -- same token,
@@ -958,17 +1061,26 @@ const LABEL_UTILITIES = [...INK_UTILITIES]
 // only half of one, because the same 1 that says "check this fill" also says "this label is
 // printed". That asymmetry is not hypothetical: reusing this number for the label is what
 // round 7 did, and it is exactly where the previous round's hole was.
+//
+// Which unit a modifier is in is decided by the brackets, not by the magnitude. Reading
+// `value > 1` as "this must be a percentage" was a guess that happens to be right for
+// every number Tailwind's own scale contains except one: `/1` is 1% on the opacity scale,
+// and the guess read it as fully opaque -- so `bg-mint/1`, an invisible tint, was checked
+// as the fill, and more to the point `text-primary-foreground/1` would have been ACCEPTED
+// as a printed label. Unbracketed is always the scale; only an arbitrary value can spell a
+// fraction, and there `/[0.5]` and `/[50%]` say which they are.
 const markAlpha = (modifier) => {
   if (!modifier) {
     return 1;
   }
+  const arbitrary = modifier.startsWith('/[');
   const raw = modifier.slice(1).replace(/^\[|\]$/g, '');
   const percent = raw.endsWith('%');
   const value = Number.parseFloat(percent ? raw.slice(0, -1) : raw);
   if (!Number.isFinite(value) || value < 0) {
     return null;
   }
-  return percent || value > 1 ? value / 100 : value;
+  return percent || !arbitrary ? value / 100 : value;
 };
 
 // Where a tint stops being a tint. The exemption above says a wash is not a mark -- it
@@ -1061,7 +1173,54 @@ const variantPrefix = (text, index) => {
 // translucent label carries a vivid fill is a design.pen question, and the answer is a pin
 // with a reason rather than a threshold quietly lowered to admit it. Nothing live is
 // affected: all 23 label sites in src/ are bare.
+// The unprefixed acceptance has a second condition, which round 8 found missing: an
+// unprefixed label is the label in EVERY state, including the ones a later variant
+// repaints. `bg-mint text-primary-foreground hover:text-muted` reads as paired, and on
+// hover the fill is still vivid mint while the glyphs on it are muted grey -- the exact
+// defect this file exists for, assembled out of two utilities that are each fine.
+//
+// Closed by refusing the shape rather than by modelling it. Deciding which states overlap
+// means an algebra over Tailwind's variants (`hover:` inside `md:`, `group-hover:` driven
+// by an ancestor, `aria-*` from runtime state), and a guard that reasons about that clears
+// marks on the strength of its own arithmetic. So any state-prefixed repaint of the label's
+// own utility voids the unprefixed acceptance, and the remedy is the one that was always
+// right: give that state its own label, or write the label into the state's own string.
+// Zero live sites -- the 7 that carry a state text override all paint soft or wash fills,
+// which never reach this predicate.
+// `text-` is two utilities wearing one prefix: it sets the colour, and it sets the font
+// size. `md:text-sm` repaints nothing, so the check has to know that much or it rejects a
+// responsive size sitting next to a perfectly good label.
+//
+// Sizes are exempted rather than colours enumerated, because the two directions cost
+// differently: a size this misses is a loud false positive on a paired fill, one the error
+// explains and a contributor can see is wrong, while a colour mistaken for a size is a
+// silent hole of the kind this whole round is about. The named scale is Tailwind's own and
+// closed; a unit-bearing arbitrary value is a length by construction, whatever the number.
+const FONT_SIZE_SCALE = /^(?:xs|sm|base|lg|\d?xl)(?:\/\S+)?$/;
+const FONT_SIZE_LENGTH = /^\[(?:length:)?[\d.]+(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|pt|%)\]$/;
+const setsTheSizeNotTheColour = (token) => (
+  FONT_SIZE_SCALE.test(token) || FONT_SIZE_LENGTH.test(token)
+);
+
+const labelRepaintedInSomeState = (haystack, utility, label) => {
+  const prefixed = new RegExp(`(?:^|\\s)\\S+:${utility}-(\\S+)`, 'g');
+  const isTheLabel = new RegExp(`^\\S+:${utility}${accentTokenSource(label)}$`);
+  for (const [written, token] of haystack.matchAll(prefixed)) {
+    if (setsTheSizeNotTheColour(token)) {
+      continue;
+    }
+    const match = written.trimStart().match(isTheLabel);
+    if (!match || !printsTheLabel(markAlpha(match[2]))) {
+      return true;
+    }
+  }
+  return false;
+};
+
 const labelCovers = (haystack, utility, label, fillPrefix) => {
+  if (labelRepaintedInSomeState(haystack, utility, label)) {
+    return false;
+  }
   const printed = new RegExp(`\\b${utility}${accentTokenSource(label)}`, 'g');
   for (const match of haystack.matchAll(printed)) {
     if (!printsTheLabel(markAlpha(match[2]))) {
@@ -1089,10 +1248,10 @@ function sourceFiles(root) {
     .sort();
 }
 
-// The alphabet's own test, run before any file is read. If the pattern the scans are about
-// to use has stopped recognising a spelling, that is a hole in this guard, and it should
-// fail here -- next to the row that names the spelling -- instead of quietly passing a tree
-// that contains one. Adding a spelling means adding a row, which is the point of there being
+// The alphabet's own test, run before any scan reads a file. If the pattern the scans are
+// about to use has stopped recognising a spelling, that is a hole in this guard, and it
+// should fail here -- next to the row that names the spelling -- instead of quietly passing
+// a tree that contains one, or failing three screens away as a pin nothing reaches. Adding a spelling means adding a row, which is the point of there being
 // one alphabet at all.
 //
 // The negatives carry as much weight as the positives, and each was a real defect or a real
@@ -1112,6 +1271,11 @@ const ACCENT_SPELLINGS = [
   ['bg-mint/[0.95]', 'mint', 0.95, true],
   ['bg-mint/10', 'mint', 0.1, false],
   ['bg-mint/[oops]', 'mint', null, true],
+  // The unit is the brackets, not the magnitude: `/1` is 1% on Tailwind's scale, `/[1]` is
+  // the fraction 1. Reading the second meaning into the first is what round 8 found.
+  ['bg-mint/1', 'mint', 0.01, false],
+  ['bg-mint/[1]', 'mint', 1, true],
+  ['bg-mint/100', 'mint', 1, true],
   ['bg-(--mint)', 'mint', 1, true],
   ['bg-(--mint)/10', 'mint', 0.1, false],
   ['bg-(--mint)/[99%]', 'mint', 0.99, true],
@@ -1144,6 +1308,79 @@ const LABEL_SPELLINGS = [
   ['bg-mint text-primary-foregroundish', false],
   ['bg-mint text-primary-foreground/[oops]', false],
   ['bg-mint hover:text-primary-foreground', false],
+  // An unprefixed label claims every state, so a state that repaints it withdraws the
+  // claim -- the fill is still vivid there and the glyphs on it are not the label any more.
+  ['bg-mint text-primary-foreground hover:text-muted', false],
+  ['bg-mint text-primary-foreground hover:text-primary-foreground/50', false],
+  ['bg-mint text-primary-foreground hover:text-primary-foreground', true],
+  ['hover:bg-mint hover:text-primary-foreground focus:text-muted', false],
+  // ... and a size is not a repaint. `text-` is the one utility name that sets two
+  // different properties, so without this the rows above would reject ordinary responsive
+  // type sitting next to a perfectly good label.
+  ['bg-mint text-primary-foreground md:text-sm', true],
+  ['bg-mint text-primary-foreground sm:text-2xl lg:text-base', true],
+  ['bg-mint text-primary-foreground md:text-[13px]', true],
+  ['bg-mint text-primary-foreground md:text-sm/6', true],
+  ['bg-mint text-primary-foreground md:text-[#f00]', false],
+];
+
+// Which utilities can carry the label, written out rather than read off the flag they are
+// derived from, so flipping one entry of INK_UTILITIES fails here instead of silently
+// widening what licenses a fill. `placeholder-` is the round 8 correction: it prints real
+// glyphs, and they are gone exactly when there is text to read.
+const LABEL_UTILITY_SPELLINGS = [
+  ['text', true],
+  ['placeholder', false],
+  ['decoration', false],
+  ['caret', false],
+];
+
+// The CSS half of the accent alphabet, which had no rows here until round 8 -- and that is
+// precisely where round 8's first two findings were. `assertMarksTakeTheInk` resolves a
+// reference through the theme's own aliases, so its two enumerations are the reference
+// pattern and the property table, and both were written at their comparison sites where
+// nothing could test them. Rows, not review rounds.
+const CSS_ALIAS_FIXTURE = `:root {
+  --wire: var(--mint);
+  --deep: var(--wire, #fff);
+  --wash: color-mix(in srgb, var(--gold) 10%, transparent);
+  --loop: var(--loop);
+  --literal: rgba(91, 255, 160, 0.16);
+}`;
+const CSS_SPELLINGS = [
+  ['var(--mint)', ['mint']],
+  ['var(--mint, #10b981)', ['mint']],
+  ['var(--mint , rgb(0 0 0))', ['mint']],
+  ['var( --cyan )', ['cyan']],
+  // Reached through an alias, including one whose own definition carries a fallback: that
+  // second hop is the spelling the CSS resolver could not see.
+  ['var(--wire)', ['mint']],
+  ['var(--deep)', ['mint']],
+  ['var(--deep, #fff)', ['mint']],
+  ['var(--wash)', ['gold']],
+  ['1px solid var(--wire)', ['mint']],
+  // A cycle is invalid at computed-value time, so under-reporting it matches the browser.
+  ['var(--loop)', []],
+  ['var(--literal)', []],
+  ['var(--mint-ink)', []],
+  ['var(--mint-foreground)', []],
+  ['var(--undefined-name)', []],
+];
+
+// What each CSS property paints. Absence means out of scope, which is a decision here and
+// has to be asserted like one -- the hairlines are the measured design.pen question, and
+// `background` was absent because nobody had written it down, not because anybody decided.
+const CSS_PAINT_SPELLINGS = [
+  ['stroke', 'canvas'],
+  ['fill', 'canvas'],
+  ['background', 'labelled'],
+  ['background-color', 'labelled'],
+  ['background-image', 'labelled'],
+  ['color', 'glyph'],
+  ['border-color', undefined],
+  ['outline-color', undefined],
+  ['box-shadow', undefined],
+  ['border', undefined],
 ];
 
 // And the third operand. The var scan reads a CSS reference rather than a utility, so its
@@ -1185,6 +1422,43 @@ function assertAccentSpellingsAreCovered() {
         `The label alphabet reads "${text}" as ${!labelled}, expected ${labelled}.\n`
         + `A label counts only when it prints the token as glyphs at alpha ${OPAQUE_ENOUGH} or above, `
         + 'in a scope the fill also applies to.',
+      );
+    }
+  }
+
+  for (const [utility, carriesTheLabel] of LABEL_UTILITY_SPELLINGS) {
+    if (INK_UTILITIES.get(utility) !== carriesTheLabel
+      || LABEL_UTILITIES.includes(utility) !== carriesTheLabel) {
+      throw new Error(
+        `The ink utilities read "${utility}-" as ${carriesTheLabel ? 'not ' : ''}carrying the label, `
+        + `expected the opposite.\n`
+        + 'Every utility here prints ink and so takes the -ink token; the flag is the narrower '
+        + 'question of which one prints the label a vivid fill is read against. A placeholder, an '
+        + 'underline and a caret are all glyphs nobody reads a word off while the fill is there.',
+      );
+    }
+  }
+
+  const accentsOfFixtureValue = accentAliasIndex(CSS_ALIAS_FIXTURE);
+  for (const [value, accents] of CSS_SPELLINGS) {
+    const read = [...accentsOfFixtureValue(normalizeCssValue(value))].sort();
+    if (JSON.stringify(read) !== JSON.stringify([...accents].sort())) {
+      throw new Error(
+        `The CSS alphabet reads "${value}" as ${JSON.stringify(read)}, expected ${JSON.stringify(accents)}.\n`
+        + 'A stylesheet reference reaches an accent directly or through any number of alias hops, and '
+        + 'a fallback is part of the reference rather than the end of it.',
+      );
+    }
+  }
+
+  for (const [property, paints] of CSS_PAINT_SPELLINGS) {
+    if (CSS_PAINTED_SURFACE.get(property) !== paints) {
+      throw new Error(
+        `CSS_PAINTED_SURFACE reads "${property}" as ${JSON.stringify(CSS_PAINTED_SURFACE.get(property))}, `
+        + `expected ${JSON.stringify(paints)}.\n`
+        + 'What a property paints decides whether a label can license it, and undefined means out of '
+        + 'scope -- which is a recorded decision here, so a property cannot leave this guard by never '
+        + 'having been written down.',
       );
     }
   }
@@ -1342,10 +1616,35 @@ function assertNoBareAccentVarInSource(root) {
   }
 }
 
+// The alphabet first, then every scan that reads through it -- the CSS one included, which
+// is why it is called from here rather than beside its own helpers. A scan that fails while
+// its own alphabet is broken reports the site it happened to reach first, and the mutation
+// sweep for round 8 is where that showed: dropping `background` from CSS_PAINTED_SURFACE
+// surfaced as a stale pin three screens away instead of as the row that names the property.
 assertAccentSpellingsAreCovered();
 assertUnlabeledFillsTakeTheInk('src');
 assertNoBareAccentVarInSource('src');
 assertEveryAcceptedPairStillExists();
+
+// index.css comes in as a definition source, not as a scan target. A custom property is
+// global once it is on :root, so `--wire-color: var(--mint)` in the app stylesheet is
+// visible to `stroke: var(--wire-color)` here -- the browser resolves it across files and
+// an index built from this file alone would see no definition and clear the wire. The
+// union is the answer for the same reason it is within one file: the question is whether
+// ANY definition can put a bare accent on this stroke.
+const accentPaints = assertMarksTakeTheInk(modelHubCss, 'model hub', css);
+
+// A pin that outlives what it excused is a silent exemption, so every entry has to
+// match a declaration that is really there.
+for (const [key, reason] of ACCEPTED_ACCENT_WASHES) {
+  if (!accentPaints.has(key)) {
+    throw new Error(
+      `ACCEPTED_ACCENT_WASHES pins '${key}' (${reason}), but no accent paint reaches that any more. `
+      + 'Drop the pin along with the declaration it was granted for -- or, if the declaration is still '
+      + 'there with a different value, re-pin the new one and re-read the reason against it.',
+    );
+  }
+}
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });
 const modelHubSystemDark = modelHub({ prefersLight: false, themeAttr: null });
