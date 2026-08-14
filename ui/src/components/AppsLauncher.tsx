@@ -138,7 +138,7 @@ export const AppsLauncher: React.FC = () => {
         <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />
         <span className="flex-1 whitespace-nowrap text-left">{t('apps.title')}</span>
         {pinned ? (
-          <Pin className="size-3.5 shrink-0 rotate-45 fill-cyan text-cyan-ink" />
+          <Pin className="size-3.5 shrink-0 rotate-45 fill-cyan-ink text-cyan-ink" />
         ) : (
           <ChevronUp className={clsx('size-3.5 shrink-0 text-muted transition-transform', !visible && 'rotate-180')} />
         )}

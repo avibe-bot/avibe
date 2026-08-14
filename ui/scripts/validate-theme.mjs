@@ -468,64 +468,121 @@ assertAccentAliasesKeepTheirTokenName(css);
 // 2.95:1, both under the 3:1 non-text floor, while their inks clear it. In dark each
 // accent's ink IS its fill, so none of this moves a dark pixel.
 
-// A translucent value is a wash, not a mark -- it has no ratio of its own, exactly as
-// requireMeasurableColor says -- so only opaque declarations are held to the rule.
 const ACCENT_NAMES = ACCENT_FILLS.map((fill) => fill.slice(2));
 const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*\\)`);
 
-// Naming color-mix() is not proof of translucency, and that is the whole exemption.
-// `color-mix(in srgb, var(--mint) 100%, transparent)` mentions both `color-mix` and
-// `transparent` and still renders as bare mint at 2.35:1 on the light canvas -- exactly
-// the mark this assertion exists to reject. So resolve the accent's share and exempt
-// only what a wash actually is.
+// A wash is not exempt because of what its value looks like. It is exempt because
+// someone decided this hairline is decoration, and wrote that down here.
 //
-// A mix shape this pattern cannot read fails loudly rather than inheriting the old
-// free pass: an unmeasured mix is not a proven-translucent one. Extending the pattern
-// is the correct response to that failure. Only the accent's own share is resolved --
-// mixing an accent into an opaque colour keeps its ratio, so such a shape is a mark
-// and must say so here rather than be waved through.
-const ACCENT_SHARE_OF_MIX = /^color-mix\(\s*in\s+[\w-]+\s*,\s*[^,]+?\s+([\d.]+)%\s*,\s*transparent\s*\)$/i;
+// Three revisions tried to infer that decision from the value instead. Matching
+// `color-mix` passed an opaque `color-mix(in srgb, var(--mint) 100%, transparent)`.
+// Resolving the share and exempting anything under 100% passed a 99% one. Any
+// threshold that replaces it can be approached from below, and measuring the
+// composited result cannot work either: a real 20% mint wash lands near 1.2:1 on the
+// light canvas, so a contrast floor would reject the decorative rails this exemption
+// exists for. Whether a translucent stroke is decoration or an illegible mark is
+// intent, and intent is not in the CSS.
+//
+// So the guard stops guessing. Every accent reaching a stroke or fill is either the
+// ink, or listed here with a reason. There is no share left to tune and no bypass
+// left to find, and the cost is one line per genuine wash -- the same bargain
+// ACCEPTED_BARE_FILLS already makes for the control-chrome sites.
+//
+// Keyed by the resolved declaration, not by its address. An address-keyed pin excuses
+// whatever that selector paints next: edit this same stroke from 20% to 100% and an
+// opaque mint ships under a pin granted to a hairline. That is the identical defect a
+// per-file mark count had -- a pin has to name the construct it was granted for, and
+// for a declaration the construct is its value. Retinting a pinned wash now fails
+// twice over, as an unpinned mark and as a stale pin, and the error prints the key to
+// re-pin with. Resolved rather than authored, so an alias cannot smuggle an accent in
+// under an innocuous-looking key.
+const ACCEPTED_ACCENT_WASHES = new Map([
+  ['model hub .model-hub-rail-line stroke: color-mix(in srgb, var(--mint) 20%, transparent)', 'decorative rail behind the wires: a 20% tint, not a mark -- the wires it sits under carry the meaning'],
+]);
 
-function accentShare(name, decl, value) {
-  if (!value.includes('color-mix')) {
-    return 1;
-  }
+// What a declaration actually paints. A custom property is not a colour, it is a
+// name for one, and `--wire-color: var(--mint)` + `stroke: var(--wire-color)` paints
+// bare mint while naming neither. modelHubSurface.css already routes 20 accents
+// through --model-hub-* aliases, so this is one refactor away rather than
+// hypothetical. Aliases are resolved to their values before the check reads them.
+//
+// The depth cap is a cycle guard, not a limit on nesting anyone writes: CSS permits
+// `--a: var(--b); --b: var(--a)`, and a resolver that trusts its input would spin.
+const ALIAS_DEPTH = 10;
 
-  const mix = ACCENT_SHARE_OF_MIX.exec(value);
-  if (!mix) {
-    throw new Error(
-      `${name}: ${decl.selector ?? decl.parent?.selector} paints ${decl.prop} with ${value}, a `
-      + 'color-mix() this guard cannot resolve to an alpha. Only a mix proven translucent is exempt '
-      + 'from the mark rule, because an opaque mix renders as the bare fill -- teach '
-      + 'ACCENT_SHARE_OF_MIX this shape instead of letting an unmeasured mix through.',
-    );
-  }
+function resolveAliases(source) {
+  const aliases = new Map();
+  postcss.parse(source).walkDecls((decl) => {
+    if (decl.prop.startsWith('--')) {
+      aliases.set(decl.prop, normalizeCssValue(decl.value));
+    }
+  });
 
-  return Number.parseFloat(mix[1]) / 100;
+  return (value) => {
+    let resolved = value;
+    for (let depth = 0; depth < ALIAS_DEPTH; depth += 1) {
+      const next = resolved.replace(/var\(\s*(--[\w-]+)\s*\)/g, (whole, name) => (
+        // An accent token is the leaf this check is looking for -- resolving it to a
+        // hex would hide the very name the error message has to report.
+        ACCENT_NAMES.includes(name.slice(2)) ? whole : aliases.get(name) ?? whole
+      ));
+      if (next === resolved) {
+        return resolved;
+      }
+      resolved = next;
+    }
+    return resolved;
+  };
 }
 
 function assertMarksTakeTheInk(source, name) {
+  const resolve = resolveAliases(source);
+  const seen = new Set();
+
   postcss.parse(source).walkDecls((decl) => {
     if (decl.prop !== 'stroke' && decl.prop !== 'fill') {
       return;
     }
 
-    const value = normalizeCssValue(decl.value);
-    if (!BARE_ACCENT_VAR.test(value) || accentShare(name, decl, value) < 1) {
+    const value = resolve(normalizeCssValue(decl.value));
+    if (!BARE_ACCENT_VAR.test(value)) {
+      return;
+    }
+
+    const selector = decl.selector ?? decl.parent?.selector;
+    const key = `${name} ${selector} ${decl.prop}: ${value}`;
+    seen.add(key);
+    if (ACCEPTED_ACCENT_WASHES.has(key)) {
       return;
     }
 
     const accent = BARE_ACCENT_VAR.exec(value)[1];
     throw new Error(
-      `${name}: ${decl.selector ?? decl.parent?.selector} paints ${decl.prop} with var(--${accent}), the fill. `
+      `${name}: ${selector} paints ${decl.prop} with var(--${accent}), the fill${
+        value === normalizeCssValue(decl.value) ? '' : ` (via ${normalizeCssValue(decl.value)})`}. `
       + 'A stroke or an SVG fill is a mark on the bare canvas -- no label is printed on it, so the '
       + `pairing that licenses a vivid fill does not apply. Use var(--${accent}-ink), which is the same `
-      + 'value in dark and a legible one in light.',
+      + 'value in dark and a legible one in light. If this one is decoration rather than a mark, say so '
+      + `in ACCEPTED_ACCENT_WASHES under '${key}' -- a translucent value is not evidence on its own.`,
     );
   });
+
+  return seen;
 }
 
-assertMarksTakeTheInk(modelHubCss, 'model hub');
+const accentPaints = assertMarksTakeTheInk(modelHubCss, 'model hub');
+
+// A pin that outlives what it excused is a silent exemption, so every entry has to
+// match a declaration that is really there.
+for (const [key, reason] of ACCEPTED_ACCENT_WASHES) {
+  if (!accentPaints.has(key)) {
+    throw new Error(
+      `ACCEPTED_ACCENT_WASHES pins '${key}' (${reason}), but no stroke or fill paints that any more. `
+      + 'Drop the pin along with the declaration it was granted for -- or, if the declaration is still '
+      + 'there with a different value, re-pin the new one and re-read the reason against it.',
+    );
+  }
+}
 
 // The same rule in Tailwind: `bg-mint` on a 6px dot is a mark, `bg-mint` under a
 // `text-primary-foreground` label is a fill. Only the label tells them apart, so the
@@ -537,6 +594,11 @@ assertMarksTakeTheInk(modelHubCss, 'model hub');
 //   2. a sibling attribute or property of the same node -- an icon tile passes
 //      `iconTileClassName="bg-gold"` beside `iconClassName="text-gold-foreground"`,
 //      and agentBackends.ts pairs `tileCls`/`iconCls` in one object literal
+//
+// and the label must also apply whenever the fill does. A label restricted to a state
+// the fill is not -- `bg-mint hover:text-primary-foreground` -- leaves the resting
+// element unlabeled, so the variant prefix has to match or be absent. Absent is the
+// broader case and passes: an always-on label still labels a hover-only fill.
 //
 // Both scopes come from the TypeScript AST, so "belongs to" is a parent node rather
 // than a line count. Proximity is not evidence: an earlier draft looked in a +/-4 line
@@ -626,12 +688,21 @@ function classStrings(file, source) {
   }
   const strings = [];
 
+  // An object literal is a shared scope only when the class string is a property
+  // VALUE, which is what a config map looks like: `{ tileCls: 'bg-gold', iconCls:
+  // 'text-gold-foreground' }` describes one node, so the two pair. As a property KEY
+  // it is a clsx condition branch instead -- `clsx({ 'bg-mint': a, 'text-primary-
+  // foreground': b })` -- and branches that toggle independently are the opposite of
+  // evidence: the fill can render while the label's condition is false. Reading which
+  // side of the colon the string sits on separates them without an allowlist of
+  // helper names.
   const scopeOf = (node) => {
     const parent = node.parent;
     if (ts.isJsxAttribute(parent) || (ts.isJsxExpression(parent) && ts.isJsxAttribute(parent.parent))) {
       return ts.isJsxAttribute(parent) ? parent.parent : parent.parent.parent;
     }
-    if (ts.isPropertyAssignment(parent) && ts.isObjectLiteralExpression(parent.parent)) {
+    if (ts.isPropertyAssignment(parent) && parent.initializer === node
+      && ts.isObjectLiteralExpression(parent.parent)) {
       return parent.parent;
     }
     return node;
@@ -678,8 +749,46 @@ function classStrings(file, source) {
   return strings;
 }
 
+// Which utilities paint an accent onto a shape. `bg-` is the common one, but an icon
+// is a mark too, and Tailwind colours an SVG with `fill-`/`stroke-`: AppsLauncher's
+// pinned-state Pin shipped a 14px `fill-cyan` glyph that this scan could not see.
+// A 14px filled glyph is read like small text rather than like a large non-text shape,
+// which is the bar its ink clears and its fill does not.
+const MARK_UTILITIES = ['bg', 'fill', 'stroke'];
+
+// The Tailwind state the utility containing `index` is gated behind: `hover:`,
+// `md:hover:`, or '' for none. Scoped to the one utility rather than the class string,
+// so two utilities sharing a string can be compared. Any whitespace separates
+// utilities, because a multi-line class string wraps on newlines.
+const variantPrefix = (text, index) => {
+  let start = index;
+  while (start > 0 && !/\s/.test(text[start - 1])) {
+    start -= 1;
+  }
+  const colon = text.lastIndexOf(':', index - 1);
+  return colon >= start ? text.slice(start, colon + 1) : '';
+};
+
+// Does this label apply wherever the fill does? An unprefixed label always applies,
+// so it labels a `hover:`-only fill. Anything else has to match exactly. A broader but
+// unequal chain (label `hover:`, fill `md:hover:`) fails rather than being reasoned
+// about: no site writes one, and a guard should fail closed on a shape it cannot
+// prove -- the fix is to merge the two utilities into one string, or pin the mark.
+const labelCovers = (haystack, label, fillPrefix) => {
+  for (let at = haystack.indexOf(label); at !== -1; at = haystack.indexOf(label, at + 1)) {
+    const prefix = variantPrefix(haystack, at);
+    if (prefix === '' || prefix === fillPrefix) {
+      return true;
+    }
+  }
+  return false;
+};
+
 function assertUnlabeledFillsTakeTheInk(root) {
-  const bare = new RegExp(`\\bbg-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-/])`, 'g');
+  const bare = new RegExp(
+    `\\b(?:${MARK_UTILITIES.join('|')})-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-/])`,
+    'g',
+  );
   const found = new Map();
 
   // readdirSync(recursive) yields platform separators, so on Windows an entry arrives
@@ -696,7 +805,9 @@ function assertUnlabeledFillsTakeTheInk(root) {
       for (const match of text.matchAll(bare)) {
         const accent = match[1];
         const label = FILL_LABEL.get(accent);
-        if (label && (text.includes(`-${label}`) || scope.includes(`-${label}`))) {
+        const fillPrefix = variantPrefix(text, match.index);
+        if (label && (labelCovers(text, `-${label}`, fillPrefix)
+          || labelCovers(scope, `-${label}`, fillPrefix))) {
           continue;
         }
 
@@ -709,11 +820,13 @@ function assertUnlabeledFillsTakeTheInk(root) {
   const unpinned = [...found.entries()].filter(([key]) => !ACCEPTED_BARE_FILLS.has(key));
   if (unpinned.length > 0) {
     throw new Error(
-      'These paint a bare accent fill with no paired *-foreground label in the same class string or on '
+      'These paint a bare accent with no paired *-foreground label in the same class string or on '
       + 'a sibling attribute/property, so they are marks read straight off the canvas and must use the '
-      + '-ink token (bg-mint-ink, bg-gold-ink, ...):\n'
+      + '-ink token (bg-mint-ink, fill-cyan-ink, stroke-gold-ink, ...):\n'
       + unpinned.map(([key, marks]) => marks.map(({ signature, line }) => `  ${key} at line ${line}\n    ${signature}`).join('\n')).join('\n')
       + '\nIf the label is real but lives on a child element, move it into the same class string. '
+      + 'If it is real but gated behind a state the fill is not, the resting element is still unlabeled '
+      + '-- give the label the same variant prefix or drop the prefix. '
       + 'If a mark is deliberately exempt, pin it in ACCEPTED_BARE_FILLS with its reason.',
     );
   }
