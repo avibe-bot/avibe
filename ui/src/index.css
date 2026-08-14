@@ -56,6 +56,7 @@
   --color-violet: var(--violet);
   --color-violet-soft: var(--violet-soft);
   --color-gold: var(--gold);
+  --color-gold-soft: var(--gold-soft);
   --color-gold-foreground: var(--gold-foreground);
   --color-pink: var(--pink);
   --color-pink-soft: var(--pink-soft);
@@ -127,6 +128,7 @@
   --violet: #8465ff;
   --violet-soft: rgba(124, 91, 255, 0.16);
   --gold: #ffc857;
+  --gold-soft: rgba(255, 200, 87, 0.16);
   --gold-foreground: #080812;
   --pink: #ff5b8a;
   --pink-soft: rgba(255, 91, 138, 0.10);
@@ -210,6 +212,7 @@
     --violet: #7c3aed;
     --violet-soft: rgba(124, 58, 237, 0.14);
     --gold: #ae4f08;
+    --gold-soft: rgba(217, 119, 6, 0.14);
     --gold-foreground: #ffffff;
     --pink: #c7204f;
     --pink-soft: rgba(220, 38, 89, 0.10);
@@ -288,6 +291,7 @@
   --violet: #7c3aed;
   --violet-soft: rgba(124, 58, 237, 0.14);
   --gold: #ae4f08;
+  --gold-soft: rgba(217, 119, 6, 0.14);
   --gold-foreground: #ffffff;
   --pink: #c7204f;
   --pink-soft: rgba(220, 38, 89, 0.10);
