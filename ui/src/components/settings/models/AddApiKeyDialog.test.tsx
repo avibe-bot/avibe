@@ -588,46 +588,93 @@ describe('AddApiKeyDialog', () => {
   });
 
   it.each([
-    {
-      inventoryState: 'clear',
-      current: {
+    { path: 'response', outcome: 'repaired' },
+    { path: 'response', outcome: 'unresolved' },
+    { path: 'response', outcome: 'impact' },
+    { path: 'inventory', outcome: 'repaired' },
+    { path: 'inventory', outcome: 'unresolved' },
+    { path: 'inventory', outcome: 'impact' },
+  ] as const)(
+    'publishes a $outcome outcome from $path evidence without waiting for reconciliation',
+    async ({ path, outcome }) => {
+      const clearSource: Source = {
         ...blockedSource,
-        state: { status: 'standby' as const, retry_at: null, detail_key: null },
-      },
-      repaired: true,
-      settlementFails: true,
-    },
-    {
-      inventoryState: 'blocked',
-      current: blockedSource,
-      repaired: false,
-      settlementFails: false,
-    },
-  ])('derives an ambiguous replacement outcome from a $inventoryState inventory read', async ({ current, repaired, settlementFails }) => {
-    vi.spyOn(modelsApi, 'replaceCredential').mockRejectedValueOnce(
-      new ApiCallError('bad_response', undefined, false),
-    );
-    const settled = replacementSettlement({
-      readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [current] }),
-      ...(settlementFails ? { source: vi.fn().mockRejectedValue(new Error('surface refresh failed')) } : {}),
-    });
-    renderReplacement(blockedSource, settled);
-    const user = userEvent.setup();
+        state: { status: 'standby', retry_at: null, detail_key: null },
+      };
+      const current = outcome === 'unresolved' ? blockedSource : clearSource;
+      const hop: RouteHopRef = {
+        backend: 'claude',
+        menu_model: 'sonnet',
+        position: 1,
+        source_id: blockedSource.id,
+        model_id: 'claude-sonnet-4-5',
+      };
+      const gap: SupplyGap = {
+        backend: 'claude',
+        model_id: 'claude-sonnet-4-5',
+        agents: ['pm-claude'],
+      };
+      const replace = vi.spyOn(modelsApi, 'replaceCredential');
+      if (outcome === 'impact') {
+        replace.mockRejectedValueOnce(new ApiCallError(
+          'source_model_in_route_chain',
+          undefined,
+          true,
+          [gap],
+          [],
+          [hop],
+        ));
+      }
+      if (path === 'response') {
+        replace.mockResolvedValueOnce({
+          source: current,
+          removed_hops: outcome === 'impact' ? [hop] : [],
+          interrupted: outcome === 'impact' ? [gap] : [],
+        });
+      } else {
+        replace.mockRejectedValueOnce(new ApiCallError('bad_response', undefined, false));
+      }
+      const settled = replacementSettlement({
+        readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [current] }),
+        source: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
+      });
+      const closeTimer = vi.spyOn(window, 'setTimeout');
+      renderReplacement(blockedSource, settled);
+      const user = userEvent.setup();
 
-    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-ambiguous');
-    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+      await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-terminal');
+      await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+      if (outcome === 'impact') {
+        await user.click(await screen.findByRole('button', { name: /^Replace anyway$|^仍要更换$/i }));
+      }
 
-    if (repaired) {
-      expect(await screen.findByText(i18n.t('settings.models.repair.repaired'))).toBeTruthy();
+      if (outcome === 'impact') {
+        expect(await screen.findByText(/^Removed hops$|^已移除的跳$/i)).toBeTruthy();
+        expect(screen.getByText(/pm-claude/)).toBeTruthy();
+        expect(replace.mock.calls.at(-1)?.[1]).toEqual({
+          key: 'sk-terminal',
+          force: true,
+          would_remove_hops: [hop],
+          would_interrupt: [gap],
+        });
+      } else if (outcome === 'unresolved') {
+        expect(await screen.findByText(i18n.t('settings.models.repair.unresolved'))).toBeTruthy();
+      } else {
+        expect(await screen.findByText(i18n.t('settings.models.repair.repaired'))).toBeTruthy();
+      }
+
+      const close = screen.getByRole('button', { name: /^Close$|^关闭$/i }) as HTMLButtonElement;
+      expect(close.disabled).toBe(false);
       expect(screen.queryByRole('button', { name: /^Retry$|^重试$/i })).toBeNull();
-    } else {
-      expect(await screen.findByText(/Couldn't replace the key|更换失败/i)).toBeTruthy();
-      expect(screen.getByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
-    }
-    expect(settled.readInventory).toHaveBeenCalledOnce();
-    expect(settled.source).toHaveBeenCalledWith(current);
-    expect(settled.unread).not.toHaveBeenCalled();
-  });
+      expect(settled.source).toHaveBeenCalledWith(current);
+      expect(settled.unread).not.toHaveBeenCalled();
+      if (path === 'inventory') expect(settled.readInventory).toHaveBeenCalledOnce();
+      else expect(settled.readInventory).not.toHaveBeenCalled();
+      expect(closeTimer.mock.calls.filter(([, delay]) => delay === 1400)).toHaveLength(
+        outcome === 'repaired' ? 1 : 0,
+      );
+    },
+  );
 
   it.each([
     ['discovery_failed', 'retryable-provider', true],

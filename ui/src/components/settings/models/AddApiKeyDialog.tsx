@@ -29,8 +29,13 @@ import {
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { GuardImpact } from './GuardImpact';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
-import { createContinuationSettlement, createSourceCreatedDelivery, type ContinuationTicket } from './mutationSettlement';
-import type { TrackSourceMutation } from './mutationSettlement';
+import {
+  createContinuationSettlement,
+  createSourceCreatedDelivery,
+  type ContinuationTicket,
+  type SourceMutationSettlement,
+  type TrackSourceMutation,
+} from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { mayHaveWritten, REPAIR_LINE_KEY, wasBlocked } from './repair';
 import { serverText } from './serverCopy';
@@ -61,6 +66,15 @@ type ReplaceOutcome =
   | { kind: 'repaired' }
   | { kind: 'unresolved' }
   | { kind: 'impact'; hops: RouteHopRef[]; gaps: SupplyGap[] };
+
+const replacementOutcomeFromEvidence = (
+  source: Source,
+  hops: RouteHopRef[] = [],
+  gaps: SupplyGap[] = [],
+): ReplaceOutcome => {
+  if (hops.length > 0 || gaps.length > 0) return { kind: 'impact', hops, gaps };
+  return wasBlocked(source.state) ? { kind: 'unresolved' } : { kind: 'repaired' };
+};
 
 type ReplacePhase =
   | { kind: 'edit' }
@@ -220,6 +234,23 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     };
   }, [continuation, open, replaceSourceId]);
 
+  const publishReplacementEvidence = React.useCallback((
+    seq: ContinuationTicket,
+    settlement: SourceMutationSettlement,
+    source: Source,
+    hops?: RouteHopRef[],
+    gaps?: SupplyGap[],
+  ) => {
+    const outcome = replacementOutcomeFromEvidence(source, hops, gaps);
+    const landed = continuation.settle(seq, () => setReplacePhase({ kind: 'done', outcome }));
+    if (landed === 'landed' && outcome.kind === 'repaired') {
+      replaceCloseTimer.current = window.setTimeout(onClose, 1400);
+    }
+    // Entity settlement applies synchronously; collection reconciliation is
+    // trailing work and cannot gate an outcome already established by evidence.
+    void settlement.source(source).catch(() => undefined);
+  }, [continuation, onClose]);
+
   const draft = React.useCallback((protocolOrder?: SourceProtocol[]): ApiKeySourceCreate => ({
     kind: 'api_key',
     vendor: 'custom',
@@ -325,17 +356,13 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           latest.id,
           confirmation ? { key, ...confirmation } : { key },
         );
-        const outcome: ReplaceOutcome = answer.removed_hops.length > 0 || answer.interrupted.length > 0
-          ? { kind: 'impact', hops: answer.removed_hops, gaps: answer.interrupted }
-          : wasBlocked(answer.source.state)
-            ? { kind: 'unresolved' }
-            : { kind: 'repaired' };
-        await settlement.source(answer.source);
-        const landed = continuation.settle(seq, () => setReplacePhase({ kind: 'done', outcome }));
-        if (landed === 'stale') return;
-        if (outcome.kind === 'repaired') {
-          replaceCloseTimer.current = window.setTimeout(onClose, 1400);
-        }
+        publishReplacementEvidence(
+          seq,
+          settlement,
+          answer.source,
+          answer.removed_hops,
+          answer.interrupted,
+        );
       } catch (error) {
         const failure = apiFailure(error);
         if (failure && (failure.wouldRemoveHops.length > 0 || failure.wouldInterrupt.length > 0)) {
@@ -358,22 +385,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               failureClass = 'authoritative-terminal';
               await settlement.gone(latest.id, inventory);
             } else {
-              try {
-                await settlement.source(current);
-              } catch {
-                // The inventory read is the mutation evidence; a trailing surface
-                // refresh must not turn a committed replacement back into Retry.
-              }
-              if (!wasBlocked(current.state)) {
-                const landed = continuation.settle(seq, () => setReplacePhase({
-                  kind: 'done',
-                  outcome: { kind: 'repaired' },
-                }));
-                if (landed === 'landed') {
-                  replaceCloseTimer.current = window.setTimeout(onClose, 1400);
-                }
-                return;
-              }
+              publishReplacementEvidence(
+                seq,
+                settlement,
+                current,
+                confirmation?.would_remove_hops,
+                confirmation?.would_interrupt,
+              );
+              return;
             }
           } catch {
             await settlement.unread();
@@ -382,7 +401,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         continuation.settle(seq, () => setReplacePhase({ kind: 'failure', failureClass }));
       }
     });
-  }, [apiKey, continuation, onClose, props, replacePhase]);
+  }, [apiKey, continuation, props, publishReplacementEvidence, replacePhase]);
 
   const cancel = React.useCallback(() => {
     if (replaceMode) {
