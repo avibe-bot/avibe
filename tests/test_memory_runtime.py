@@ -4372,15 +4372,15 @@ async def test_list_all_episodes_does_not_let_one_project_starve_others(
         project="notes",
     )
 
-    class _ListModule:
+    class _ListProvider(FakeMemoryProvider):
         async def list_episodes(
             self,
-            *,
+            principal_id: str,
             project_id: str,
             page: int,
             page_size: int,
-            **_kwargs,
         ) -> MemoryListPage:
+            self.list_requests.append((principal_id, project_id, page, page_size))
             if project_id == "default":
                 await asyncio.Event().wait()
             return MemoryListPage(
@@ -4391,8 +4391,13 @@ async def test_list_all_episodes_does_not_let_one_project_starve_others(
                 total_count=1,
             )
 
+    module = memory_module.MemoryModule(
+        store=MemoryStore(),
+        provider=_ListProvider(),
+        enabled=True,
+    )
     runtime = object.__new__(MemoryRuntime)
-    runtime._module = _ListModule()
+    runtime._module = module
     runtime._retired = False
     runtime.list_memory_projects = lambda _principal_id: ("default", "notes")
 

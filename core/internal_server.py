@@ -1684,6 +1684,11 @@ def create_app(
                 content={"status": "failed", "error": "memory_invalid_input"},
             )
         if project_id != DEFAULT_MEMORY_PROJECT_ID:
+            if getattr(runtime, "available", True) is False:
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "failed", "error": "memory_store_unavailable"},
+                )
             try:
                 catalog = await run_blocking(runtime.list_memory_projects, principal_id)
             except Exception:

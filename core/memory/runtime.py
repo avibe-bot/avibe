@@ -97,6 +97,7 @@ from core.memory.types import (
     MemoryItems,
     MemoryListPage,
     MemoryListItem,
+    MemoryListResult,
     MemoryListWarningCode,
     MemoryResult,
     MemoryWarningCode,
@@ -124,6 +125,18 @@ _MEMORY_LIST_CURSOR_VERSION = 1
 MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
+
+
+@asynccontextmanager
+async def _concurrent_episode_lists(
+    module: MemoryModule,
+) -> AsyncIterator[Callable[..., Awaitable[MemoryListResult]]]:
+    batch = getattr(module, "concurrent_episode_lists", None)
+    if batch is None:
+        yield module.list_episodes
+        return
+    async with batch() as list_episodes:
+        yield list_episodes
 
 
 @dataclass(frozen=True, slots=True)
@@ -1521,18 +1534,20 @@ class MemoryRuntime:
         available_counts: dict[str, int] = {}
         project_has_more: dict[str, bool] = {}
         complete = True
-        project_windows = await asyncio.gather(
-            *(
-                self._list_project_window(
-                    principal_id,
-                    project_id,
-                    boundary=boundaries[project_id],
-                    limit=limit,
-                    deadline=deadline,
+        async with _concurrent_episode_lists(self.module) as list_episodes:
+            project_windows = await asyncio.gather(
+                *(
+                    self._list_project_window(
+                        principal_id,
+                        project_id,
+                        list_episodes=list_episodes,
+                        boundary=boundaries[project_id],
+                        limit=limit,
+                        deadline=deadline,
+                    )
+                    for project_id in projects
                 )
-                for project_id in projects
             )
-        )
         for project_id, window in zip(projects, project_windows):
             if isinstance(window, OperationFailed):
                 complete = False
@@ -1610,6 +1625,7 @@ class MemoryRuntime:
         principal_id: str,
         project_id: str,
         *,
+        list_episodes: Callable[..., Awaitable[MemoryListResult]],
         boundary: tuple[str, str] | None,
         limit: int,
         deadline: float,
@@ -1651,7 +1667,7 @@ class MemoryRuntime:
                 return failure_result("memory_provider_timeout")
             try:
                 result = await asyncio.wait_for(
-                    self.module.list_episodes(
+                    list_episodes(
                         principal_id=principal_id,
                         project_id=project_id,
                         page=page,

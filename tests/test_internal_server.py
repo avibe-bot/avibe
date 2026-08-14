@@ -766,6 +766,42 @@ def test_memory_list_binds_cli_session_and_uses_exact_provider_page() -> None:
     )
 
 
+def test_memory_list_reports_unavailable_store_before_named_project_validation() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    runtime = SimpleNamespace(
+        available=False,
+        list_memory_projects=Mock(return_value=("default",)),
+        list_episodes_payload=AsyncMock(),
+    )
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/list",
+                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
+                json={"project": "notes", "page": 1, "limit": 20},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_store_unavailable",
+    }
+    runtime.list_memory_projects.assert_not_called()
+    runtime.list_episodes_payload.assert_not_awaited()
+
+
 def test_memory_list_rejects_all_for_cli_at_controller_boundary() -> None:
     from core.memory.http_headers import CALLER_SESSION_HEADER
 
