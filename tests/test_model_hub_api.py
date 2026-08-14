@@ -856,7 +856,34 @@ def test_source_create_nonce_covers_in_flight_committed_and_deleted_states(tmp_p
     asyncio.run(scenario())
 
 
-def test_source_create_validates_probe_order_before_every_nonce_state(tmp_path):
+@pytest.mark.parametrize(
+    "malformed_fields",
+    [
+        pytest.param({"protocol_order": ["anthropic"]}, id="protocol-order"),
+        pytest.param({"billing": "credits"}, id="billing"),
+        pytest.param(
+            {
+                "models": [
+                    {
+                        "id": "duplicate-model",
+                        "origin": "manual",
+                        "reasoning_efforts": [],
+                    },
+                    {
+                        "id": "duplicate-model",
+                        "origin": "manual",
+                        "reasoning_efforts": [],
+                    },
+                ]
+            },
+            id="duplicate-models",
+        ),
+    ],
+)
+def test_source_create_validates_all_fields_before_every_nonce_state(
+    tmp_path,
+    malformed_fields,
+):
     async def scenario():
         class BlockingObservationAdapter(FakeAdapter):
             def __init__(self):
@@ -897,7 +924,7 @@ def test_source_create_validates_probe_order_before_every_nonce_state(tmp_path):
             "key": "sk-test-source-create-probe-order",
             "client_nonce": "scn_01j5w8z7p4n6q2rt",
         }
-        malformed = {**payload, "protocol_order": ["anthropic"]}
+        malformed = {**payload, **malformed_fields}
 
         unclaimed_work = list(adapter.secret_lengths)
         with pytest.raises(ModelHubError) as unclaimed:

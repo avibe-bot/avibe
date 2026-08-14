@@ -2241,8 +2241,9 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
         if kind != "api_key" and client_nonce is not None:
             raise ModelHubError("discovery_failed")
+        protocol_order: tuple[str, ...] | None = None
         if kind == "api_key":
-            self._observation_protocol_order(payload)
+            protocol_order = self._observation_protocol_order(payload)
 
         if oauth_ref:
             return self._source_creation_result(
@@ -2258,6 +2259,35 @@ class ModelHubService:
             )
         if kind == "subscription":
             raise ModelHubError("flow_not_found", status=404)
+
+        assert protocol_order is not None
+        # Validate the complete client-controlled Source shape before nonce
+        # state can mask a malformed request. Probe results replace only the
+        # provisional protocol and server-derived model state below.
+        try:
+            source = ModelHubSourceConfig.from_payload(
+                ModelHubSourceConfig(
+                    id=_source_id(),
+                    kind=kind,
+                    vendor=vendor,
+                    display_name=display_name,
+                    protocol=cast(
+                        Literal["anthropic", "openai_responses", "openai_chat"],
+                        protocol_order[0],
+                    ),
+                    base_url=base_url,
+                    supply_channel=channel,
+                    billing=billing,
+                    state=ModelHubSourceStateConfig(status="standby"),
+                    usage=ModelHubSourceUsageConfig(),
+                    models=manual_models,
+                    created_at=self.now().isoformat(),
+                    client_nonce=client_nonce,
+                    credential_ref="cred_preflight",
+                ).to_payload()
+            )
+        except (TypeError, ValueError):
+            raise ModelHubError("discovery_failed") from None
 
         nonce_claimed = False
         release_nonce = True
@@ -2276,24 +2306,9 @@ class ModelHubService:
                     "protocol_order": payload.get("protocol_order"),
                 }
             )
-            source = ModelHubSourceConfig(
-                id=_source_id(),
-                kind=kind,
-                vendor=vendor,
-                display_name=display_name,
-                protocol=cast(
-                    Literal["anthropic", "openai_responses", "openai_chat"],
-                    observation.protocol,
-                ),
-                base_url=base_url,
-                supply_channel=channel,
-                billing=billing,
-                state=ModelHubSourceStateConfig(status="standby"),
-                usage=ModelHubSourceUsageConfig(),
-                models=manual_models,
-                created_at=self.now().isoformat(),
-                client_nonce=client_nonce,
-                credential_ref="cred_preflight",
+            source.protocol = cast(
+                Literal["anthropic", "openai_responses", "openai_chat"],
+                observation.protocol,
             )
             if observation.discovery is ObservationDiscovery.SUCCEEDED:
                 self._apply_discovered_models(
