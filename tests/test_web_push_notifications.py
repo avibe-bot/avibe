@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from core import web_push_notifications
 from storage import message_deliveries, messages_service, project_access_service, web_push_service
 from storage.db import create_sqlite_engine
@@ -10,7 +12,20 @@ from vibe import remote_access
 from vibe.authorization import AuthorizationContext
 
 
-def _remote_authorization_record(user_key: str) -> dict:
+@pytest.fixture(autouse=True)
+def _clear_recent_delivery_dispositions():
+    web_push_notifications._RECENT_DELIVERY_DISPOSITIONS.clear()
+    yield
+
+
+def _remote_authorization_record(
+    user_key: str,
+    *,
+    claims_age_seconds: int = 0,
+    authorization_revision: int | None = None,
+    instance_access_source: str = "email",
+    organization: bool = False,
+) -> dict:
     subject = user_key.removeprefix("remote:")
     record = web_push_notifications.web_push_authorization_context_record(
         user_key,
@@ -18,8 +33,12 @@ def _remote_authorization_record(user_key: str) -> dict:
             instance_role="editor",
             subject=subject,
             email=f"{subject}@example.com",
-            instance_access_source="email",
-            claims_issued_at=int(web_push_notifications.time.time()),
+            instance_access_source=instance_access_source,
+            claims_issued_at=int(web_push_notifications.time.time()) - claims_age_seconds,
+            authorization_revision=authorization_revision,
+            organization_id="org_1" if organization else None,
+            organization_member_id="member_1" if organization else None,
+            organization_role="member" if organization else None,
             is_remote=True,
         ),
     )
@@ -27,7 +46,7 @@ def _remote_authorization_record(user_key: str) -> dict:
     return record
 
 
-def _paired_revision_config(revision: int):
+def _paired_revision_config(revision: int, *, instance_kind: str = ""):
     from core.services.settings import default_config
 
     config = default_config()
@@ -36,6 +55,7 @@ def _paired_revision_config(revision: int):
     cloud.instance_id = "inst-push"
     cloud.instance_secret = "device-secret"
     cloud.backend_url = "https://backend.test"
+    cloud.instance_kind = instance_kind
     config.save()
     remote_access._clear_authorization_revision_cache()
     remote_access._replace_authorization_revision(config, revision)
@@ -416,8 +436,17 @@ def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeyp
             "message_id": expired_message["id"],
         }
     )
+    # The persisted Personal prompt snapshot aging past the interactive
+    # authorization refresh cutoff must not silently drop the recipient: the
+    # PWA subscription is durable state (#1434).
     assert [send[0]["endpoint"] for send in sends] == [
         "https://push.example.test/a",
+        "https://push.example.test/a",
+    ]
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert [entry["disposition"] for entry in recent] == [
+        web_push_notifications.WEB_PUSH_DISPOSITION_SENT,
+        web_push_notifications.WEB_PUSH_DISPOSITION_SENT,
     ]
 
 
@@ -426,7 +455,7 @@ def test_send_to_enabled_subscriptions_rejects_stale_instance_authorization_revi
     tmp_path,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _paired_revision_config(41)
+    config = _paired_revision_config(41, instance_kind="organization")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-08-04T00:00:00Z"
@@ -437,7 +466,12 @@ def test_send_to_enabled_subscriptions_rejects_stale_instance_authorization_revi
             subject="user-a",
             email="member@example.com",
             instance_access_source="email",
-            claims_issued_at=int(web_push_notifications.time.time()),
+            # Claims issued well before the interactive refresh cutoff: claim
+            # age alone must not drop the recipient on an Organization instance
+            # either; only a confirmed revision change may.
+            claims_issued_at=int(web_push_notifications.time.time())
+            - remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
+            - 3600,
             authorization_revision=41,
             is_remote=True,
         ),
@@ -540,7 +574,647 @@ def test_send_to_enabled_subscriptions_rejects_stale_instance_authorization_revi
         }
     )
 
+    # A confirmed authorization change (fresh revision differs from the signed
+    # one) stops protected delivery for the Organization policy.
     assert len(sends) == 1
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_REVOKED
+    assert recent[0]["owners"]["remote:user-a"]["policy"] == "organization"
+    engine.dispose()
+
+
+def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, tmp_path):
+    """Personal notification authorization is isolated from Organization gates."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_revision_config(41, instance_kind="personal")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-04T00:00:00Z"
+    authorization_record = _remote_authorization_record(
+        "remote:user-a",
+        claims_age_seconds=remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS + 3600,
+        authorization_revision=41,
+    )
+
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_personal",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_push_personal",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_push_personal",
+                native_session_id="",
+                title="Personal Push",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_personal",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:user-a",
+            metadata={
+                "_web_push_user_key": "remote:user-a",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
+            message_type="user",
+            text="Please finish",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload={
+                "endpoint": "https://push.example.test/personal",
+                "keys": {"p256dh": "personal-key", "auth": "personal-auth"},
+            },
+        )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    def _result_message() -> str:
+        with engine.begin() as conn:
+            row = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id="ses_push_personal",
+                platform="avibe",
+                author="agent",
+                source="agent",
+                message_type="result",
+                text="Done",
+            )
+        return row["id"]
+
+    first_message = _result_message()
+    web_push_notifications._send_to_enabled_subscriptions(
+        {"title": "Personal Push", "body": "Done", "session_id": "ses_push_personal", "message_id": first_message}
+    )
+    assert len(sends) == 1
+
+    # An instance-wide revision bump is Organization authorization state: it
+    # must not strand a Personal owner's subscription.
+    remote_access._replace_authorization_revision(config, 42)
+    second_message = _result_message()
+    web_push_notifications._send_to_enabled_subscriptions(
+        {"title": "Personal Push", "body": "Done again", "session_id": "ses_push_personal", "message_id": second_message}
+    )
+    assert len(sends) == 2
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert all(
+        entry["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+        for entry in recent
+    )
+    assert all(
+        entry["owners"]["remote:user-a"]["policy"] == "personal" for entry in recent
+    )
+    engine.dispose()
+
+
+def test_unknown_instance_kind_selects_policy_from_record_claim_shape(monkeypatch, tmp_path):
+    """Legacy pairings without a known kind fall back to the record's claims."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_revision_config(41)
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-04T00:00:00Z"
+    personal_record = _remote_authorization_record("remote:user-personal", authorization_revision=41)
+    organization_record = _remote_authorization_record(
+        "remote:user-org",
+        authorization_revision=41,
+        instance_access_source="organization_group",
+        organization=True,
+    )
+
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_unknown_kind",
+            now=now,
+        )
+        for session_id, user_key, record in (
+            ("ses_push_unknown_personal", "remote:user-personal", personal_record),
+            ("ses_push_unknown_org", "remote:user-org", organization_record),
+        ):
+            conn.execute(
+                agent_sessions.insert().values(
+                    id=session_id,
+                    scope_id=scope_id,
+                    agent_backend="codex",
+                    agent_variant="default",
+                    session_anchor=session_id,
+                    native_session_id="",
+                    title=session_id,
+                    status="active",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+            messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                author_id=user_key,
+                metadata={
+                    "_web_push_user_key": user_key,
+                    "_web_push_authorization_contexts": [record],
+                },
+                message_type="user",
+                text="Please finish",
+            )
+            web_push_service.upsert_subscription(
+                conn,
+                user_key=user_key,
+                payload={
+                    "endpoint": f"https://push.example.test/{user_key}",
+                    "keys": {"p256dh": f"{user_key}-p256dh", "auth": f"{user_key}-auth"},
+                },
+            )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    def _result_message(session_id: str) -> str:
+        with engine.begin() as conn:
+            row = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="agent",
+                source="agent",
+                message_type="result",
+                text="Done",
+            )
+        return row["id"]
+
+    personal_message = _result_message("ses_push_unknown_personal")
+    web_push_notifications._send_to_enabled_subscriptions(
+        {"title": "Unknown kind", "body": "Done", "session_id": "ses_push_unknown_personal", "message_id": personal_message}
+    )
+    assert len(sends) == 1
+
+    remote_access._replace_authorization_revision(config, 42)
+
+    personal_after = _result_message("ses_push_unknown_personal")
+    web_push_notifications._send_to_enabled_subscriptions(
+        {"title": "Unknown kind", "body": "Done again", "session_id": "ses_push_unknown_personal", "message_id": personal_after}
+    )
+    org_after = _result_message("ses_push_unknown_org")
+    web_push_notifications._send_to_enabled_subscriptions(
+        {"title": "Unknown kind", "body": "Done org", "session_id": "ses_push_unknown_org", "message_id": org_after}
+    )
+
+    # The email-shaped owner keeps receiving; the organization-group owner is
+    # blocked by the confirmed revision change.
+    assert [send[0]["endpoint"] for send in sends] == [
+        "https://push.example.test/remote:user-personal",
+        "https://push.example.test/remote:user-personal",
+    ]
+    recent = web_push_notifications.recent_delivery_dispositions()
+    org_entry = next(
+        entry
+        for entry in recent
+        if "remote:user-org" in entry["owners"]
+    )
+    assert org_entry["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_REVOKED
+    assert org_entry["owners"]["remote:user-org"]["policy"] == "organization"
+    engine.dispose()
+
+
+def test_organization_revision_unavailable_retries_once_then_recovers(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="organization")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-04T00:00:00Z"
+    authorization_record = _remote_authorization_record(
+        "remote:user-a",
+        authorization_revision=41,
+    )
+
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_unavailable_retry",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_push_unavailable_retry",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_push_unavailable_retry",
+                native_session_id="",
+                title="Unavailable Retry",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_unavailable_retry",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:user-a",
+            metadata={
+                "_web_push_user_key": "remote:user-a",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
+            message_type="user",
+            text="Please finish",
+        )
+        message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_unavailable_retry",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload={
+                "endpoint": "https://push.example.test/unavailable-retry",
+                "keys": {"p256dh": "retry-key", "auth": "retry-auth"},
+            },
+        )
+
+    # The fresh watermark reads as unavailable exactly once (stale snapshot or
+    # control-plane outage); the bounded sync retry refreshes it.
+    watermark_reads = []
+
+    def _current_revision(config, *, now=None):
+        watermark_reads.append(now)
+        return 41 if len(watermark_reads) > 1 else None
+
+    monkeypatch.setattr(remote_access, "current_authorization_revision", _current_revision)
+    sync_calls = []
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_retry_authorization_revision_sync",
+        lambda config: sync_calls.append(config),
+    )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Unavailable Retry",
+            "body": "Done",
+            "session_id": "ses_push_unavailable_retry",
+            "message_id": message["id"],
+        }
+    )
+
+    assert len(sync_calls) == 1
+    assert [send[0]["endpoint"] for send in sends] == [
+        "https://push.example.test/unavailable-retry"
+    ]
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    engine.dispose()
+
+
+def test_organization_revision_unavailable_after_bounded_retry_skips_with_disposition(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="organization")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-04T00:00:00Z"
+    authorization_record = _remote_authorization_record(
+        "remote:user-a",
+        authorization_revision=41,
+    )
+
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_unavailable",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_push_unavailable",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_push_unavailable",
+                native_session_id="",
+                title="Unavailable Push",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_unavailable",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:user-a",
+            metadata={
+                "_web_push_user_key": "remote:user-a",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
+            message_type="user",
+            text="Please finish",
+        )
+        message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_unavailable",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload={
+                "endpoint": "https://push.example.test/unavailable",
+                "keys": {"p256dh": "unavailable-key", "auth": "unavailable-auth"},
+            },
+        )
+
+    monkeypatch.setattr(
+        remote_access,
+        "current_authorization_revision",
+        lambda config, *, now=None: None,
+    )
+    sync_calls = []
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_retry_authorization_revision_sync",
+        lambda config: sync_calls.append(config),
+    )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Unavailable Push",
+            "body": "Done",
+            "session_id": "ses_push_unavailable",
+            "message_id": message["id"],
+        }
+    )
+
+    # Temporary unavailability is a per-delivery decision, not confirmed
+    # revocation and not permanent loss: exactly one bounded retry, an explicit
+    # disposition, and the subscription stays enabled for the next attempt.
+    assert sends == []
+    assert len(sync_calls) == 1
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_REVISION_UNAVAILABLE
+    owner = recent[0]["owners"]["remote:user-a"]
+    assert owner["policy"] == "organization"
+    assert owner["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_REVISION_UNAVAILABLE
+    with engine.connect() as conn:
+        assert web_push_service.count_enabled(conn, user_key="remote:user-a") == 1
+    engine.dispose()
+
+
+def test_organization_unsigned_record_reports_refresh_required(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="organization")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-04T00:00:00Z"
+    authorization_record = _remote_authorization_record("remote:user-a")
+
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_unsigned",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_push_unsigned",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_push_unsigned",
+                native_session_id="",
+                title="Unsigned Push",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_unsigned",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:user-a",
+            metadata={
+                "_web_push_user_key": "remote:user-a",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
+            message_type="user",
+            text="Please finish",
+        )
+        message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_unsigned",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload={
+                "endpoint": "https://push.example.test/unsigned",
+                "keys": {"p256dh": "unsigned-key", "auth": "unsigned-auth"},
+            },
+        )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Unsigned Push",
+            "body": "Done",
+            "session_id": "ses_push_unsigned",
+            "message_id": message["id"],
+        }
+    )
+
+    # Organization claims that predate revision signing cannot be confirmed
+    # current at delivery time; skip them with an explicit, visible reason.
+    assert sends == []
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_AUTHORIZATION_REFRESH_REQUIRED
+    assert recent[0]["owners"]["remote:user-a"]["policy"] == "organization"
+    engine.dispose()
+
+
+def test_authorized_owner_without_subscription_records_no_subscription(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-04T00:00:00Z"
+    authorization_record = _remote_authorization_record("remote:user-a")
+
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_no_sub",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_push_no_sub",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_push_no_sub",
+                native_session_id="",
+                title="No Subscription",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_no_sub",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:user-a",
+            metadata={
+                "_web_push_user_key": "remote:user-a",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
+            message_type="user",
+            text="Please finish",
+        )
+        message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_no_sub",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-b",
+            payload={
+                "endpoint": "https://push.example.test/other",
+                "keys": {"p256dh": "other-key", "auth": "other-auth"},
+            },
+        )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "No Subscription",
+            "body": "Done",
+            "session_id": "ses_push_no_sub",
+            "message_id": message["id"],
+        }
+    )
+
+    assert sends == []
+    recent = web_push_notifications.recent_delivery_dispositions(user_key="remote:user-a")
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION
+    assert recent[0]["owners"]["remote:user-a"]["disposition"] is None
     engine.dispose()
 
 
