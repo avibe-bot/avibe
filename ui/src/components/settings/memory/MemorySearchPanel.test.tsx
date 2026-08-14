@@ -103,6 +103,8 @@ describe('MemorySearchPanel browse and search modes', () => {
     render(<MemorySearchPanel enabled />);
 
     expect(await screen.findByText(first.summary)).toBeTruthy();
+    expect(screen.getByLabelText('memory.search.browse.sortLabel')).toHaveProperty('value', 'newest');
+    expect(screen.getByLabelText('memory.search.browse.sortLabel')).toHaveProperty('disabled', false);
     expect(api.listMemoryEpisodes).toHaveBeenCalledWith('default', {
       page: 1,
       cursor: null,

@@ -271,9 +271,9 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
         {browseMode ? (
           <Select
             value="newest"
+            onChange={() => undefined}
             aria-label={t('memory.search.browse.sortLabel')}
             wrapperClassName="lg:w-44"
-            disabled
           >
             <option value="newest">{t('memory.search.browse.newestFirst')}</option>
           </Select>
