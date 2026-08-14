@@ -1349,6 +1349,21 @@ def _is_remote_access_request(config: V2Config) -> bool:
     return _remote_access_host_allowed(config, _effective_normalized_host())
 
 
+_REMOTE_ACCESS_STATUS_PUBLIC_FIELDS = (
+    "ok",
+    "provider",
+    "enabled",
+    "public_url",
+    "paired",
+    "running",
+    "pid_state",
+    "transport_protocol",
+    "settings",
+    "tunnel_quality",
+    "network_path",
+)
+
+
 def _remote_access_allowed_hosts(config: V2Config) -> frozenset[str]:
     public_host = _remote_access_public_host(config)
     if not public_host:
@@ -5967,26 +5982,14 @@ def remote_access_status():
         include_network_path=True,
     )
     if remote_request:
-        # The raw status exposes host internals — cloudflared PID, absolute
-        # binary path/version, the edge bind-address settings, and network-path
-        # diagnostics — none of which a remote caller needs and several of which
-        # fingerprint the host. The remote-visible UI (the Dashboard connector
-        # card) consumes only the public URL, the paired/running connector
-        # state, and the tunnel quality, so project exactly that and drop the
-        # rest at the boundary rather than relying on every future field staying
-        # inert across the tunnel.
+        # Keep host internals (cloudflared PID, absolute binary path/version)
+        # local-only. The Remote Access page itself is used across the tunnel,
+        # so the projection must still carry the fields that page renders:
+        # connector health, saved tunnel controls, quality, and the network
+        # path that owns the "Technical details" disclosure.
         status_payload = {
             key: status_payload[key]
-            for key in (
-                "ok",
-                "provider",
-                "enabled",
-                "public_url",
-                "paired",
-                "running",
-                "transport_protocol",
-                "tunnel_quality",
-            )
+            for key in _REMOTE_ACCESS_STATUS_PUBLIC_FIELDS
             if key in status_payload
         }
     return jsonify(status_payload)

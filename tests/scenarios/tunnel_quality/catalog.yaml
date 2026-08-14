@@ -200,3 +200,9 @@ scenarios:
     kind: user_experience
     layer: browser
     test: null
+  - id: RA-TQ-032
+    name: Remote status keeps the Remote Access page fields while dropping host internals
+    status: covered
+    kind: network_policy
+    layer: contract
+    test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals
