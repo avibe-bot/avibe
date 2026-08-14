@@ -342,7 +342,7 @@ def _is_markdown_table_delimiter_line(line: str) -> bool:
         return False
     cells = line.strip().strip("|").split("|")
     return len(cells) >= 2 and all(
-        re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in cells
+        re.fullmatch(r"\s*:?\-+:?\s*", cell) for cell in cells
     )
 
 
@@ -363,6 +363,28 @@ def _is_markdown_table_delimiter_before(markdown_mask: str, start: int) -> bool:
             return index > 0 and "|" in lines[index - 1]
         index -= 1
     return False
+
+
+def _markdown_container_level_at(text: str, start: int) -> int:
+    """Return the CommonMark container nesting level for a candidate row."""
+    newline = re.match(r"\r\n|\r|\n", text[start:])
+    if newline is None:
+        return 0
+
+    line_offsets = [0]
+    line_offsets.extend(
+        match.end() for match in re.finditer(r"\r\n|\r|\n", text)
+    )
+    candidate_position = start + newline.end()
+    line_index = bisect_left(line_offsets, candidate_position + 1) - 1
+    for token in _BLOCK_MARKDOWN.parse(text):
+        if (
+            token.type == "inline"
+            and token.map is not None
+            and token.map[0] <= line_index < token.map[1]
+        ):
+            return token.level
+    return 0
 
 # Silent output blocks are intentionally simple and model-facing. Once a real
 # opener is found outside code, its contents are opaque until the closing tag.
@@ -1459,6 +1481,8 @@ def _extract_buttons(
         ]
         if any(start <= m.start() < end for start, end in html_block_ranges):
             return [], text
+        if _markdown_container_level_at(text, m.start()) > 1:
+            return [], text
 
     if pattern is _UNSEPARATED_BUTTON_ROW_RE and _is_markdown_table_delimiter_before(
         mask, m.start()
@@ -1486,6 +1510,9 @@ def _extract_buttons(
             buttons.append(QuickReplyButton(text=label))
 
     if not buttons:
+        return [], text
+
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and len(buttons) < 2:
         return [], text
 
     # Enforce a reasonable upper bound on button count

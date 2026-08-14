@@ -1513,6 +1513,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_short_markdown_table_delimiter(self):
+        text = "Option | Status\n- | -\n[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_process_reply_accepts_slack_angle_link_style_quick_reply_button(self):
         reply = process_reply(
             "Done.\n\n---\n"
@@ -1541,6 +1549,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, "Table | Value")
         self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
 
+    def test_process_reply_preserves_lazy_markdown_container_continuations(self):
+        for text in (
+            "> Compare these states:\n[A] | [B]",
+            "- Compare these states:\n[A] | [B]",
+            "1. Compare these states:\n[A] | [B]",
+        ):
+            with self.subTest(text=text):
+                reply = process_reply(text)
+
+                self.assertEqual(reply.text, text)
+                self.assertEqual(reply.buttons, [])
+
     def test_process_reply_accepts_fullwidth_pipe_without_rule(self):
         reply = process_reply("Done.\n[A] ｜ [B]")
 
@@ -1549,6 +1569,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
     def test_process_reply_preserves_single_bracket_line_without_rule(self):
         text = "Use this value:\n[example]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_unseparated_row_with_blank_button_label(self):
+        text = "Checkbox states:\n[ ] | [Checked]"
 
         reply = process_reply(text)
 
