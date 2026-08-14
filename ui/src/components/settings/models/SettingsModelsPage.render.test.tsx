@@ -124,6 +124,43 @@ describe('SettingsModelsPage surface branches', () => {
     expect((callback.match(/void refresh\(\)/g) ?? []).length).toBe(2);
   });
 
+  it('issues exactly one surface refresh for a successful subscription create', async () => {
+    const created = {
+      ...nativeSubscription,
+      id: 'src_created_subscription',
+      display_name: 'Created subscription',
+    };
+    const terminal = {
+      flow_id: 'flow_created_subscription',
+      client_nonce: 'ofn_created_subscription',
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'success' as const,
+      presentation: { expects: 'none' as const },
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    vi.spyOn(modelsApi, 'startOAuth').mockResolvedValue(terminal);
+    const status = vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({
+      flow: terminal,
+      created: { source: created, added_to: [], adopted_by: [] },
+      repaired: null,
+    });
+    renderPage([retainedSource]);
+
+    await screen.findByText('Retained source');
+    const listSources = vi.mocked(modelsApi.listSources);
+    const refreshesBeforeCreate = listSources.mock.calls.length;
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
+    await user.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
+
+    await waitFor(() => expect(status).toHaveBeenCalledWith(terminal.flow_id));
+    await waitFor(() => expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1));
+    await act(async () => Promise.resolve());
+    expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1);
+  });
+
   it('renders Frame 09 without tabs when every backend is direct and no source exists', async () => {
     renderPage([]);
 

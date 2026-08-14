@@ -13,18 +13,44 @@
  * lifetime that spans the gesture → mount boundary, which is exactly what a
  * component ref cannot hold; threading a live `Window` through page state and a
  * prop would model that lifetime as data and copy it. One module owns the
- * allocation, and whichever journey opens next claims it.
+ * allocation, handoff, claim, navigation, retention and disposal.
  */
 
-/** Allocated by a gesture, not yet claimed by the journey it was opened for. */
-let handedTab: Window | null = null;
+import type { OAuthFailureClass } from './asyncLifetime';
+
+type ProviderTabState = 'handed' | 'claimed' | 'retry-pending' | 'retry-committed';
+type ProviderTabPurpose = 'initial' | 'retry';
+type ProviderTabRecord = { tab: Window; state: ProviderTabState };
+
+/** The one browser tab this feature owns, from allocation through disposal. */
+let providerTab: ProviderTabRecord | null = null;
+
+/** Reasons are carried from the shared OAuth classifier to the one disposer. */
+export type ProviderTabDisposalReason = OAuthFailureClass | 'success' | 'cleanup';
+
+const closeTab = (tab: Window) => {
+  if (tab.closed) return;
+  try {
+    tab.close();
+  } catch {
+    // Cross-origin or already-closing windows can reject access.
+  }
+};
+
+/** Drop an old record before a new gesture allocates the single owned tab. */
+const discardOwnedTab = () => {
+  if (!providerTab) return;
+  closeTab(providerTab.tab);
+  providerTab = null;
+};
 
 /**
  * The single `window.open` for provider handoffs: blank, and with `opener`
  * severed, because the provider page is navigated into it later and would
  * otherwise be able to drive this window (reverse tabnabbing).
  */
-export function preopenProviderTab(): Window | null {
+export function preopenProviderTab(purpose: ProviderTabPurpose = 'initial'): Window | null {
+  discardOwnedTab();
   try {
     const tab = window.open('about:blank', '_blank');
     if (tab) {
@@ -33,6 +59,7 @@ export function preopenProviderTab(): Window | null {
       } catch {
         // Some browser WindowProxy implementations expose a read-only opener.
       }
+      providerTab = { tab, state: purpose === 'retry' ? 'retry-pending' : 'claimed' };
     }
     return tab;
   } catch {
@@ -45,7 +72,8 @@ export function preopenProviderTab(): Window | null {
  * it. Called from the gesture; claimed by the dialog as it opens.
  */
 export function handOffProviderTab(): void {
-  handedTab = preopenProviderTab();
+  const tab = preopenProviderTab();
+  if (tab && providerTab) providerTab.state = 'handed';
 }
 
 /**
@@ -57,8 +85,43 @@ export function handOffProviderTab(): void {
  * a handoff whose journey never opened cannot survive into a later one.
  */
 export function takeHandedProviderTab(): Window | null {
-  const tab = handedTab;
-  handedTab = null;
-  if (!tab || tab.closed) return null;
+  if (!providerTab || providerTab.state !== 'handed') return null;
+  if (providerTab.tab.closed) {
+    providerTab = null;
+    return null;
+  }
+  providerTab.state = 'claimed';
+  return providerTab.tab;
+}
+
+/** Commit the retry handoff only once the next flow is definitely starting. */
+export function commitProviderTabRetry(): void {
+  if (providerTab?.state === 'retry-pending') providerTab.state = 'retry-committed';
+}
+
+/**
+ * Take the owned tab for navigation and end this module's ownership. A settled
+ * flow therefore cannot navigate a tab later, even if its auth URL is present.
+ */
+export function takeProviderTabForNavigation(): Window | null {
+  if (!providerTab) return null;
+  const tab = providerTab.tab;
+  providerTab = null;
+  if (tab.closed) return null;
   return tab;
+}
+
+/**
+ * Dispose the owned tab, or retain a committed Retry tab across effect cleanup.
+ * The caller supplies the shared classifier's value; no second terminal
+ * predicate is allowed in this owner or its callers.
+ */
+export function disposeProviderTab(reason?: ProviderTabDisposalReason): void {
+  if (!providerTab) return;
+  if (providerTab.state === 'retry-committed' && reason === 'cleanup') {
+    providerTab.state = 'handed';
+    return;
+  }
+  closeTab(providerTab.tab);
+  providerTab = null;
 }

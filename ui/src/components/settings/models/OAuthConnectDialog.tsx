@@ -38,7 +38,12 @@ import {
   type FlowView,
 } from './asyncLifetime';
 import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
-import { preopenProviderTab, takeHandedProviderTab } from './providerTab';
+import {
+  commitProviderTabRetry,
+  disposeProviderTab,
+  preopenProviderTab,
+  takeProviderTabForNavigation,
+} from './providerTab';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
 import {
@@ -139,28 +144,8 @@ export const OAuthConnectDialog: React.FC<{
   onCloseRef.current = onClose;
   const initializedOpenSubject = React.useRef<string | null>(null);
   const clientNonce = React.useRef<string | null>(null);
-  const providerWindow = React.useRef<Window | null>(null);
   const heldFlowId = React.useRef<string | null>(null);
   const rereadHeldFlow = React.useRef<(() => Promise<boolean>) | null>(null);
-
-  const preopenProviderWindow = React.useCallback(() => {
-    if (providerWindow.current && !providerWindow.current.closed) return;
-    providerWindow.current = preopenProviderTab();
-  }, []);
-
-  const closeProviderWindow = React.useCallback(() => {
-    // Also the tab a gesture outside this dialog handed over: an unused handoff
-    // is an unused tab, and this is already the owner that closes one.
-    const target = providerWindow.current ?? takeHandedProviderTab();
-    providerWindow.current = null;
-    if (!target || target.closed) return;
-    try {
-      target.close();
-    } catch {
-      // Cross-origin or already-closing windows can reject access; clearing the
-      // ref above is still the important ownership transition.
-    }
-  }, []);
 
   const createClientNonce = React.useCallback(() => {
     const uuid = globalThis.crypto?.randomUUID?.();
@@ -382,7 +367,11 @@ export const OAuthConnectDialog: React.FC<{
       // the guard above already makes that poll harmless, but there is no reason
       // to let it fire.
       if (isDone(step.action)) stop();
-      if (isDone(step.action)) closeProviderWindow();
+      if (isDone(step.action)) {
+        disposeProviderTab(
+          step.view.failureClass ?? (step.action === 'succeed' ? 'success' : undefined),
+        );
+      }
       return isDone(step.action);
     };
     settleRef.current = settle;
@@ -412,11 +401,11 @@ export const OAuthConnectDialog: React.FC<{
               // this authority is retired, neither outcome may update the view
               // or dispose a provider tab owned by its replacement.
               if (cancelled || flowAuthorityRef.current !== authority) return true;
-              // This reread did not start a provider journey, so the tab opened
-              // by the Retry gesture has no URL to receive.
-              closeProviderWindow();
               const failure = apiFailure(err);
               const failureClass = classifyOAuthFailure(failure);
+              // This reread did not start a provider journey, so the tab opened
+              // by the Retry gesture has no URL to receive.
+              disposeProviderTab(failureClass);
               // An unread flow is still held. Retry may ask again, but it may not
               // turn missing evidence into permission to mint a replacement.
               if (failureClass === 'inconclusive') return true;
@@ -471,6 +460,7 @@ export const OAuthConnectDialog: React.FC<{
           pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
           return;
         }
+        disposeProviderTab(failureClass);
         // The authority goes first because its answer is what decides whether these
         // pairs are the ones on screen — see `failureLanded`. The refetch below is
         // owed whatever it answers.
@@ -574,7 +564,7 @@ export const OAuthConnectDialog: React.FC<{
           failureClass,
         });
         if (!isReauth) setStartFailureCode(failure?.detail ?? failure?.code ?? 'start_failed');
-        closeProviderWindow();
+        disposeProviderTab(failureClass);
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     })();
@@ -609,7 +599,7 @@ export const OAuthConnectDialog: React.FC<{
       // first, and by then the attempt it belongs to is not merely settled but
       // GONE. Whatever gap report is on screen when it returns is somebody else's.
       const opened = openedFlowId;
-      closeProviderWindow();
+      disposeProviderTab('cleanup');
       if (heldFlowId.current === opened) heldFlowId.current = null;
       rereadHeldFlow.current = null;
       void releaseFlow(authority, owner, {
@@ -670,6 +660,7 @@ export const OAuthConnectDialog: React.FC<{
       // ignored. `failureLanded` is the part that knows.
       const failure = apiFailure(err);
       const failureClass = classifyOAuthFailure(failure);
+      disposeProviderTab(failureClass);
       const step = authority.transition({
         kind: 'error',
         errorKey: oauthFailureKey(failure?.code, journey),
@@ -688,7 +679,7 @@ export const OAuthConnectDialog: React.FC<{
       setNativeSlotTaken(true);
       setChannel('hub');
       setStartFailureCode(null);
-      closeProviderWindow();
+      disposeProviderTab(view.failureClass ?? 'retryable-provider');
       setPhase('choose');
       return;
     }
@@ -699,6 +690,7 @@ export const OAuthConnectDialog: React.FC<{
     const freshAcquisition = startFailureCode === null;
     setStartFailureCode(null);
     if (freshAcquisition) clientNonce.current = null;
+    commitProviderTabRetry();
     setStartAttempt((attempt) => attempt + 1);
     setPhase('flow');
   };
@@ -742,7 +734,7 @@ export const OAuthConnectDialog: React.FC<{
     // claim taken at mount is stranded by anything that remounts (StrictMode
     // replays effects in development) with the tab still open and unreachable.
     // Claiming here also means a run with nothing to navigate keeps the handoff.
-    const target = providerWindow.current ?? takeHandedProviderTab();
+    const target = takeProviderTabForNavigation();
     if (!target || target.closed) return;
     try {
       target.location.href = presentation.auth_url;
@@ -750,7 +742,6 @@ export const OAuthConnectDialog: React.FC<{
       // A popup may become inaccessible after opening; the visible link remains
       // the fallback in that case.
     }
-    providerWindow.current = null;
   }, [flowActive, presentation?.auth_url]);
 
   const choosing = !isReauth && phase === 'choose';
@@ -892,7 +883,7 @@ export const OAuthConnectDialog: React.FC<{
               size="sm"
               className="model-hub-dialog-action"
               onClick={() => {
-                preopenProviderWindow();
+                preopenProviderTab();
                 setPhase('flow');
               }}
             >
@@ -1058,7 +1049,7 @@ export const OAuthConnectDialog: React.FC<{
                   size="sm"
                   className="h-10 sm:h-9"
                   onClick={() => {
-                    preopenProviderWindow();
+                    preopenProviderTab('retry');
                     void retryStart();
                   }}
                 >

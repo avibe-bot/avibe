@@ -9,6 +9,7 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { ApiCallError, modelsApi } from './modelsApi';
+import { disposeProviderTab } from './providerTab';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
@@ -19,6 +20,8 @@ import type { Source } from './types';
 
 afterEach(() => {
   cleanup();
+  disposeProviderTab('cleanup');
+  disposeProviderTab('cleanup');
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -57,6 +60,19 @@ const dialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> 
 
 const renderDialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> = {}) =>
   render(dialog(props));
+
+const providerTab = () => {
+  const tab = {
+    closed: false,
+    close: vi.fn(),
+    opener: {} as unknown,
+    location: { href: '' },
+  };
+  tab.close.mockImplementation(() => {
+    tab.closed = true;
+  });
+  return tab;
+};
 
 describe('add-subscription channel choice', () => {
   it('flips the recommendation and visible order by vendor', () => {
@@ -110,6 +126,73 @@ describe('add-subscription start recovery', () => {
     expect(start.mock.calls[0].slice(0, 2)).toEqual(['anthropic', 'native_cli']);
     expect(start.mock.calls[1]).toEqual(start.mock.calls[0]);
     expect(start.mock.calls[0][2]).toMatch(/^ofn_[a-z0-9]{16,64}$/);
+  });
+
+  it('keeps the Retry tab across effect cleanup and navigates the replacement flow', async () => {
+    const authUrl = 'https://provider.example/retry';
+    const tab = providerTab();
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    const reauth = vi
+      .spyOn(modelsApi, 'reauthSource')
+      .mockRejectedValueOnce(new ApiCallError('engine_down'))
+      .mockResolvedValueOnce({
+        flow_id: 'oaf_retry',
+        intent: 'reauth',
+        vendor: 'anthropic',
+        channel: 'native_cli',
+        state: 'awaiting_action',
+        presentation: { expects: 'paste_code', auth_url: authUrl },
+        expires_at: '2099-01-01T00:00:00Z',
+      });
+    renderDialog({ reauth: subscription() });
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
+
+    await waitFor(() => expect(reauth).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(tab.location.href).toBe(authUrl));
+    expect(tab.close).not.toHaveBeenCalled();
+  });
+
+  it('disposes the blank tab when acquisition is refused', async () => {
+    const tab = providerTab();
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    vi.spyOn(modelsApi, 'startOAuth').mockRejectedValue(new ApiCallError('engine_down'));
+    renderDialog();
+
+    await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
+    await screen.findByRole('button', { name: /^Retry$|^重试$/i });
+
+    expect(tab.close).toHaveBeenCalledOnce();
+    expect(tab.location.href).toBe('');
+  });
+
+  it('disposes without navigating an already-terminal nonce replay', async () => {
+    const authUrl = 'https://provider.example/stale';
+    const tab = providerTab();
+    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window);
+    const terminal = {
+      flow_id: 'oaf_terminal',
+      client_nonce: 'ofn_terminal',
+      vendor: 'anthropic',
+      channel: 'native_cli' as const,
+      state: 'failed' as const,
+      presentation: { expects: 'paste_code' as const, auth_url: authUrl },
+      error_key: 'settings.models.oauth.error.generic',
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    vi.spyOn(modelsApi, 'startOAuth').mockResolvedValue(terminal);
+    const status = vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({
+      flow: terminal,
+      created: null,
+      repaired: null,
+    });
+    renderDialog();
+
+    await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
+    await waitFor(() => expect(status).toHaveBeenCalledWith(terminal.flow_id));
+
+    expect(tab.close).toHaveBeenCalledOnce();
+    expect(tab.location.href).toBe('');
   });
 });
 
