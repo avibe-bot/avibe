@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.15.0
+version: 0.16.0
 ---
 
 # Background Watch Hook
@@ -220,15 +220,63 @@ if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
   done
 fi
 if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
-  for SKILL_ROOT in "${CODEX_HOME:-$HOME/.codex}/skills" "${AGENTS_HOME:-$HOME/.agents}/skills"; do
-    [ -d "$SKILL_ROOT" ] || continue
-    BACKGROUND_WATCH_HOOK_SKILL_FILE="$(find "$SKILL_ROOT" -path '*/background-watch-hook/SKILL.md' -print -quit)"
-    [ -n "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ] && break
+  for SKILL_FILE in \
+    "${CODEX_HOME:-$HOME/.codex}/skills/background-watch-hook/SKILL.md" \
+    "${AGENTS_HOME:-$HOME/.agents}/skills/background-watch-hook/SKILL.md" \
+    "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/background-watch-hook/SKILL.md" \
+    "${OPENCODE_HOME:-$HOME/.opencode}/skills/background-watch-hook/SKILL.md" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/background-watch-hook/SKILL.md"; do
+    if [ -f "$SKILL_FILE" ]; then
+      BACKGROUND_WATCH_HOOK_SKILL_FILE="$SKILL_FILE"
+      break
+    fi
   done
 fi
 test -f "$BACKGROUND_WATCH_HOOK_SKILL_FILE"
 BACKGROUND_WATCH_HOOK_DIR="$(dirname "$BACKGROUND_WATCH_HOOK_SKILL_FILE")"
 ```
+
+## Active Waiter Preflight
+
+Skill distribution belongs to the agent environment, not to this skill. When
+multiple harnesses on one machine should use the same checkout, expose that
+canonical directory through harness-local symlinks instead of maintaining
+independent copies. This skill does not install, copy, or rewrite harness skill
+directories.
+
+Before arming a managed GitHub waiter, check the waiter in the active directory
+resolved above. The preflight is capability-based so it works for repository,
+symlinked, and harness-managed installations without a second resolver or a
+custom package manifest:
+
+```bash
+WAIT_PR="$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py"
+test -f "$WAIT_PR"
+WAIT_PR_HELP="$(uv run --no-project "$WAIT_PR" --help 2>&1)" || {
+  printf '%s\n' "background-watch-hook waiter is not executable: $WAIT_PR" >&2
+  exit 1
+}
+for REQUIRED_FLAG in \
+  --sha \
+  --workflow \
+  --seed-state \
+  --actionable-only \
+  --ignore-author; do
+  case "$WAIT_PR_HELP" in
+    *"$REQUIRED_FLAG"*) ;;
+    *)
+      printf '%s\n' "background-watch-hook waiter is missing $REQUIRED_FLAG: $WAIT_PR" >&2
+      exit 1
+      ;;
+  esac
+done
+```
+
+The frontmatter version is a human-readable signal; the required command-line
+capabilities are the runtime contract. A failed preflight is an environment
+blocker. Repair the harness registration or symlink to the intended skill, then
+run the preflight again. Do not patch an older copy in place or hand-roll a
+substitute waiter.
 
 ## GitHub Example Waiter
 
