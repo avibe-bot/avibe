@@ -810,8 +810,11 @@ class MemoryModule:
                 and health.capabilities.get("rerank") is True
                 and "agentic_search" not in health.disabled_features
             )
-        except asyncio.TimeoutError:
-            if agentic_telemetry is not None:
+        except (asyncio.TimeoutError, MemoryProviderFailure) as failure:
+            if agentic_telemetry is not None and (
+                isinstance(failure, asyncio.TimeoutError)
+                or failure.error == "memory_provider_timeout"
+            ):
                 agentic_telemetry.timed_out = True
             embed_available = False
             agentic_available = False

@@ -800,6 +800,45 @@ async def test_agentic_recall_logs_capability_probe_timeout(
     assert "private query" not in telemetry[0]
 
 
+async def test_agentic_recall_logs_typed_provider_health_timeout(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = FakeMemoryProvider(
+        agentic_budget_enforced_flag=True,
+        health_failure=MemoryProviderFailure("memory_provider_timeout"),
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=30,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+
+    caplog.set_level("INFO", logger="core.memory.module")
+    result = await module.recall(
+        "private query",
+        policy=policy,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_scopes == []
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "mode=agentic" in telemetry[0]
+    assert "success=false" in telemetry[0]
+    assert "timeout=true" in telemetry[0]
+    assert "private query" not in telemetry[0]
+
+
 async def test_agentic_recall_reaches_provider_with_policy_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
