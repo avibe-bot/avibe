@@ -152,8 +152,8 @@ def _manifest(repo_root: Path, commit: str, skill_root: Path) -> dict[str, Any]:
 
 
 def _expanded_targets(values: list[str] | None) -> list[Path]:
-    raw_targets = [Path(value).expanduser() for value in values] if values else list(DEFAULT_TARGETS)
-    return [target for target in raw_targets]
+    raw_targets = list(values) if values else [str(target) for target in DEFAULT_TARGETS]
+    return [Path(value).expanduser() for value in raw_targets]
 
 
 def _target_destination(target: Path) -> Path:
