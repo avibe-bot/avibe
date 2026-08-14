@@ -847,6 +847,28 @@ def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[st
     return migrated, changed, warnings
 
 
+# The spellings a hand-edited config may use for a boolean, both sides in one
+# place. ``""`` reads as off because ``test_show_agent_activity_defaults_off_and
+# _round_trips`` states it; anything absent from here names no side at all.
+_BOOL_SPELLINGS = {
+    "1": True,
+    "true": True,
+    "yes": True,
+    "on": True,
+    "0": False,
+    "false": False,
+    "no": False,
+    "off": False,
+    "": False,
+}
+
+# Sections whose fields are independent of one another, so a single unreadable
+# field is recovered on its own instead of discarding its siblings — and whose
+# switches recover to off rather than to the fresh-install default. See
+# ``_reset_recoverable_config_section``.
+_FIELD_SCOPED_RECOVERY_SECTIONS = ("ui", "audio_asr")
+
+
 def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     message = str(error)
     match = re.search(r"Config '([^']+)'", message)
@@ -900,7 +922,66 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     return None
 
 
-def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
+def _recovery_field_for_error(section: Optional[str], error: BaseException) -> Optional[str]:
+    """The single field an error names, for the field-scoped sections only.
+
+    Restricted to those sections so every other section keeps recovering — and
+    de-duplicating — as a whole, which is what stops the recovery loop.
+    """
+
+    if section not in _FIELD_SCOPED_RECOVERY_SECTIONS:
+        return None
+    match = re.search(r"Config '([^']+)'", str(error))
+    if not match:
+        return None
+    path = match.group(1).split(".", 1)
+    if len(path) != 2 or path[0] != section:
+        return None
+    return path[1]
+
+
+def _recover_switch_section_field(
+    payload: dict, section: str, field_name: Optional[str]
+) -> bool:
+    """Recover the one unreadable field of a section whose fields stand alone.
+
+    Discarding the whole section would answer an unreadable font size by hiding
+    the tool-call rows, and — the defect this exists for — an unreadable
+    anything by turning transcription back **on**, because ``audio_asr.enabled``
+    and ``ui.show_tool_calls`` both declare ``True``. So the unreadable field is
+    recovered on its own and its siblings are kept as written: a field declared
+    ``bool`` resolves to ``False``, because an unreadable switch is no evidence
+    the feature was on, and any other field is dropped so its declared default
+    applies — which is what keeps a corrupt ``audio_asr.model`` from switching
+    off transcription the config plainly asked for.
+
+    Stated over the section's declared fields rather than over the switches that
+    exist today, so a boolean added to either dataclass is covered without
+    editing this function.
+    """
+
+    declared = V2Config.__dataclass_fields__[section].default_factory
+    switches = {info.name for info in fields(declared) if info.type in (bool, "bool")}
+    stored = payload.get(section)
+    if not isinstance(stored, dict):
+        # Nothing readable to keep, so every switch resolves off.
+        payload[section] = {name: False for name in switches}
+        return True
+    if field_name is None:
+        stored.update({name: False for name in switches})
+        return True
+    if field_name in switches:
+        stored[field_name] = False
+        return True
+    if field_name in {info.name for info in fields(declared)}:
+        stored.pop(field_name, None)
+        return True
+    return False
+
+
+def _reset_recoverable_config_section(
+    payload: dict, section: str, field_name: Optional[str] = None
+) -> bool:
     """Replace one independently recoverable section with its safe default.
 
     This is deliberately outside ``V2Config.from_payload``. Direct callers and
@@ -908,6 +989,8 @@ def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
+    if section in _FIELD_SCOPED_RECOVERY_SECTIONS:
+        return _recover_switch_section_field(payload, section, field_name)
     if section == "memory.rerank":
         memory = payload.get("memory")
         processing = memory.get("processing") if isinstance(memory, dict) else None
@@ -1396,6 +1479,12 @@ class AudioAsrConfig:
         Stated over the declared fields rather than over the three switches
         that exist today, so a boolean added later is covered without editing
         this method.
+
+        Raised one field at a time, in the ``Config '<section>.<field>'`` shape
+        every other message on this path uses, because that is what lets a disk
+        load recover the unreadable switch alone instead of the whole section —
+        which for this section means turning transcription back on. A second
+        unreadable switch simply raises on the next pass of the recovery loop.
         """
         invalid = sorted(
             info.name
@@ -1403,9 +1492,7 @@ class AudioAsrConfig:
             if info.type in (bool, "bool") and not isinstance(getattr(self, info.name), bool)
         )
         if invalid:
-            raise ValueError(
-                "Config 'audio_asr' fields must be booleans: " + ", ".join(invalid)
-            )
+            raise ValueError(f"Config 'audio_asr.{invalid[0]}' must be a boolean")
 
 
 _MEMORY_MAX_URL_BYTES = 2048
@@ -2744,20 +2831,26 @@ class V2Config:
                 break
             except (TypeError, ValueError) as exc:
                 section = _recovery_section_for_error(exc)
-                if section is None or section in recovered_sections:
+                field_name = _recovery_field_for_error(section, exc)
+                # Keyed by whatever this pass will actually repair, so the
+                # dedupe that stops the loop cannot mistake a second unreadable
+                # field of a field-scoped section for no progress and discard
+                # the whole file.
+                recovered = section if field_name is None else f"{section}.{field_name}"
+                if section is None or recovered in recovered_sections:
                     warning = f"Config could not be loaded; using recovery defaults: {exc}"
                     logger.error("%s", warning)
                     config = cls.default()
                     recovery_warnings.append(warning)
                     break
-                if not _reset_recoverable_config_section(candidate, section):
+                if not _reset_recoverable_config_section(candidate, section, field_name):
                     warning = f"Config section '{section}' could not be recovered; using recovery defaults: {exc}"
                     logger.error("%s", warning)
                     config = cls.default()
                     recovery_warnings.append(warning)
                     break
-                recovered_sections.add(section)
-                recovery_warnings.append(f"Recovered invalid config section '{section}': {exc}")
+                recovered_sections.add(recovered)
+                recovery_warnings.append(f"Recovered invalid config section '{recovered}': {exc}")
 
         all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
         if migrated and not migration_warnings and not recovery_warnings:
@@ -2957,19 +3050,30 @@ class V2Config:
         except (TypeError, ValueError) as exc:
             raise ValueError("Config 'ui.chat_message_font_size' must be a number") from exc
 
-        # These two switches accept the several spellings a hand-edited config
-        # may use for a boolean — ``true``/``1``/``"yes"``/``"off"`` all name a
-        # side the caller meant. A value that spells no side at all (``[]``,
-        # ``{}``, ``null``) is refused rather than silently read as false.
+        # This section's switches accept the several spellings a hand-edited
+        # config may use for a boolean — ``true``/``1``/``"yes"``/``"off"`` all
+        # name a side the caller meant, and ``_BOOL_SPELLINGS`` is the whole
+        # vocabulary in one place rather than a truthy list plus an implicit
+        # else. A value outside it names no side at all — ``"garbage"``, ``5``,
+        # ``[]`` — and is refused rather than read as false, which on this write
+        # path would answer 200 having stored the side the caller never asked
+        # for. Applied to every field ``UiConfig`` declares ``bool``, so a
+        # switch added later is spelled and refused like its siblings instead of
+        # reaching the runtime as whatever the file happened to hold.
         def _spelled_bool(name: str, value: object) -> bool:
+            if isinstance(value, bool):
+                return value
             if isinstance(value, str):
-                return value.strip().lower() in ("1", "true", "yes", "on")
-            if isinstance(value, (bool, int)):
+                spelled = _BOOL_SPELLINGS.get(value.strip().lower())
+                if spelled is not None:
+                    return spelled
+            elif isinstance(value, int) and value in (0, 1):
                 return bool(value)
             raise ValueError(f"Config 'ui.{name}' must be a boolean")
 
-        ui.show_agent_activity = _spelled_bool("show_agent_activity", ui.show_agent_activity)
-        ui.show_tool_calls = _spelled_bool("show_tool_calls", ui.show_tool_calls)
+        for info in fields(UiConfig):
+            if info.type in (bool, "bool"):
+                setattr(ui, info.name, _spelled_bool(info.name, getattr(ui, info.name)))
 
         remote_access_payload = payload.get("remote_access") or {}
         if not isinstance(remote_access_payload, dict):

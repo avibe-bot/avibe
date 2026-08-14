@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import fields
+
 import pytest
 
 from config.v2_config import (
+    _BOOL_SPELLINGS,
     AgentsConfig,
     DiscordConfig,
     LarkConfig,
@@ -308,6 +311,42 @@ def test_show_tool_calls_defaults_on_and_round_trips() -> None:
     config = V2Config.from_payload(payload)
     assert config.ui.show_tool_calls is False
     assert api.config_to_payload(config)["ui"]["show_tool_calls"] is False
+
+
+def test_ui_switches_resolve_the_side_a_spelling_names_or_refuse_the_value() -> None:
+    """A switch stores the side its value names; a value naming none is refused.
+
+    ``/api/config`` validates through this same parser, so a value read as a
+    side it never named is answered 200 holding the opposite of what the caller
+    sent. Seeded from ``_BOOL_SPELLINGS`` and from the switches ``UiConfig``
+    declares rather than from lists repeated here, so a spelling added to the
+    vocabulary or a switch added to the section is covered without editing it.
+    """
+    payload = api.config_to_payload(_base_config())
+    switches = [info.name for info in fields(UiConfig) if info.type in (bool, "bool")]
+    assert len(switches) > 1
+
+    for name in switches:
+        for spelling, side in _BOOL_SPELLINGS.items():
+            for written in (spelling, spelling.upper(), f"  {spelling} "):
+                payload["ui"][name] = written
+                parsed = getattr(V2Config.from_payload(payload).ui, name)
+                assert parsed is side, (name, written)
+        for literal in (True, False, 1, 0):
+            payload["ui"][name] = literal
+            assert getattr(V2Config.from_payload(payload).ui, name) is bool(literal), (
+                name,
+                literal,
+            )
+
+        # Outside the vocabulary the value names no side at all. Reading it as
+        # off — which is what a truthy-list-plus-else does — is the defect:
+        # ``5`` was read as on and ``"garbage"`` as off, both silently.
+        for unspellable in ("garbage", "maybe", "true-ish", 5, -1, 2.0, [], {}, None):
+            payload["ui"][name] = unspellable
+            with pytest.raises(ValueError, match=name):
+                V2Config.from_payload(payload)
+        payload["ui"][name] = getattr(_base_config().ui, name)
 
     # String forms parse explicitly — ``bool("false")`` would be True, which must NOT
     # keep tool rows visible when the user hid them.

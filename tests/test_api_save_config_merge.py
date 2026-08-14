@@ -11,7 +11,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.v2_config import AudioAsrConfig, UiConfig, V2Config, VibeCloudRemoteAccessConfig
+from config.v2_config import (
+    _FIELD_SCOPED_RECOVERY_SECTIONS,
+    AudioAsrConfig,
+    UiConfig,
+    V2Config,
+    VibeCloudRemoteAccessConfig,
+)
 from core.audio_asr import AudioAsrService
 from vibe import api, remote_access
 
@@ -1306,6 +1312,12 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
     refusal added above has to come back out of the recovery table rather than
     reaching the caller. Seeded over the same surface as the write test, which
     is what makes the two halves one statement instead of two lists.
+
+    Recovery is also held to what it may not decide on the config's behalf. An
+    unreadable value is not evidence, so it may never leave an optional
+    feature's switch **on**, and it may never answer for a field other than the
+    one it repaired — which is what keeps an unreadable ``audio_asr.model`` from
+    discarding a stored ``enabled: false`` and starting to transcribe.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config_path = tmp_path / "config.json"
@@ -1324,14 +1336,163 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
         config = V2Config.load(config_path)
 
         assert any(path[0] in warning for warning in config.load_warnings), label
-        assert _walk(config, path, attr=True) == _walk(V2Config.default(), path, attr=True), label
+        declared = _walk(V2Config.default(), path, attr=True)
+        expected = (
+            False
+            if path[0] in _FIELD_SCOPED_RECOVERY_SECTIONS and isinstance(declared, bool)
+            else declared
+        )
+        assert _walk(config, path, attr=True) == expected, label
+        recovered = api.config_to_payload(config, include_secrets=True, include_internal=True)
+        if len(path) > 1:
+            # The recovered section must be exactly what the file would have
+            # parsed to had that one field been written with its recovered
+            # value — so every sibling survives, including the ones derived
+            # from it. Asserting sibling-by-sibling would instead pass for a
+            # recovery that quietly re-derived a flag nobody listed.
+            repaired = copy.deepcopy(healthy)
+            _walk(repaired, path[:-1], attr=False)[path[-1]] = expected  # type: ignore[index]
+            assert recovered[path[0]] == api.config_to_payload(
+                V2Config.from_payload(repaired), include_secrets=True, include_internal=True
+            )[path[0]], label
         # Everything outside the corrupted section survives. Without this the
         # test would pass just as well for a recovery that threw the whole file
         # away, which for a scalar looks identical to repairing that scalar.
-        recovered = api.config_to_payload(config, include_secrets=True, include_internal=True)
         assert {key: value for key, value in recovered.items() if key != path[0]} == {
             key: value for key, value in healthy.items() if key != path[0]
         }, label
+
+
+def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_path, monkeypatch):
+    """Recovery answers for the field it repaired, and never for the switch.
+
+    ``audio_asr.enabled`` and ``ui.show_tool_calls`` both declare ``True``, so
+    replacing either section wholesale answers an unreadable *anything* by
+    switching a feature the file had off back **on** — for ``audio_asr`` that
+    means starting to send audio to a remote endpoint after an upgrade. The
+    fix is scope, not a safer default: repair the unreadable field alone, keep
+    every sibling as written, and resolve an unreadable switch to off, because
+    a value naming no side is no evidence the feature was on.
+
+    Stated over the declared fields of every field-scoped section rather than
+    over the two the review named, so a field or a whole section added to
+    ``_FIELD_SCOPED_RECOVERY_SECTIONS`` is covered without editing this test.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
+    base = api.config_to_payload(
+        V2Config.from_payload(_full_config_payload()), include_secrets=True, include_internal=True
+    )
+
+    def _load(payload: dict) -> V2Config:
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+        return V2Config.load(config_path)
+
+    def _section_payload(config: V2Config, section: str) -> dict:
+        return api.config_to_payload(config, include_secrets=True, include_internal=True)[section]
+
+    recovered_fields: set[tuple[str, str]] = set()
+    every_switch: set[tuple[str, str]] = set()
+    for section in _FIELD_SCOPED_RECOVERY_SECTIONS:
+        declared = fields(V2Config.__dataclass_fields__[section].default_factory)
+        switches = [info.name for info in declared if info.type in (bool, "bool")]
+        assert switches, section
+        every_switch |= {(section, name) for name in switches}
+        # Both sides, so "keeps the sibling as written" is a real statement
+        # rather than one that happens to match the declared defaults.
+        for side in (False, True):
+            seed = copy.deepcopy(base)
+            seed[section].update({name: side for name in switches})
+            assert _load(seed).load_warnings == (), (section, side)
+
+            for info in declared:
+                for unreadable in ([], "garbage", {"nope": 1}):
+                    corrupted = copy.deepcopy(seed)
+                    corrupted[section][info.name] = unreadable
+                    try:
+                        V2Config.from_payload(corrupted)
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        # This field reads that value, so there is nothing to
+                        # recover. Driving the sweep off the parser rather than
+                        # off a table of types keeps a newly validated field
+                        # covered without editing this test.
+                        continue
+                    recovered_fields.add((section, info.name))
+
+                    config = _load(corrupted)
+                    assert config.load_warnings, (section, side, info.name, unreadable)
+
+                    # A declared switch resolves off; anything else falls back
+                    # to its own default. Either way the section must be
+                    # exactly what the file would have parsed to had that one
+                    # field been written so — which is how every sibling,
+                    # including a flag derived from the repaired field, is held
+                    # in a single assertion.
+                    repaired = copy.deepcopy(seed)
+                    repaired[section][info.name] = (
+                        False
+                        if info.name in switches
+                        else getattr(getattr(V2Config.default(), section), info.name)
+                    )
+                    assert _section_payload(config, section) == _section_payload(
+                        V2Config.from_payload(repaired), section
+                    ), (section, side, info.name, unreadable)
+
+        # An unreadable section keeps no sibling, so every switch resolves off
+        # — stated the same way, as the parse of a section written that way.
+        broken = copy.deepcopy(base)
+        broken[section] = 5
+        config = _load(broken)
+        assert config.load_warnings, section
+        all_off = copy.deepcopy(base)
+        all_off[section] = {name: False for name in switches}
+        assert _section_payload(config, section) == _section_payload(
+            V2Config.from_payload(all_off), section
+        ), section
+
+    # The sweep skips any field the parser reads happily, so state that no
+    # switch was skipped: a switch that stopped being validated would make the
+    # property above vacuous exactly where it matters.
+    assert every_switch <= recovered_fields, every_switch - recovered_fields
+
+    # The review's own case, and the mirror it must not become.
+    stored_off = copy.deepcopy(base)
+    stored_off["audio_asr"].update({"enabled": False, "enabled_configured": True})
+    for corrupt_field in ("enabled", "model", "timeout_seconds"):
+        payload = copy.deepcopy(stored_off)
+        payload["audio_asr"][corrupt_field] = "garbage" if corrupt_field != "model" else []
+        assert _load(payload).audio_asr.enabled is False, corrupt_field
+
+    stored_on = copy.deepcopy(base)
+    stored_on["audio_asr"].update({"enabled": True, "enabled_configured": True})
+    stored_on["audio_asr"]["model"] = []
+    # An unreadable model name is no reason to stop transcribing audio the
+    # config plainly asked to transcribe; only the model falls back.
+    recovered = _load(stored_on)
+    assert recovered.audio_asr.enabled is True
+    assert recovered.audio_asr.model == V2Config.default().audio_asr.model
+
+    # The member the review did not reach: same class, same flip, other section.
+    hidden_rows = copy.deepcopy(base)
+    hidden_rows["ui"].update({"show_tool_calls": False, "instance_name": "kept"})
+    hidden_rows["ui"]["chat_message_font_size"] = "garbage"
+    recovered = _load(hidden_rows)
+    assert recovered.ui.show_tool_calls is False
+    assert recovered.ui.instance_name == "kept"
+    assert recovered.ui.chat_message_font_size == V2Config.default().ui.chat_message_font_size
+
+    # Two unreadable fields of one section are two repairs, not a reason to
+    # discard the file: the recovery loop dedupes per field, not per section.
+    both = copy.deepcopy(base)
+    both["ui"].update(
+        {"show_agent_activity": "garbage", "show_tool_calls": 5, "instance_name": "kept"}
+    )
+    recovered = _load(both)
+    assert recovered.ui.show_agent_activity is False
+    assert recovered.ui.show_tool_calls is False
+    assert recovered.ui.instance_name == "kept"
 
 
 def test_editor_config_write_payload_keeps_messaging_fields_only():
