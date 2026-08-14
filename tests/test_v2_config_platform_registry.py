@@ -8,6 +8,7 @@ import pytest
 
 from config.v2_config import (
     _BOOL_SPELLINGS,
+    _named_value,
     AgentsConfig,
     AudioAsrConfig,
     DiscordConfig,
@@ -386,9 +387,12 @@ _KIND_EXEMPT_FIELDS = {("remote_access.vibe_cloud", "instance_kind")}
 # than the ``ValueError`` every other refusal here raises, and a ``float`` field
 # accepted them outright — an ASR timeout of infinity never expires.
 _NAMING_NO_NUMBER = (True, False, "garbage", [], {}, None, float("inf"), float("-inf"), float("nan"))
+# A fractional value is a legal ``float`` and names no ``int``, so this is the
+# one row the two numeric kinds cannot share: ``int(14.9)`` is ``14``, and a
+# font size posted as 14.9 was answered 200 and stored as 14.
 _VALUES_NAMING_NO = {
     "bool": ("garbage", 5, -1, 2.0, [], {}, None),
-    "int": _NAMING_NO_NUMBER,
+    "int": _NAMING_NO_NUMBER + (14.9, -0.5, 0.1),
     "float": _NAMING_NO_NUMBER,
     "str": (5, True, 2.0, [], {}, None),
 }
@@ -501,6 +505,73 @@ def test_config_fields_are_held_to_the_kind_they_declare() -> None:
         ).remote_access.vibe_cloud.auto_recovery
         is False
     )
+
+
+# Numbers to offer the numeric vocabulary: whole and fractional, negative, the
+# first integer a ``float`` cannot hold, one too large for a ``float`` at all,
+# and the three that are numbers without naming a quantity.
+_NUMBERS_GIVEN = (
+    0,
+    1,
+    -3,
+    14,
+    14.0,
+    -2.0,
+    0.5,
+    2.5,
+    14.9,
+    -0.5,
+    10**19,
+    2**53 + 1,
+    10**309,
+    float("inf"),
+    float("-inf"),
+    float("nan"),
+)
+
+
+def test_a_number_this_parser_accepts_is_the_number_it_was_given() -> None:
+    """Whatever the numeric vocabulary accepts, it stores unchanged.
+
+    Three review rounds each found one coercion — a switch read as ``1``, an
+    infinity read as an ASR timeout, a font size of 14.9 truncated to ``14`` —
+    and they are one defect wearing three faces: a conversion that succeeds
+    while changing the number, so the write is answered 200 having stored a
+    setting the caller never sent. Listing the three known faces would leave the
+    fourth to a fourth review round, so the property is stated over inputs
+    instead of over forbidden cases: offer this vocabulary a number, and either
+    it refuses or it hands back exactly what it was given. A conversion added
+    later that rounds, truncates, or saturates fails here rather than in review.
+
+    A spelling is deliberately not held to the rule — reading ``"14"`` as 14 is
+    the normalization this keeps, asserted at the bottom — because a spelling
+    names a number without being one, and no fractional spelling reaches the
+    conversion anyway: ``int("14.9")`` raises.
+    """
+
+    read: dict[str, list[object]] = {"int": [], "float": []}
+    for kind in read:
+        for value in _NUMBERS_GIVEN:
+            try:
+                number = _named_value(f"probe.{kind}", kind, value)
+            except ValueError:
+                continue
+            assert number == value, (kind, value, number)
+            read[kind].append(value)
+
+    # Non-vacuity, and the half of the contract the rule must not eat: refusing
+    # every number satisfies the loop above, so the values that must still be
+    # read are named. They are asserted by calling rather than by looking for
+    # them in what was accepted, because ``14.0 in [14]`` is true in Python —
+    # membership would report the float as read on the strength of the int it
+    # equals, and a rule that refused every float would pass.
+    assert _named_value("probe.int", "int", 14.0) == 14
+    assert _named_value("probe.float", "float", 14.9) == 14.9
+    assert _named_value("probe.int", "int", 2**53 + 1) == 2**53 + 1
+    assert len(read["int"]) >= 6 and len(read["float"]) >= 6, read
+
+    assert _named_value("probe.int", "int", "14") == 14
+    assert _named_value("probe.float", "float", "2.5") == 2.5
 
 
 def test_config_payload_includes_vibe_cloud_remote_access() -> None:

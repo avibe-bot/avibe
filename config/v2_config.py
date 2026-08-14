@@ -896,12 +896,14 @@ def _named_value(path: str, declared: object, value: object) -> object:
     belongs to ``V2Config.load``, behind a backup and a warning; this states
     only what a value must name to be readable at all.
 
-    A switch reads the spellings above. A number reads anything that names a
-    finite one, so a hand-edited ``"14"`` still means 14 — but a ``bool`` is
-    refused, because Python makes it an ``int`` and ``int(True)`` is a legal
-    ``1``, so a switch posted where a font size belongs would be stored as a
-    size and answered 200, and an infinity or a NaN is refused because neither
-    names a setting any field here can hold. A string reads only a string: no
+    A switch reads the spellings above. A number reads any spelling that names
+    one, so a hand-edited ``"14"`` still means 14, and otherwise reads only a
+    number it can store unchanged: a ``bool`` is refused because Python makes it
+    an ``int`` and ``int(True)`` is a legal ``1``, an infinity and a NaN are
+    refused because neither names a setting any field here can hold, and a
+    fractional value posted to an integer field is refused because ``int(14.9)``
+    is ``14`` — every one of them otherwise answers 200 having stored a setting
+    the caller never sent. A string reads only a string: no
     number names a URL or a credential, and silently emptying one logs the
     operator out or unpairs the instance. Kinds outside this vocabulary —
     containers, nested sections — are left to the code that already
@@ -946,6 +948,19 @@ def _named_value(path: str, declared: object, value: object) -> object:
             # stored a bound the caller never asked for. Only floats are
             # checked: an ``int`` is always finite, and asking ``math`` about a
             # large one would raise the overflow just caught above.
+            raise ValueError(f"Config '{path}' must be a number")
+        if isinstance(value, (int, float)) and number != value:
+            # The conversion succeeded and changed the number. ``int(14.9)`` is
+            # ``14``, so a posted font size of 14.9 answered 200 having stored a
+            # size nobody asked for, and ``float`` of an integer past 2**53 lands
+            # on its neighbour the same way. Both are the defect this whole
+            # vocabulary exists to refuse — a value coerced into a legal setting
+            # instead of refused — so the rule is stated as what it is: a number
+            # this reads is the number it was given. Only a numeric input is
+            # held to it. A string is a spelling, not a number, and reading
+            # ``"14"`` as 14 is the normalization this deliberately keeps; a
+            # fractional spelling has no route here anyway, because ``int`` of
+            # ``"14.9"`` already raises above.
             raise ValueError(f"Config '{path}' must be a number")
         return number
     if text == "str":
