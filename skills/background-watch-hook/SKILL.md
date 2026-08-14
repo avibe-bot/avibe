@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.15.0
+version: 0.16.0
 ---
 
 # Background Watch Hook
@@ -220,7 +220,11 @@ if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
   done
 fi
 if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
-  for SKILL_ROOT in "${CODEX_HOME:-$HOME/.codex}/skills" "${AGENTS_HOME:-$HOME/.agents}/skills"; do
+  for SKILL_ROOT in \
+    "${CODEX_HOME:-$HOME/.codex}/skills" \
+    "${AGENTS_HOME:-$HOME/.agents}/skills" \
+    "${OPENCODE_HOME:-$HOME/.opencode}/skills" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills"; do
     [ -d "$SKILL_ROOT" ] || continue
     BACKGROUND_WATCH_HOOK_SKILL_FILE="$(find "$SKILL_ROOT" -path '*/background-watch-hook/SKILL.md' -print -quit)"
     [ -n "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ] && break
@@ -228,6 +232,37 @@ if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
 fi
 test -f "$BACKGROUND_WATCH_HOOK_SKILL_FILE"
 BACKGROUND_WATCH_HOOK_DIR="$(dirname "$BACKGROUND_WATCH_HOOK_SKILL_FILE")"
+```
+
+## Skill Distribution Preflight
+
+Before arming a managed GitHub waiter, verify that the active harness copy is
+the canonical committed skill. The check is read-only and must pass before a
+wait starts:
+
+```bash
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SYNC_SKILL="$REPO_ROOT/skills/background-watch-hook/scripts/sync_skill.py"
+test -f "$SYNC_SKILL"
+python3 "$SYNC_SKILL" \
+  --repo-root "$REPO_ROOT" \
+  --check
+```
+
+The check compares the installed tree with the current canonical commit,
+records the full tree SHA-256 and frontmatter version, and probes
+`wait_pr.py --help` for the combined `--sha`, `--workflow`, `--seed-state`,
+`--actionable-only`, and `--ignore-author` options. A non-zero result is an
+environment blocker: report the canonical path and required commit, then
+repair the installation with the same helper before arming the watch. Do not
+patch an older harness copy in place or hand-roll a substitute waiter.
+
+To install the canonical committed copy into the configured harness targets:
+
+```bash
+python3 "$SYNC_SKILL" \
+  --repo-root "$REPO_ROOT" \
+  --install
 ```
 
 ## GitHub Example Waiter
