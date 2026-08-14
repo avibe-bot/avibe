@@ -61,6 +61,8 @@ def serve(uds: Path) -> None:
     app = create_app()
     round_handler = _AgenticRoundHandler()
     round_logger = logging.getLogger("everos.memory.search.agentic")
+    original_round_logger_level = round_logger.level
+    round_logger.setLevel(logging.INFO)
     round_logger.addHandler(round_handler)
     if recorder is not None:
         original_lifespan = app.router.lifespan_context
@@ -114,6 +116,7 @@ def serve(uds: Path) -> None:
         uvicorn.Server(config).run()
     finally:
         round_logger.removeHandler(round_handler)
+        round_logger.setLevel(original_round_logger_level)
 
 
 class _AgenticRoundHandler(logging.Handler):

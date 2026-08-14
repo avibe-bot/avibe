@@ -42,6 +42,9 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
     import uvicorn
 
     captured: dict[str, object] = {}
+    round_logger = logging.getLogger("everos.memory.search.agentic")
+    original_round_logger_level = round_logger.level
+    round_logger.setLevel(logging.ERROR)
 
     class _App:
         def middleware(self, _kind: str):
@@ -62,6 +65,7 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
             return None
 
         def run(self) -> None:
+            captured["round_logger_level"] = round_logger.level
             return None
 
     monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.3")
@@ -72,9 +76,14 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(uvicorn, "Server", _Server)
     monkeypatch.setenv("AVIBE_MEMORY_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
 
-    sidecar.serve(tmp_path / "everos.sock")
+    try:
+        sidecar.serve(tmp_path / "everos.sock")
+    finally:
+        round_logger.setLevel(original_round_logger_level)
 
     assert captured["timeout_graceful_shutdown"] == 1
+    assert captured["round_logger_level"] == logging.INFO
+    assert round_logger.level == original_round_logger_level
     assert isinstance(captured["app"], sidecar._RecorderHealthProjection)
     assert isinstance(captured["app"]._app, sidecar._AgenticDeadlineProjection)
 
@@ -141,6 +150,8 @@ def test_agentic_deadline_projection_returns_allowlisted_round_header() -> None:
     ]
     round_logger = logging.getLogger("everos.memory.search.agentic")
     round_handler = sidecar._AgenticRoundHandler()
+    original_round_logger_level = round_logger.level
+    round_logger.setLevel(logging.INFO)
     round_logger.addHandler(round_handler)
 
     async def receive():
@@ -153,20 +164,12 @@ def test_agentic_deadline_projection_returns_allowlisted_round_header() -> None:
 
     async def downstream(_scope, downstream_receive, send):
         assert (await downstream_receive())["body"] == _agentic_search_body()
-        round_logger.handle(
-            logging.LogRecord(
-                name="everos.memory.search.agentic",
-                level=logging.INFO,
-                pathname=__file__,
-                lineno=1,
-                msg={
-                    "event": "agentic_search_decision",
-                    "round": "round2",
-                    "query": "private query must not be projected",
-                },
-                args=(),
-                exc_info=None,
-            )
+        round_logger.info(
+            {
+                "event": "agentic_search_decision",
+                "round": "round2",
+                "query": "private query must not be projected",
+            }
         )
         await send(
             {
@@ -196,6 +199,7 @@ def test_agentic_deadline_projection_returns_allowlisted_round_header() -> None:
         )
     finally:
         round_logger.removeHandler(round_handler)
+        round_logger.setLevel(original_round_logger_level)
 
     headers = dict(sent[0]["headers"])
     assert headers[sidecar._AGENTIC_ROUND_HEADER.lower().encode()] == b"round2"
