@@ -214,9 +214,13 @@ describe('SettingsModelsPage surface branches', () => {
 
     await screen.findByText('Retained source');
     await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
-    expect(await screen.findByRole('dialog')).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+    const picker = await screen.findByRole('menu');
+    expect(within(picker).getByText(/Native recommended|原生推荐/i)).toBeTruthy();
+    expect(within(picker).getByText(/Gateway recommended|网关推荐/i)).toBeTruthy();
+    expect(within(picker).queryByText(/Claude Pro \/ Max|ChatGPT Plus \/ Pro/i)).toBeNull();
+    await userEvent.click(within(picker).getByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
 
+    expect(screen.queryByRole('menu')).toBeNull();
     expect((await screen.findByRole('dialog')).textContent).toMatch(/Add Claude subscription|添加 anthropic 订阅/i);
   });
 
@@ -227,9 +231,9 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
     await user.click(trigger);
-    const picker = await screen.findByRole('dialog');
-    const claude = within(picker).getByRole('button', { name: /Claude subscription|Claude 订阅/i });
-    const chatgpt = within(picker).getByRole('button', { name: /ChatGPT subscription|ChatGPT 订阅/i });
+    const picker = await screen.findByRole('menu');
+    const claude = within(picker).getByRole('menuitem', { name: /Claude subscription|Claude 订阅/i });
+    const chatgpt = within(picker).getByRole('menuitem', { name: /ChatGPT subscription|ChatGPT 订阅/i });
 
     await waitFor(() => expect(document.activeElement).toBe(claude));
     expect(claude.getAttribute('tabindex')).toBe('0');
@@ -251,9 +255,24 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
     await user.click(trigger);
-    await screen.findByRole('dialog');
+    await screen.findByRole('menu');
     await user.keyboard('{Escape}');
 
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it('restores the Add subscription trigger when an outside press dismisses the vendor picker', async () => {
+    renderPage([retainedSource]);
+
+    const user = userEvent.setup();
+    await screen.findByText('Retained source');
+    const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
+    await user.click(trigger);
+    await screen.findByRole('menu');
+    await user.click(document.body);
+
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
@@ -263,7 +282,7 @@ describe('SettingsModelsPage surface branches', () => {
     const user = userEvent.setup();
     await screen.findByText('Claude native login');
     await user.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
-    await user.click(await screen.findByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
 
     const native = await screen.findByRole('radio', { name: /Native|原生/i });
     const hub = screen.getByRole('radio', { name: /Gateway|网关/i });
@@ -278,7 +297,7 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     const trigger = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
     await userEvent.click(trigger);
-    await userEvent.click(screen.getByRole('button', { name: /Claude subscription|Claude 订阅/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
     const cancelButtons = screen.getAllByRole('button', { name: /^Cancel$|^取消$/i });
     await userEvent.click(cancelButtons[cancelButtons.length - 1]);
 

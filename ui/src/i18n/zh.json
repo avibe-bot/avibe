@@ -865,10 +865,14 @@
         }
       },
       "subscriptionPicker": {
-        "title": "选择要连接的订阅",
-        "detail": "选择要添加到 Model Hub 的账号订阅。",
-        "anthropic": { "title": "Claude 订阅", "detail": "Claude Pro / Max" },
-        "openai": { "title": "ChatGPT 订阅", "detail": "ChatGPT Plus / Pro" }
+        "vendor": {
+          "anthropic": "Claude 订阅",
+          "openai": "ChatGPT 订阅"
+        },
+        "recommendation": {
+          "native": "原生推荐",
+          "gateway": "网关推荐"
+        }
       },
       "sources": {
         "title": "来源",

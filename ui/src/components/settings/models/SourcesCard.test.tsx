@@ -42,7 +42,7 @@ describe('SourcesCard footer', () => {
     await waitFor(() => expect(screen.queryByText(/dispatch layer|调度/i)).toBeNull());
   });
 
-  it('draws the two Frame 01 commands without restoring the retired vendor menu', async () => {
+  it('draws the two Frame 01 commands and dispatches each action', async () => {
     const onAddApiKey = vi.fn();
     const onAddSubscription = vi.fn();
     render(

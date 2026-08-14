@@ -1,9 +1,10 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, Info, LoaderCircle, Route, Sparkles } from 'lucide-react';
+import { ArrowLeft, Gauge, Info, LoaderCircle, Route } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
@@ -56,6 +57,11 @@ import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Sou
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
+const SUBSCRIPTION_PICKER_OPTIONS = [
+  { vendor: 'anthropic', recommendation: 'native' },
+  { vendor: 'openai', recommendation: 'gateway' },
+] as const;
+type SubscriptionPickerVendor = (typeof SUBSCRIPTION_PICKER_OPTIONS)[number]['vendor'];
 
 const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> => Object.fromEntries(
   await mapWithConcurrency(
@@ -300,7 +306,8 @@ export const SettingsModelsPage: React.FC = () => {
   // owns the success-landing timer and reconcile flag below.
   const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
   const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
-  const subscriptionPickerRefs = React.useRef<Partial<Record<'anthropic' | 'openai', HTMLButtonElement | null>>>({});
+  const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
+  const subscriptionPickerRefs = React.useRef<Partial<Record<SubscriptionPickerVendor, HTMLButtonElement | null>>>({});
   const subscriptionPickerHandoffRef = React.useRef(false);
   const subscriptionCloseTimer = React.useRef<number | null>(null);
   // A successful OAuth terminal reports the same moved rows twice: first with
@@ -913,9 +920,9 @@ export const SettingsModelsPage: React.FC = () => {
     setSubscriptionPickerOpen(false);
   }, []);
   const focusSubscriptionPickerOption = React.useCallback((index: number) => {
-    const bounded = Math.max(0, Math.min(index, 1));
+    const bounded = Math.max(0, Math.min(index, SUBSCRIPTION_PICKER_OPTIONS.length - 1));
     setSubscriptionPickerIndex(bounded);
-    const vendor = (['anthropic', 'openai'] as const)[bounded];
+    const { vendor } = SUBSCRIPTION_PICKER_OPTIONS[bounded];
     subscriptionPickerRefs.current[vendor]?.focus();
   }, []);
   const openSubscriptionPicker = React.useCallback(() => {
@@ -923,6 +930,10 @@ export const SettingsModelsPage: React.FC = () => {
     setSubscriptionPickerIndex(0);
     setSubscriptionPickerOpen(true);
   }, []);
+  const toggleSubscriptionPicker = React.useCallback(() => {
+    if (subscriptionPickerOpen) closeSubscriptionPicker();
+    else openSubscriptionPicker();
+  }, [closeSubscriptionPicker, openSubscriptionPicker, subscriptionPickerOpen]);
   React.useEffect(() => () => {
     if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
   }, []);
@@ -957,7 +968,91 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'sources' ? <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
-                        <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={openSubscriptionPicker} subscriptionTriggerRef={subscriptionTriggerRef} />
+                        <Popover
+                          open={subscriptionPickerOpen}
+                          onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
+                        >
+                          <PopoverAnchor virtualRef={subscriptionAnchorRef} />
+                          <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <PopoverContent
+                            role="menu"
+                            aria-label={t('settings.models.upstream.addSubscription')}
+                            align="start"
+                            sideOffset={8}
+                            collisionPadding={12}
+                            className="flex w-[300px] max-w-[calc(100vw-24px)] flex-col gap-0.5 rounded-[10px] border-border-strong bg-surface p-1.5 text-foreground !shadow-[var(--model-hub-menu-shadow)]"
+                            onOpenAutoFocus={(event) => {
+                              event.preventDefault();
+                              window.requestAnimationFrame(() => {
+                                const { vendor } = SUBSCRIPTION_PICKER_OPTIONS[subscriptionPickerIndex];
+                                subscriptionPickerRefs.current[vendor]?.focus();
+                              });
+                            }}
+                            onCloseAutoFocus={(event) => {
+                              event.preventDefault();
+                              if (subscriptionPickerHandoffRef.current) {
+                                subscriptionPickerHandoffRef.current = false;
+                                return;
+                              }
+                              window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
+                            }}
+                            onInteractOutside={(event) => {
+                              if (subscriptionTriggerRef.current?.contains(event.target as Node)) event.preventDefault();
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+                                event.preventDefault();
+                                focusSubscriptionPickerOption(subscriptionPickerIndex + 1);
+                              } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+                                event.preventDefault();
+                                focusSubscriptionPickerOption(subscriptionPickerIndex - 1);
+                              } else if (event.key === 'Home') {
+                                event.preventDefault();
+                                focusSubscriptionPickerOption(0);
+                              } else if (event.key === 'End') {
+                                event.preventDefault();
+                                focusSubscriptionPickerOption(SUBSCRIPTION_PICKER_OPTIONS.length - 1);
+                              }
+                            }}
+                          >
+                            {SUBSCRIPTION_PICKER_OPTIONS.map(({ vendor, recommendation }, index) => {
+                              const vendorLabel = t(`settings.models.subscriptionPicker.vendor.${vendor}`);
+                              const recommendationLabel = t(`settings.models.subscriptionPicker.recommendation.${recommendation}`);
+                              return (
+                                <Button
+                                  key={vendor}
+                                  ref={(node) => { subscriptionPickerRefs.current[vendor] = node; }}
+                                  type="button"
+                                  role="menuitem"
+                                  variant="ghost"
+                                  className={cn(
+                                    'model-hub-subscription-menu-row h-auto w-full min-w-0 justify-start gap-2 rounded-[7px] px-2.5 py-[9px] text-left focus-visible:ring-0 focus-visible:ring-offset-0',
+                                    subscriptionPickerIndex === index &&
+                                      'model-hub-subscription-menu-row--active',
+                                  )}
+                                  tabIndex={subscriptionPickerIndex === index ? 0 : -1}
+                                  onClick={() => {
+                                    subscriptionPickerHandoffRef.current = true;
+                                    setSubscriptionPickerOpen(false);
+                                    setSubscriptionVendor(vendor);
+                                  }}
+                                >
+                                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold" title={vendorLabel}>{vendorLabel}</span>
+                                  <Badge
+                                    variant="recommendation"
+                                    className={cn(
+                                      recommendation === 'native'
+                                        ? 'model-hub-accent-tile--mint model-hub-accent-ink--mint border-transparent'
+                                        : 'model-hub-accent-pill--neutral',
+                                    )}
+                                  >
+                                    {recommendationLabel}
+                                  </Badge>
+                                </Button>
+                              );
+                            })}
+                          </PopoverContent>
+                        </Popover>
                         <div className="hidden lg:block" aria-hidden="true" />
                         <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
@@ -969,65 +1064,6 @@ export const SettingsModelsPage: React.FC = () => {
                   </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
                 </div>}
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
-      <Dialog open={subscriptionPickerOpen} onOpenChange={(open) => open ? setSubscriptionPickerOpen(true) : closeSubscriptionPicker()}>
-        <DialogContent
-          className="max-w-[420px]"
-          onOpenAutoFocus={(event) => {
-            event.preventDefault();
-            window.requestAnimationFrame(() => subscriptionPickerRefs.current[(['anthropic', 'openai'] as const)[subscriptionPickerIndex]]?.focus());
-          }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            if (subscriptionPickerHandoffRef.current) {
-              subscriptionPickerHandoffRef.current = false;
-              return;
-            }
-            window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>{t('settings.models.subscriptionPicker.title')}</DialogTitle>
-            <DialogDescription>{t('settings.models.subscriptionPicker.detail')}</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-2 sm:grid-cols-2" onKeyDown={(event) => {
-            if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
-              event.preventDefault();
-              focusSubscriptionPickerOption(subscriptionPickerIndex + 1);
-            } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
-              event.preventDefault();
-              focusSubscriptionPickerOption(subscriptionPickerIndex - 1);
-            } else if (event.key === 'Home') {
-              event.preventDefault();
-              focusSubscriptionPickerOption(0);
-            } else if (event.key === 'End') {
-              event.preventDefault();
-              focusSubscriptionPickerOption(1);
-            }
-          }}>
-            {(['anthropic', 'openai'] as const).map((vendor, index) => (
-              <Button
-                key={vendor}
-                ref={(node) => { subscriptionPickerRefs.current[vendor] = node; }}
-                type="button"
-                variant="outline"
-                className="h-auto justify-start gap-3 px-3 py-3 text-left"
-                tabIndex={subscriptionPickerIndex === index ? 0 : -1}
-                onClick={() => {
-                  subscriptionPickerHandoffRef.current = true;
-                  setSubscriptionPickerOpen(false);
-                  setSubscriptionVendor(vendor);
-                }}
-              >
-                <span className="model-hub-accent-tile--mint grid size-8 shrink-0 place-items-center rounded-lg"><Sparkles className="model-hub-accent-ink--mint size-4" /></span>
-                <span className="flex flex-col items-start">
-                  <span className="font-semibold">{t(`settings.models.subscriptionPicker.${vendor}.title`)}</span>
-                  <span className="text-[11px] text-muted">{t(`settings.models.subscriptionPicker.${vendor}.detail`)}</span>
-                </span>
-              </Button>
-            ))}
-          </div>
-        </DialogContent>
-      </Dialog>
       {subscriptionVendor && (
         <OAuthConnectDialog
           open

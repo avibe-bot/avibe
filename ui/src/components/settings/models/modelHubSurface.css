@@ -86,6 +86,7 @@
   /* Modal scrim and lifted-surface shadows, cast in the theme's own extreme:
    * dimming toward --background, shadowing in the darkest ink the theme owns. */
   --model-hub-scrim: color-mix(in srgb, var(--background) 87.8%, transparent);
+  --model-hub-menu-shadow: 0 10px 28px color-mix(in srgb, var(--background) 50%, transparent);
   --model-hub-dialog-shadow: 0 16px 40px 0 color-mix(in srgb, var(--background) 60%, transparent);
   --model-hub-drawer-shadow: -18px 0 48px color-mix(in srgb, var(--background) 65.1%, transparent);
 }
@@ -100,6 +101,7 @@
   --model-hub-gold-ink: var(--gold-ink);
   --model-hub-violet-ink: var(--violet-ink);
   --model-hub-mint-ink: var(--mint-ink);
+  --model-hub-menu-shadow: 0 10px 28px color-mix(in srgb, var(--foreground) 14%, transparent);
   --model-hub-dialog-shadow: 0 16px 40px 0 color-mix(in srgb, var(--foreground) 14%, transparent);
   --model-hub-drawer-shadow: -18px 0 48px color-mix(in srgb, var(--foreground) 16%, transparent);
 }
@@ -115,6 +117,7 @@
     --model-hub-gold-ink: var(--gold-ink);
     --model-hub-violet-ink: var(--violet-ink);
     --model-hub-mint-ink: var(--mint-ink);
+    --model-hub-menu-shadow: 0 10px 28px color-mix(in srgb, var(--foreground) 14%, transparent);
     --model-hub-dialog-shadow: 0 16px 40px 0 color-mix(in srgb, var(--foreground) 14%, transparent);
     --model-hub-drawer-shadow: -18px 0 48px color-mix(in srgb, var(--foreground) 16%, transparent);
   }
@@ -332,6 +335,12 @@
   padding-inline: 12px;
   border-radius: var(--model-hub-footer-action-radius);
   font-size: var(--model-hub-footer-action-font-size);
+}
+
+.model-hub-subscription-menu-row--active,
+.model-hub-subscription-menu-row:hover,
+.model-hub-subscription-menu-row:focus-visible {
+  background: var(--model-hub-wash-08);
 }
 
 .model-hub-add-sub-overlay { background: var(--model-hub-scrim); }

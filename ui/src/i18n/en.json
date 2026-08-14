@@ -865,10 +865,14 @@
         }
       },
       "subscriptionPicker": {
-        "title": "Choose a subscription to connect",
-        "detail": "Choose the account subscription you want to add to Model Hub.",
-        "anthropic": { "title": "Claude subscription", "detail": "Claude Pro / Max" },
-        "openai": { "title": "ChatGPT subscription", "detail": "ChatGPT Plus / Pro" }
+        "vendor": {
+          "anthropic": "Claude subscription",
+          "openai": "ChatGPT subscription"
+        },
+        "recommendation": {
+          "native": "Native recommended",
+          "gateway": "Gateway recommended"
+        }
       },
       "sources": {
         "title": "Sources",
