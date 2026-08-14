@@ -121,7 +121,7 @@ _CALL_LOG_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
 _RECORDER_DISABLED = {"state": "disabled", "reason": None}
 _RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
 _MEMORY_LIST_CURSOR_VERSION = 1
-_MEMORY_LIST_CURSOR_MAX_BYTES = 4096
+MEMORY_LIST_CURSOR_MAX_BYTES = 8192
 _MEMORY_LIST_PROVIDER_PAGE_SIZE = 20
 _MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS = 20.0
 
@@ -1502,6 +1502,7 @@ class MemoryRuntime:
             return {"status": "failed", "error": "memory_store_unavailable"}
         if not projects:
             projects = (DEFAULT_MEMORY_PROJECT_ID,)
+        projects = tuple(sorted(projects))
         fingerprint = _memory_list_catalog_fingerprint(projects)
         try:
             boundaries = _decode_memory_list_cursor(
@@ -1540,12 +1541,14 @@ class MemoryRuntime:
                 if window.error == "memory_provider_timeout":
                     break
                 continue
-            items, total_count, project_warnings, has_more = window
+            items, total_count, project_warnings, has_more, window_complete = window
             candidates.extend(items)
             totals[project_id] = total_count
             available_counts[project_id] = len(items)
             project_has_more[project_id] = has_more
             warnings.extend(project_warnings)
+            if not window_complete:
+                complete = False
 
         if not totals and failures:
             failure = next(
@@ -1575,11 +1578,11 @@ class MemoryRuntime:
             or selected_counts[project_id] < available_counts[project_id]
             for project_id in totals
         )
-        if not complete and selected:
+        if not complete:
             has_more = True
         next_cursor = (
             _encode_memory_list_cursor(fingerprint, next_boundaries)
-            if has_more and selected
+            if has_more
             else None
         )
         return {
@@ -1613,6 +1616,7 @@ class MemoryRuntime:
             int,
             tuple[MemoryListWarningCode, ...],
             bool,
+            bool,
         ]
         | OperationFailed
     ):
@@ -1620,10 +1624,23 @@ class MemoryRuntime:
         items_by_id: dict[str, MemoryListItem] = {}
         warnings: list[MemoryListWarningCode] = []
         total_count = 0
+
+        def timeout_result():
+            if not items_by_id:
+                return OperationFailed(error="memory_provider_timeout")
+            ordered = _order_project_memory_list_items(items_by_id.values())
+            return (
+                tuple(ordered[:limit]),
+                total_count,
+                tuple(dict.fromkeys((*warnings, "memory_list_truncated"))),
+                True,
+                False,
+            )
+
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return OperationFailed(error="memory_provider_timeout")
+                return timeout_result()
             try:
                 result = await asyncio.wait_for(
                     self.module.list_episodes(
@@ -1635,8 +1652,10 @@ class MemoryRuntime:
                     timeout=remaining,
                 )
             except asyncio.TimeoutError:
-                return OperationFailed(error="memory_provider_timeout")
+                return timeout_result()
             if isinstance(result, OperationFailed):
+                if result.error == "memory_provider_timeout":
+                    return timeout_result()
                 return result
             total_count = result.total_count
             warnings.extend(result.warnings)
@@ -1669,6 +1688,7 @@ class MemoryRuntime:
             total_count,
             tuple(dict.fromkeys(warnings)),
             len(ordered) > limit,
+            True,
         )
 
     def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
@@ -3588,7 +3608,7 @@ def _encode_memory_list_cursor(
         sort_keys=True,
     ).encode("ascii")
     token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-    if len(token.encode("ascii")) > _MEMORY_LIST_CURSOR_MAX_BYTES:
+    if len(token.encode("ascii")) > MEMORY_LIST_CURSOR_MAX_BYTES:
         raise ValueError("Memory list cursor is too large")
     return token
 
@@ -3604,7 +3624,7 @@ def _decode_memory_list_cursor(
     if (
         not isinstance(cursor, str)
         or not cursor
-        or len(cursor.encode("utf-8")) > _MEMORY_LIST_CURSOR_MAX_BYTES
+        or len(cursor.encode("utf-8")) > MEMORY_LIST_CURSOR_MAX_BYTES
     ):
         raise ValueError("invalid Memory list cursor")
     try:

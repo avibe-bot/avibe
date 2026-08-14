@@ -1610,6 +1610,7 @@ def create_app(
             parse_agent_search_project,
             parse_ui_search_project,
         )
+        from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
 
         is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
         limit = payload.get("limit", 20)
@@ -1643,7 +1644,8 @@ def create_app(
                     and (
                         not isinstance(cursor, str)
                         or not cursor
-                        or len(cursor.encode("utf-8")) > 4096
+                        or len(cursor.encode("utf-8"))
+                        > MEMORY_LIST_CURSOR_MAX_BYTES
                     )
                 )
             ):
