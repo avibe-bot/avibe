@@ -75,7 +75,28 @@ Failures produce `memory_list_partial`; deadline/provider-window limits produce
    single-project listing, and focused unit/contract tests.
 2. PR2 (after PR1 review pass): scoped internal route/client, CLI/i18n/docs,
    UI-only aggregate cursor, parser contracts, and closed-loop scenarios.
-3. Browse UI remains out of scope until its design mockup is approved.
+3. PR3 (after PR2 review pass): extend the existing Search tab with the approved
+   browse state, UI API types, i18n, and component contracts.
+
+## Search tab browse state
+
+The owner-approved UI keeps the existing Processing Record / Profile / Search /
+Settings tabs. `MemorySearchPanel` switches by trimmed query value:
+
+- empty query: browse processed episodes in timestamp-descending order
+- non-empty query: retain the existing relevance-ordered search behavior
+
+Browse uses the same project catalog as search, including the UI-only `all`
+aggregate. Single-project pages use EverOS page numbers. For `all`, the client
+keeps the opaque cursor returned for each visited page so Previous, known page
+numbers, and Next remain navigable without interpreting the token. Project
+changes reset browse pagination.
+
+Each browse row shows its project, timestamp, and a bounded excerpt. Selecting a
+row opens a detail view with the episode body and a copy affordance for the
+opaque entry id. Loading, empty, partial/truncated, disabled, and closed-error
+states remain explicit. The sort control is fixed to Newest first because v1's
+provider-neutral contract exposes only timestamp ordering.
 
 Scenario IDs are catalogued under `tests/scenarios/memory_list/`; the closed-loop
 evidence captures processed episodes in one scoped project, lists them through

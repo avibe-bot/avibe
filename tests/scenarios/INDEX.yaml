@@ -65,6 +65,8 @@ capabilities:
       - tests/test_internal_server.py
       - tests/test_internal_client.py
       - tests/test_memory_cli.py
+      - ui/src/components/settings/memory/MemorySearchPanel.test.tsx
+      - ui/src/context/ApiContext.memoryList.test.tsx
   - id: memory_repair
     name: Live Memory index repair via admitted artifact sync
     status: active
