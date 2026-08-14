@@ -70,7 +70,11 @@ from .server import (
     OpenCodeServerManager,
     native_part_id_for_attempt,
 )
-from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
+from .session import (
+    OpenCodeResumeUnavailableError,
+    OpenCodeSessionManager,
+    requires_message_order_repair,
+)
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
@@ -1160,17 +1164,38 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     logger.debug("Failed to resolve OpenCode model variant support: %s", err)
 
             baseline_message_ids: set[str] = set()
+            baseline_messages = None
             try:
                 baseline_messages = await server.list_messages(
                     session_id=session_id,
                     directory=request.working_path,
                 )
+            except Exception as err:
+                logger.debug(f"Failed to snapshot OpenCode messages before prompt: {err}")
+
+            if baseline_messages is not None:
+                if requires_message_order_repair(baseline_messages):
+                    session_id = await self._session_manager.repair_message_order(
+                        request,
+                        server,
+                        session_id,
+                        baseline_messages,
+                    )
+                    self._session_manager.set_request_session(
+                        request.base_session_id,
+                        session_id,
+                        request.working_path,
+                        request.session_key,
+                    )
+                    self._session_manager.mark_initialized(session_id)
+                    baseline_messages = await server.list_messages(
+                        session_id=session_id,
+                        directory=request.working_path,
+                    )
                 for message in baseline_messages:
                     message_id = message.get("info", {}).get("id")
                     if message_id:
                         baseline_message_ids.add(message_id)
-            except Exception as err:
-                logger.debug(f"Failed to snapshot OpenCode messages before prompt: {err}")
 
             # Prepare message with file attachment info if present
             prompt_text = self._prepare_message_with_files(request)

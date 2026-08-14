@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from core.services.session_fork import fork_source_state, pending_native_fork
 from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
@@ -33,10 +34,86 @@ class OpenCodeResumeUnavailableError(RuntimeError):
             "Not creating a new one to avoid silently losing context — start a new session to continue."
         )
 
+
 logger = logging.getLogger(__name__)
 
 
+_OPENCODE_MESSAGE_ID_RE = re.compile(r"^msg_([0-9a-fA-F]{12})")
+_OPENCODE_ID_CLOCK_BITS = 48
+_OPENCODE_ID_COUNTER_BITS = 12
+_OPENCODE_ID_CLOCK_MODULUS = 1 << _OPENCODE_ID_CLOCK_BITS
+_OPENCODE_ID_WRAP_DISTANCE = _OPENCODE_ID_CLOCK_MODULUS // 2
+_OPENCODE_TIME_ORDERED_MESSAGES_VERSION = (1, 18, 15)
+
+
 RequestSessionTuple = Tuple[str, str, str]
+
+
+def _message_id_clock_value(message_id: object) -> Optional[int]:
+    match = _OPENCODE_MESSAGE_ID_RE.match(str(message_id or ""))
+    return int(match.group(1), 16) if match else None
+
+
+def _message_created_at(message: Dict[str, Any]) -> Optional[float]:
+    info = message.get("info") or {}
+    time_info = info.get("time") or {}
+    created = time_info.get("created")
+    if not isinstance(created, (int, float)):
+        return None
+    return float(created)
+
+
+def _uses_legacy_message_ordering(version: Optional[str]) -> bool:
+    match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", str(version or "").strip())
+    if not match:
+        return True
+    parsed = tuple(int(part) for part in match.groups())
+    return parsed < _OPENCODE_TIME_ORDERED_MESSAGES_VERSION
+
+
+def requires_message_order_repair(
+    messages: list[Dict[str, Any]],
+    *,
+    now_ms: Optional[int] = None,
+) -> bool:
+    """Detect histories that legacy OpenCode would order by the wrong message.
+
+    OpenCode <= 1.18.14 encoded a millisecond clock plus counter into only
+    48 bits, then selected the latest user/assistant message by lexicographic
+    ID. The clock wrapped in August 2026. A full native fork reassigns IDs in
+    creation order, preserving context while making those releases usable.
+    """
+
+    candidates: list[tuple[str, str, float, int]] = []
+    for message in messages:
+        info = message.get("info") or {}
+        role = str(info.get("role") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        message_id = str(info.get("id") or "")
+        clock_value = _message_id_clock_value(message_id)
+        created_at = _message_created_at(message)
+        if clock_value is None or created_at is None:
+            continue
+        candidates.append((role, message_id, created_at, clock_value))
+
+    for role in ("user", "assistant"):
+        role_messages = [candidate for candidate in candidates if candidate[0] == role]
+        if len(role_messages) < 2:
+            continue
+        latest_by_time = max(role_messages, key=lambda candidate: (candidate[2], candidate[1]))
+        latest_by_id = max(role_messages, key=lambda candidate: candidate[1])
+        if latest_by_time[1] != latest_by_id[1]:
+            return True
+
+    if not candidates:
+        return False
+
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    current_clock = (current_ms << _OPENCODE_ID_COUNTER_BITS) % _OPENCODE_ID_CLOCK_MODULUS
+    newest_by_time = max(candidates, key=lambda candidate: (candidate[2], candidate[1]))
+    newest_clock = newest_by_time[3]
+    return newest_clock > current_clock and newest_clock - current_clock > _OPENCODE_ID_WRAP_DISTANCE
 
 
 class OpenCodeSessionManager:
@@ -245,6 +322,48 @@ class OpenCodeSessionManager:
             return False
         self._initialized_sessions.add(opencode_session_id)
         return True
+
+    async def repair_message_order(
+        self,
+        request: AgentRequest,
+        server: OpenCodeServerManager,
+        session_id: str,
+        messages: list[Dict[str, Any]],
+    ) -> str:
+        """Reindex a wrapped OpenCode history without dropping context."""
+
+        if not requires_message_order_repair(messages):
+            return session_id
+
+        runtime_version = await server.get_version()
+        if not _uses_legacy_message_ordering(runtime_version):
+            logger.info(
+                "OpenCode %s already uses time-ordered messages; leaving session %s unchanged",
+                runtime_version,
+                session_id,
+            )
+            return session_id
+
+        session_data = await server.fork_session(
+            session_id,
+            directory=request.working_path,
+            message_id=None,
+        )
+        repaired_session_id = str(session_data.get("id") or "").strip()
+        if not repaired_session_id:
+            raise RuntimeError(f"OpenCode returned no session ID while repairing wrapped history {session_id}")
+
+        self.bind_agent_session_id(
+            request,
+            request.base_session_id,
+            repaired_session_id,
+        )
+        logger.warning(
+            "Reindexed OpenCode session %s as %s after detecting non-monotonic message IDs",
+            session_id,
+            repaired_session_id,
+        )
+        return repaired_session_id
 
     def get_session_lock(self, base_session_id: str) -> asyncio.Lock:
         if base_session_id not in self._session_locks:
