@@ -974,6 +974,47 @@ def test_list_episodes_rejects_cross_scope_or_malformed_envelopes(mutation) -> N
         asyncio.run(run())
 
 
+def test_list_episodes_rejects_nonempty_page_beyond_total_count() -> None:
+    data = {
+        "episodes": [
+            {
+                "id": "episode-impossible-page",
+                "user_id": PRINCIPAL,
+                "app_id": "avibe",
+                "project_id": PROJECT,
+                "session_id": "provider-session",
+                "timestamp": "2026-08-14T00:00:00Z",
+                "sender_ids": [],
+                "summary": "Summary",
+                "subject": "Subject",
+                "episode": "Body",
+                "type": "Conversation",
+            }
+        ],
+        "profiles": [],
+        "agent_cases": [],
+        "agent_skills": [],
+        "total_count": 1,
+        "count": 1,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"request_id": "request", "data": data})
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).list_episodes(
+                PRINCIPAL,
+                PROJECT,
+                3,
+                5,
+            )
+        assert raised.value.error == "memory_provider_response_invalid"
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
+
+
 def test_profile_canonicalizes_structured_profile() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(

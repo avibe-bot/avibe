@@ -1115,6 +1115,10 @@ def _map_episode_page(
         or not isinstance(count, int)
         or count != len(episodes)
         or total_count < count
+        or (
+            count > 0
+            and total_count < (page - 1) * page_size + count
+        )
     ):
         raise MemoryProviderFailure("memory_provider_response_invalid")
 
