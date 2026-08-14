@@ -2,6 +2,7 @@ import copy
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -895,14 +896,16 @@ def _named_value(path: str, declared: object, value: object) -> object:
     belongs to ``V2Config.load``, behind a backup and a warning; this states
     only what a value must name to be readable at all.
 
-    A switch reads the spellings above. A number reads anything that names one,
-    so a hand-edited ``"14"`` still means 14 — but a ``bool`` is refused,
-    because Python makes it an ``int`` and ``int(True)`` is a legal ``1``, so a
-    switch posted where a font size belongs would be stored as a size and
-    answered 200. A string reads only a string: no number names a URL or a
-    credential, and silently emptying one logs the operator out or unpairs the
-    instance. Kinds outside this vocabulary — containers, nested sections —
-    are left to the code that already understands them.
+    A switch reads the spellings above. A number reads anything that names a
+    finite one, so a hand-edited ``"14"`` still means 14 — but a ``bool`` is
+    refused, because Python makes it an ``int`` and ``int(True)`` is a legal
+    ``1``, so a switch posted where a font size belongs would be stored as a
+    size and answered 200, and an infinity or a NaN is refused because neither
+    names a setting any field here can hold. A string reads only a string: no
+    number names a URL or a credential, and silently emptying one logs the
+    operator out or unpairs the instance. Kinds outside this vocabulary —
+    containers, nested sections — are left to the code that already
+    understands them.
     """
 
     if isinstance(declared, str):
@@ -924,9 +927,27 @@ def _named_value(path: str, declared: object, value: object) -> object:
         if isinstance(value, bool):
             raise ValueError(f"Config '{path}' must be a number")
         try:
-            return int(value) if text == "int" else float(value)
-        except (TypeError, ValueError) as exc:
+            number = int(value) if text == "int" else float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            # ``OverflowError`` is how Python spells "this float names no
+            # integer": ``int(float("inf"))`` raises it rather than
+            # ``ValueError``, and JSON turns both a hand-edited ``1e309`` and
+            # the ``Infinity`` an older release serialized back into that
+            # float. Left uncaught it escapes recovery on the disk path and
+            # answers 500 on the write path, so it is spelled here as what it
+            # is — a value naming no number — instead of being caught wider.
             raise ValueError(f"Config '{path}' must be a number") from exc
+        if isinstance(number, float) and not math.isfinite(number):
+            # An infinity or a NaN survives ``float(...)`` and then behaves as
+            # a setting: an infinite ASR timeout never expires, and a NaN loses
+            # every range comparison so it clamps to whichever bound is written
+            # first. Refused for the same reason as the rest — it names no
+            # setting — rather than clamped, which would answer 200 having
+            # stored a bound the caller never asked for. Only floats are
+            # checked: an ``int`` is always finite, and asking ``math`` about a
+            # large one would raise the overflow just caught above.
+            raise ValueError(f"Config '{path}' must be a number")
+        return number
     if text == "str":
         if not isinstance(value, str):
             raise ValueError(f"Config '{path}' must be a string")

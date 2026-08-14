@@ -1387,6 +1387,46 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
                     path[0]
                 ]
             ), label
+
+    # A number that names no setting reaches the file by a route none of the
+    # shapes above take. ``json`` reads a hand-edited ``1e309`` and the
+    # ``Infinity`` an older release serialized into the same float, and on an
+    # ``int`` field converting it raises ``OverflowError`` — not the
+    # ``ValueError`` this recovery is built on, so it escaped ``load`` and took
+    # startup down with it, which is the one outcome this test exists to rule
+    # out. Asserted as "recovers like any other unreadable value" rather than
+    # against a hand-written expectation, so it cannot drift from the sweep
+    # above, and seeded from the declared numeric fields of the held sections,
+    # so a number added to one of them is covered without editing this.
+    assert json.loads("1e309") == float("inf")
+    assert json.loads(json.dumps(float("inf"))) == float("inf")
+    numeric_paths = [
+        (section, info.name)
+        for section in _FIELD_SCOPED_RECOVERY_SECTIONS
+        for info in fields(V2Config.__dataclass_fields__[section].default_factory)
+        if any(kind in str(info.type) for kind in ("int", "float"))
+    ]
+    assert len(numeric_paths) >= 3, numeric_paths
+    for path in numeric_paths:
+        label = ".".join(path)
+        unreadable = copy.deepcopy(healthy)
+        _walk(unreadable, path[:-1], attr=False)[path[-1]] = []  # type: ignore[index]
+        config_path.write_text(json.dumps(unreadable), encoding="utf-8")
+        like_any_other = api.config_to_payload(
+            V2Config.load(config_path), include_secrets=True, include_internal=True
+        )
+        for number in (float("inf"), float("-inf"), float("nan")):
+            payload = copy.deepcopy(healthy)
+            _walk(payload, path[:-1], attr=False)[path[-1]] = number  # type: ignore[index]
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            config = V2Config.load(config_path)
+
+            assert any(path[0] in warning for warning in config.load_warnings), (label, number)
+            assert (
+                api.config_to_payload(config, include_secrets=True, include_internal=True)
+                == like_any_other
+            ), (label, number)
         # Everything outside the corrupted section survives. Without this the
         # test would pass just as well for a recovery that threw the whole file
         # away, which for a scalar looks identical to repairing that scalar.

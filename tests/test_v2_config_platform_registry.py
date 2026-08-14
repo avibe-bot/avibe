@@ -380,12 +380,34 @@ _KIND_EXEMPT_FIELDS = {("remote_access.vibe_cloud", "instance_kind")}
 # What each declared kind must refuse. ``True`` appears under the numbers on
 # purpose: Python makes ``bool`` an ``int``, so ``int(True)`` is a legal ``1``
 # and a switch posted where a size or a timeout belongs would be stored as one.
+# The infinities and the NaN are there because they are numbers that name no
+# setting: ``json`` produces them from a hand-edited ``1e309`` as readily as
+# from the literal ``Infinity``, ``int(inf)`` raises ``OverflowError`` rather
+# than the ``ValueError`` every other refusal here raises, and a ``float`` field
+# accepted them outright — an ASR timeout of infinity never expires.
+_NAMING_NO_NUMBER = (True, False, "garbage", [], {}, None, float("inf"), float("-inf"), float("nan"))
 _VALUES_NAMING_NO = {
     "bool": ("garbage", 5, -1, 2.0, [], {}, None),
-    "int": (True, False, "garbage", [], {}, None),
-    "float": (True, False, "garbage", [], {}, None),
+    "int": _NAMING_NO_NUMBER,
+    "float": _NAMING_NO_NUMBER,
     "str": (5, True, 2.0, [], {}, None),
 }
+
+
+def _declared_kind(info) -> tuple[str, bool]:
+    """The kind a field declares, and whether it also names ``None``.
+
+    ``Optional[int]`` reports its ``__name__`` as the bare ``"Optional"``, which
+    dropped the kind being wrapped and quietly excused every optional field from
+    the rule below — ``audio_asr.max_file_bytes`` was skipped while this test's
+    docstring claimed every declared field was covered.
+    """
+
+    text = info.type if isinstance(info.type, str) else getattr(info.type, "__name__", "")
+    if text.startswith("Optional"):
+        text = str(info.type)
+    optional = re.fullmatch(r"(?:typing\.)?Optional\[(?:typing\.)?(.+)\]", text)
+    return (optional.group(1), True) if optional else (text, False)
 
 
 def test_config_fields_are_held_to_the_kind_they_declare() -> None:
@@ -398,6 +420,13 @@ def test_config_fields_are_held_to_the_kind_they_declare() -> None:
     a credential belongs emptied the credential. Each was a separate finding
     because each field open-coded its own coercion; the property is stated once
     here instead.
+
+    "Another kind" includes a number of the right type that still names no
+    setting. An infinity is a ``float`` and a NaN loses every comparison it is
+    given, so both slip past a type check and then behave as settings — an ASR
+    timeout that never expires, a size that clamps to whichever bound is written
+    first — and on an ``int`` field the conversion raises ``OverflowError``
+    instead, which is not the exception the disk path recovers from.
 
     Seeded from the declared fields of each section rather than from the ones a
     review reached, and closed with a non-vacuity assertion, so a field added to
@@ -428,7 +457,7 @@ def test_config_fields_are_held_to_the_kind_they_declare() -> None:
     for section, dataclass_type, section_path in _KIND_HELD_SECTIONS:
         assert V2Config.from_payload(copy.deepcopy(healthy)), section
         for info in fields(dataclass_type):
-            kind = info.type if isinstance(info.type, str) else getattr(info.type, "__name__", "")
+            kind, optional = _declared_kind(info)
             if kind not in _VALUES_NAMING_NO:
                 # Containers and nested sections are held by the code that
                 # already understands them, not by the declared-kind rule.
@@ -437,12 +466,30 @@ def test_config_fields_are_held_to_the_kind_they_declare() -> None:
                 continue
             declared_kinds.add((section, info.name))
             for value in _VALUES_NAMING_NO[kind]:
+                if value is None and optional:
+                    # A field that declares ``Optional`` names ``None`` as one of
+                    # its own values, so refusing it would be the mirror defect.
+                    assert V2Config.from_payload(_seed(section_path, info.name, None))
+                    continue
                 with pytest.raises(ValueError, match=re.escape(f"{section}.{info.name}")):
                     V2Config.from_payload(_seed(section_path, info.name, value))
                 held.add((section, info.name))
 
     assert declared_kinds <= held, declared_kinds - held
     assert len(held) > 10, held
+
+    # An optional scalar is a declared kind like any other, and it existing is
+    # what stops the line above from being satisfied by a resolver that quietly
+    # drops every ``Optional`` field out of ``declared_kinds`` as well as out of
+    # ``held`` — which is how ``audio_asr.max_file_bytes`` went uncovered.
+    optional_scalars = {
+        (section, info.name)
+        for section, dataclass_type, _ in _KIND_HELD_SECTIONS
+        for info in fields(dataclass_type)
+        if _declared_kind(info)[1] and _declared_kind(info)[0] in _VALUES_NAMING_NO
+    }
+    assert optional_scalars, "no optional scalar field left to hold to its declared kind"
+    assert optional_scalars <= held, optional_scalars - held
 
     # A value that *names* the declared kind is still read, so the rule refuses
     # wrong kinds rather than everything that is not already the right type.
