@@ -1312,6 +1312,54 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started["flow"]["channel"], "native_cli")
         self.assertEqual(harness.agent_auth.start_calls, [("codex", False)])
 
+    async def test_in_flight_native_login_holds_the_cli_until_it_settles(self):
+        """Scenario: AUTH-SETUP-110"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(Path(state_dir.name))
+
+        first = await harness.service.oauth_start(
+            {"vendor": "anthropic", "channel": "native_cli"}
+        )
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", False)])
+
+        with self.assertRaises(ModelHubError) as refused:
+            await harness.service.oauth_start(
+                {"vendor": "anthropic", "channel": "native_cli"}
+            )
+
+        # Refused at the starting point. The sanctioned CLI owns one shared
+        # login, so a second authorization would overwrite whatever the first
+        # one writes and no later check could roll that back.
+        self.assertEqual(refused.exception.code, "native_source_already_exists")
+        self.assertEqual(
+            refused.exception.data,
+            {"existing_source_id": first["flow"]["source_id"]},
+        )
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", False)])
+        self.assertEqual(harness.agent_auth.cancelled, [])
+        self.assertEqual(harness.store.config.sources, [])
+
+        await harness.service.oauth_cancel(first["flow"]["flow_id"])
+        second = await harness.service.oauth_start(
+            {"vendor": "anthropic", "channel": "native_cli"}
+        )
+
+        self.assertNotEqual(second["flow"]["flow_id"], first["flow"]["flow_id"])
+        self.assertEqual(
+            harness.agent_auth.start_calls,
+            [("claude", False), ("claude", False)],
+        )
+
+        harness.agent_auth.complete(second["flow"]["flow_id"])
+        completed = await harness.service.oauth_status(second["flow"]["flow_id"])
+
+        self.assertEqual(completed["flow"]["state"], "success")
+        self.assertEqual(
+            [source.id for source in harness.store.config.sources],
+            [second["flow"]["source_id"]],
+        )
+
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.
 

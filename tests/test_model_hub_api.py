@@ -1082,21 +1082,201 @@ def test_nonce_oauth_start_replays_committed_flow_before_native_slot_conflict(tm
     assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
 
 
-def test_concurrent_native_oauth_materialization_keeps_singleton_source(tmp_path):
+def test_concurrent_native_oauth_start_refuses_the_second_provider_window(tmp_path):
+    """Unit layer for scenario AUTH-SETUP-110.
+
+    Two tabs start a native login while no Source exists yet. The singleton is
+    held before any provider work, so the second request is refused at the
+    starting point: the sanctioned CLI is asked to authorize exactly once and
+    the shared credential the winner writes cannot be overwritten behind it.
+    """
+
     async def run_race():
         service, store, adapter = _service(tmp_path)
-        started = await asyncio.gather(
+        results = await asyncio.gather(
             service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}),
             service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}),
+            return_exceptions=True,
         )
-        first, second = (result["flow"] for result in started)
+        return service, store, adapter, results
+
+    service, store, adapter, results = asyncio.run(run_race())
+
+    started = [result for result in results if isinstance(result, dict)]
+    refused = [result for result in results if isinstance(result, ModelHubError)]
+    assert len(started) == 1
+    assert len(refused) == 1
+    winner = started[0]["flow"]
+    assert refused[0].code == "native_source_already_exists"
+    assert refused[0].status == 409
+    assert refused[0].data == {"existing_source_id": winner["source_id"]}
+    # The refused request never reached the provider, so no second
+    # authorization window opened and no credential was touched by it.
+    assert adapter.oauth_start_calls == [(winner["source_id"], "anthropic")]
+    assert adapter.cancelled == []
+    assert adapter.secret_lengths == []
+
+    adapter.flows[winner["flow_id"]] = OAuthFlowState(
+        **{**adapter.flows[winner["flow_id"]].__dict__, "state": "success"}
+    )
+    completed = asyncio.run(service.oauth_status(winner["flow_id"]))["flow"]
+
+    assert completed["state"] == "success"
+    assert [source.id for source in store.config.sources] == [winner["source_id"]]
+
+
+def test_pending_native_oauth_keeps_holding_the_slot_while_polled(tmp_path):
+    """Unit layer for scenario AUTH-SETUP-110.
+
+    The dialog polls status every couple of seconds while the user is still in
+    the provider window. A poll is not a terminal transition, so the hold must
+    survive it; releasing on any non-success state would reopen the race after
+    the first poll.
+    """
+    service, _store, adapter = _service(tmp_path)
+    first = asyncio.run(
+        service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+    )["flow"]
+
+    polled = asyncio.run(service.oauth_status(first["flow_id"]))["flow"]
+
+    assert polled["state"] == "awaiting_action"
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        )
+
+    assert exc_info.value.code == "native_source_already_exists"
+    assert adapter.oauth_start_calls == [(first["source_id"], "anthropic")]
+
+
+def test_cancelled_native_oauth_releases_the_slot_for_the_next_start(tmp_path):
+    """Unit layer for scenario AUTH-SETUP-110 (cancellation)."""
+    service, _store, adapter = _service(tmp_path)
+    first = asyncio.run(
+        service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+    )["flow"]
+    with pytest.raises(ModelHubError):
+        asyncio.run(
+            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        )
+
+    asyncio.run(service.oauth_cancel(first["flow_id"]))
+    second = asyncio.run(
+        service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+    )["flow"]
+
+    assert second["flow_id"] != first["flow_id"]
+    assert adapter.oauth_start_calls == [
+        (first["source_id"], "anthropic"),
+        (second["source_id"], "anthropic"),
+    ]
+
+
+def test_failed_native_oauth_releases_the_slot_for_the_next_start(tmp_path):
+    """Unit layer for scenario AUTH-SETUP-110 (terminal failure)."""
+    service, _store, adapter = _service(tmp_path)
+    first = asyncio.run(
+        service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+    )["flow"]
+    adapter.flows[first["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[first["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.error.denied",
+        }
+    )
+
+    failed = asyncio.run(service.oauth_status(first["flow_id"]))["flow"]
+    second = asyncio.run(
+        service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+    )["flow"]
+
+    assert failed["state"] == "failed"
+    assert second["flow_id"] != first["flow_id"]
+    assert adapter.oauth_start_calls == [
+        (first["source_id"], "anthropic"),
+        (second["source_id"], "anthropic"),
+    ]
+
+
+def test_abandoned_native_oauth_slot_expires_with_its_flow(tmp_path):
+    """Unit layer for scenario AUTH-SETUP-110.
+
+    A tab closed mid-authorization never reports a terminal state. The hold is
+    bound to the flow's own deadline, so it frees itself instead of wedging the
+    vendor until the service restarts.
+    """
+    current = [datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc)]
+    store = MemoryStore()
+    adapter = FakeAdapter()
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        native_oauth_adapter=adapter,
+        oauth_flows=OAuthFlowRegistry(
+            tmp_path / "oauth_flows.json",
+            now=lambda: current[0],
+        ),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        now=lambda: current[0],
+        requested_model_override=store.requested_model,
+    )
+    request = {"vendor": "anthropic", "channel": "native_cli"}
+    first = asyncio.run(service.oauth_start(request))["flow"]
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.oauth_start(request))
+
+    current[0] = datetime(2026, 7, 23, 4, 15, tzinfo=timezone.utc)
+    second = asyncio.run(service.oauth_start(request))["flow"]
+
+    assert first["expires_at"] == "2026-07-23T04:15:00+00:00"
+    assert second["flow_id"] != first["flow_id"]
+    assert adapter.oauth_start_calls == [
+        (first["source_id"], "anthropic"),
+        (second["source_id"], "anthropic"),
+    ]
+
+
+def test_restarted_native_oauth_materialization_keeps_singleton_source(tmp_path):
+    """Unit layer for scenario AUTH-SETUP-110.
+
+    A restart drops the in-memory hold while the provider flow it described is
+    still live, which is the one remaining window where two native flows can
+    both succeed. The mutation-lock re-check stays the backstop for it.
+    """
+
+    async def run_race():
+        service, store, adapter = _service(tmp_path)
+        first = (
+            await service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        )["flow"]
+        restarted = ModelHubService(
+            store=store,
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "restarted-events.json"),
+            native_oauth_adapter=adapter,
+            oauth_flows=OAuthFlowRegistry(
+                tmp_path / "oauth_flows.json",
+                now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+            ),
+            revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+            now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+            requested_model_override=store.requested_model,
+        )
+        second = (
+            await restarted.oauth_start(
+                {"vendor": "anthropic", "channel": "native_cli"}
+            )
+        )["flow"]
         for flow in (first, second):
             adapter.flows[flow["flow_id"]] = OAuthFlowState(
                 **{**adapter.flows[flow["flow_id"]].__dict__, "state": "success"}
             )
         results = await asyncio.gather(
-            service.oauth_status(first["flow_id"]),
-            service.oauth_status(second["flow_id"]),
+            restarted.oauth_status(first["flow_id"]),
+            restarted.oauth_status(second["flow_id"]),
             return_exceptions=True,
         )
         return results, store, adapter, first, second
@@ -3421,6 +3601,52 @@ def test_nonce_oauth_start_owner_cancellation_releases_waiter_and_tuple(tmp_path
     fresh, adapter = asyncio.run(run_cancellation_and_retry())
 
     assert fresh["flow"]["client_nonce"] == "ofn_01j5w8z7p4n6q2rt"
+    assert len(adapter.oauth_start_calls) == 1
+
+
+def test_native_oauth_start_releases_singleton_reservation_after_failure_and_cancel(tmp_path):
+    async def run_recovery():
+        service, _, adapter = _service(tmp_path)
+        original_start = adapter.start_oauth
+
+        async def failing_start(source_id, vendor):
+            raise RuntimeError("provider start failed")
+
+        adapter.start_oauth = failing_start
+        with pytest.raises(ModelHubError) as failure:
+            await service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        assert failure.value.code == "engine_down"
+        assert service._native_slot_reservations == {}
+
+        provider_started = asyncio.Event()
+        release_provider = asyncio.Event()
+
+        async def blocked_start(source_id, vendor):
+            provider_started.set()
+            await release_provider.wait()
+            return await original_start(source_id, vendor)
+
+        adapter.start_oauth = blocked_start
+        pending = asyncio.create_task(
+            service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        )
+        await provider_started.wait()
+        assert service._native_slot_reservations
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        release_provider.set()
+        await asyncio.sleep(0)
+        assert service._native_slot_reservations == {}
+        adapter.start_oauth = original_start
+        recovered = await service.oauth_start(
+            {"vendor": "anthropic", "channel": "native_cli"}
+        )
+        return recovered, adapter
+
+    recovered, adapter = asyncio.run(run_recovery())
+
+    assert recovered["flow"]["vendor"] == "anthropic"
     assert len(adapter.oauth_start_calls) == 1
 
 

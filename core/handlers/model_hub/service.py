@@ -279,6 +279,20 @@ class HandleSettlement:
     turn_outcome: TurnOutcomeProjectionInput | None
 
 
+@dataclass(frozen=True)
+class _NativeSlotReservation:
+    """One in-flight native login holding a vendor's CLI singleton.
+
+    ``expires_at`` mirrors the provider flow's own deadline once the flow
+    exists, so an abandoned authorization frees the slot instead of wedging it
+    until restart. It stays ``None`` only while the start call is in flight,
+    which that call always settles itself.
+    """
+
+    source_id: str
+    expires_at: datetime | None = None
+
+
 HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
 
 
@@ -576,6 +590,13 @@ class ModelHubService:
         self._oauth_start_tasks: dict[
             tuple[str, str, OAuthChannel], asyncio.Task[dict]
         ] = {}
+        # The native singleton is held from before provider work starts until
+        # the flow settles, because the sanctioned CLI owns one shared login:
+        # whichever authorization finishes last overwrites that credential and
+        # cancelling an already-successful flow cannot roll it back. Keeping
+        # this in memory is deliberate — a restart ends every in-flight flow it
+        # describes, and the materialization re-check remains the backstop.
+        self._native_slot_reservations: dict[str, _NativeSlotReservation] = {}
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
@@ -637,6 +658,66 @@ class ModelHubService:
             ),
             None,
         )
+
+    def _native_slot_reservation(
+        self,
+        vendor: str,
+    ) -> _NativeSlotReservation | None:
+        """Return the live reservation holding ``vendor``'s native singleton."""
+
+        reservation = self._native_slot_reservations.get(vendor)
+        if reservation is None:
+            return None
+        if reservation.expires_at is not None and reservation.expires_at <= self.now():
+            # The provider flow can no longer complete, so nothing can still
+            # overwrite the shared credential even though no terminal
+            # transition was ever observed for it.
+            self._native_slot_reservations.pop(vendor, None)
+            return None
+        return reservation
+
+    def _reserve_native_slot(self, vendor: str, source_id: str) -> None:
+        self._native_slot_reservations[vendor] = _NativeSlotReservation(source_id)
+
+    def _hold_native_slot_until(
+        self,
+        vendor: str,
+        source_id: str | None,
+        expires_at_iso: str | None,
+    ) -> None:
+        """Bind a held reservation to the started flow's own deadline."""
+
+        if source_id is None or expires_at_iso is None:
+            return
+        if self._native_slot_reservations.get(vendor) != _NativeSlotReservation(
+            source_id
+        ):
+            return
+        try:
+            expires_at = _parse_datetime(expires_at_iso)
+        except ValueError:
+            return
+        if (expires_at.tzinfo is None) != (self.now().tzinfo is None):
+            # Incomparable clocks would crash the next check. Leave the hold
+            # bound to this flow's settle paths instead.
+            return
+        self._native_slot_reservations[vendor] = _NativeSlotReservation(
+            source_id,
+            expires_at,
+        )
+
+    def _release_native_slot(
+        self,
+        vendor: str | None,
+        source_id: str | None,
+    ) -> None:
+        """Free the singleton once this flow can no longer reach the CLI."""
+
+        if not vendor or source_id is None:
+            return
+        reservation = self._native_slot_reservations.get(vendor)
+        if reservation is not None and reservation.source_id == source_id:
+            self._native_slot_reservations.pop(vendor, None)
 
     async def _engine_call(self, awaitable):
         try:
@@ -1622,6 +1703,12 @@ class ModelHubService:
                     except OSError:
                         pass
                 raise
+            finally:
+                if channel == "native_cli" and source_id:
+                    # The flow has consumed its authorization either way: on
+                    # success the persisted Source now holds the singleton, and
+                    # on failure nothing of this flow can reach the CLI again.
+                    self._release_native_slot(vendor, source_id)
 
     @staticmethod
     def _source_matches_binding(
@@ -2075,6 +2162,11 @@ class ModelHubService:
         flow: OAuthFlowState,
     ) -> tuple[OAuthFlowState, dict | None]:
         if flow.state != "success":
+            if flow.state in {"failed", "cancelled"}:
+                # Terminal only. A polled ``awaiting_action`` flow still owns the
+                # CLI login it launched, so releasing on every non-success poll
+                # would hand the singleton away mid-authorization.
+                self._release_native_slot(binding.vendor, binding.source_id)
             if (
                 self._is_hub_unsuccessful_terminal(binding, flow)
                 and binding.source_id is not None
@@ -3853,9 +3945,11 @@ class ModelHubService:
                     raise ModelHubError("engine_down", status=503)
                 return await asyncio.shield(task)
 
+        reserved_source_id: str | None = None
         if oauth_channel == "native_cli":
             existing = self._existing_native_source(self.store.load(), vendor)
-            if existing is not None:
+            reserved = self._native_slot_reservation(vendor)
+            if existing is not None or reserved is not None:
                 # This request owns a new nonce claim, so release it before
                 # rejecting the occupied singleton. A committed/in-flight
                 # nonce has already returned above and never reaches here.
@@ -3865,15 +3959,27 @@ class ModelHubService:
                         vendor,
                         oauth_channel,
                     )
+                occupant = (
+                    existing.id
+                    if existing is not None
+                    else cast(_NativeSlotReservation, reserved).source_id
+                )
                 raise ModelHubError(
                     "native_source_already_exists",
                     status=409,
                     detail="modelHub.errors.native_subscription_slot_taken",
-                    data={"existing_source_id": existing.id},
+                    data={"existing_source_id": occupant},
                 )
+            # Hold the singleton before any provider work: a second tab that
+            # reached only this far would otherwise open its own authorization
+            # and overwrite the shared CLI credential behind the first login.
+            # Nothing awaits between the check above and this reservation, so
+            # the pair is atomic for every concurrent caller.
+            reserved_source_id = _source_id()
+            self._reserve_native_slot(vendor, reserved_source_id)
 
         async def start_and_remember() -> dict:
-            pending_source_id = _source_id()
+            pending_source_id = reserved_source_id or _source_id()
             flow: OAuthFlowState | None = None
             flow_cleanup_done = False
             try:
@@ -3901,7 +4007,17 @@ class ModelHubService:
                         flow.expires_at_iso if client_nonce is not None else None
                     ),
                 )
+                # The flow now owns the slot, so bind the hold to the deadline
+                # after which the provider can no longer reach the CLI.
+                self._hold_native_slot_until(
+                    vendor,
+                    reserved_source_id,
+                    flow.expires_at_iso,
+                )
             except BaseException as error:
+                # The start never reached a live flow, so nothing of this
+                # request can still overwrite the shared CLI credential.
+                self._release_native_slot(vendor, reserved_source_id)
                 try:
                     if flow is not None and not flow_cleanup_done:
                         await self._discard_started_oauth_flow(
@@ -4059,6 +4175,10 @@ class ModelHubService:
                     else:
                         self.oauth_flows.forget(flow_id)
                 else:
+                    # The provider flow is cancelled, so this authorization can
+                    # no longer touch the CLI credential: free the singleton for
+                    # the next attempt instead of holding it until expiry.
+                    self._release_native_slot(binding.vendor, binding.source_id)
                     if binding.client_nonce is not None:
                         self.oauth_flows.retain_cancelled(flow_id)
                     else:
