@@ -472,7 +472,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                             'mt-2 rounded-md border px-2.5 py-1.5 text-[10px]',
                             currentValidationState === 'success'
                               ? 'border-mint/30 bg-mint-soft text-mint-ink'
-                              : 'border-danger/30 bg-danger/10 text-danger'
+                              : 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                           )}
                         >
                           {currentValidationState === 'success' ? t('platform.validationSuccess') : t('platform.validationFailed')}

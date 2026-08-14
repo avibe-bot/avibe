@@ -944,7 +944,7 @@ export const VaultSecretForm: React.FC<{
         </div>
       )}
       {protection === 'standard' && !checkingAvault && !p2Ready && (
-        <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+        <div className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
           {t('vaults.dialog.p2Unavailable', {
             version: AVAULT_P2_MIN_VERSION,
             installed: avaultDep?.version ?? 'unknown',
@@ -1257,7 +1257,7 @@ export const VaultSecretForm: React.FC<{
           {signingError && <span className="text-xs text-destructive-ink">{signingError}</span>}
 
           {!p2Ready && (
-            <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+            <div className="rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-xs text-gold-ink">
               {t('vaults.dialog.signingNeedsAvault', { version: AVAULT_P2_MIN_VERSION })}
             </div>
           )}

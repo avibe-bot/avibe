@@ -379,7 +379,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                       </Button>
                       {installResults[name]?.message && (
                         <span
-                          className={clsx('text-[11px]', installResults[name].ok ? 'text-mint-ink' : 'text-danger')}
+                          className={clsx('text-[11px]', installResults[name].ok ? 'text-mint-ink' : 'text-destructive-ink')}
                         >
                           {installResults[name].message}
                         </span>

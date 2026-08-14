@@ -237,7 +237,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                 variant="secondary"
                 size="xs"
                 onClick={() => handleDelete(primary.code)}
-                className="text-muted hover:border-danger/40 hover:text-danger"
+                className="text-muted hover:border-destructive/40 hover:text-destructive-ink"
               >
                 {t('bindCode.revoke')}
               </Button>
@@ -362,7 +362,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                             type="button"
                             onClick={() => handleDelete(bc.code)}
                             title={t('bindCode.delete')}
-                            className="rounded p-1.5 text-muted transition-colors hover:text-danger"
+                            className="rounded p-1.5 text-muted transition-colors hover:text-destructive-ink"
                           >
                             <Trash2 size={14} />
                           </button>
@@ -902,7 +902,7 @@ export const UserList: React.FC = () => {
                           size="xs"
                           onClick={() => handleRemoveUser(u.platform, u.userId)}
                           title={t('userList.removeUser')}
-                          className="text-muted hover:border-danger/40 hover:text-danger"
+                          className="text-muted hover:border-destructive/40 hover:text-destructive-ink"
                         >
                           <Trash2 size={12} />
                           {t('userList.removeUser')}

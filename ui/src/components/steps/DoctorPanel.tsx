@@ -42,9 +42,9 @@ const STATUS_TONE: Record<
     iconNode: <AlertTriangle className="size-4" />,
   },
   fail: {
-    row: 'bg-danger/[0.06]',
-    icon: 'text-danger',
-    text: 'text-danger font-semibold',
+    row: 'bg-destructive/[0.06]',
+    icon: 'text-destructive-ink',
+    text: 'text-destructive-ink font-semibold',
     iconNode: <XCircle className="size-4" />,
   },
 };
@@ -247,7 +247,7 @@ const SummaryTile: React.FC<{
   const cfg = {
     success: 'border-mint/30 bg-mint/[0.06] text-mint-ink',
     warning: 'border-gold/30 bg-gold/[0.06] text-gold-ink',
-    danger: 'border-danger/30 bg-danger/[0.06] text-danger',
+    danger: 'border-destructive/30 bg-destructive/[0.06] text-destructive-ink',
   }[tone];
   return (
     <div className={clsx('flex items-center gap-3 rounded-xl border px-4 py-3', cfg)}>

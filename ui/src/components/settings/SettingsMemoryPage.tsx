@@ -381,7 +381,7 @@ export const SettingsMemoryPage: React.FC = () => {
               ))}
             </ul>
           </div>
-          <div className="rounded-[10px] border border-warning/30 bg-warning/5 px-3 py-2.5">
+          <div className="rounded-[10px] border border-gold/30 bg-gold/5 px-3 py-2.5">
             <div className="mb-1 font-semibold text-foreground">{t('memory.clear.keepsTitle')}</div>
             <ul className="flex flex-col gap-1">
               {(t('memory.clear.keeps', { returnObjects: true }) as string[]).map((line, idx) => (

@@ -22,7 +22,7 @@ const LEVEL_PILL: Record<string, string> = {
   DEBUG: 'border-border bg-foreground/[0.04] text-muted',
   INFO: 'border-cyan/30 bg-cyan/[0.08] text-cyan-ink',
   WARNING: 'border-gold/30 bg-gold/[0.08] text-gold-ink',
-  ERROR: 'border-danger/30 bg-danger/[0.08] text-danger',
+  ERROR: 'border-destructive/30 bg-destructive/[0.08] text-destructive-ink',
 };
 
 const parseLogMessage = (message: string): { location?: string; content: string } => {
@@ -300,7 +300,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
                     key={i}
                     className={clsx(
                       'px-4 py-2.5 transition-colors hover:bg-foreground/[0.02]',
-                      log.level === 'ERROR' && 'bg-danger/[0.04]',
+                      log.level === 'ERROR' && 'bg-destructive/[0.04]',
                       log.level === 'WARNING' && 'bg-gold/[0.04]'
                     )}
                   >
@@ -331,7 +331,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
                       className={clsx(
                         'mt-1.5 whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed',
                         log.level === 'ERROR'
-                          ? 'text-danger'
+                          ? 'text-destructive-ink'
                           : log.level === 'WARNING'
                             ? 'text-gold-ink'
                             : 'text-foreground'

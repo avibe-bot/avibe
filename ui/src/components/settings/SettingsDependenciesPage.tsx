@@ -363,7 +363,7 @@ export const SettingsDependenciesPage: React.FC = () => {
               ))}
             </ul>
           </div>
-          <div className="rounded-[10px] border border-warning/30 bg-warning/5 px-3 py-2.5">
+          <div className="rounded-[10px] border border-gold/30 bg-gold/5 px-3 py-2.5">
             <div className="mb-1 font-semibold text-foreground">{t('memory.factoryReset.retainsTitle')}</div>
             <ul className="flex flex-col gap-1">
               {(t('memory.factoryReset.retains', { returnObjects: true }) as string[]).map((line, idx) => (

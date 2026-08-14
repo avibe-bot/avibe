@@ -117,8 +117,8 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
         {/* Ack sits ABOVE the button: the natural order is read-the-risk → check → the
             (now-enabled) Add-Passkey button right below it. The button gates on `ackLoss`. */}
         {canUsePasskey && (
-          <div className="flex flex-col gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3">
-            <span className="text-[11.5px] leading-snug text-warning">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
+          <div className="flex flex-col gap-2 rounded-xl border border-gold/40 bg-gold/10 p-3">
+            <span className="text-[11.5px] leading-snug text-gold-ink">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
             <label className="flex items-start gap-2 text-[11.5px] leading-snug text-muted-foreground">
               <input type="checkbox" checked={ackLoss} onChange={(e) => setAckLoss(e.target.checked)} className="mt-0.5 shrink-0" />
               <span>{t('vaults.protectedUnlock.passkeyAck')}</span>
@@ -139,7 +139,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
             <span className="text-center text-[11.5px] text-muted-foreground">{t('vaults.protectedUnlock.passkeyCaption')}</span>
           </div>
         ) : (
-          <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-snug text-warning">
+          <div className="rounded-md border border-gold/40 bg-gold/10 px-3 py-2 text-xs leading-snug text-gold-ink">
             {t('vaults.protectedUnlock.unlockUnavailableHere')}
           </div>
         )}
@@ -188,7 +188,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
       )}
 
       {!showUnlockPasskey && (
-        <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+        <div className="rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-xs text-gold-ink">
           {t('vaults.protectedUnlock.unlockUnavailableHere')}
         </div>
       )}

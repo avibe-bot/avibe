@@ -1914,7 +1914,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               </span>
             </span>
             {channels.length === 0 && !loading && (
-              <span className="text-sm text-warning">{t('channelList.noChannelsFound')}</span>
+              <span className="text-sm text-gold-ink">{t('channelList.noChannelsFound')}</span>
             )}
           </div>
           <span className="text-sm text-muted font-mono">{t('channelList.enabledCount', { count: selectedCount })}</span>
@@ -2077,13 +2077,13 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         ? channel.supports_topics
                           ? 'bg-accent/10 text-accent-ink border-accent/20'
                           : channel.type === 'supergroup'
-                            ? 'bg-success/10 text-success border-success/20'
+                            ? 'bg-mint/10 text-mint-ink border-mint/20'
                             : channel.is_private
-                              ? 'bg-warning/10 text-warning border-warning/20'
+                              ? 'bg-gold/10 text-gold-ink border-gold/20'
                               : 'bg-surface text-foreground border-border'
                       : channel.is_private
-                        ? 'bg-warning/10 text-warning border-warning/20'
-                        : 'bg-success/10 text-success border-success/20'
+                        ? 'bg-gold/10 text-gold-ink border-gold/20'
+                        : 'bg-mint/10 text-mint-ink border-mint/20'
                   )}
                 >
                   {platform === 'discord'

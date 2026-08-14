@@ -494,14 +494,14 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
 
           {/* Error */}
           {loginState === 'error' && (
-            <div className="rounded-xl border border-danger/30 bg-danger/10 px-6 py-6">
+            <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-6 py-6">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-14 items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger">
+                <div className="flex size-14 items-center justify-center rounded-full border border-destructive/30 bg-destructive/15 text-destructive-ink">
                   <AlertTriangle size={28} />
                 </div>
                 <div>
                   <h3 className="text-[14px] font-semibold text-foreground">{t('wechatConfig.errorTitle')}</h3>
-                  <p className="mt-1 text-[12px] text-danger">{message}</p>
+                  <p className="mt-1 text-[12px] text-destructive-ink">{message}</p>
                 </div>
                 <Button variant="brand" size="sm" onClick={startLogin} disabled={starting}>
                   <RefreshCw size={14} strokeWidth={2.25} />

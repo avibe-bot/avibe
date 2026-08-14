@@ -351,7 +351,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                         'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium',
                         authResult.ok
                           ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
-                          : 'border-danger/30 bg-danger/10 text-danger'
+                          : 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                       )}
                     >
                       {authResult.ok ? <Check size={14} /> : null}

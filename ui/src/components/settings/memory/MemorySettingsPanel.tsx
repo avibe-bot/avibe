@@ -332,7 +332,7 @@ export const MemorySettingsPanel: React.FC<{
   return (
     <div className="flex flex-col gap-4">
       {rebuildRequired ? (
-        <div className="flex flex-col gap-1 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3">
+        <div className="flex flex-col gap-1 rounded-xl border border-gold/40 bg-gold/10 px-4 py-3">
           <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.rebuildRequiredTitle')}</span>
           <span className="text-[12px] leading-snug text-muted">{t('memory.settings.rebuildRequiredDescription')}</span>
         </div>

@@ -79,9 +79,6 @@
   --color-bg: var(--background);
   --color-panel: var(--surface);
   --color-text: var(--foreground);
-  --color-success: var(--mint);
-  --color-warning: var(--gold);
-  --color-danger: var(--destructive);
 
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
@@ -227,7 +224,11 @@
     --border: rgba(8, 8, 18, 0.08);
     --border-strong: rgba(8, 8, 18, 0.14);
     --input: rgba(8, 8, 18, 0.12);
-    --ring: rgba(16, 185, 129, 0.5);
+    /* The focus ring is an affordance drawn on a neutral surface, so it follows
+       the ink rather than the fill: the vivid fill at 50% composites to 1.5:1 on
+       every light surface, well under the 3:1 non-text floor. Mint ink at 85%
+       reads 3.7-4.0:1 while staying a ring rather than a hard stroke. */
+    --ring: rgba(6, 122, 85, 0.85);
 
     /* Light is where fill and ink diverge. As small text on a light surface the
        vivid fills read 2.2-4.2:1, so each --X-ink is deepened until it clears
@@ -320,7 +321,8 @@
   --border: rgba(8, 8, 18, 0.08);
   --border-strong: rgba(8, 8, 18, 0.14);
   --input: rgba(8, 8, 18, 0.12);
-  --ring: rgba(16, 185, 129, 0.5);
+  /* Mirrors the @media light block above; see the note there. */
+  --ring: rgba(6, 122, 85, 0.85);
 
   --mint: #10b981;
   --mint-soft: rgba(16, 185, 129, 0.14);

@@ -319,7 +319,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         </div>
 
         {error && (
-          <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-[12px] text-danger">
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}

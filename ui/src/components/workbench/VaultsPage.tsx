@@ -261,7 +261,7 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: V
       >
         {g.session_id ? <Link2 className="size-3 opacity-70" /> : <Globe className="size-3 opacity-70" />}
       </span>
-      <span className={cn('font-mono tabular-nums', rem.urgent ? 'text-warning' : 'text-mint-ink/80')}>
+      <span className={cn('font-mono tabular-nums', rem.urgent ? 'text-gold-ink' : 'text-mint-ink/80')}>
         {rem.expired ? t('vaults.grants.expired') : chipCountdown(rem)}
       </span>
       {onRevoke ? (
@@ -926,9 +926,9 @@ export const VaultsPage: React.FC = () => {
           </div>
         ) : null}
         {deleteTarget?.protection === 'protected' ? (
-          <div className="flex flex-col gap-2 rounded-[10px] border border-warning/30 bg-warning/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
+          <div className="flex flex-col gap-2 rounded-[10px] border border-gold/30 bg-gold/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
             <span className="flex items-start gap-2">
-              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-warning" />
+              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-gold-ink" />
               <span>{t('vaults.deleteDialog.protectedUnlockNote')}</span>
             </span>
           </div>

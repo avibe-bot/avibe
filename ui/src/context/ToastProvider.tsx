@@ -82,10 +82,10 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             key={toast.id}
             className={`flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border animate-slide-in ${
               toast.type === 'success'
-                ? 'bg-success/10 border-success/30 text-success'
+                ? 'bg-mint/10 border-mint/30 text-mint-ink'
                 : toast.type === 'warning'
                 ? 'bg-gold/10 border-gold/30 text-gold-ink'
-                : 'bg-error/10 border-error/30 text-error'
+                : 'bg-destructive/10 border-destructive/30 text-destructive-ink'
             }`}
           >
             {toast.type === 'success' ? (

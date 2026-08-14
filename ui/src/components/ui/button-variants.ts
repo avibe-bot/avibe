@@ -30,7 +30,11 @@ export const buttonVariants = cva(
         'outline-cyan':
           'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan-ink hover:bg-cyan/[0.10]',
         ghost: 'gap-1.5 text-foreground hover:bg-surface-2',
-        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:opacity-90',
+        // Hover darkens the fill rather than fading it: opacity blends the fill
+        // toward the page surface, which pulls the white label *down* toward AA
+        // (4.70:1 -> ~4.25:1 in light). brightness-95 deepens it instead, so the
+        // label gains contrast on hover, and it matches the other fill variants.
+        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:brightness-95',
         // Pink-soft destructive — design.pen T09T8Z. Pink fill + pink border
         // + pink text/icon, used for in-panel delete CTAs where a full
         // destructive shouts too loud. Drives the --pink / --pink-soft tokens

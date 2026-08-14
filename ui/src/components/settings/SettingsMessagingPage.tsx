@@ -194,7 +194,7 @@ export const SettingsMessagingPage: React.FC = () => {
             className={clsx(
               'inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em]',
               saveError
-                ? 'border-danger/30 bg-danger/10 text-danger'
+                ? 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                 : 'border-mint/30 bg-mint/[0.08] text-mint-ink'
             )}
           >
