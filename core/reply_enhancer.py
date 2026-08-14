@@ -406,7 +406,6 @@ def process_reply(
     workbench needs the links in place so it can rewrite them to media-proxy URLs
     for inline rendering; IM keeps the default (links stripped to plain labels and
     uploaded to the platform separately).
-
     """
     text, markdown_mask = _strip_silent_blocks_with_mask(text)
     visible_text = text
