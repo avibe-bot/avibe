@@ -682,6 +682,78 @@ async def test_list_episodes_rejects_nonempty_page_beyond_total_count(
     ) == OperationFailed(error="memory_provider_response_invalid")
 
 
+@pytest.mark.parametrize(
+    "items",
+    [
+        (
+            MemoryListItem(
+                id="older",
+                subject="Subject",
+                summary="Summary",
+                body="Processed body",
+                timestamp="2026-08-14T02:11:11Z",
+                project="notes",
+            ),
+            MemoryListItem(
+                id="newer",
+                subject="Subject",
+                summary="Summary",
+                body="Processed body",
+                timestamp="2026-08-14T02:11:12Z",
+                project="notes",
+            ),
+        ),
+        (
+            MemoryListItem(
+                id="week-date",
+                subject="Subject",
+                summary="Summary",
+                body="Processed body",
+                timestamp="2026-W33-5T02:11:12+00:00",
+                project="notes",
+            ),
+        ),
+    ],
+)
+async def test_list_episodes_rejects_invalid_shared_timestamp_contract(
+    tmp_path: Path,
+    items: tuple[MemoryListItem, ...],
+) -> None:
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=items,
+            page=1,
+            page_size=20,
+            count=len(items),
+            total_count=len(items),
+        )
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+
+async def test_list_episodes_rejects_invalid_items_container(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider(
+        list_page=MemoryListPage(
+            items=None,  # type: ignore[arg-type]
+            page=1,
+            page_size=20,
+            count=0,
+            total_count=0,
+        )
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    assert await module.list_episodes(
+        principal_id=PRINCIPAL,
+        project_id="notes",
+    ) == OperationFailed(error="memory_provider_response_invalid")
+
+
 async def test_keyword_recall_skips_health_and_succeeds_without_embedding(tmp_path: Path) -> None:
     class NoHealthProvider(FakeMemoryProvider):
         async def health_snapshot(self):

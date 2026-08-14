@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import unicodedata
 import weakref
@@ -88,6 +89,9 @@ _SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
 
 
 _ROOT_LIFECYCLE_LOCKS: dict[str, asyncio.Lock] = {}
+_RFC3339_TIMESTAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
+)
 
 
 class MemorySessionLifecycleBusyError(RuntimeError):
@@ -980,6 +984,7 @@ class MemoryModule:
             not isinstance(result, MemoryListPage)
             or result.page != page
             or result.page_size != page_size
+            or not isinstance(result.items, tuple)
             or isinstance(result.count, bool)
             or not isinstance(result.count, int)
             or result.count != len(result.items)
@@ -991,19 +996,30 @@ class MemoryModule:
                 result.count > 0
                 and result.total_count < (page - 1) * page_size + result.count
             )
+            or not isinstance(result.warnings, tuple)
             or any(warning != "memory_list_truncated" for warning in result.warnings)
         ):
             return OperationFailed(error="memory_provider_response_invalid")
         total_bytes = 0
+        previous_instant: datetime | None = None
         for item in result.items:
+            instant = _list_timestamp_instant(item.timestamp) if isinstance(
+                item,
+                MemoryListItem,
+            ) else None
             if (
                 not isinstance(item, MemoryListItem)
                 or item.kind != "episode"
                 or item.project != project_id
                 or not _valid_list_identifier(item.id)
-                or not _valid_list_timestamp(item.timestamp)
+                or instant is None
+                or (
+                    previous_instant is not None
+                    and instant > previous_instant
+                )
             ):
                 return OperationFailed(error="memory_provider_response_invalid")
+            previous_instant = instant
             for value, allow_empty in (
                 (item.subject, True),
                 (item.summary, True),
@@ -1199,14 +1215,18 @@ def _valid_list_identifier(value: object) -> bool:
     return bool(value) and encoded is not None and len(encoded) <= 128 and "\x00" not in value
 
 
-def _valid_list_timestamp(value: object) -> bool:
-    if not isinstance(value, str) or len(value) > 64:
-        return False
+def _list_timestamp_instant(value: object) -> datetime | None:
+    if (
+        not isinstance(value, str)
+        or len(value) > 64
+        or _RFC3339_TIMESTAMP_RE.fullmatch(value) is None
+    ):
+        return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return False
-    return parsed.tzinfo is not None
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _profile_bytes(profile: object) -> int | None:
