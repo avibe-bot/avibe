@@ -247,14 +247,63 @@ function contrastRatio(foreground, background) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+// Brand fill/label pairs the owner has accepted against the AA floor. Avibe's
+// accents carry the product's personality — an AI-colleague product should read as
+// alive, not muted — so the light fills keep design.pen's saturation and the white
+// label the design drew, which is the pairing the palette shipped before it was
+// briefly deepened. Text on a neutral surface is a separate token (--X-ink) and
+// keeps the full floor; only the label printed on a brand fill is accepted here.
+//
+// These are pinned, not skipped. Each entry records the ratio the pair was accepted
+// at and the guard fails when the measured ratio moves off it, so an exemption still
+// catches drift: nudge either token and this list goes stale loudly, forcing a fresh
+// decision instead of quietly sliding further down. Owner decision 2026-08-14.
+const ACCEPTED_BRAND_PAIRS = new Map([
+  ['light fill: --primary-foreground on --primary', 2.54],
+  ['light fill: --accent-foreground on --accent', 3.68],
+  ['light fill: --gold-foreground on --gold', 3.19],
+  // Dark violet is not a new exemption: the Button already printed a hard-coded
+  // text-white on this fill, so the pair shipped at 4.38:1 while no token declared
+  // it and this guard could not see it. Naming --violet-foreground brings it under
+  // the same pin as the rest instead of leaving it undeclared.
+  ['dark fill: --violet-foreground on --violet', 4.38],
+]);
+const PIN_TOLERANCE = 0.01;
+const consultedBrandPairs = new Set();
+
 function assertContrast(name, tokens, inkProp, surfaceProp) {
   const ink = requireMeasurableColor(name, inkProp, tokens.get(inkProp));
   const surface = requireMeasurableColor(name, surfaceProp, tokens.get(surfaceProp));
 
   const ratio = contrastRatio(ink, surface);
+  const key = `${name}: ${inkProp} on ${surfaceProp}`;
+  const accepted = ACCEPTED_BRAND_PAIRS.get(key);
+  if (accepted !== undefined) {
+    consultedBrandPairs.add(key);
+    if (Math.abs(ratio - accepted) > PIN_TOLERANCE) {
+      throw new Error(
+        `${key} is ${ratio.toFixed(2)}:1, but ACCEPTED_BRAND_PAIRS pins it at ${accepted.toFixed(2)}:1. ` +
+          'This pair is exempt from the AA floor by an owner decision taken at that exact ratio, so moving ' +
+          'either token needs a fresh decision — re-pin it here once the new value is intended.',
+      );
+    }
+    return;
+  }
   if (ratio < AA_SMALL_TEXT) {
     throw new Error(
       `${name}: ${inkProp} on ${surfaceProp} is ${ratio.toFixed(2)}:1, below WCAG AA ${AA_SMALL_TEXT}:1`,
+    );
+  }
+}
+
+// A pair that no longer exists must not keep its exemption: the tokens it excused
+// may have been renamed or dropped, and a stale entry would silently excuse whatever
+// takes that name next.
+function assertEveryAcceptedPairStillExists() {
+  const stale = [...ACCEPTED_BRAND_PAIRS.keys()].filter((key) => !consultedBrandPairs.has(key));
+  if (stale.length > 0) {
+    throw new Error(
+      `ACCEPTED_BRAND_PAIRS lists ${stale.join(', ')}, which no theme declares. Drop the entry.`,
     );
   }
 }
@@ -267,10 +316,63 @@ const ACCENT_FILLS = ['--primary', '--accent', '--destructive', '--mint', '--cya
 const NEUTRAL_INKS = ['--foreground', '--muted'];
 const INK_SURFACES = ['--card', '--background', '--surface-3'];
 
+// A semantic fill and the palette token behind it must hold the same value, because
+// the pair measured here is not always the pair rendered: Button's `brand` prints
+// --primary-foreground on bg-mint and `brand-cyan` prints --accent-foreground on
+// bg-cyan. They match today by convention only, so without this the pinned ratio on
+// --primary would keep passing while the CTA it claims to describe drifted away.
+const SEMANTIC_FILL_ALIASES = [['--primary', '--mint'], ['--accent', '--cyan']];
+
+// Pointing at a control must never cost contrast. Every interactive brand fill
+// therefore declares the value it hovers to, and the hovered fill is measured against
+// the same label as the resting one. Naming the hovered value is the point: a filter
+// scales the label along with the background, so it cannot be aimed — brightness(1.1)
+// on light --primary read 2.09:1 against the 2.54:1 it started from, and no brightness
+// value fixes it, because a white label is already clamped at the top.
+//
+// The direction follows the LABEL, not the theme. Mint, cyan and gold carry a dark
+// label in dark and a white one in light, so they lighten there and darken here;
+// --violet's label is white in both, so it darkens in both. That inversion is exactly
+// what a single shared mix token got wrong, and what this assertion catches.
+// --mint / --cyan ride along through SEMANTIC_FILL_ALIASES above.
+const HOVER_FILLS = ['--primary', '--accent', '--gold', '--violet', '--destructive'];
+
 for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
   for (const fill of ACCENT_FILLS) {
     assertEqual(`${theme} ${fill} is defined`, tokens.has(fill), true);
     assertEqual(`${theme} ${fill} declares an ink`, tokens.has(`${fill}-ink`), true);
+  }
+
+  for (const [semantic, palette] of SEMANTIC_FILL_ALIASES) {
+    // The hover pair is aliased for the same reason as the resting one: `brand` pairs
+    // bg-mint with --primary-foreground, so a --mint-hover that drifted from
+    // --primary-hover would render a pairing no assertion below ever measures.
+    for (const suffix of ['', '-hover']) {
+      const [a, b] = [`${semantic}${suffix}`, `${palette}${suffix}`];
+      if (tokens.get(a) !== tokens.get(b)) {
+        throw new Error(
+          `${theme} ${a} is ${tokens.get(a)} but ${b} is ${tokens.get(b)}. `
+            + `Button prints ${semantic}-foreground on ${palette}, so the contrast measured on ${a} `
+            + 'is only the contrast users see while the two stay equal. Move both or neither.',
+        );
+      }
+    }
+  }
+
+  for (const fill of HOVER_FILLS) {
+    assertEqual(`${theme} ${fill} declares a hover fill`, tokens.has(`${fill}-hover`), true);
+    const name = `${theme} hover`;
+    const label = requireMeasurableColor(name, `${fill}-foreground`, tokens.get(`${fill}-foreground`));
+    const resting = contrastRatio(label, requireMeasurableColor(name, fill, tokens.get(fill)));
+    const hovered = contrastRatio(label, requireMeasurableColor(name, `${fill}-hover`, tokens.get(`${fill}-hover`)));
+    if (hovered < resting) {
+      throw new Error(
+        `${theme} ${fill}-hover reads ${hovered.toFixed(2)}:1 against ${fill}-foreground, worse than `
+          + `${fill}'s own ${resting.toFixed(2)}:1. Hovering a control must not cost contrast, so the `
+          + `hovered fill has to move AWAY from its label — darker under a light label, lighter under a `
+          + 'dark one. Check which way this theme\'s label points before picking the value.',
+      );
+    }
   }
 
   // Inks are read as small text on a bare surface, so every one of them clears AA
@@ -324,6 +426,7 @@ function assertAccentAliasesKeepTheirTokenName(source) {
     `${fill}-ink`,
     `${fill}-soft`,
     `${fill}-foreground`,
+    `${fill}-hover`,
   ]));
 
   postcss.parse(source).walkAtRules('theme', (atRule) => {
@@ -346,6 +449,7 @@ function assertAccentAliasesKeepTheirTokenName(source) {
 }
 
 assertAccentAliasesKeepTheirTokenName(css);
+assertEveryAcceptedPairStillExists();
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });
 const modelHubSystemDark = modelHub({ prefersLight: false, themeAttr: null });

@@ -38,6 +38,7 @@
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-primary-ink: var(--primary-ink);
+  --color-primary-hover: var(--primary-hover);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -45,9 +46,11 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent-ink: var(--accent-ink);
+  --color-accent-hover: var(--accent-hover);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-destructive-ink: var(--destructive-ink);
+  --color-destructive-hover: var(--destructive-hover);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
   --color-input: var(--input);
@@ -62,16 +65,21 @@
   --color-mint: var(--mint);
   --color-mint-soft: var(--mint-soft);
   --color-mint-ink: var(--mint-ink);
+  --color-mint-hover: var(--mint-hover);
   --color-cyan: var(--cyan);
   --color-cyan-soft: var(--cyan-soft);
   --color-cyan-ink: var(--cyan-ink);
+  --color-cyan-hover: var(--cyan-hover);
   --color-violet: var(--violet);
   --color-violet-soft: var(--violet-soft);
+  --color-violet-foreground: var(--violet-foreground);
   --color-violet-ink: var(--violet-ink);
+  --color-violet-hover: var(--violet-hover);
   --color-gold: var(--gold);
   --color-gold-soft: var(--gold-soft);
   --color-gold-foreground: var(--gold-foreground);
   --color-gold-ink: var(--gold-ink);
+  --color-gold-hover: var(--gold-hover);
   --color-pink: var(--pink);
   --color-pink-soft: var(--pink-soft);
   --color-pink-ink: var(--pink-ink);
@@ -120,6 +128,18 @@
   --primary: #5bffa0;
   --primary-foreground: #080812;
   --primary-ink: #5bffa0;
+  /* Every interactive brand fill declares the value it hovers to, instead of deriving
+     one with a filter. A filter scales the label along with the background, so it
+     cannot move a pairing in a chosen direction: light's labels are white, already
+     clamped at the top, and brightness(1.1) there dropped --primary from 2.54:1 to
+     2.09:1 while brightness(0.95) bought nothing back (2.50:1). A declared fill leaves
+     the label at full luminance and lifts that same hover to 3.23:1.
+     Which way a fill moves follows its LABEL, not its theme — the distinction a single
+     shared mix token could not express. These accents carry a dark label, so they
+     lighten; --violet's label is white in both themes, so it darkens in both. Each
+     value is the fill mixed 88% toward its label's opposite, and validate-theme.mjs
+     asserts hovering never costs contrast, so no brand fill can ship without one. */
+  --primary-hover: #6fffab;
   --secondary: #11111c;
   --secondary-foreground: #f5f1e8;
   --muted: #9ba3b8;
@@ -127,9 +147,11 @@
   --accent: #3fe0e5;
   --accent-foreground: #080812;
   --accent-ink: #3fe0e5;
+  --accent-hover: #56e4e8;
   --destructive: #ff6b6b;
   --destructive-foreground: #080812;
   --destructive-ink: #ff6b6b;
+  --destructive-hover: #ff7d7d;
 
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.14);
@@ -139,19 +161,29 @@
   --mint: #5bffa0;
   --mint-soft: rgba(91, 255, 160, 0.16);
   --mint-ink: #5bffa0;
+  --mint-hover: #6fffab;
   --cyan: #3fe0e5;
   --cyan-soft: rgba(63, 224, 229, 0.16);
   --cyan-ink: #3fe0e5;
+  --cyan-hover: #56e4e8;
   /* The fill keeps design.pen's #7c5bff. Only the ink is lightened, because
      #7c5bff read 4.28:1 as text on --card — the one dark accent below the
-     floor. Hue and saturation are unchanged. */
+     floor. Hue and saturation are unchanged.
+     Violet is the only accent whose label is white in BOTH themes, which is why
+     it needs its own --violet-foreground rather than borrowing a theme rule: the
+     Button used a hard-coded text-white, so nothing declared the pair and the
+     guard could not see it. Naming it also fixes the hover direction — violet
+     darkens on hover in dark too, where every other accent lightens. */
   --violet: #7c5bff;
   --violet-soft: rgba(124, 91, 255, 0.16);
+  --violet-foreground: #ffffff;
   --violet-ink: #8465ff;
+  --violet-hover: #6d50e0;
   --gold: #ffc857;
   --gold-soft: rgba(255, 200, 87, 0.16);
   --gold-foreground: #080812;
   --gold-ink: #ffc857;
+  --gold-hover: #ffcf6b;
   --pink: #ff5b8a;
   --pink-soft: rgba(255, 91, 138, 0.10);
   --pink-ink: #ff5b8a;
@@ -203,25 +235,36 @@
     --popover: #ffffff;
     --popover-foreground: #0a0a14;
 
-    /* Fills keep design.pen's vivid light accents, and take a dark label the
-       way the dark theme already does — #10b981 reads 2.54:1 under white but
-       7.86:1 under #080812, so the fill never had to move. --destructive is
-       the exception: #e11d48 is 4.70:1 under white and only 4.24:1 under the
-       dark ink, so its label stays white. Inks are a separate token; see the
-       --mint-ink group. Guarded by ui/scripts/validate-theme.mjs. */
+    /* Fills keep design.pen's vivid light accents *and* its white label — the
+       pairing the product shipped before it was briefly deepened. The brand
+       pair is a product decision, not an oversight: an AI-colleague product
+       should read as alive rather than muted, so the accent stays at full
+       saturation and the label stays white the way the design drew it. That
+       costs AA on the label (white on #10b981 is 2.54:1), so
+       validate-theme.mjs exempts these pairs by *pinning* the ratio each was
+       accepted at rather than skipping them — drift in either token changes
+       the measured ratio and fails the guard until someone re-decides.
+       --destructive needs no exemption: #e11d48 under white is 4.70:1.
+       Accent-as-text on a neutral surface is a separate token and keeps the
+       full AA floor; see the --mint-ink group. Owner decision 2026-08-14. */
     --primary: #10b981;
-    --primary-foreground: #080812;
+    --primary-foreground: #ffffff;
     --primary-ink: #067a55;
+    /* Every brand fill darkens on hover here, because this theme's labels are white —
+       see the dark block for why hover is a declared fill rather than a filter. */
+    --primary-hover: #0ea372;
     --secondary: #eef1f7;
     --secondary-foreground: #0a0a14;
     --muted: #5c6079;
     --muted-soft: #eef1f7;
     --accent: #0891b2;
-    --accent-foreground: #080812;
+    --accent-foreground: #ffffff;
     --accent-ink: #0e7490;
+    --accent-hover: #07809d;
     --destructive: #e11d48;
     --destructive-foreground: #ffffff;
     --destructive-ink: #ca1a41;
+    --destructive-hover: #c61a3f;
 
     --border: rgba(8, 8, 18, 0.08);
     --border-strong: rgba(8, 8, 18, 0.14);
@@ -241,16 +284,21 @@
     --mint: #10b981;
     --mint-soft: rgba(16, 185, 129, 0.14);
     --mint-ink: #067a55;
+    --mint-hover: #0ea372;
     --cyan: #0891b2;
     --cyan-soft: rgba(8, 145, 178, 0.14);
     --cyan-ink: #0e7490;
+    --cyan-hover: #07809d;
     --violet: #7c3aed;
     --violet-soft: rgba(124, 58, 237, 0.14);
+    --violet-foreground: #ffffff;
     --violet-ink: #7c3aed;
+    --violet-hover: #6d33d1;
     --gold: #d97706;
     --gold-soft: rgba(217, 119, 6, 0.14);
-    --gold-foreground: #080812;
+    --gold-foreground: #ffffff;
     --gold-ink: #ae4f08;
+    --gold-hover: #bf6905;
     --pink: #dc2659;
     --pink-soft: rgba(220, 38, 89, 0.10);
     --pink-ink: #c7204f;
@@ -305,21 +353,26 @@
   --popover: #ffffff;
   --popover-foreground: #0a0a14;
 
-  /* Vivid fill + dark label, deepened ink - see the prefers-color-scheme block
-     above. Both light blocks must stay value-identical. */
+  /* Vivid fill + white label, deepened ink - see the prefers-color-scheme
+     block above. Both light blocks must stay value-identical. */
   --primary: #10b981;
-  --primary-foreground: #080812;
+  --primary-foreground: #ffffff;
   --primary-ink: #067a55;
+  /* Every brand fill darkens on hover here, because this theme's labels are white —
+     see the dark block for why hover is a declared fill rather than a filter. */
+  --primary-hover: #0ea372;
   --secondary: #eef1f7;
   --secondary-foreground: #0a0a14;
   --muted: #5c6079;
   --muted-soft: #eef1f7;
   --accent: #0891b2;
-  --accent-foreground: #080812;
+  --accent-foreground: #ffffff;
   --accent-ink: #0e7490;
+  --accent-hover: #07809d;
   --destructive: #e11d48;
   --destructive-foreground: #ffffff;
   --destructive-ink: #ca1a41;
+  --destructive-hover: #c61a3f;
 
   --border: rgba(8, 8, 18, 0.08);
   --border-strong: rgba(8, 8, 18, 0.14);
@@ -330,16 +383,21 @@
   --mint: #10b981;
   --mint-soft: rgba(16, 185, 129, 0.14);
   --mint-ink: #067a55;
+  --mint-hover: #0ea372;
   --cyan: #0891b2;
   --cyan-soft: rgba(8, 145, 178, 0.14);
   --cyan-ink: #0e7490;
+  --cyan-hover: #07809d;
   --violet: #7c3aed;
   --violet-soft: rgba(124, 58, 237, 0.14);
+  --violet-foreground: #ffffff;
   --violet-ink: #7c3aed;
+  --violet-hover: #6d33d1;
   --gold: #d97706;
   --gold-soft: rgba(217, 119, 6, 0.14);
-  --gold-foreground: #080812;
+  --gold-foreground: #ffffff;
   --gold-ink: #ae4f08;
+  --gold-hover: #bf6905;
   --pink: #dc2659;
   --pink-soft: rgba(220, 38, 89, 0.10);
   --pink-ink: #c7204f;

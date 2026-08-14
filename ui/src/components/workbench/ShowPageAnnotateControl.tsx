@@ -155,7 +155,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                 aria-label={offLabel}
                 title={offLabel}
                 aria-pressed
-                className="grid size-6 shrink-0 place-items-center rounded-[5px] bg-mint text-primary-foreground transition hover:brightness-110"
+                className="grid size-6 shrink-0 place-items-center rounded-[5px] bg-mint text-primary-foreground transition hover:bg-mint-hover"
               >
                 <MessageSquarePlus className="size-3.5" />
               </button>

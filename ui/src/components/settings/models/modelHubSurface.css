@@ -74,9 +74,13 @@
   --model-hub-danger-border: color-mix(in srgb, var(--destructive) 25%, transparent);
   --model-hub-success-fill: color-mix(in srgb, var(--mint) 7.8%, transparent);
   --model-hub-success-border: color-mix(in srgb, var(--mint) 25%, transparent);
-  /* A brand button held at low emphasis: the fill fades toward the surface while
-   * the label stays --primary-foreground, which is dark in both themes. Needs no
-   * light branch — the same fade lands on white and keeps the label legible. */
+  /* A brand button held at low emphasis: the fill fades toward the surface. Once
+   * it fades it is a wash, not a fill, so the label follows the wash rule and
+   * takes --mint-ink rather than the fill's paired --primary-foreground. That
+   * matters in light, where --primary-foreground is white: white on a 34.9%
+   * mint wash over a light dialog is ~1.4:1, i.e. the same invisible-label bug
+   * this palette work started from. --mint-ink is asserted against every
+   * neutral surface in both themes, so one value serves both. */
   --model-hub-dim-brand-fill: color-mix(in srgb, var(--mint) 34.9%, transparent);
 
   /* Modal scrim and lifted-surface shadows, cast in the theme's own extreme:
@@ -593,11 +597,16 @@
   padding: var(--model-hub-add-key-foot-padding-y) var(--model-hub-add-key-foot-padding-x);
   background: var(--model-hub-add-key-footer-fill);
 }
+/* The fill is a wash here, so the label leaves the brand pair and takes the ink
+ * token — see --model-hub-dim-brand-fill. The hover rule repeats the pair to
+ * hold the button steady: a dimmed action is deliberately not interactive-looking. */
 .model-hub-add-key-action--dim {
   background: var(--model-hub-add-key-dim-primary);
+  color: var(--mint-ink);
 }
 .model-hub-add-key-action--dim:hover {
   background: var(--model-hub-add-key-dim-primary);
+  color: var(--mint-ink);
 }
 
 .model-hub-route-overlay { background: var(--model-hub-scrim); }

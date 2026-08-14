@@ -9,19 +9,30 @@ export const buttonVariants = cva(
     variants: {
       variant: {
         // Mint primary — flat, no glow shadow (design.pen Button/Default).
-        default: 'gap-1.5 bg-primary text-primary-foreground hover:brightness-110',
-        // Brand CTA — bright bg + brand-color glow shadow + bold text + brighten on hover.
-        // The fill is the accent itself and the label its paired *-foreground, which
-        // is the dark ink in both themes: a brand fill stays vivid under light, so it
-        // takes the same dark label there that it takes on the dark frame.
+        default: 'gap-1.5 bg-primary text-primary-foreground hover:bg-primary-hover',
+        // Brand CTA — bright bg + brand-color glow shadow + bold text.
+        // The fill is the accent itself and the label its paired *-foreground: a dark
+        // ink on the dark theme's neon accents, white on light's vivid ones (and white
+        // in both for violet, the one accent whose label does not follow the theme).
+        // All are the design's own pairing; see the ACCEPTED_BRAND_PAIRS note in
+        // ui/scripts/validate-theme.mjs for why light's white label is deliberate.
+        //
+        // Hover paints a declared --X-hover fill rather than filtering the button,
+        // because brightness() scales the label along with the background: on light's
+        // white labels that made hover strictly worse than the pairing the owner
+        // accepted. A named fill also lets validate-theme.mjs measure the hovered pair
+        // and assert it never reads worse than the resting one — which is how violet's
+        // inverted direction surfaces at build time rather than in review. The glow
+        // shadow no longer brightens with the fill; the fill swap carries the
+        // affordance. See the --primary-hover note in index.css.
         brand:
-          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_24px_-4px_rgba(91,255,160,0.6)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_24px_-4px_rgba(91,255,160,0.6)] hover:bg-mint-hover disabled:shadow-none',
         'brand-cyan':
-          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_24px_-4px_rgba(63,224,229,0.6)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_24px_-4px_rgba(63,224,229,0.6)] hover:bg-cyan-hover disabled:shadow-none',
         'brand-gold':
-          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_24px_-4px_rgba(255,200,87,0.55)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_24px_-4px_rgba(255,200,87,0.55)] hover:bg-gold-hover disabled:shadow-none',
         'brand-violet':
-          'gap-2 bg-violet font-bold text-white shadow-[0_0_24px_-4px_rgba(124,91,255,0.55)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-violet font-bold text-violet-foreground shadow-[0_0_24px_-4px_rgba(124,91,255,0.55)] hover:bg-violet-hover disabled:shadow-none',
         secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong',
         // Outline — bg matches page surface so it sits cleanly on glow gradients.
         outline:
@@ -30,11 +41,12 @@ export const buttonVariants = cva(
         'outline-cyan':
           'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan-ink hover:bg-cyan/[0.10]',
         ghost: 'gap-1.5 text-foreground hover:bg-surface-2',
-        // Hover darkens the fill rather than fading it: opacity blends the fill
-        // toward the page surface, which pulls the white label *down* toward AA
-        // (4.70:1 -> ~4.25:1 in light). brightness-95 deepens it instead, so the
-        // label gains contrast on hover, and it matches the other fill variants.
-        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:brightness-95',
+        // Hover swaps the fill rather than fading it: opacity blends the fill toward
+        // the page surface, which pulls the white label *down* toward AA (4.70:1 ->
+        // ~4.25:1 in light). A fixed brightness-95 was no better — it only deepened,
+        // which helps light's white label but drags dark's #080812 label the wrong
+        // way. --destructive-hover is declared per theme like every other brand fill.
+        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:bg-destructive-hover',
         // Pink-soft destructive — design.pen T09T8Z. Pink fill + pink border
         // + pink text/icon, used for in-panel delete CTAs where a full
         // destructive shouts too loud. Drives the --pink / --pink-soft tokens
