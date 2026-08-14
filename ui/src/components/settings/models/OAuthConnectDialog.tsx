@@ -25,6 +25,7 @@ import { useToast } from '@/context/ToastContext';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
 import { AdoptionNote } from './AdoptionNote';
 import {
+  classifyOAuthFailure,
   createFlowAuthority,
   failureLanded,
   initialFlowView,
@@ -406,8 +407,22 @@ export const OAuthConnectDialog: React.FC<{
               // fresh acquisition; this status read was the required last chance
               // to observe a near-deadline terminal result.
               return false;
-            } catch {
-              return false;
+            } catch (err) {
+              const failure = apiFailure(err);
+              const failureClass = classifyOAuthFailure(failure);
+              // An unread flow is still held. Retry may ask again, but it may not
+              // turn missing evidence into permission to mint a replacement.
+              if (failureClass === 'inconclusive') return true;
+              // A named failure replaces the local timeout so the same class can
+              // decide whether another Retry is meaningful.
+              transition({ kind: 'reset' });
+              const step = transition({
+                kind: 'error',
+                errorKey: oauthFailureKey(failure?.code, journey),
+                failureClass,
+              });
+              rowsBehindAreStale(failure, failureLanded(step.action));
+              return true;
             }
           };
         }
@@ -444,14 +459,19 @@ export const OAuthConnectDialog: React.FC<{
         // about the flow at all — that same read is what materializes a
         // just-succeeded one. Keep reading instead of stopping; the deadline check
         // at the top of each poll bounds either.
-        if (!pollFailureSettles(submittingRef.current, failure?.serverNamed ?? false, failure?.code ?? failure?.detail)) {
+        const failureClass = classifyOAuthFailure(failure);
+        if (!pollFailureSettles(submittingRef.current, failureClass)) {
           pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
           return;
         }
         // The authority goes first because its answer is what decides whether these
         // pairs are the ones on screen — see `failureLanded`. The refetch below is
         // owed whatever it answers.
-        const step = transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
+        const step = transition({
+          kind: 'error',
+          errorKey: oauthFailureKey(failure?.code, journey),
+          failureClass,
+        });
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     };
@@ -524,6 +544,7 @@ export const OAuthConnectDialog: React.FC<{
         pollTimer = window.setTimeout(() => void poll(started.flow_id), POLL_MS);
       } catch (err) {
         const failure = apiFailure(err);
+        const failureClass = classifyOAuthFailure(failure);
         // A reauth that fails to START can still have written the row: the
         // irreversible marking is rolled back only for a login that fails to
         // spawn, not for the flow-binding failures after it. Which is why this
@@ -543,6 +564,7 @@ export const OAuthConnectDialog: React.FC<{
         const step = transition({
           kind: 'error',
           errorKey: isReauth ? 'settings.models.oauth.error.start' : oauthStartFailureKey(failure?.detail ?? failure?.code),
+          failureClass,
         });
         if (!isReauth) setStartFailureCode(failure?.detail ?? failure?.code ?? 'start_failed');
         closeProviderWindow();
@@ -640,9 +662,11 @@ export const OAuthConnectDialog: React.FC<{
       // the flow id, so a submit rejecting afterwards is still current and still
       // ignored. `failureLanded` is the part that knows.
       const failure = apiFailure(err);
+      const failureClass = classifyOAuthFailure(failure);
       const step = authority.transition({
         kind: 'error',
         errorKey: oauthFailureKey(failure?.code, journey),
+        failureClass,
       });
       rowsBehindAreStale(failure, failureLanded(step.action));
     } finally {
@@ -661,7 +685,7 @@ export const OAuthConnectDialog: React.FC<{
       setPhase('choose');
       return;
     }
-    const timedOutFlow = view.errorKey === 'settings.models.oauth.error.timeout' ? heldFlowId.current : null;
+    const timedOutFlow = view.failureClass === 'inconclusive' ? heldFlowId.current : null;
     if (timedOutFlow && rereadHeldFlow.current) {
       if (await rereadHeldFlow.current()) return;
     }
@@ -672,7 +696,7 @@ export const OAuthConnectDialog: React.FC<{
     setPhase('flow');
   };
 
-  const { flow, errorKey } = view;
+  const { flow, errorKey, failureClass } = view;
   const presentation = flow?.presentation;
   const expects = presentation?.expects;
   const isDevice = expects === 'none';
@@ -681,7 +705,6 @@ export const OAuthConnectDialog: React.FC<{
   // the same call, so there is no in-between to hold the banner for. The complete
   // rendered state comes from the authority's landed view.
   const success = view.settled && flow?.state === 'success';
-  const failed = view.settled && Boolean(errorKey);
   const active = !view.settled;
 
   const remainingMs = flow?.expires_at ? Math.max(0, new Date(flow.expires_at).getTime() - Date.now()) : null;
@@ -893,7 +916,7 @@ export const OAuthConnectDialog: React.FC<{
             </DialogTitle>
           </DialogHeader>
 
-          {failed && (
+          {failureClass && (
             <div className="flex flex-col gap-2">
               <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive-ink">
                 <TriangleAlert className="mt-0.5 size-4 shrink-0" />
@@ -1022,7 +1045,7 @@ export const OAuthConnectDialog: React.FC<{
                   siblings are already marked — so sending the user back to the row
                   to confirm it a second time asks them to agree to a cost they have
                   already paid, for the only gesture that can undo it. */}
-              {failed && (
+              {failureClass && failureClass !== 'authoritative-terminal' && (
                 <Button
                   variant="brand"
                   size="sm"

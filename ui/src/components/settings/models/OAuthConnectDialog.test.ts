@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import * as React from 'react';
@@ -19,6 +19,7 @@ import type { Source } from './types';
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -35,6 +36,24 @@ const subscription = (over: Partial<Source> = {}): Source => ({
   models: [],
   ...over,
 });
+
+const renderDialog = (props: Partial<React.ComponentProps<typeof OAuthConnectDialog>> = {}) =>
+  render(React.createElement(
+    ToastProvider,
+    null,
+    React.createElement(
+      I18nextProvider,
+      { i18n },
+      React.createElement(OAuthConnectDialog, {
+        open: true,
+        vendor: 'anthropic',
+        sources: [],
+        onClose: vi.fn(),
+        onConnected: vi.fn(),
+        ...props,
+      }),
+    ),
+  ));
 
 describe('add-subscription channel choice', () => {
   it('flips the recommendation and visible order by vendor', () => {
@@ -78,21 +97,7 @@ describe('add-subscription start recovery', () => {
         expires_at: '2099-01-01T00:00:00Z',
       });
 
-    render(React.createElement(
-      ToastProvider,
-      null,
-      React.createElement(
-        I18nextProvider,
-        { i18n },
-        React.createElement(OAuthConnectDialog, {
-          open: true,
-          vendor: 'anthropic',
-          sources: [],
-          onClose: vi.fn(),
-          onConnected: vi.fn(),
-        }),
-      ),
-    ));
+    renderDialog();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
@@ -102,5 +107,51 @@ describe('add-subscription start recovery', () => {
     expect(start.mock.calls[0].slice(0, 2)).toEqual(['anthropic', 'native_cli']);
     expect(start.mock.calls[1]).toEqual(start.mock.calls[0]);
     expect(start.mock.calls[0][2]).toMatch(/^ofn_[a-z0-9]{16,64}$/);
+  });
+});
+
+describe('OAuth failure class behavior', () => {
+  it('keeps a held flow when its timeout reread is inconclusive', async () => {
+    vi.useFakeTimers();
+    const reauth = vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue({
+      flow_id: 'oaf_timeout',
+      intent: 'reauth',
+      vendor: 'anthropic',
+      channel: 'native_cli',
+      state: 'awaiting_action',
+      presentation: { expects: 'none' },
+      expires_at: new Date(Date.now() - 61_000).toISOString(),
+    });
+    const status = vi
+      .spyOn(modelsApi, 'getOAuthStatus')
+      .mockRejectedValue(new TypeError('Failed to fetch'));
+    renderDialog({ reauth: subscription() });
+
+    await act(async () => Promise.resolve());
+    expect(reauth).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTime(2_000));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+      await Promise.resolve();
+    });
+
+    expect(status).toHaveBeenCalledWith('oaf_timeout');
+    expect(reauth).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer Retry for an authoritative terminal failure', async () => {
+    vi.spyOn(modelsApi, 'reauthSource').mockRejectedValue(new ApiCallError('source_not_found'));
+    renderDialog({ reauth: subscription() });
+
+    await screen.findByRole('button', { name: /^Close$|^关闭$/i });
+    expect(screen.queryByRole('button', { name: /^Retry$|^重试$/i })).toBeNull();
+  });
+
+  it('offers Retry when the engine is unavailable', async () => {
+    vi.spyOn(modelsApi, 'reauthSource').mockRejectedValue(new ApiCallError('engine_down'));
+    renderDialog({ reauth: subscription() });
+
+    expect(await screen.findByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
   });
 });
