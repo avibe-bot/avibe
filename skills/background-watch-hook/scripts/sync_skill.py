@@ -254,7 +254,10 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--check", action="store_true", help="Verify installed targets without changing them")
     mode.add_argument("--install", action="store_true", help="Install the canonical skill into the targets")
     parser.add_argument("--repo-root", help="Avibe repository root; defaults to this checkout")
-    parser.add_argument("--commit", help="Canonical git commit; defaults to the repository HEAD")
+    parser.add_argument(
+        "--commit",
+        help="Canonical git commit; defaults to the latest commit touching the skill tree",
+    )
     parser.add_argument("--target", action="append", help="Installation target; repeat for multiple harnesses")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable output")
     return parser
