@@ -88,7 +88,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3">
-          <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint-soft text-mint">
+          <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint-soft text-mint-ink">
             <Play className="size-4" />
           </div>
           <div className="flex flex-1 flex-col gap-0.5">
@@ -136,7 +136,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
         </div>
 
         {error && (
-          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}

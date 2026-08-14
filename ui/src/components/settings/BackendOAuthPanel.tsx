@@ -379,9 +379,9 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
 
       {signedIn && state === 'idle' && (
         <div className="flex items-start gap-2 rounded-md border border-mint/30 bg-mint-soft/40 px-3 py-2">
-          <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-mint" />
+          <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-mint-ink" />
           <div className="flex flex-col gap-0.5">
-            <p className="text-[12px] text-mint">
+            <p className="text-[12px] text-mint-ink">
               {(() => {
                 if (backend === 'claude') return t('settings.backends.claudeOauthSignedIn');
                 if (backend === 'codex') return t('settings.backends.codexOauthSignedIn');
@@ -389,7 +389,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
               })()}
             </p>
             {signedInDetail && (
-              <p className="font-mono text-[11px] text-mint/80">{signedInDetail}</p>
+              <p className="font-mono text-[11px] text-mint-ink/80">{signedInDetail}</p>
             )}
           </div>
         </div>
@@ -397,15 +397,15 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
 
       {state === 'success' && (
         <div className="flex items-start gap-2 rounded-md border border-mint/30 bg-mint-soft/40 px-3 py-2">
-          <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-mint" />
-          <p className="text-[12px] text-mint">{t('settings.backends.oauthSuccess')}</p>
+          <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-mint-ink" />
+          <p className="text-[12px] text-mint-ink">{t('settings.backends.oauthSuccess')}</p>
         </div>
       )}
 
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/[0.08] px-3 py-2">
-          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive" />
-          <p className="text-[12px] leading-relaxed text-destructive">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive-ink" />
+          <p className="text-[12px] leading-relaxed text-destructive-ink">
             {t('settings.backends.oauthFailed', { detail: error })}
           </p>
         </div>
@@ -514,7 +514,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
             size="sm"
             onClick={() => void removeAuth()}
             disabled={removing || starting}
-            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            className="text-destructive-ink hover:bg-destructive/10 hover:text-destructive-ink"
           >
             <Trash2 className="size-3.5" />
             {removing ? t('common.removing') : removeLabel}

@@ -110,7 +110,7 @@ export const VaultApprovalFloat: React.FC<{ offscreen: VaultRequest[]; pending: 
             onClick={() => setReviewing(oldestOffscreen)}
             className="flex w-full items-center gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-3 py-2.5 text-left transition-colors hover:bg-gold/[0.12]"
           >
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gold/15 text-gold">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gold/15 text-gold-ink">
               <KeyRound className="size-4" />
             </span>
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">

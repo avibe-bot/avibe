@@ -31,11 +31,11 @@ export const StepCard: React.FC<StepCardProps> = ({
     {...props}
   >
     {icon ? (
-      <span className="inline-flex size-12 items-center justify-center rounded-[10px] border border-mint/[0.33] bg-mint/[0.12] text-mint [&>svg]:size-[22px]">
+      <span className="inline-flex size-12 items-center justify-center rounded-[10px] border border-mint/[0.33] bg-mint/[0.12] text-mint-ink [&>svg]:size-[22px]">
         {icon}
       </span>
     ) : null}
-    <span className="font-mono text-[12px] font-semibold uppercase tracking-[0.16em] text-mint">
+    <span className="font-mono text-[12px] font-semibold uppercase tracking-[0.16em] text-mint-ink">
       {eyebrow}
     </span>
     <h3 className="text-[22px] font-bold leading-tight tracking-[-0.4px] text-foreground">{title}</h3>

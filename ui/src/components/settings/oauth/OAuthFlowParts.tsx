@@ -26,7 +26,7 @@ export const OAuthLinkRow: React.FC<{ url: string } & CopyProps> = ({ url, onCop
       href={url}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex max-w-full items-center gap-1.5 break-all rounded-md bg-cyan-soft/40 px-2 py-1 font-mono text-[12px] text-cyan transition-colors hover:bg-cyan-soft hover:text-cyan"
+      className="inline-flex max-w-full items-center gap-1.5 break-all rounded-md bg-cyan-soft/40 px-2 py-1 font-mono text-[12px] text-cyan-ink transition-colors hover:bg-cyan-soft hover:text-cyan-ink"
     >
       <ExternalLink className="size-3 shrink-0" />
       <span className="break-all">{url}</span>
@@ -41,7 +41,7 @@ export const OAuthLinkRow: React.FC<{ url: string } & CopyProps> = ({ url, onCop
 /** Device code as a spaced mono chip + a copy button. */
 export const OAuthDeviceCodeRow: React.FC<{ code: string } & CopyProps> = ({ code, onCopy, copyLabel }) => (
   <div className="flex flex-wrap items-center gap-2">
-    <code className="rounded-md bg-cyan-soft/40 px-2.5 py-1 font-mono text-[14px] font-semibold tracking-[0.18em] text-cyan">
+    <code className="rounded-md bg-cyan-soft/40 px-2.5 py-1 font-mono text-[14px] font-semibold tracking-[0.18em] text-cyan-ink">
       {code}
     </code>
     <Button type="button" variant="secondary" size="xs" onClick={onCopy}>

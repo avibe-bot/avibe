@@ -174,7 +174,7 @@ export const SettingsServicePage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Server className="size-3.5 text-mint" />
+            <Server className="size-3.5 text-mint-ink" />
             {t('settings.serviceRuntimeTitle')}
           </span>
         }
@@ -184,7 +184,7 @@ export const SettingsServicePage: React.FC = () => {
             className={clsx(
               'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em]',
               isRunning
-                ? 'border-mint/30 bg-mint/[0.08] text-mint'
+                ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
                 : 'border-border bg-foreground/[0.04] text-muted'
             )}
           >
@@ -243,7 +243,7 @@ export const SettingsServicePage: React.FC = () => {
         <SettingsRow
           title={
             <span className="inline-flex items-center gap-2">
-              <Globe2 className="size-3.5 text-cyan" />
+              <Globe2 className="size-3.5 text-cyan-ink" />
               {t('settings.consoleServerTitle')}
             </span>
           }
@@ -294,7 +294,7 @@ export const SettingsServicePage: React.FC = () => {
         <SettingsRow
           title={
             <span className="inline-flex items-center gap-2">
-              <Tag className="size-3.5 text-cyan" />
+              <Tag className="size-3.5 text-cyan-ink" />
               {t('settings.instanceNameTitle')}
             </span>
           }

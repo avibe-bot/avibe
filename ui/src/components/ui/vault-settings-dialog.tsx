@@ -146,7 +146,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
       <DialogContent>
         <DialogTitle className="sr-only">{t('vaults.settings.title')}</DialogTitle>
         <div className="flex items-start gap-3 pr-6">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-mint-soft text-mint">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-mint-soft text-mint-ink">
             <ShieldCheck className="size-5" />
           </span>
           <div className="flex flex-col gap-0.5">
@@ -192,7 +192,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
         )}
 
         {error ? (
-          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
             {error}
           </div>
         ) : null}

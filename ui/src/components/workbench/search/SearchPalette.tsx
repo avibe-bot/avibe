@@ -164,7 +164,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
 
           {/* Query row — mint search glyph + input + Esc pill. */}
           <div className="flex shrink-0 items-center gap-3 border-b border-border px-[18px] py-4">
-            <Search className="size-[18px] shrink-0 text-mint" />
+            <Search className="size-[18px] shrink-0 text-mint-ink" />
             <Input
               ref={inputRef}
               variant="bare"
@@ -199,7 +199,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             )}
             {showError && (
               <div className="px-2.5 py-10">
-                <div className="mx-auto flex max-w-sm items-center gap-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[13px] text-destructive">
+                <div className="mx-auto flex max-w-sm items-center gap-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[13px] text-destructive-ink">
                   <AlertCircle className="size-4 shrink-0" />
                   <span>{t('workbench.search.error')}</span>
                 </div>

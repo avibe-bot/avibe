@@ -146,9 +146,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   };
 
   const colorClasses: Record<BackendOption['color'], { border: string; bg: string; text: string }> = {
-    mint: { border: 'border-mint', bg: 'bg-mint/[0.08]', text: 'text-mint' },
-    cyan: { border: 'border-cyan', bg: 'bg-cyan/[0.08]', text: 'text-cyan' },
-    violet: { border: 'border-violet', bg: 'bg-violet/[0.08]', text: 'text-violet' },
+    mint: { border: 'border-mint', bg: 'bg-mint/[0.08]', text: 'text-mint-ink' },
+    cyan: { border: 'border-cyan', bg: 'bg-cyan/[0.08]', text: 'text-cyan-ink' },
+    violet: { border: 'border-violet', bg: 'bg-violet/[0.08]', text: 'text-violet-ink' },
   };
 
   return (
@@ -277,7 +277,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                   onClick={() => setEffort(opt)}
                   className={clsx(
                     'truncate rounded px-0.5 text-[11px] capitalize transition',
-                    effort === opt ? 'bg-mint-soft font-bold text-mint' : 'font-medium text-muted hover:text-foreground',
+                    effort === opt ? 'bg-mint-soft font-bold text-mint-ink' : 'font-medium text-muted hover:text-foreground',
                   )}
                 >
                   {opt}
@@ -321,7 +321,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         </div>
 
         {error && (
-          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}

@@ -272,7 +272,7 @@ export const CodexProviderConfig: React.FC<{
             // disk key/tokens we cannot tell whether the user is
             // signed in via keychain or not — say so honestly rather
             // than rendering "no key configured" with an oauth toggle.
-            <p className="text-[12px] text-gold">
+            <p className="text-[12px] text-gold-ink">
               {t('settings.backends.codexAuthModeUncertain', { store: state.credentials_store })}
             </p>
           )}
@@ -281,7 +281,7 @@ export const CodexProviderConfig: React.FC<{
             // the API-key UX is honest about what saving will do: we pin
             // ``cli_auth_credentials_store = "file"`` on save, otherwise
             // Codex would ignore ``auth.json`` and keep reading the keychain.
-            <p className="text-[12px] text-gold">
+            <p className="text-[12px] text-gold-ink">
               {t('settings.backends.codexCredentialsStoreKeyringWarn', { store: state.credentials_store })}
             </p>
           )}
@@ -375,7 +375,7 @@ export const CodexProviderConfig: React.FC<{
                     size="xs"
                     onClick={() => void onRemoveApiKey()}
                     disabled={removingKey || editingKey}
-                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    className="text-destructive-ink hover:bg-destructive/10 hover:text-destructive-ink"
                   >
                     <Trash2 className="size-3" />
                     {removingKey

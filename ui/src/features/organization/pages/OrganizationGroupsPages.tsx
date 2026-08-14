@@ -631,13 +631,13 @@ export function OrganizationGroupDetailPage() {
                 {t('organization.groups.referencedBy')} <span className="ml-1 text-muted">{referenceCount}</span>
               </div>
               <div className="space-y-4 p-5 text-[12px]">
-                <ReferenceSection icon={<Server className="size-4 text-cyan" />} title={t('organization.nav.instances')} items={references?.instances.map((item) => item.slug) ?? []} />
-                <ReferenceSection icon={<Workflow className="size-4 text-gold" />} title={t('organization.overview.projects')} items={references?.projects.map((item) => item.displayName) ?? []} />
-                <ReferenceSection icon={<Boxes className="size-4 text-pink" />} title={t('organization.nav.resources')} items={references?.resources.map((item) => item.displayName) ?? []} />
+                <ReferenceSection icon={<Server className="size-4 text-cyan-ink" />} title={t('organization.nav.instances')} items={references?.instances.map((item) => item.slug) ?? []} />
+                <ReferenceSection icon={<Workflow className="size-4 text-gold-ink" />} title={t('organization.overview.projects')} items={references?.projects.map((item) => item.displayName) ?? []} />
+                <ReferenceSection icon={<Boxes className="size-4 text-pink-ink" />} title={t('organization.nav.resources')} items={references?.resources.map((item) => item.displayName) ?? []} />
               </div>
             </TableFrame>
             <div className="rounded-lg border border-gold/35 bg-gold/10 p-4">
-              <div className="flex items-center gap-2 text-[13px] font-semibold"><Archive className="size-4 text-gold" />{t('organization.groups.archiveImpactTitle')}</div>
+              <div className="flex items-center gap-2 text-[13px] font-semibold"><Archive className="size-4 text-gold-ink" />{t('organization.groups.archiveImpactTitle')}</div>
               <p className="mt-1 text-[12px] leading-5 text-muted">{t('organization.groups.archiveImpactBody')}</p>
             </div>
         </div>

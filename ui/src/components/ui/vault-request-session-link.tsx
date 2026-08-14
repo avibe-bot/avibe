@@ -20,7 +20,7 @@ export const VaultRequestSessionLink: React.FC<{
     <Link
       to={`/chat/${encodeURIComponent(session.id)}`}
       className={cn(
-        'min-w-0 truncate font-medium text-foreground transition-colors hover:text-cyan hover:underline',
+        'min-w-0 truncate font-medium text-foreground transition-colors hover:text-cyan-ink hover:underline',
         className,
       )}
     >

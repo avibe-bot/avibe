@@ -150,13 +150,13 @@ const InboxHoverPopover: React.FC<{
                 )}
               >
                 <div className="flex items-center gap-1.5 text-[10px]">
-                  <span className="truncate font-semibold text-cyan">{projectLabel}</span>
+                  <span className="truncate font-semibold text-cyan-ink">{projectLabel}</span>
                   <span className="text-muted">·</span>
                   <span className="flex-1 truncate font-semibold text-foreground">
                     {s.title?.trim() || s.session_id}
                   </span>
                   {s.replied && (
-                    <span className="shrink-0 font-semibold text-cyan" title={t('workbench.inbox.replied')}>
+                    <span className="shrink-0 font-semibold text-cyan-ink" title={t('workbench.inbox.replied')}>
                       ↩
                     </span>
                   )}
@@ -183,7 +183,7 @@ const InboxHoverPopover: React.FC<{
       <button
         type="button"
         onClick={() => navigate('/inbox')}
-        className="flex items-center justify-center gap-1.5 rounded-md pt-1 text-[11px] font-medium text-cyan hover:underline"
+        className="flex items-center justify-center gap-1.5 rounded-md pt-1 text-[11px] font-medium text-cyan-ink hover:underline"
       >
         {t('workbench.inbox.viewAll')}
         <ArrowRight className="size-3" />
@@ -579,7 +579,7 @@ const ProjectRow: React.FC<{
                       );
                       if (ok) await onArchive();
                     }}
-                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-pink transition hover:bg-pink/[0.08]"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-pink-ink transition hover:bg-pink/[0.08]"
                   >
                     <Archive className="size-3" />
                     {t('workbench.projectArchive')}
@@ -783,7 +783,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         >
           {({ isActive }) => (
             <>
-              <Inbox className={clsx('size-4', isActive ? 'text-cyan' : 'text-foreground')} />
+              <Inbox className={clsx('size-4', isActive ? 'text-cyan-ink' : 'text-foreground')} />
               <span className="flex-1">{t('workbench.nav.inbox')}</span>
               {badge && (
                 <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-[0_0_10px_-2px_rgba(63,224,229,0.7)]">
@@ -836,7 +836,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             >
               {({ isActive }) => (
                 <>
-                  <Icon className={clsx('size-4', isActive ? 'text-mint' : 'text-muted group-hover:text-foreground')} />
+                  <Icon className={clsx('size-4', isActive ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
                   <span>{t(i18nKey)}</span>
                 </>
               )}
@@ -890,7 +890,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             </div>
           )}
           {projectsError && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[11px] text-destructive">
+            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[11px] text-destructive-ink">
               {t('workbench.projectsLoadError')}
             </div>
           )}

@@ -144,7 +144,7 @@ describe('MemoryLogPanel', () => {
     await user.click(await screen.findByText('Alpha'));
 
     const badge = await screen.findByText(`memory.log.status.${label}`);
-    expect(badge.classList.contains('text-destructive')).toBe(true);
+    expect(badge.classList.contains('text-destructive-ink')).toBe(true);
   });
 
   it('accumulates cursor pages and refresh replaces the old result', async () => {

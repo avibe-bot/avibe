@@ -190,7 +190,7 @@ export const SelectionQuoteToolbar: React.FC<{
         <>
           {(onQuote || onAskInNew) && <span className="h-5 w-px bg-border" />}
           <Button variant="ghost" className={itemClass} {...activate(runCopy)}>
-            {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5 text-muted" />}
+            {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5 text-muted" />}
             {t('chat.selection.copy')}
           </Button>
         </>

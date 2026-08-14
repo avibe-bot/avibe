@@ -855,7 +855,7 @@ export const RouteChainDialog: React.FC<{
             </li>
           ))}
         </ul>
-        <p className="model-hub-guard-hint text-destructive">
+        <p className="model-hub-guard-hint text-destructive-ink">
           <Info aria-hidden="true" />
           {t("settings.models.guard.hint.interrupt")}
         </p>
@@ -1067,7 +1067,7 @@ export const RouteChainDialog: React.FC<{
                 : "settings.models.routeDialog.reorder.sorted",
             );
           }}
-          className="model-hub-route-reseed flex items-center gap-1.5 self-start font-semibold text-cyan"
+          className="model-hub-route-reseed flex items-center gap-1.5 self-start font-semibold text-cyan-ink"
         >
           <ListOrdered aria-hidden="true" />
           {t("settings.models.routeDialog.reorder.label")}

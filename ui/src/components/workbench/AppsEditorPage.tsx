@@ -181,7 +181,7 @@ const MobileEditor: React.FC<{
       ) : (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
           <span className="grid size-12 place-items-center rounded-2xl border border-violet/50 bg-violet/[0.1]">
-            <CodeXml className="size-6 text-violet" />
+            <CodeXml className="size-6 text-violet-ink" />
           </span>
           <div className="flex flex-col gap-1">
             <div className="text-[15px] font-semibold text-foreground">{t('apps.editor.empty')}</div>

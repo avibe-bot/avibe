@@ -90,7 +90,7 @@ export function ShowPageOrganizationAuthorizationPrompt({
     <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
       <span className={clsx(
         'flex min-w-0 items-start gap-1.5 text-[11px] leading-snug',
-        subjectMismatch ? 'text-destructive' : 'text-muted',
+        subjectMismatch ? 'text-destructive-ink' : 'text-muted',
       )}>
         {subjectMismatch ? <TriangleAlert className="mt-0.5 size-3.5 shrink-0" /> : null}
         <span>
@@ -355,7 +355,7 @@ export function ShowPageWorkspaceAccessControl({
             })}
           </div>
           {!patch ? (
-            <p className="mt-1.5 text-[11px] text-gold">{t('chat.showPage.groupRequired')}</p>
+            <p className="mt-1.5 text-[11px] text-gold-ink">{t('chat.showPage.groupRequired')}</p>
           ) : null}
         </fieldset>
       ) : null}
@@ -385,7 +385,7 @@ export function ShowPageWorkspaceAccessControl({
 
       {access?.mode === 'organization' && canManage && ['conflict', 'unreachable', 'error'].includes(gate) ? (
         <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
-          <span className="text-[11px] leading-snug text-destructive">
+          <span className="text-[11px] leading-snug text-destructive-ink">
             {t(`chat.showPage.workspaceErrors.${gate}`)}
           </span>
           <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" onClick={() => void loadManagement()} aria-label={t('common.retry')} title={t('common.retry')}>
@@ -404,7 +404,7 @@ export function ShowPageWorkspaceAccessControl({
         <div
           className={clsx(
             'flex items-center gap-1.5 text-[11px] leading-snug',
-            syncPresentation.tone === 'error' ? 'text-destructive' : 'text-gold',
+            syncPresentation.tone === 'error' ? 'text-destructive-ink' : 'text-gold-ink',
           )}
         >
           {syncPresentation.tone === 'error' ? (

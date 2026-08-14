@@ -16,7 +16,12 @@
  * --cyan / --destructive lands on design.pen's dark hex in dark mode and follows
  * the light accents on its own. Accent *inks* do need one, because an accent
  * dimmed toward transparency reads as "quiet" over black and "washed out" over
- * white; light re-anchors those on the full accent.
+ * white; light re-anchors those on the full ink.
+ *
+ * Which accent token a rule reaches for follows index.css: a fill, hairline or
+ * wire takes --X, and anything that renders as text or an icon takes --X-ink.
+ * They are different values in light, where a vivid brand fill and a legible
+ * label pull in opposite directions.
  */
 :root {
   /* Neutral wash channel: white over the dark frame. */
@@ -55,22 +60,23 @@
   --model-hub-cyan-1a: color-mix(in srgb, var(--cyan) 10.2%, transparent);
   --model-hub-cyan-4d: color-mix(in srgb, var(--cyan) 30.2%, transparent);
 
-  /* Accent inks. */
-  --model-hub-gold-ink: color-mix(in srgb, var(--gold) 85.1%, transparent);
-  --model-hub-violet-ink: color-mix(in srgb, var(--violet) 80%, transparent);
-  --model-hub-mint-ink: color-mix(in srgb, var(--mint) 80%, transparent);
+  /* Accent inks, dimmed a step from the accent's own ink token. */
+  --model-hub-gold-ink: color-mix(in srgb, var(--gold-ink) 85.1%, transparent);
+  --model-hub-violet-ink: color-mix(in srgb, var(--violet-ink) 80%, transparent);
+  --model-hub-mint-ink: color-mix(in srgb, var(--mint-ink) 80%, transparent);
 
   /* Danger and success roles, shared by the key dialog and the adopt drawer.
    * The danger ink mixes toward --foreground rather than transparency: that is
-   * what lifts dark --destructive to design.pen's #ff8a8a and deepens the light
-   * one instead of fading it into the surface. */
-  --model-hub-danger-ink: color-mix(in srgb, var(--destructive) 80%, var(--foreground));
+   * what lifts dark --destructive-ink to design.pen's #ff8a8a and deepens the
+   * light one instead of fading it into the surface. */
+  --model-hub-danger-ink: color-mix(in srgb, var(--destructive-ink) 80%, var(--foreground));
   --model-hub-danger-fill: color-mix(in srgb, var(--destructive) 7.8%, transparent);
   --model-hub-danger-border: color-mix(in srgb, var(--destructive) 25%, transparent);
   --model-hub-success-fill: color-mix(in srgb, var(--mint) 7.8%, transparent);
   --model-hub-success-border: color-mix(in srgb, var(--mint) 25%, transparent);
-  /* A brand button held at low emphasis. Its label stays --primary-foreground,
-   * so light deepens the fill instead of paling it further (see light block). */
+  /* A brand button held at low emphasis: the fill fades toward the surface while
+   * the label stays --primary-foreground, which is dark in both themes. Needs no
+   * light branch — the same fade lands on white and keeps the label legible. */
   --model-hub-dim-brand-fill: color-mix(in srgb, var(--mint) 34.9%, transparent);
 
   /* Modal scrim and lifted-surface shadows, cast in the theme's own extreme:
@@ -87,10 +93,9 @@
   --model-hub-ink-59: color-mix(in srgb, var(--muted) 65%, transparent);
   --model-hub-ink-73: color-mix(in srgb, var(--muted) 80%, transparent);
   --model-hub-ink-8c: var(--muted);
-  --model-hub-gold-ink: var(--gold);
-  --model-hub-violet-ink: var(--violet);
-  --model-hub-mint-ink: var(--mint);
-  --model-hub-dim-brand-fill: color-mix(in srgb, var(--mint) 80%, var(--foreground));
+  --model-hub-gold-ink: var(--gold-ink);
+  --model-hub-violet-ink: var(--violet-ink);
+  --model-hub-mint-ink: var(--mint-ink);
   --model-hub-dialog-shadow: 0 16px 40px 0 color-mix(in srgb, var(--foreground) 14%, transparent);
   --model-hub-drawer-shadow: -18px 0 48px color-mix(in srgb, var(--foreground) 16%, transparent);
 }
@@ -103,10 +108,9 @@
     --model-hub-ink-59: color-mix(in srgb, var(--muted) 65%, transparent);
     --model-hub-ink-73: color-mix(in srgb, var(--muted) 80%, transparent);
     --model-hub-ink-8c: var(--muted);
-    --model-hub-gold-ink: var(--gold);
-    --model-hub-violet-ink: var(--violet);
-    --model-hub-mint-ink: var(--mint);
-    --model-hub-dim-brand-fill: color-mix(in srgb, var(--mint) 80%, var(--foreground));
+    --model-hub-gold-ink: var(--gold-ink);
+    --model-hub-violet-ink: var(--violet-ink);
+    --model-hub-mint-ink: var(--mint-ink);
     --model-hub-dialog-shadow: 0 16px 40px 0 color-mix(in srgb, var(--foreground) 14%, transparent);
     --model-hub-drawer-shadow: -18px 0 48px color-mix(in srgb, var(--foreground) 16%, transparent);
   }
@@ -117,20 +121,20 @@
 .model-hub-accent-tile--gold { background: var(--model-hub-gold-1a); }
 .model-hub-accent-tile--violet { background: var(--model-hub-violet-24); }
 .model-hub-accent-tile--neutral { background: var(--model-hub-wash-0a); }
-.model-hub-accent-ink--cyan { color: var(--cyan); }
-.model-hub-accent-ink--mint { color: var(--mint); }
-.model-hub-accent-ink--gold { color: var(--gold); }
-.model-hub-accent-ink--violet { color: var(--violet); }
+.model-hub-accent-ink--cyan { color: var(--cyan-ink); }
+.model-hub-accent-ink--mint { color: var(--mint-ink); }
+.model-hub-accent-ink--gold { color: var(--gold-ink); }
+.model-hub-accent-ink--violet { color: var(--violet-ink); }
 .model-hub-accent-ink--neutral { color: var(--muted); }
-.model-hub-accent-pill--cyan { border-color: var(--model-hub-cyan-4d); background: var(--model-hub-cyan-1a); color: var(--cyan); }
-.model-hub-accent-pill--mint { border-color: var(--model-hub-mint-4d); background: var(--model-hub-mint-1a); color: var(--mint); }
-.model-hub-accent-pill--gold { border-color: var(--model-hub-gold-4d); background: var(--model-hub-gold-1a); color: var(--gold); }
-.model-hub-accent-pill--violet { border-color: var(--model-hub-violet-4d); background: var(--model-hub-violet-1a); color: var(--violet); }
+.model-hub-accent-pill--cyan { border-color: var(--model-hub-cyan-4d); background: var(--model-hub-cyan-1a); color: var(--cyan-ink); }
+.model-hub-accent-pill--mint { border-color: var(--model-hub-mint-4d); background: var(--model-hub-mint-1a); color: var(--mint-ink); }
+.model-hub-accent-pill--gold { border-color: var(--model-hub-gold-4d); background: var(--model-hub-gold-1a); color: var(--gold-ink); }
+.model-hub-accent-pill--violet { border-color: var(--model-hub-violet-4d); background: var(--model-hub-violet-1a); color: var(--violet-ink); }
 .model-hub-accent-pill--neutral { border-color: var(--model-hub-wash-14); background: var(--model-hub-wash-0a); color: var(--muted); }
 
-.model-hub-ink-mint { color: var(--mint); }
-.model-hub-ink-gold { color: var(--gold); }
-.model-hub-ink-violet { color: var(--violet); }
+.model-hub-ink-mint { color: var(--mint-ink); }
+.model-hub-ink-gold { color: var(--gold-ink); }
+.model-hub-ink-violet { color: var(--violet-ink); }
 .model-hub-ink-40 { color: var(--model-hub-ink-40); }
 .model-hub-ink-59 { color: var(--model-hub-ink-59); }
 .model-hub-ink-73 { color: var(--model-hub-ink-73); }
@@ -141,10 +145,10 @@
 .model-hub-fill-0a { background: var(--model-hub-wash-0a); }
 .model-hub-border-14 { border-color: var(--model-hub-wash-14); }
 .model-hub-border-33 { border-color: var(--model-hub-wash-33); }
-.model-hub-action-mint { color: var(--mint); }
+.model-hub-action-mint { color: var(--mint-ink); }
 .model-hub-action-mint:hover { color: var(--model-hub-mint-ink); }
-.model-hub-status-gold { border-color: var(--model-hub-gold-66); background: var(--model-hub-gold-14); color: var(--gold); }
-.model-hub-status-mint { border-color: var(--model-hub-mint-4d); background: var(--model-hub-mint-14); color: var(--mint); }
+.model-hub-status-gold { border-color: var(--model-hub-gold-66); background: var(--model-hub-gold-14); color: var(--gold-ink); }
+.model-hub-status-mint { border-color: var(--model-hub-mint-4d); background: var(--model-hub-mint-14); color: var(--mint-ink); }
 .model-hub-add-key-error-ink { color: var(--model-hub-danger-ink); }
 
 .model-hub-shell {
@@ -203,7 +207,7 @@
   border-radius: 999px;
   background: var(--model-hub-mint-1a);
   padding: 3px 8px;
-  color: var(--mint);
+  color: var(--mint-ink);
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0;
@@ -218,7 +222,7 @@
 .model-hub-runtime-pill--error {
   border-color: color-mix(in srgb, var(--destructive) 30%, transparent);
   background: color-mix(in srgb, var(--destructive) 10%, transparent);
-  color: var(--destructive);
+  color: var(--destructive-ink);
 }
 
 .model-hub-runtime-pill--direct {
@@ -244,7 +248,7 @@
   border-radius: 999px;
   background: var(--model-hub-violet-1a);
   padding: 4px 10px;
-  color: var(--violet);
+  color: var(--violet-ink);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0;
@@ -285,7 +289,7 @@
 .model-hub-takeover-chip {
   border-color: var(--model-hub-violet-4d);
   background: var(--model-hub-violet-1a);
-  color: var(--violet);
+  color: var(--violet-ink);
 }
 
 .model-hub-overview-body { position: relative; }
@@ -544,7 +548,7 @@
   align-items: center;
   border-color: var(--model-hub-add-key-success-border);
   background: var(--model-hub-add-key-success-fill);
-  color: var(--mint);
+  color: var(--mint-ink);
   font-size: var(--model-hub-add-key-strip-title-size);
   font-weight: 600;
 }
@@ -582,7 +586,7 @@
 }
 .model-hub-add-key-segment.is-selected {
   background: var(--model-hub-add-key-success-fill);
-  color: var(--mint);
+  color: var(--mint-ink);
 }
 .model-hub-add-key-foot {
   gap: var(--model-hub-add-key-foot-gap);
@@ -669,9 +673,9 @@
 .model-hub-route-hop-model { font-size: 10.5px; }
 .model-hub-route-grip { width: 14px; height: 14px; color: var(--model-hub-ink-4d); }
 .model-hub-route-grip > svg { width: 14px; height: 14px; }
-.model-hub-route-grip[aria-grabbed="true"] { color: var(--mint); }
+.model-hub-route-grip[aria-grabbed="true"] { color: var(--mint-ink); }
 .model-hub-route-invalid,
-.model-hub-route-invalid-summary { color: var(--destructive); font-size: 10px; line-height: 14px; }
+.model-hub-route-invalid-summary { color: var(--destructive-ink); font-size: 10px; line-height: 14px; }
 .model-hub-route-selector-label { color: var(--model-hub-ink-73); font-size: 10.5px; font-weight: 700; }
 .model-hub-route-candidate { min-height: 28px; }
 .model-hub-route-remove { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
@@ -1059,7 +1063,7 @@
 }
 .model-hub-order-grip svg { width: 100%; height: 100%; }
 .model-hub-order-grip:disabled { color: var(--model-hub-order-grip-dim); }
-.model-hub-order-grip.is-grabbed { color: var(--mint); }
+.model-hub-order-grip.is-grabbed { color: var(--mint-ink); }
 .model-hub-order-ordinal {
   width: var(--model-hub-order-ordinal-size);
   height: var(--model-hub-order-ordinal-size);
@@ -1074,7 +1078,7 @@
   font-size: 11px;
   font-weight: 400;
 }
-.model-hub-order-ordinal.is-first { background: var(--mint-soft); color: var(--mint); }
+.model-hub-order-ordinal.is-first { background: var(--mint-soft); color: var(--mint-ink); }
 .model-hub-order-name { font-size: var(--model-hub-order-name-size); font-weight: 600; }
 .model-hub-order-identity {
   display: flex;
@@ -1120,7 +1124,7 @@
   color: var(--muted);
   font-size: 11.5px;
 }
-.model-hub-order-state--error { color: var(--destructive); }
+.model-hub-order-state--error { color: var(--destructive-ink); }
 .model-hub-order-foot {
   min-height: 61px;
   padding: var(--model-hub-order-foot-padding-y) var(--model-hub-order-foot-padding-x);
@@ -1220,7 +1224,7 @@
   height: var(--model-hub-adopt-bullet-icon);
   margin-top: 3px;
   flex: none;
-  color: var(--mint);
+  color: var(--mint-ink);
 }
 .model-hub-adopt-failure {
   padding: 11px 13px;

@@ -51,7 +51,7 @@ export function TelegramTopicList<T extends { enabled: boolean }>({
       <div className="mb-3 flex items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-            <GitBranch size={15} className="text-cyan" />
+            <GitBranch size={15} className="text-cyan-ink" />
             {t('channelList.topicSettingsTitle')}
             <span className="rounded-full border border-border bg-foreground/[0.04] px-2 py-0.5 text-[10px] font-medium text-muted">
               {topics.length}
@@ -75,7 +75,7 @@ export function TelegramTopicList<T extends { enabled: boolean }>({
               )}
             >
               <div className="flex items-center gap-3 px-3.5 py-3">
-                <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-cyan/25 bg-cyan-soft/20 text-cyan">
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-cyan/25 bg-cyan-soft/20 text-cyan-ink">
                   <GitBranch size={14} />
                 </span>
                 <span className="min-w-0 flex-1">
@@ -93,7 +93,7 @@ export function TelegramTopicList<T extends { enabled: boolean }>({
                   className={clsx(
                     'rounded-full border px-2 py-0.5 text-[10px] font-medium',
                     customized
-                      ? 'border-cyan/30 bg-cyan-soft/25 text-cyan'
+                      ? 'border-cyan/30 bg-cyan-soft/25 text-cyan-ink'
                       : 'border-border bg-foreground/[0.04] text-muted',
                   )}
                 >

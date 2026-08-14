@@ -70,7 +70,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3">
-          <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint/[0.08] text-mint">
+          <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint/[0.08] text-mint-ink">
             <Folder className="size-4" />
           </div>
           <div className="flex flex-1 flex-col gap-0.5">
@@ -98,7 +98,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
             onClick={() => setPhase('pick')}
             className="flex items-center gap-2 rounded-md border border-border-strong bg-surface-2 px-3 py-2 text-left text-[12px] font-mono text-foreground transition hover:bg-foreground/[0.04]"
           >
-            <FolderOpen className="size-3.5 shrink-0 text-gold" />
+            <FolderOpen className="size-3.5 shrink-0 text-gold-ink" />
             <span className="flex-1 truncate">{folderPath || '—'}</span>
             <span className="shrink-0 text-[10px] text-muted">{t('workbench.newProjectDialog.pickFolder')}</span>
           </button>
@@ -127,7 +127,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
         </div>
 
         {error && (
-          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}

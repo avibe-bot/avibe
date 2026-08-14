@@ -86,7 +86,7 @@ export function StatCard({ label, value, detail, icon }: {
         <div className="mt-3 text-3xl font-semibold tabular-nums">{value}</div>
         {detail ? <div className="mt-1 text-[12px] text-muted">{detail}</div> : null}
       </div>
-      <div className="grid size-9 place-items-center rounded-lg bg-mint/10 text-mint">{icon}</div>
+      <div className="grid size-9 place-items-center rounded-lg bg-mint/10 text-mint-ink">{icon}</div>
     </Card>
   );
 }
@@ -98,11 +98,11 @@ export function InitialsAvatar({ value, tone = 'mint', className }: {
 }) {
   const initial = value.trim().charAt(0).toUpperCase() || '?';
   const tones = {
-    mint: 'border-mint/30 bg-mint/15 text-mint',
-    cyan: 'border-cyan/30 bg-cyan/15 text-cyan',
-    violet: 'border-violet/30 bg-violet/15 text-violet',
-    gold: 'border-gold/30 bg-gold/15 text-gold',
-    pink: 'border-pink/30 bg-pink/15 text-pink',
+    mint: 'border-mint/30 bg-mint/15 text-mint-ink',
+    cyan: 'border-cyan/30 bg-cyan/15 text-cyan-ink',
+    violet: 'border-violet/30 bg-violet/15 text-violet-ink',
+    gold: 'border-gold/30 bg-gold/15 text-gold-ink',
+    pink: 'border-pink/30 bg-pink/15 text-pink-ink',
   };
   return (
     <span className={clsx('grid size-9 shrink-0 place-items-center rounded-lg border text-[13px] font-bold', tones[tone], className)}>
@@ -121,12 +121,12 @@ export function RoleBadge({ role }: { role: OrganizationRole }) {
 }
 
 const GROUP_TONES: Record<GroupColor, string> = {
-  mint: 'border-mint/25 bg-mint/10 text-mint',
-  cyan: 'border-cyan/25 bg-cyan/10 text-cyan',
-  blue: 'border-cyan/25 bg-cyan/10 text-cyan',
-  violet: 'border-violet/25 bg-violet/10 text-violet',
-  rose: 'border-pink/25 bg-pink/10 text-pink',
-  gold: 'border-gold/25 bg-gold/10 text-gold',
+  mint: 'border-mint/25 bg-mint/10 text-mint-ink',
+  cyan: 'border-cyan/25 bg-cyan/10 text-cyan-ink',
+  blue: 'border-cyan/25 bg-cyan/10 text-cyan-ink',
+  violet: 'border-violet/25 bg-violet/10 text-violet-ink',
+  rose: 'border-pink/25 bg-pink/10 text-pink-ink',
+  gold: 'border-gold/25 bg-gold/10 text-gold-ink',
 };
 
 export function GroupPill({ name, color = 'violet' }: { name: string; color?: GroupColor | null }) {
@@ -232,7 +232,7 @@ export function ErrorBanner({ code, onRetry }: { code?: string; onRetry?: () => 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-destructive/35 bg-destructive/10 p-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex items-start gap-3">
-        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
+        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-destructive-ink" />
         <div>
           <div className="text-[13px] font-semibold">{t('organization.states.errorTitle')}</div>
           <div className="mt-0.5 text-[12px] text-muted">{t(messageKey)}</div>
@@ -248,7 +248,7 @@ export function ConflictBanner({ onReload }: { onReload: () => void }) {
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-gold/35 bg-gold/10 p-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex items-start gap-3">
-        <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
+        <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold-ink" />
         <div>
           <div className="text-[13px] font-semibold">{t('organization.states.conflictTitle')}</div>
           <div className="mt-0.5 text-[12px] text-muted">{t('organization.states.conflictBody')}</div>

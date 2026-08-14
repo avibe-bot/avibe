@@ -256,7 +256,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           {backend && (
             <span
               className={clsx(
-                'shrink-0 items-center gap-1 rounded border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-cyan',
+                'shrink-0 items-center gap-1 rounded border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-cyan-ink',
                 compactMobile ? 'hidden md:inline-flex' : 'inline-flex',
               )}
             >
@@ -317,7 +317,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   })
                 }
               >
-                <Sparkles className="size-3.5 shrink-0 text-cyan" />
+                <Sparkles className="size-3.5 shrink-0 text-cyan-ink" />
                 <span className="flex-1 truncate font-semibold">{defaultLabel}</span>
               </RouteItem>
             )}
@@ -362,7 +362,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 // that tab explicitly instead of resuming the remembered one.
                 navigate('/agents?tab=definitions');
               }}
-              className="mt-1 h-auto w-full justify-start gap-1.5 rounded px-2 py-1.5 text-[11px] font-medium text-cyan hover:bg-cyan/[0.08] hover:text-cyan"
+              className="mt-1 h-auto w-full justify-start gap-1.5 rounded px-2 py-1.5 text-[11px] font-medium text-cyan-ink hover:bg-cyan/[0.08] hover:text-cyan-ink"
             >
               <Plus className="size-3.5" />
               {t('chat.picker.newAgent')}
@@ -467,7 +467,7 @@ const RouteItem: React.FC<{
     disabled={disabled}
     className={clsx(
       'h-auto w-full justify-start gap-2 rounded px-2 py-1.5 text-left text-[12px] font-normal',
-      active ? 'bg-cyan/[0.10] text-cyan hover:bg-cyan/[0.10] hover:text-cyan' : 'text-foreground hover:bg-foreground/[0.04]',
+      active ? 'bg-cyan/[0.10] text-cyan-ink hover:bg-cyan/[0.10] hover:text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
     )}
   >
     {children}

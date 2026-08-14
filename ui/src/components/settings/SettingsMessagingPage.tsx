@@ -194,8 +194,8 @@ export const SettingsMessagingPage: React.FC = () => {
             className={clsx(
               'inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em]',
               saveError
-                ? 'border-danger/30 bg-danger/10 text-danger'
-                : 'border-mint/30 bg-mint/[0.08] text-mint'
+                ? 'border-destructive/30 bg-destructive/10 text-destructive-ink'
+                : 'border-mint/30 bg-mint/[0.08] text-mint-ink'
             )}
           >
             {saveError ? t('common.saveFailed') : t('settings.messagingAutosaved')}
@@ -209,7 +209,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Sparkles className="size-3.5 text-cyan" />
+            <Sparkles className="size-3.5 text-cyan-ink" />
             {t('settings.messagingInputEnrichmentTitle')}
           </span>
         }
@@ -276,7 +276,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Bot className="size-3.5 text-mint" />
+            <Bot className="size-3.5 text-mint-ink" />
             {t('settings.messagingAgentContextTitle')}
           </span>
         }
@@ -312,7 +312,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Radio className="size-3.5 text-gold" />
+            <Radio className="size-3.5 text-gold-ink" />
             {t('settings.messagingWorkFeedbackTitle')}
           </span>
         }
@@ -439,7 +439,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Send className="size-3.5 text-cyan" />
+            <Send className="size-3.5 text-cyan-ink" />
             {t('settings.messagingReplyExperienceTitle')}
           </span>
         }
@@ -499,7 +499,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Type className="size-3.5 text-mint" />
+            <Type className="size-3.5 text-mint-ink" />
             {t('settings.messagingDisplayTitle')}
           </span>
         }
@@ -582,7 +582,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <MessageSquare className="size-3.5 text-mint" />
+            <MessageSquare className="size-3.5 text-mint-ink" />
             {t('settings.messagingGroupsTitle')}
           </span>
         }

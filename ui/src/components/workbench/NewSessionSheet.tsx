@@ -109,7 +109,7 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
           </div>
 
           {ns.error && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
               {ns.error}
             </div>
           )}

@@ -1271,11 +1271,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               ) : att.kind === 'image' && att.url ? (
                 <img src={att.url} alt="" className="size-7 rounded object-cover" />
               ) : (
-                <span className="grid size-7 place-items-center rounded bg-cyan/15 text-cyan">
+                <span className="grid size-7 place-items-center rounded bg-cyan/15 text-cyan-ink">
                   <Paperclip className="size-3.5" />
                 </span>
               )}
-              <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink' : 'text-foreground')}>
+              <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink-ink' : 'text-foreground')}>
                 {att.name}
               </span>
               {att.status === 'error' && att.retryable && (

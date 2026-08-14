@@ -13,7 +13,7 @@ export const ErrorFallback: React.FC<{ error: unknown; reset: () => void; varian
     <div className={clsx('grid h-full w-full place-items-center bg-surface p-6 text-center', variant === 'page' && 'min-h-[60vh]')}>
       <div className="flex max-w-sm flex-col items-center gap-3">
         <span className="grid size-12 shrink-0 place-items-center rounded-2xl border border-gold/40 bg-gold/[0.08]">
-          <AlertTriangle className="size-6 text-gold" />
+          <AlertTriangle className="size-6 text-gold-ink" />
         </span>
         <div className="text-[15px] font-semibold text-foreground">{t('errorBoundary.title')}</div>
         <div className="text-[12.5px] text-muted">{t('errorBoundary.body')}</div>

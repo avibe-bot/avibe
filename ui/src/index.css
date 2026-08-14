@@ -37,36 +37,49 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-primary-ink: var(--primary-ink);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-soft: var(--muted-soft);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-accent-ink: var(--accent-ink);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-ink: var(--destructive-ink);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  /* Each accent is four tokens: --X is the brand fill and the base every wash
+     mixes from, --X-foreground is the label printed on that fill, --X-soft is
+     the wash, and --X-ink is the accent used as text on a neutral surface.
+     Fill and ink pull in opposite directions on a light surface — the fill has
+     to stay vivid to read as the brand, the ink has to go deep to stay legible
+     — so they cannot be the same value. Use bg-X / border-X for the fill and
+     text-X-ink for text. */
   --color-mint: var(--mint);
   --color-mint-soft: var(--mint-soft);
+  --color-mint-ink: var(--mint-ink);
   --color-cyan: var(--cyan);
   --color-cyan-soft: var(--cyan-soft);
+  --color-cyan-ink: var(--cyan-ink);
   --color-violet: var(--violet);
   --color-violet-soft: var(--violet-soft);
+  --color-violet-ink: var(--violet-ink);
   --color-gold: var(--gold);
+  --color-gold-soft: var(--gold-soft);
   --color-gold-foreground: var(--gold-foreground);
+  --color-gold-ink: var(--gold-ink);
   --color-pink: var(--pink);
   --color-pink-soft: var(--pink-soft);
+  --color-pink-ink: var(--pink-ink);
 
   /* Compatibility aliases for current UI during migration. */
   --color-bg: var(--background);
   --color-panel: var(--surface);
   --color-text: var(--foreground);
-  --color-success: var(--mint);
-  --color-warning: var(--gold);
-  --color-danger: var(--destructive);
 
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
@@ -102,16 +115,21 @@
   --popover: #11111c;
   --popover-foreground: #f5f1e8;
 
+  /* On a dark surface a vivid accent is already legible, so ink tracks fill
+     here; light is where the two diverge. --violet is the one exception. */
   --primary: #5bffa0;
   --primary-foreground: #080812;
+  --primary-ink: #5bffa0;
   --secondary: #11111c;
   --secondary-foreground: #f5f1e8;
   --muted: #9ba3b8;
   --muted-soft: #0e0e18;
   --accent: #3fe0e5;
   --accent-foreground: #080812;
+  --accent-ink: #3fe0e5;
   --destructive: #ff6b6b;
   --destructive-foreground: #080812;
+  --destructive-ink: #ff6b6b;
 
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.14);
@@ -120,16 +138,23 @@
 
   --mint: #5bffa0;
   --mint-soft: rgba(91, 255, 160, 0.16);
+  --mint-ink: #5bffa0;
   --cyan: #3fe0e5;
   --cyan-soft: rgba(63, 224, 229, 0.16);
-  /* Lightened just past AA on --card: #7c5bff read at 4.28:1 there, the one dark
-     ink below the floor. Hue and saturation are unchanged. */
-  --violet: #8465ff;
+  --cyan-ink: #3fe0e5;
+  /* The fill keeps design.pen's #7c5bff. Only the ink is lightened, because
+     #7c5bff read 4.28:1 as text on --card — the one dark accent below the
+     floor. Hue and saturation are unchanged. */
+  --violet: #7c5bff;
   --violet-soft: rgba(124, 91, 255, 0.16);
+  --violet-ink: #8465ff;
   --gold: #ffc857;
+  --gold-soft: rgba(255, 200, 87, 0.16);
   --gold-foreground: #080812;
+  --gold-ink: #ffc857;
   --pink: #ff5b8a;
   --pink-soft: rgba(255, 91, 138, 0.10);
+  --pink-ink: #ff5b8a;
 
   /* Page-family gradients (mirror design.pen 1:1). Layers ordered top-most first. */
   --gradient-console:
@@ -178,41 +203,57 @@
     --popover: #ffffff;
     --popover-foreground: #0a0a14;
 
-    /* Light inks are deepened relative to dark. The dark palette's vivid accents
-       read at 2.5-4.2:1 as small text on a light surface, and text-mint /
-       text-gold / text-cyan / text-destructive are used app-wide, so every ink
-       here clears WCAG AA (4.5:1) against --surface-3, the darkest light
-       surface. Deepening the fills lifts white-on-fill for --primary /
-       --accent / --gold / --destructive by the same amount, since contrast is
-       symmetric. --primary / --accent / --ring carry --mint / --cyan by
-       definition. Guarded by ui/scripts/validate-theme.mjs. */
-    --primary: #067a55;
-    --primary-foreground: #ffffff;
+    /* Fills keep design.pen's vivid light accents, and take a dark label the
+       way the dark theme already does — #10b981 reads 2.54:1 under white but
+       7.86:1 under #080812, so the fill never had to move. --destructive is
+       the exception: #e11d48 is 4.70:1 under white and only 4.24:1 under the
+       dark ink, so its label stays white. Inks are a separate token; see the
+       --mint-ink group. Guarded by ui/scripts/validate-theme.mjs. */
+    --primary: #10b981;
+    --primary-foreground: #080812;
+    --primary-ink: #067a55;
     --secondary: #eef1f7;
     --secondary-foreground: #0a0a14;
     --muted: #5c6079;
     --muted-soft: #eef1f7;
-    --accent: #0e7490;
-    --accent-foreground: #ffffff;
-    --destructive: #ca1a41;
+    --accent: #0891b2;
+    --accent-foreground: #080812;
+    --accent-ink: #0e7490;
+    --destructive: #e11d48;
     --destructive-foreground: #ffffff;
+    --destructive-ink: #ca1a41;
 
     --border: rgba(8, 8, 18, 0.08);
     --border-strong: rgba(8, 8, 18, 0.14);
     --input: rgba(8, 8, 18, 0.12);
-    --ring: rgba(6, 122, 85, 0.5);
+    /* The focus ring is an affordance drawn on a neutral surface, so it follows
+       the ink rather than the fill: the vivid fill at 50% composites to 1.5:1 on
+       every light surface, well under the 3:1 non-text floor. Mint ink at 85%
+       reads 3.7-4.0:1 while staying a ring rather than a hard stroke. */
+    --ring: rgba(6, 122, 85, 0.85);
 
-    /* Accents share the AA floor below - see the --primary group. */
-    --mint: #067a55;
+    /* Light is where fill and ink diverge. As small text on a light surface the
+       vivid fills read 2.2-4.2:1, so each --X-ink is deepened until it clears
+       WCAG AA (4.5:1) against --surface-3, the darkest light surface, keeping
+       the fill's hue and saturation. --violet already cleared the floor, so its
+       ink equals its fill. The washes below mix from the fill, which is why
+       they carry the fill's hex. */
+    --mint: #10b981;
     --mint-soft: rgba(16, 185, 129, 0.14);
-    --cyan: #0e7490;
+    --mint-ink: #067a55;
+    --cyan: #0891b2;
     --cyan-soft: rgba(8, 145, 178, 0.14);
+    --cyan-ink: #0e7490;
     --violet: #7c3aed;
     --violet-soft: rgba(124, 58, 237, 0.14);
-    --gold: #ae4f08;
-    --gold-foreground: #ffffff;
-    --pink: #c7204f;
+    --violet-ink: #7c3aed;
+    --gold: #d97706;
+    --gold-soft: rgba(217, 119, 6, 0.14);
+    --gold-foreground: #080812;
+    --gold-ink: #ae4f08;
+    --pink: #dc2659;
     --pink-soft: rgba(220, 38, 89, 0.10);
+    --pink-ink: #c7204f;
 
     /* Light-theme page gradients (softer alphas over light base). */
     --gradient-console:
@@ -264,33 +305,44 @@
   --popover: #ffffff;
   --popover-foreground: #0a0a14;
 
-  --primary: #067a55;
-  --primary-foreground: #ffffff;
+  /* Vivid fill + dark label, deepened ink - see the prefers-color-scheme block
+     above. Both light blocks must stay value-identical. */
+  --primary: #10b981;
+  --primary-foreground: #080812;
+  --primary-ink: #067a55;
   --secondary: #eef1f7;
   --secondary-foreground: #0a0a14;
   --muted: #5c6079;
   --muted-soft: #eef1f7;
-  --accent: #0e7490;
-  --accent-foreground: #ffffff;
-  --destructive: #ca1a41;
+  --accent: #0891b2;
+  --accent-foreground: #080812;
+  --accent-ink: #0e7490;
+  --destructive: #e11d48;
   --destructive-foreground: #ffffff;
+  --destructive-ink: #ca1a41;
 
   --border: rgba(8, 8, 18, 0.08);
   --border-strong: rgba(8, 8, 18, 0.14);
   --input: rgba(8, 8, 18, 0.12);
-  --ring: rgba(6, 122, 85, 0.5);
+  /* Mirrors the @media light block above; see the note there. */
+  --ring: rgba(6, 122, 85, 0.85);
 
-  /* Deepened inks, AA on --surface-3 - see the prefers-color-scheme block above. */
-  --mint: #067a55;
+  --mint: #10b981;
   --mint-soft: rgba(16, 185, 129, 0.14);
-  --cyan: #0e7490;
+  --mint-ink: #067a55;
+  --cyan: #0891b2;
   --cyan-soft: rgba(8, 145, 178, 0.14);
+  --cyan-ink: #0e7490;
   --violet: #7c3aed;
   --violet-soft: rgba(124, 58, 237, 0.14);
-  --gold: #ae4f08;
-  --gold-foreground: #ffffff;
-  --pink: #c7204f;
+  --violet-ink: #7c3aed;
+  --gold: #d97706;
+  --gold-soft: rgba(217, 119, 6, 0.14);
+  --gold-foreground: #080812;
+  --gold-ink: #ae4f08;
+  --pink: #dc2659;
   --pink-soft: rgba(220, 38, 89, 0.10);
+  --pink-ink: #c7204f;
 
   /* Light-theme page gradients (softer alphas over light base). */
   --gradient-console:
@@ -523,7 +575,7 @@ pre,
 .vr-markdown li.task-list-item { list-style: none; }
 .vr-markdown li.task-list-item input { margin-right: 0.4em; }
 .vr-markdown a {
-  color: var(--cyan);
+  color: var(--cyan-ink);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -574,7 +626,7 @@ pre,
 .vr-code-block:hover .vr-code-copy,
 .vr-code-copy:focus-visible { opacity: 1; }
 .vr-code-copy:hover { color: var(--foreground); background: var(--surface-3); }
-.vr-code-copy.is-copied { opacity: 1; color: var(--mint); border-color: rgba(91, 255, 160, 0.4); }
+.vr-code-copy.is-copied { opacity: 1; color: var(--mint-ink); border-color: rgba(91, 255, 160, 0.4); }
 /* Touch devices have no hover — keep the button gently visible so it's tappable. */
 @media (hover: none) {
   .vr-code-copy { opacity: 0.6; }

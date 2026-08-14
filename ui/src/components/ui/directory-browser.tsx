@@ -363,7 +363,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             <span className="size-3 rounded-full bg-[#28C840]" />
           </div>
           <div className="flex flex-1 items-center justify-center gap-2 text-[13px] font-semibold text-foreground">
-            <FolderOpen className="size-3.5 text-mint" />
+            <FolderOpen className="size-3.5 text-mint-ink" />
             {t('directoryBrowser.title')}
           </div>
           <button
@@ -429,12 +429,12 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                 <button
                   type="button"
                   onClick={submitManualPath}
-                  className="rounded px-2 py-0.5 text-[10px] font-semibold text-cyan hover:bg-foreground/[0.04]"
+                  className="rounded px-2 py-0.5 text-[10px] font-semibold text-cyan-ink hover:bg-foreground/[0.04]"
                 >
                   {t('directoryBrowser.editPathDone')}
                 </button>
               </div>
-              {pathError && <div className="px-1 text-[10.5px] text-destructive">{pathError}</div>}
+              {pathError && <div className="px-1 text-[10.5px] text-destructive-ink">{pathError}</div>}
             </div>
           ) : (
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-md border border-border-strong bg-surface-2 px-2 py-1 font-mono text-[11px]">
@@ -447,7 +447,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                     title={crumb.isHome ? homePath : undefined}
                     className={clsx(
                       'shrink-0 rounded px-1 py-0.5 transition hover:bg-foreground/[0.04]',
-                      i === breadcrumbs.length - 1 ? 'font-semibold text-cyan' : 'text-muted',
+                      i === breadcrumbs.length - 1 ? 'font-semibold text-cyan-ink' : 'text-muted',
                     )}
                   >
                     {crumb.label}
@@ -466,7 +466,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             className={clsx(
               'flex size-7 items-center justify-center rounded-md border transition',
               pathEditing
-                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan'
+                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan-ink'
                 : 'border-border-strong text-muted hover:text-foreground',
             )}
           >
@@ -481,7 +481,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             className={clsx(
               'flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition',
               showHidden
-                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan'
+                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan-ink'
                 : 'border-border-strong text-muted hover:text-foreground',
             )}
           >
@@ -534,7 +534,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
           {/* Folder list */}
           <div className="flex min-w-0 flex-1 flex-col overflow-y-auto px-2 py-2">
             {error && (
-              <div className="mx-2 mb-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-sm text-destructive">
+              <div className="mx-2 mb-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-sm text-destructive-ink">
                 {error}
               </div>
             )}
@@ -555,8 +555,8 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                 onClick={() => navigate(dir.path)}
                 className="group flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-[13px] text-foreground transition hover:bg-foreground/[0.04]"
               >
-                <Folder className="size-4 shrink-0 text-gold group-hover:hidden" />
-                <FolderOpen className="hidden size-4 shrink-0 text-gold group-hover:block" />
+                <Folder className="size-4 shrink-0 text-gold-ink group-hover:hidden" />
+                <FolderOpen className="hidden size-4 shrink-0 text-gold-ink group-hover:block" />
                 <span className="truncate">{dir.name}</span>
               </button>
             ))}
@@ -572,7 +572,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             {creating ? (
               <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-dashed border-border-strong bg-foreground/[0.03] px-3 py-2.5">
                 <div className="flex items-center gap-2">
-                  <FolderPlus className="size-4 shrink-0 text-mint" />
+                  <FolderPlus className="size-4 shrink-0 text-mint-ink" />
                   <input
                     ref={newFolderInputRef}
                     value={newFolderName}
@@ -608,7 +608,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                     {t('directoryBrowser.newFolder')}
                   </button>
                 </div>
-                {createError && <div className="pl-6 text-[11px] text-destructive">{createError}</div>}
+                {createError && <div className="pl-6 text-[11px] text-destructive-ink">{createError}</div>}
               </div>
             ) : (
               <button

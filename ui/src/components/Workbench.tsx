@@ -71,7 +71,7 @@ export const Workbench: React.FC = () => {
     <div className="flex flex-col items-center gap-5 md:min-h-[calc(100dvh-7rem)] md:justify-center">
       {/* Hero panel — a centered card, not a full-bleed fill. */}
       <div className="flex w-full max-w-[640px] flex-col items-center gap-6 rounded-2xl border border-border bg-surface-2 px-6 py-10">
-        <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/40 bg-mint-soft text-mint shadow-[0_0_24px_-6px_rgba(91,255,160,0.6)]">
+        <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/40 bg-mint-soft text-mint-ink shadow-[0_0_24px_-6px_rgba(91,255,160,0.6)]">
           <Sparkles className="size-6" />
         </div>
         <div className="flex max-w-[520px] flex-col items-center gap-3 text-center">
@@ -84,9 +84,9 @@ export const Workbench: React.FC = () => {
               key={key}
               type="button"
               onClick={onClick}
-              className="group flex items-center gap-2 rounded-full border border-border-strong bg-surface px-3 py-2 text-[12px] text-foreground transition hover:border-mint/40 hover:bg-mint-soft hover:text-mint"
+              className="group flex items-center gap-2 rounded-full border border-border-strong bg-surface px-3 py-2 text-[12px] text-foreground transition hover:border-mint/40 hover:bg-mint-soft hover:text-mint-ink"
             >
-              <Icon className="size-3.5 text-muted group-hover:text-mint" />
+              <Icon className="size-3.5 text-muted group-hover:text-mint-ink" />
               <span>{t(`workbench.canvas.suggestions.${key}`)}</span>
             </button>
           ))}
@@ -128,10 +128,10 @@ export const Workbench: React.FC = () => {
           className="max-w-[640px]"
         />
         {ns.needsProject && (
-          <div className="px-2 text-[10.5px] text-gold">{t('workbench.canvas.noProjectForChat')}</div>
+          <div className="px-2 text-[10.5px] text-gold-ink">{t('workbench.canvas.noProjectForChat')}</div>
         )}
         {ns.error && (
-          <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {ns.error}
           </div>
         )}

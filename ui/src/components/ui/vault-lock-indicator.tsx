@@ -29,7 +29,7 @@ export function VaultLockIndicator({ className }: { className?: string }) {
       className={cn('flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-3 pr-1', className)}
       title={t('vaults.lock.windowTooltip')}
     >
-      <Unlock className="size-3.5 shrink-0 text-mint" />
+      <Unlock className="size-3.5 shrink-0 text-mint-ink" />
       <span className="text-xs font-medium text-foreground">
         {t('vaults.lock.unlocked')} · <span className="tabular-nums">{formatRemaining(remainingMs)}</span>
       </span>

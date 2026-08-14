@@ -2316,12 +2316,12 @@ export const ChatPage: React.FC = () => {
         <button
           type="button"
           onClick={goBack}
-          className="inline-flex items-center gap-1.5 text-[12px] text-cyan hover:underline"
+          className="inline-flex items-center gap-1.5 text-[12px] text-cyan-ink hover:underline"
         >
           <ArrowLeft className="size-3.5" />
           {t('chat.back')}
         </button>
-        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
           {error ?? t('chat.notFound')}
         </div>
       </div>
@@ -2372,7 +2372,7 @@ export const ChatPage: React.FC = () => {
             container, whose drop handler stages them on the composer. */}
         {fileDragging && (
           <div className="pointer-events-none absolute inset-0 z-10 m-2 flex items-center justify-center rounded-2xl border-2 border-dashed border-mint/60 bg-background/85 backdrop-blur-sm md:m-3">
-            <div className="flex flex-col items-center gap-2 text-mint">
+            <div className="flex flex-col items-center gap-2 text-mint-ink">
               <UploadCloud className="size-7" />
               <span className="text-[13px] font-medium">{t('chat.compose.dropOverlay')}</span>
             </div>
@@ -2436,7 +2436,7 @@ export const ChatPage: React.FC = () => {
           of being discarded on unmount. */}
       <div className={clsx('flex min-h-0 flex-1 flex-col', showPageActive && 'hidden')}>
         {error && (
-          <div className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}
@@ -2601,7 +2601,7 @@ export const QueueRow: React.FC<{
       >
         {annotationView && (
           <>
-            <span className="mr-2 inline-flex items-center gap-[5px] align-middle text-[10.5px] font-medium text-cyan">
+            <span className="mr-2 inline-flex items-center gap-[5px] align-middle text-[10.5px] font-medium text-cyan-ink">
               <MessageSquareQuote className="size-[11px] shrink-0" />
               {t(annotationTitleKey(annotationView.direction))}
             </span>
@@ -2644,7 +2644,7 @@ export const QueueRow: React.FC<{
         onClick={() => onRemove(item.id)}
         aria-label={t('chat.queue.remove')}
         title={t('chat.queue.remove')}
-        className="size-6 shrink-0 text-muted hover:text-destructive"
+        className="size-6 shrink-0 text-muted hover:text-destructive-ink"
       >
         <X className="size-3.5" />
       </Button>
@@ -2663,10 +2663,10 @@ const ACTIVITY_ITEM_ICON: Record<SessionActivityItemKind, LucideIcon> = {
 };
 
 const ACTIVITY_ITEM_TINT: Record<SessionActivityItemKind, string> = {
-  backend_activity: 'bg-mint/15 text-mint',
-  watch: 'bg-cyan/15 text-cyan',
-  task: 'bg-gold/15 text-gold',
-  agent_run: 'bg-violet/15 text-violet',
+  backend_activity: 'bg-mint/15 text-mint-ink',
+  watch: 'bg-cyan/15 text-cyan-ink',
+  task: 'bg-gold/15 text-gold-ink',
+  agent_run: 'bg-violet/15 text-violet-ink',
 };
 
 // One expanded popover row: colored kind icon box + two-line label / subtitle.
@@ -2708,7 +2708,7 @@ const ActivityRow: React.FC<{
       {isHarness ? (
         <ChevronRight className="size-4 shrink-0 self-center text-muted" aria-hidden="true" />
       ) : (
-        <span className="shrink-0 self-center text-[11px] font-medium text-mint">
+        <span className="shrink-0 self-center text-[11px] font-medium text-mint-ink">
           {t('chat.activities.status.running')}
         </span>
       )}
@@ -2779,11 +2779,11 @@ const ActivityStrip: React.FC<{
       indicator={
         active.length > 0 ? (
           <Activity
-            className={clsx('size-3.5 shrink-0', queuedOnly ? 'text-muted' : 'text-mint')}
+            className={clsx('size-3.5 shrink-0', queuedOnly ? 'text-muted' : 'text-mint-ink')}
             aria-hidden="true"
           />
         ) : (
-          <Loader2 className="size-3.5 shrink-0 animate-spin text-mint" aria-hidden="true" />
+          <Loader2 className="size-3.5 shrink-0 animate-spin text-mint-ink" aria-hidden="true" />
         )
       }
       label={
@@ -2841,7 +2841,7 @@ const ActivityStrip: React.FC<{
               <button
                 type="button"
                 onClick={() => navigateTo('/harness')}
-                className="flex shrink-0 items-center justify-center gap-1 border-t border-border/60 px-2 py-2 text-[12px] font-medium text-cyan transition-colors hover:bg-surface-2"
+                className="flex shrink-0 items-center justify-center gap-1 border-t border-border/60 px-2 py-2 text-[12px] font-medium text-cyan-ink transition-colors hover:bg-surface-2"
               >
                 {t('chat.activities.manageInHarness')}
                 <ArrowRight className="size-3.5" aria-hidden="true" />
@@ -2868,11 +2868,11 @@ export const QueueStrip: React.FC<{
     <div className="shrink-0 px-4 md:px-8">
       <div className="mx-auto w-full max-w-[1080px] rounded-xl border border-cyan/25 bg-cyan/[0.04] p-2">
         <div className="flex items-center justify-between px-1 pb-1.5">
-          <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-cyan">
+          <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-cyan-ink">
             <Clock className="size-3" />
             {t('chat.queue.title', { count: queue.length })}
           </span>
-          <Button type="button" variant="ghost" size="sm" onClick={onSendNow} className="h-6 px-2 text-[11px] text-cyan">
+          <Button type="button" variant="ghost" size="sm" onClick={onSendNow} className="h-6 px-2 text-[11px] text-cyan-ink">
             {t('chat.queue.sendNow')}
           </Button>
         </div>
@@ -3813,7 +3813,7 @@ const ForkSourceBanner: React.FC<{ sourceSessionId: string; sourceTitle: string 
     <div className="flex w-full justify-center">
       <Link
         to={`/chat/${encodeURIComponent(sourceSessionId)}`}
-        className="inline-flex max-w-full items-center gap-2 rounded-full border border-cyan/30 bg-cyan/[0.08] px-3 py-1.5 text-[12px] text-cyan transition-colors hover:border-cyan/50 hover:bg-cyan/[0.12]"
+        className="inline-flex max-w-full items-center gap-2 rounded-full border border-cyan/30 bg-cyan/[0.08] px-3 py-1.5 text-[12px] text-cyan-ink transition-colors hover:border-cyan/50 hover:bg-cyan/[0.12]"
       >
         <GitFork className="size-3.5 shrink-0" />
         <span className="shrink-0">{t('chat.forkedFromPrefix')}</span>
@@ -4055,15 +4055,15 @@ export const MessageRow = memo(function MessageRow({
     return (
       <div data-message-id={message.id} className={rowClass('justify-start')}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
-          <div className="inline-flex w-fit max-w-full items-start gap-1.5 rounded-2xl rounded-tl-md border border-gold/30 bg-gold/[0.08] px-3 py-1.5 text-[12px] text-gold">
+          <div className="inline-flex w-fit max-w-full items-start gap-1.5 rounded-2xl rounded-tl-md border border-gold/30 bg-gold/[0.08] px-3 py-1.5 text-[12px] text-gold-ink">
             <Bell className="mt-px size-3 shrink-0" />
             <span className="min-w-0 break-words">
               <span className="font-semibold">{t(isVaultNotification ? 'chat.source.vault' : 'chat.notifyLabel')}</span>
               {vaultStatusKey && (
-                <span className="font-normal text-gold/80"> · {t(vaultStatusKey)}</span>
+                <span className="font-normal text-gold-ink/80"> · {t(vaultStatusKey)}</span>
               )}
               {resultPresentation.body && (
-                <span className="font-normal text-gold/80"> · {resultPresentation.body}</span>
+                <span className="font-normal text-gold-ink/80"> · {resultPresentation.body}</span>
               )}
             </span>
           </div>
@@ -4103,13 +4103,13 @@ export const MessageRow = memo(function MessageRow({
                 <button
                   type="button"
                   onClick={() => navigate(triggerLink.to)}
-                  className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan-ink hover:underline"
                 >
                   {t(harnessChipLabelKey(message))}
                   <ArrowUpRight className="size-3 shrink-0" />
                 </button>
               ) : (
-                <span className="shrink-0 text-[11px] font-medium text-cyan">
+                <span className="shrink-0 text-[11px] font-medium text-cyan-ink">
                   {t(harnessChipLabelKey(message))}
                 </span>
               )}
@@ -4126,7 +4126,7 @@ export const MessageRow = memo(function MessageRow({
                   <button
                     type="button"
                     onClick={() => navigate(triggerLink.to)}
-                    className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
+                    className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-cyan-ink hover:underline"
                   >
                     <span className="min-w-0 truncate">{triggerLink.label}</span>
                     <ArrowUpRight className="size-3 shrink-0" />
@@ -4192,12 +4192,12 @@ const ChatMissing: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       <button
         type="button"
         onClick={onBack}
-        className="inline-flex items-center gap-1.5 text-[12px] text-cyan hover:underline"
+        className="inline-flex items-center gap-1.5 text-[12px] text-cyan-ink hover:underline"
       >
         <ArrowLeft className="size-3.5" />
         {t('chat.back')}
       </button>
-      <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+      <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
         {t('chat.missingSessionId')}
       </div>
     </div>

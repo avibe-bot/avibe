@@ -48,7 +48,7 @@ export const AnnotationMessage: React.FC<AnnotationMessageProps> = ({
   // Rule 02: two title values, and the action never enters the title. A resolved
   // agent mark is still titled "Agent 批注" — the marker below says it is done.
   const label = (
-    <span className={clsx('text-[11px] font-medium', fromUser ? 'text-cyan' : 'text-mint')}>
+    <span className={clsx('text-[11px] font-medium', fromUser ? 'text-cyan-ink' : 'text-mint-ink')}>
       {t(annotationTitleKey(view.direction))}
     </span>
   );
@@ -74,7 +74,7 @@ export const AnnotationMessage: React.FC<AnnotationMessageProps> = ({
   // Rule 07.
   const resolvedNode = view.resolved ? (
     <div className="mt-[9px] flex w-full">
-      <span className="inline-flex items-center gap-1 rounded-full border border-mint/35 bg-mint-soft px-[9px] py-[3px] text-[10.5px] font-semibold text-mint">
+      <span className="inline-flex items-center gap-1 rounded-full border border-mint/35 bg-mint-soft px-[9px] py-[3px] text-[10.5px] font-semibold text-mint-ink">
         <Check className="size-[11px] shrink-0" />
         {t('chat.annotation.resolved')}
       </span>

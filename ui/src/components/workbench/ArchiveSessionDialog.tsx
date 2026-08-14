@@ -109,7 +109,7 @@ export function ArchiveSessionDialog({
       <DialogContent className="max-w-[420px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span className="grid size-7 shrink-0 place-items-center rounded-full bg-destructive/12 text-destructive">
+            <span className="grid size-7 shrink-0 place-items-center rounded-full bg-destructive/12 text-destructive-ink">
               <AlertTriangle className="size-4" />
             </span>
             {t('workbench.archiveSession.title')}
@@ -126,10 +126,10 @@ export function ArchiveSessionDialog({
               {t('workbench.archiveSession.checking')}
             </span>
           ) : previewError ? (
-            <span className="text-pink">{t('workbench.archiveSession.previewError')}</span>
+            <span className="text-pink-ink">{t('workbench.archiveSession.previewError')}</span>
           ) : reclaimItems.length > 0 ? (
             <>
-              <p className="mb-1.5 font-medium text-destructive">{t('workbench.archiveSession.reclaimIntro')}</p>
+              <p className="mb-1.5 font-medium text-destructive-ink">{t('workbench.archiveSession.reclaimIntro')}</p>
               <ul className="list-disc space-y-0.5 pl-4 text-muted">
                 {reclaimItems.map((item) => (
                   <li key={item}>{item}</li>

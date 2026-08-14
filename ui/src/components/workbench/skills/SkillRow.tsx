@@ -32,13 +32,13 @@ export function SkillRow({ skill, selected, inherited, updateAvailable, onSelect
       )}
     >
       <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-border bg-surface-3">
-        <WandSparkles className={clsx('size-4', selected ? 'text-mint' : 'text-muted')} />
+        <WandSparkles className={clsx('size-4', selected ? 'text-mint-ink' : 'text-muted')} />
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="flex items-center gap-2">
           <span className="truncate text-[14px] font-semibold text-foreground">{skill.name}</span>
           {updateAvailable ? (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gold/40 bg-gold/[0.12] px-1.5 font-mono text-[9px] font-bold uppercase text-gold">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gold/40 bg-gold/[0.12] px-1.5 font-mono text-[9px] font-bold uppercase text-gold-ink">
               <ArrowUp className="size-2.5" />
               {t('skills.updateBadge')}
             </span>

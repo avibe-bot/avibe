@@ -176,7 +176,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                       className={clsx(
                         'flex h-6 items-center gap-1 rounded-[5px] px-2 text-[12px] transition-colors',
                         active
-                          ? 'bg-mint-soft font-bold text-mint'
+                          ? 'bg-mint-soft font-bold text-mint-ink'
                           : 'font-medium text-muted hover:text-foreground',
                       )}
                     >
@@ -246,7 +246,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                     <span
                       className={clsx(
                         'grid size-8 shrink-0 place-items-center rounded-md',
-                        active ? 'bg-mint-soft text-mint' : 'bg-foreground/[0.04] text-muted',
+                        active ? 'bg-mint-soft text-mint-ink' : 'bg-foreground/[0.04] text-muted',
                       )}
                     >
                       <Icon className="size-4" />
@@ -255,14 +255,14 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                       <span
                         className={clsx(
                           'block text-[13px]',
-                          active ? 'font-bold text-mint' : 'font-medium text-foreground',
+                          active ? 'font-bold text-mint-ink' : 'font-medium text-foreground',
                         )}
                       >
                         {t(labelKey)}
                       </span>
                       <span className="block text-[11px] text-muted">{t(descKey)}</span>
                     </span>
-                    {active && <Check className="size-4 shrink-0 text-mint" />}
+                    {active && <Check className="size-4 shrink-0 text-mint-ink" />}
                   </button>
                 );
               })}

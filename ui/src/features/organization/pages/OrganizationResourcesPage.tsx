@@ -231,7 +231,7 @@ function ResourceAccessDialog({
                   );
                 })}
               </div>
-              {groupIds.length === 0 ? <div className="mt-2 text-[11px] text-gold">{t('organization.resources.groupRequired')}</div> : null}
+              {groupIds.length === 0 ? <div className="mt-2 text-[11px] text-gold-ink">{t('organization.resources.groupRequired')}</div> : null}
             </fieldset>
           ) : null}
         </div>
@@ -397,7 +397,7 @@ export function OrganizationResourcesPage() {
             return (
               <div key={`${resource.instance_id}:${resource.resource_kind}:${resource.resource_id}`} className="grid gap-3 border-b border-border px-4 py-4 last:border-0 md:grid-cols-[minmax(220px,1.35fr)_170px_minmax(190px,1fr)_130px_90px] md:items-center md:px-5">
                 <div className="flex min-w-0 items-center gap-3">
-                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 text-mint"><Icon className="size-4" /></span>
+                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 text-mint-ink"><Icon className="size-4" /></span>
                   <div className="min-w-0">
                     <div className="truncate text-[12px] font-semibold">{resource.display_name}</div>
                     <div className="truncate font-mono text-[10px] text-muted">{resource.resource_id} · {instanceNames.get(resource.instance_id) ?? resource.instance_id}</div>

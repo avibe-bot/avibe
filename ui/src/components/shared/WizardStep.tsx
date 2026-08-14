@@ -45,7 +45,7 @@ export const StepHeader: React.FC<StepHeaderProps> = ({
       <span
         className={clsx(
           'flex size-7 items-center justify-center rounded-full text-[12px] font-bold transition-colors',
-          completed ? 'bg-mint text-primary-foreground' : 'bg-cyan/15 text-cyan'
+          completed ? 'bg-mint text-primary-foreground' : 'bg-cyan/15 text-cyan-ink'
         )}
       >
         {completed ? <Check size={14} /> : step}

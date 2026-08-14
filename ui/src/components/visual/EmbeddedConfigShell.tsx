@@ -29,7 +29,7 @@ export const EmbeddedConfigShell: React.FC<EmbeddedConfigShellProps> = ({
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-end gap-2">
-        <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
+        <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
           {completed} / {total}
         </span>
         <div className="flex gap-1">

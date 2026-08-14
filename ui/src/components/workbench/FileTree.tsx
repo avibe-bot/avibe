@@ -225,7 +225,7 @@ const Dir: React.FC<{ path: string; name: string; depth: number }> = ({ path, na
               type="button"
               onClick={load}
               style={{ paddingLeft: 8 + (depth + 1) * 14 }}
-              className="flex w-full items-center gap-1 truncate py-1 pr-2 text-left text-[11.5px] text-destructive transition hover:bg-destructive/[0.06]"
+              className="flex w-full items-center gap-1 truncate py-1 pr-2 text-left text-[11.5px] text-destructive-ink transition hover:bg-destructive/[0.06]"
               title={`${error} — ${t('common.retry')}`}
             >
               <span className="truncate">{error}</span>
@@ -375,7 +375,7 @@ export const FileTree: React.FC<{
           root folder. */}
       <div onContextMenu={(e) => openMenu(e, rootPath, null)}>
         {error && (
-          <div className="mx-1 mb-1 flex items-start gap-1 rounded border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
+          <div className="mx-1 mb-1 flex items-start gap-1 rounded border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive-ink">
             <span className="min-w-0 flex-1">{error}</span>
             <button type="button" onClick={() => setError(null)} className="shrink-0 font-bold">
               ×
@@ -389,7 +389,7 @@ export const FileTree: React.FC<{
         <ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} itemCount={menuItemCount}>
           {menu.entry && menu.entry.kind === 'file' && (
             <ContextMenuItem
-              icon={<FileText className="size-3.5 text-cyan" />}
+              icon={<FileText className="size-3.5 text-cyan-ink" />}
               label={t('apps.fileBrowser.open')}
               onClick={() => {
                 const e = menu.entry as FsEntry;
@@ -401,7 +401,7 @@ export const FileTree: React.FC<{
           {(!menu.entry || menu.entry.kind === 'dir') && (
             <>
               <ContextMenuItem
-                icon={<FilePlus className="size-3.5 text-mint" />}
+                icon={<FilePlus className="size-3.5 text-mint-ink" />}
                 label={t('apps.fileBrowser.newFile')}
                 onClick={() => {
                   startEdit({ dir: menu.entry ? joinPath(menu.dir, menu.entry.name) : menu.dir, mode: 'new-file' });
@@ -409,7 +409,7 @@ export const FileTree: React.FC<{
                 }}
               />
               <ContextMenuItem
-                icon={<FolderPlus className="size-3.5 text-gold" />}
+                icon={<FolderPlus className="size-3.5 text-gold-ink" />}
                 label={t('apps.fileBrowser.newFolder')}
                 onClick={() => {
                   startEdit({ dir: menu.entry ? joinPath(menu.dir, menu.entry.name) : menu.dir, mode: 'new-folder' });

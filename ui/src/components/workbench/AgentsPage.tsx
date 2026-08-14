@@ -472,14 +472,14 @@ export const AgentsPage: React.FC = () => {
               className={clsx(
                 'flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-3 text-[13px] transition',
                 active
-                  ? 'border-b-2 border-violet font-bold text-violet'
+                  ? 'border-b-2 border-violet font-bold text-violet-ink'
                   : 'font-medium text-muted hover:text-foreground',
               )}
             >
               {key === 'definitions' ? (
-                <Layers className={clsx('size-3.5', active ? 'text-violet' : 'text-muted')} />
+                <Layers className={clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted')} />
               ) : (
-                <Activity className={clsx('size-3.5', active ? 'text-violet' : 'text-muted')} />
+                <Activity className={clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted')} />
               )}
               {t(`agents.tabs.${key}`)}
               {key === 'running' && (
@@ -487,7 +487,7 @@ export const AgentsPage: React.FC = () => {
                   className={clsx(
                     'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
                     active
-                      ? 'border-violet/30 bg-violet/[0.10] text-violet'
+                      ? 'border-violet/30 bg-violet/[0.10] text-violet-ink'
                       : 'border-border-strong bg-foreground/[0.04] text-muted',
                   )}
                 >
@@ -547,7 +547,7 @@ export const AgentsPage: React.FC = () => {
       </div>
 
       {activeTab === 'definitions' && error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
           {error}
         </div>
       )}
@@ -669,7 +669,7 @@ const OrganizationAgentOnboarding: React.FC<OrganizationAgentOnboardingProps> = 
       <div className="flex flex-col gap-4 px-1 sm:px-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="flex min-w-0 flex-1 items-start gap-3">
-            <span className="grid size-9 shrink-0 place-items-center rounded-md border border-mint/30 bg-mint-soft text-mint">
+            <span className="grid size-9 shrink-0 place-items-center rounded-md border border-mint/30 bg-mint-soft text-mint-ink">
               <ShieldCheck className="size-4" />
             </span>
             <div className="min-w-0">
@@ -700,7 +700,7 @@ const OrganizationAgentOnboarding: React.FC<OrganizationAgentOnboardingProps> = 
             type="button"
             aria-expanded={expanded}
             onClick={() => onExpandedChange(!expanded)}
-            className="flex min-w-0 items-center gap-2 text-[12px] font-medium text-foreground hover:text-mint"
+            className="flex min-w-0 items-center gap-2 text-[12px] font-medium text-foreground hover:text-mint-ink"
           >
             <ChevronRight className={clsx('size-3.5 shrink-0 transition-transform', expanded && 'rotate-90')} />
             {t('agents.onboarding.inventory', { count: counts.total })}
@@ -842,7 +842,7 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
             }}
             className={clsx(
               'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-              value === key ? 'bg-cyan-soft text-cyan' : 'text-foreground hover:bg-foreground/[0.04]',
+              value === key ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
             )}
           >
             {key !== 'all' && <Bot className={clsx('size-3.5', BACKEND_ICON_CLASS[key])} />}
@@ -1219,7 +1219,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
                 }}
                 className={clsx(
                   'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition disabled:cursor-not-allowed',
-                  active ? 'bg-mint-soft font-bold text-mint' : 'font-medium text-muted hover:text-foreground',
+                  active ? 'bg-mint-soft font-bold text-mint-ink' : 'font-medium text-muted hover:text-foreground',
                   !canEdit && !active && 'opacity-70 hover:text-muted',
                 )}
               >
@@ -1300,7 +1300,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
               variant="outline"
               size="xs"
               onClick={() => setRunning(true)}
-              className="border-mint/40 bg-mint-soft text-mint hover:brightness-110"
+              className="border-mint/40 bg-mint-soft text-mint-ink hover:brightness-110"
             >
               <Play className="size-3" />
               {t('agents.detail.run')}

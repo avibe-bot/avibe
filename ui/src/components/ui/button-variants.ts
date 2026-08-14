@@ -11,7 +11,9 @@ export const buttonVariants = cva(
         // Mint primary — flat, no glow shadow (design.pen Button/Default).
         default: 'gap-1.5 bg-primary text-primary-foreground hover:brightness-110',
         // Brand CTA — bright bg + brand-color glow shadow + bold text + brighten on hover.
-        // Foreground tokens flip in light mode (--primary/--accent/--gold-foreground).
+        // The fill is the accent itself and the label its paired *-foreground, which
+        // is the dark ink in both themes: a brand fill stays vivid under light, so it
+        // takes the same dark label there that it takes on the dark frame.
         brand:
           'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_24px_-4px_rgba(91,255,160,0.6)] hover:brightness-105 disabled:shadow-none',
         'brand-cyan':
@@ -26,9 +28,13 @@ export const buttonVariants = cva(
           'gap-1.5 border border-border bg-background text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.05)] hover:bg-surface-2',
         // Cyan outline — for "Read Vibe Remote" / docs style CTAs.
         'outline-cyan':
-          'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan hover:bg-cyan/[0.10]',
+          'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan-ink hover:bg-cyan/[0.10]',
         ghost: 'gap-1.5 text-foreground hover:bg-surface-2',
-        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:opacity-90',
+        // Hover darkens the fill rather than fading it: opacity blends the fill
+        // toward the page surface, which pulls the white label *down* toward AA
+        // (4.70:1 -> ~4.25:1 in light). brightness-95 deepens it instead, so the
+        // label gains contrast on hover, and it matches the other fill variants.
+        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:brightness-95',
         // Pink-soft destructive — design.pen T09T8Z. Pink fill + pink border
         // + pink text/icon, used for in-panel delete CTAs where a full
         // destructive shouts too loud. Drives the --pink / --pink-soft tokens
@@ -39,9 +45,9 @@ export const buttonVariants = cva(
         // same visual weight as the mint-soft "Run" button it usually sits next
         // to — a balanced soft pair rather than a near-invisible wash.
         'destructive-soft':
-          'gap-1.5 border border-pink/45 bg-pink/15 text-pink hover:border-pink/60 hover:bg-pink/[0.22]',
-        link: 'text-primary underline-offset-4 hover:underline',
-        accent: 'gap-1.5 border border-cyan/40 bg-cyan-soft text-cyan hover:bg-cyan/15',
+          'gap-1.5 border border-pink/45 bg-pink/15 text-pink-ink hover:border-pink/60 hover:bg-pink/[0.22]',
+        link: 'text-primary-ink underline-offset-4 hover:underline',
+        accent: 'gap-1.5 border border-cyan/40 bg-cyan-soft text-cyan-ink hover:bg-cyan/15',
       },
       size: {
         // h-8 toolbar buttons (LogsPanel/DoctorPanel/SettingsServicePage/AgentDetection toolbar).

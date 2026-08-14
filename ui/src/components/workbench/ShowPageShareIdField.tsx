@@ -125,7 +125,7 @@ export const ShowPageShareIdField: React.FC<{
           )}
         </Button>
       </div>
-      <p className={clsx('text-[11px] leading-snug', isError ? 'text-destructive' : 'text-muted')}>{message}</p>
+      <p className={clsx('text-[11px] leading-snug', isError ? 'text-destructive-ink' : 'text-muted')}>{message}</p>
     </div>
   );
 };

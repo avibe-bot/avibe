@@ -60,7 +60,7 @@ const MenuItem: React.FC<{ icon: LucideIcon; onClick: () => void; danger?: boole
     onClick={onClick}
     className={clsx(
       'h-auto w-full justify-start gap-2 rounded px-2 py-2 text-left text-[13px] font-normal',
-      danger ? 'text-pink hover:bg-pink/[0.08] hover:text-pink' : 'text-foreground hover:bg-foreground/[0.04]',
+      danger ? 'text-pink-ink hover:bg-pink/[0.08] hover:text-pink-ink' : 'text-foreground hover:bg-foreground/[0.04]',
     )}
   >
     <Icon className={clsx('size-3.5 shrink-0', danger ? '' : 'text-muted')} />
@@ -152,7 +152,7 @@ const MobileProjectRow: React.FC<{
           onClick={onToggle}
           className="flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5 text-left"
         >
-          {open ? <FolderOpen className="size-4 shrink-0 text-cyan" /> : <Folder className="size-4 shrink-0 text-muted" />}
+          {open ? <FolderOpen className="size-4 shrink-0 text-cyan-ink" /> : <Folder className="size-4 shrink-0 text-muted" />}
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{project.display_name}</span>
           {state.sessions !== null && !state.error && (
             <Badge variant="secondary" className="font-mono text-[10px]">
@@ -422,7 +422,7 @@ export const ProjectsPage: React.FC = () => {
           size="icon"
           onClick={() => setShowNewProject(true)}
           aria-label={t('projects.newProject')}
-          className="border-mint/35 bg-mint/[0.08] text-mint hover:bg-mint/[0.14]"
+          className="border-mint/35 bg-mint/[0.08] text-mint-ink hover:bg-mint/[0.14]"
         >
           <FolderPlus className="size-4" />
         </Button>}
@@ -501,7 +501,7 @@ export const ProjectsPage: React.FC = () => {
                     type="button"
                     onClick={() => revealMoreSessions(project.id, state, visibleSessionCount, allSessionRows.length)}
                     disabled={state.loadingMore}
-                    className="flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[12px] font-medium text-cyan transition hover:bg-cyan/[0.06] disabled:opacity-50"
+                    className="flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[12px] font-medium text-cyan-ink transition hover:bg-cyan/[0.06] disabled:opacity-50"
                   >
                     {state.loadingMore ? <Loader2 className="size-3.5 animate-spin" /> : <ChevronDown className="size-3.5" />}
                     {t('projects.loadMore')}

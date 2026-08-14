@@ -230,7 +230,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
         {/* Domain selector */}
         <div className="space-y-2 rounded-xl border border-border bg-background px-5 py-4">
           <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-            <Globe size={14} className="text-cyan" /> {t('larkConfig.domainLabel')}
+            <Globe size={14} className="text-cyan-ink" /> {t('larkConfig.domainLabel')}
           </label>
           <div className="flex gap-2">
             {(['feishu', 'lark'] as const).map((opt) => (
@@ -244,7 +244,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                 className={clsx(
                   'flex-1 rounded-lg border px-3 py-2 text-[12px] font-semibold transition',
                   domain === opt
-                    ? 'border-mint/45 bg-mint/[0.08] text-mint shadow-[0_0_24px_-4px_rgba(91,255,160,0.4)]'
+                    ? 'border-mint/45 bg-mint/[0.08] text-mint-ink shadow-[0_0_24px_-4px_rgba(91,255,160,0.4)]'
                     : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
                 )}
               >
@@ -261,7 +261,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
             <StepHeader
               step={1}
               title={t('larkConfig.step1Title')}
-              icon={<Plus size={16} className="text-cyan" />}
+              icon={<Plus size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[1]}
               onToggle={() => toggleStep(1)}
             />
@@ -283,7 +283,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
             <StepHeader
               step={2}
               title={t('larkConfig.step2Title')}
-              icon={<KeyRound size={16} className="text-cyan" />}
+              icon={<KeyRound size={16} className="text-cyan-ink" />}
               completed={isValid}
               expanded={expandedSteps[2]}
               onToggle={() => toggleStep(2)}
@@ -294,7 +294,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
 
                 <div className="space-y-2 pt-1">
                   <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                    <KeyRound size={14} className="text-cyan" /> {t('larkConfig.appId')}
+                    <KeyRound size={14} className="text-cyan-ink" /> {t('larkConfig.appId')}
                   </label>
                   <Input
                     type="text"
@@ -308,7 +308,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
 
                 <div className="space-y-2">
                   <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                    <KeyRound size={14} className="text-cyan" /> {t('larkConfig.appSecret')}
+                    <KeyRound size={14} className="text-cyan-ink" /> {t('larkConfig.appSecret')}
                   </label>
                   <Input
                     type="password"
@@ -341,8 +341,8 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                       className={clsx(
                         'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium',
                         authResult.ok
-                          ? 'border-mint/30 bg-mint/[0.08] text-mint'
-                          : 'border-danger/30 bg-danger/10 text-danger'
+                          ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
+                          : 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                       )}
                     >
                       {authResult.ok ? <Check size={14} /> : null}
@@ -357,9 +357,9 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                   <div
                     className={clsx(
                       'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[12px]',
-                      wsStatus === 'connecting' && 'border-cyan/30 bg-cyan/[0.06] text-cyan',
-                      wsStatus === 'connected' && 'border-mint/30 bg-mint/[0.08] text-mint',
-                      wsStatus === 'error' && 'border-danger/30 bg-danger/10 text-danger'
+                      wsStatus === 'connecting' && 'border-cyan/30 bg-cyan/[0.06] text-cyan-ink',
+                      wsStatus === 'connected' && 'border-mint/30 bg-mint/[0.08] text-mint-ink',
+                      wsStatus === 'error' && 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                     )}
                   >
                     {wsStatus === 'connecting' && <RefreshCw size={14} className="animate-spin" />}
@@ -372,14 +372,14 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                 {authResult?.ok && chats.length > 0 && (
                   <div className="space-y-2 pt-1">
                     <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                      <MessageSquare size={14} className="text-cyan" /> {t('larkConfig.chatListLabel')}
+                      <MessageSquare size={14} className="text-cyan-ink" /> {t('larkConfig.chatListLabel')}
                     </label>
                     <p className="text-[11px] text-muted">{t('larkConfig.chatListHint')}</p>
                     <div className="max-h-32 overflow-y-auto rounded-lg border border-border bg-background px-3 py-2.5">
                       <ul className="space-y-1 text-[12px] text-foreground">
                         {chats.map((c: any) => (
                           <li key={c.id} className="flex items-center gap-2">
-                            <Check size={12} className="shrink-0 text-mint" />
+                            <Check size={12} className="shrink-0 text-mint-ink" />
                             <span>{c.name}</span>
                             <span className="font-mono text-[11px] text-muted">({c.id})</span>
                           </li>
@@ -397,7 +397,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
             <StepHeader
               step={3}
               title={t('larkConfig.step3Title')}
-              icon={<Shield size={16} className="text-cyan" />}
+              icon={<Shield size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[3]}
               onToggle={() => toggleStep(3)}
             />
@@ -409,10 +409,10 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
 
                 <div className="space-y-2 rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-[12px] font-semibold text-cyan">{t('larkConfig.step3BatchImport')}</span>
+                    <span className="text-[12px] font-semibold text-cyan-ink">{t('larkConfig.step3BatchImport')}</span>
                     <button
                       onClick={copyPermissionsJson}
-                      className="inline-flex items-center gap-1.5 rounded border border-cyan/30 bg-cyan/[0.08] px-2 py-0.5 text-[11px] font-medium text-cyan transition hover:bg-cyan/[0.16]"
+                      className="inline-flex items-center gap-1.5 rounded border border-cyan/30 bg-cyan/[0.08] px-2 py-0.5 text-[11px] font-medium text-cyan-ink transition hover:bg-cyan/[0.16]"
                     >
                       {copiedJson ? <Check size={12} /> : <Copy size={12} />}
                       {copiedJson ? t('larkConfig.step3Copied') : t('larkConfig.step3CopyJson')}
@@ -421,11 +421,11 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                   <pre className="overflow-x-auto whitespace-pre rounded bg-background/80 px-3 py-2 font-mono text-[11px] text-foreground">
                     {LARK_PERMISSIONS_JSON}
                   </pre>
-                  <p className="text-[11px] text-cyan/85">{t('larkConfig.step3BatchImportHint')}</p>
+                  <p className="text-[11px] text-cyan-ink/85">{t('larkConfig.step3BatchImportHint')}</p>
                 </div>
 
                 <details className="text-[12px] text-muted">
-                  <summary className="cursor-pointer font-medium text-foreground transition hover:text-cyan">
+                  <summary className="cursor-pointer font-medium text-foreground transition hover:text-cyan-ink">
                     {t('larkConfig.step3ManualList')}
                   </summary>
                   <ul className="mt-2 space-y-1.5 pl-1">
@@ -448,7 +448,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
             <StepHeader
               step={4}
               title={t('larkConfig.step4Title')}
-              icon={<Radio size={16} className="text-cyan" />}
+              icon={<Radio size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[4]}
               onToggle={() => toggleStep(4)}
             />
@@ -477,17 +477,17 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                   </ol>
                 </div>
 
-                <div className="rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-[12px] leading-[1.55] text-gold">
+                <div className="rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-[12px] leading-[1.55] text-gold-ink">
                   <strong>{t('slackConfig.important')}:</strong> {t('larkConfig.step4Tip')}
                 </div>
 
                 <div className="space-y-1.5 rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2.5">
-                  <div className="flex items-center gap-2 text-[12px] font-semibold text-cyan">
+                  <div className="flex items-center gap-2 text-[12px] font-semibold text-cyan-ink">
                     <AlertTriangle size={14} />
                     {t('larkConfig.step4LongConnFaqTitle')}
                   </div>
-                  <p className="text-[11px] text-cyan/85">{t('larkConfig.step4LongConnFaqDesc')}</p>
-                  <p className="text-[11px] font-medium text-cyan">{t('larkConfig.step4LarkWsWarning')}</p>
+                  <p className="text-[11px] text-cyan-ink/85">{t('larkConfig.step4LongConnFaqDesc')}</p>
+                  <p className="text-[11px] font-medium text-cyan-ink">{t('larkConfig.step4LarkWsWarning')}</p>
                 </div>
               </div>
             )}
@@ -498,7 +498,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
             <StepHeader
               step={5}
               title={t('larkConfig.step5Title')}
-              icon={<BookOpen size={16} className="text-cyan" />}
+              icon={<BookOpen size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[5]}
               onToggle={() => toggleStep(5)}
             />
@@ -511,7 +511,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                 <ol className="list-inside list-decimal space-y-1.5 pl-1 text-[12px] leading-[1.55] text-muted">
                   <li>{t('larkConfig.step5Item1')}</li>
                 </ol>
-                <div className="rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-[12px] leading-[1.55] text-gold">
+                <div className="rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-[12px] leading-[1.55] text-gold-ink">
                   <strong>{t('slackConfig.important')}:</strong> {t('larkConfig.step5Tip')}
                 </div>
               </div>
@@ -550,7 +550,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
             </p>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
-            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
+            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedCount} / 5
             </span>
             <div className="flex gap-1">

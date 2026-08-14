@@ -117,7 +117,7 @@ const AgentModelCard: React.FC<{
     && Boolean(agent.model_supply?.length)
     && agent.model_supply?.every((entry) => !entry.has_runnable_hop);
   const statusClass = switchFailed || health === 'interrupted'
-    ? 'text-destructive'
+    ? 'text-destructive-ink'
     : hasTakeover || health === 'degraded' || health === 'waiting'
       ? 'model-hub-ink-gold'
       : 'text-muted';

@@ -103,7 +103,7 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
           </div>
           {text != null && (
             <Button variant="ghost" size="icon" className="size-8" onClick={copy} aria-label={t('common.copy')}>
-              {copied ? <Check className="size-4 text-mint" /> : <Copy className="size-4" />}
+              {copied ? <Check className="size-4 text-mint-ink" /> : <Copy className="size-4" />}
             </Button>
           )}
           {local && localPath ? (
@@ -111,14 +111,14 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
               type="button"
               variant="ghost"
               size="icon"
-              className="size-8 text-mint"
+              className="size-8 text-mint-ink"
               aria-label={t('chat.media.download')}
               onClick={() => downloadFile(localPath)}
             >
               <Download className="size-4" />
             </Button>
           ) : (
-            <Button asChild variant="ghost" size="icon" className="size-8 text-mint" aria-label={t('chat.media.download')}>
+            <Button asChild variant="ghost" size="icon" className="size-8 text-mint-ink" aria-label={t('chat.media.download')}>
               <a href={`${mediaUrl}?download=1`} download onClick={(e) => handleMediaDownloadClick(e, mediaUrl || '', name || undefined)}>
                 <Download className="size-4" />
               </a>

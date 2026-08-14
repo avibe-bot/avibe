@@ -197,7 +197,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     return (
       <div className="flex w-full justify-center">
         <WizardCard accent size="hero" className="items-center gap-6 text-center">
-          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint shadow-[0_0_48px_-6px_rgba(91,255,160,0.7)]">
+          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-[0_0_48px_-6px_rgba(91,255,160,0.7)]">
             <Check size={36} strokeWidth={2.4} />
           </div>
           <div className="space-y-2">
@@ -210,7 +210,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
           </div>
           <div className="w-full max-w-md rounded-xl border border-gold/30 bg-gold/[0.06] px-5 py-4 text-left">
             <div className="mb-3 flex items-center gap-3">
-              <div className="flex size-10 items-center justify-center rounded-lg border border-gold/30 bg-gold/15 text-gold">
+              <div className="flex size-10 items-center justify-center rounded-lg border border-gold/30 bg-gold/15 text-gold-ink">
                 <Key size={18} />
               </div>
               <div>
@@ -226,11 +226,11 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
                 title="Copy"
                 aria-label={t('common.copy') as string}
               >
-                {codeCopied ? <Check size={16} className="text-mint" /> : <Copy size={16} />}
+                {codeCopied ? <Check size={16} className="text-mint-ink" /> : <Copy size={16} />}
               </button>
             </div>
             {codeCopied && (
-              <p className="mt-2 text-[11px] text-mint">{t('summary.bindCodeCopied')}</p>
+              <p className="mt-2 text-[11px] text-mint-ink">{t('summary.bindCodeCopied')}</p>
             )}
           </div>
           <Button variant="brand" size="lg" onClick={() => navigate('/')}>
@@ -246,7 +246,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     <div className="flex w-full justify-center">
       <WizardCard accent size="hero" className="gap-6">
         <div className="flex flex-col items-center gap-5 text-center">
-          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint shadow-[0_0_48px_-6px_rgba(91,255,160,0.7)]">
+          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-[0_0_48px_-6px_rgba(91,255,160,0.7)]">
             <Check size={36} strokeWidth={2.4} />
           </div>
           <div className="space-y-2">
@@ -293,7 +293,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         {/* Quick start tips */}
         <div className="rounded-xl border border-cyan/30 bg-cyan/[0.05] px-5 py-4">
           <div className="mb-3 flex items-center gap-2">
-            <Sparkles size={14} className="text-cyan" />
+            <Sparkles size={14} className="text-cyan-ink" />
             <h3 className="text-[13px] font-semibold text-foreground">{t('summary.usageTips')}</h3>
           </div>
           <div className="space-y-3">
@@ -319,7 +319,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         </div>
 
         {error && (
-          <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-[12px] text-danger">
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}
@@ -353,9 +353,9 @@ const Tip: React.FC<{
   description: string;
 }> = ({ icon, tone, title, description }) => {
   const toneClasses = {
-    cyan: 'border-cyan/30 bg-cyan/[0.08] text-cyan',
-    gold: 'border-gold/30 bg-gold/10 text-gold',
-    mint: 'border-mint/30 bg-mint/[0.08] text-mint',
+    cyan: 'border-cyan/30 bg-cyan/[0.08] text-cyan-ink',
+    gold: 'border-gold/30 bg-gold/10 text-gold-ink',
+    mint: 'border-mint/30 bg-mint/[0.08] text-mint-ink',
   }[tone];
   return (
     <div className="flex items-start gap-3">

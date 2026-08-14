@@ -307,7 +307,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
     <div className="flex flex-col gap-3.5">
       {/* Header: type + enabled pills + close */}
       <div className="flex items-center gap-2">
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-violet/40 bg-violet-soft px-2.5 py-0.5 text-[11px] font-semibold text-violet">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-violet/40 bg-violet-soft px-2.5 py-0.5 text-[11px] font-semibold text-violet-ink">
           {isWatch ? <Eye className="size-3" /> : <CalendarClock className="size-3" />}
           {t(isWatch ? 'agents.graph.triggerDetail.watchType' : 'agents.graph.triggerDetail.taskType')}
         </span>
@@ -315,7 +315,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
           className={clsx(
             'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold',
             enabled
-              ? 'border-mint/40 bg-mint-soft text-mint'
+              ? 'border-mint/40 bg-mint-soft text-mint-ink'
               : 'border-border-strong bg-foreground/[0.04] text-muted',
           )}
         >
@@ -399,7 +399,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between">
             <SectionLabel>{t('agents.graph.triggerDetail.runsTitle')}</SectionLabel>
-            <Link to="/harness?tab=runs" className="text-[11px] font-medium text-cyan hover:underline">
+            <Link to="/harness?tab=runs" className="text-[11px] font-medium text-cyan-ink hover:underline">
               {t('agents.graph.detail.viewAllInHarness')}
             </Link>
           </div>
