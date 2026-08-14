@@ -613,6 +613,20 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_accepts_row_after_closed_raw_html_block(self):
+        reply = process_reply("<script>\ncontent\n</script>\n[A] | [B]")
+
+        self.assertEqual(reply.text, "<script>\ncontent\n</script>")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
+    def test_process_reply_preserves_oversized_separator_free_row(self):
+        text = "Grades:\n[A] | [B] | [C] | [D] | [E] | [F]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_process_reply_ignores_indented_code_when_scanning_table_context(self):
         text = "    Head | Status\n    --- | ---\n[A] | [B]"
 

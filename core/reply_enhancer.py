@@ -1489,7 +1489,7 @@ def _extract_buttons(
             for source_range in blocking_ranges
             if source_range not in code_ranges
         ]
-        if any(start <= m.start() < end for start, end in html_block_ranges):
+        if any(start <= m.start(1) < end for start, end in html_block_ranges):
             return [], text
         if _markdown_container_level_at(text, m.start()) > 1:
             return [], text
@@ -1522,6 +1522,9 @@ def _extract_buttons(
     if not buttons:
         return [], text
 
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and len(buttons) > 5:
+        return [], text
+
     if pattern is _UNSEPARATED_BUTTON_ROW_RE and len(buttons) < 2:
         return [], text
 
@@ -1530,3 +1533,9 @@ def _extract_buttons(
 
     cleaned = text[: m.start()]
     return buttons, cleaned
+
+
+def strip_quick_reply_buttons(text: str) -> str:
+    """Remove a trailing quick-reply row while preserving all other markup."""
+    _, cleaned = _extract_buttons(text)
+    return cleaned
