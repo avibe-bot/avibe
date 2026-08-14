@@ -64,16 +64,14 @@ const INITIAL_PHASE: Phase = { kind: 'form', report: null };
 
 type ReplaceOutcome =
   | { kind: 'repaired' }
-  | { kind: 'unresolved' }
   | { kind: 'impact'; hops: RouteHopRef[]; gaps: SupplyGap[] };
 
 const replacementOutcomeFromEvidence = (
-  source: Source,
   hops: RouteHopRef[] = [],
   gaps: SupplyGap[] = [],
 ): ReplaceOutcome => {
   if (hops.length > 0 || gaps.length > 0) return { kind: 'impact', hops, gaps };
-  return wasBlocked(source.state) ? { kind: 'unresolved' } : { kind: 'repaired' };
+  return { kind: 'repaired' };
 };
 
 type ReplacePhase =
@@ -241,7 +239,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     hops?: RouteHopRef[],
     gaps?: SupplyGap[],
   ) => {
-    const outcome = replacementOutcomeFromEvidence(source, hops, gaps);
+    const outcome = replacementOutcomeFromEvidence(hops, gaps);
     const landed = continuation.settle(seq, () => setReplacePhase({ kind: 'done', outcome }));
     if (landed === 'landed' && outcome.kind === 'repaired') {
       replaceCloseTimer.current = window.setTimeout(onClose, 1400);
@@ -384,7 +382,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
             if (!current) {
               failureClass = 'authoritative-terminal';
               await settlement.gone(latest.id, inventory);
-            } else {
+            } else if (!wasBlocked(current.state)) {
               publishReplacementEvidence(
                 seq,
                 settlement,
@@ -585,12 +583,6 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   gaps={replacePhase.outcome.gaps}
                   committed
                 />
-              </div>
-            )}
-            {replacePhase.kind === 'done' && replacePhase.outcome.kind === 'unresolved' && (
-              <div className="model-hub-ink-gold flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] font-medium">
-                <TriangleAlert className="size-4 shrink-0" />
-                {t('settings.models.repair.unresolved')}
               </div>
             )}
             {replacePhase.kind === 'done' && replacePhase.outcome.kind === 'repaired' && (

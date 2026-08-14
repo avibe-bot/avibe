@@ -56,6 +56,11 @@ const blockedSource: Source = {
   },
 };
 
+const successfulReplacementSource = (): Source => ({
+  ...blockedSource,
+  state: { status: 'standby', retry_at: null, detail_key: null },
+});
+
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -458,7 +463,7 @@ describe('AddApiKeyDialog', () => {
       if (path === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
       requests.push({ input: path, init });
       return Response.json({
-        source: { ...blockedSource, state: { status: 'active' } },
+        source: successfulReplacementSource(),
         removed_hops: [],
         interrupted: [],
       });
@@ -474,7 +479,11 @@ describe('AddApiKeyDialog', () => {
     expect(requests[0].input).toBe(`/api/models/sources/${blockedSource.id}/credential`);
     expect(requests[0].init?.method).toBe('PUT');
     expect(JSON.parse(String(requests[0].init?.body))).toEqual({ key: 'sk-replacement' });
-    expect(settled.source).toHaveBeenCalledWith(expect.objectContaining({ state: { status: 'active' } }));
+    expect(settled.source).toHaveBeenCalledWith(expect.objectContaining({ state: {
+      status: 'standby',
+      retry_at: null,
+      detail_key: null,
+    } }));
   });
 
   it('uses the existing guard shape before force and reports the committed impact', async () => {
@@ -496,7 +505,7 @@ describe('AddApiKeyDialog', () => {
         [hop],
       ))
       .mockResolvedValueOnce({
-        source: { ...blockedSource, state: { status: 'active' } },
+        source: successfulReplacementSource(),
         removed_hops: [hop],
         interrupted: [gap],
       });
@@ -557,7 +566,7 @@ describe('AddApiKeyDialog', () => {
         [nextHop],
       ))
       .mockResolvedValueOnce({
-        source: { ...blockedSource, state: { status: 'active' } },
+        source: successfulReplacementSource(),
         removed_hops: [nextHop],
         interrupted: [],
       });
@@ -589,19 +598,13 @@ describe('AddApiKeyDialog', () => {
 
   it.each([
     { path: 'response', outcome: 'repaired' },
-    { path: 'response', outcome: 'unresolved' },
     { path: 'response', outcome: 'impact' },
     { path: 'inventory', outcome: 'repaired' },
-    { path: 'inventory', outcome: 'unresolved' },
     { path: 'inventory', outcome: 'impact' },
   ] as const)(
     'publishes a $outcome outcome from $path evidence without waiting for reconciliation',
     async ({ path, outcome }) => {
-      const clearSource: Source = {
-        ...blockedSource,
-        state: { status: 'standby', retry_at: null, detail_key: null },
-      };
-      const current = outcome === 'unresolved' ? blockedSource : clearSource;
+      const current = successfulReplacementSource();
       const hop: RouteHopRef = {
         backend: 'claude',
         menu_model: 'sonnet',
@@ -657,8 +660,6 @@ describe('AddApiKeyDialog', () => {
           would_remove_hops: [hop],
           would_interrupt: [gap],
         });
-      } else if (outcome === 'unresolved') {
-        expect(await screen.findByText(i18n.t('settings.models.repair.unresolved'))).toBeTruthy();
       } else {
         expect(await screen.findByText(i18n.t('settings.models.repair.repaired'))).toBeTruthy();
       }
@@ -675,6 +676,31 @@ describe('AddApiKeyDialog', () => {
       );
     },
   );
+
+  it('keeps Retry when an ambiguous replacement still observes the blocked source', async () => {
+    vi.spyOn(modelsApi, 'replaceCredential').mockRejectedValueOnce(
+      new ApiCallError('bad_response', undefined, false),
+    );
+    const settled = replacementSettlement({
+      readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [blockedSource] }),
+      source: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
+    });
+    const closeTimer = vi.spyOn(window, 'setTimeout');
+    renderReplacement(blockedSource, settled);
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-uncommitted');
+    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+
+    expect(await screen.findByText(/Couldn't replace the key|更换失败/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.repair.repaired'))).toBeNull();
+    expect(screen.queryByText(/^Removed hops$|^已移除的跳$/i)).toBeNull();
+    expect(settled.readInventory).toHaveBeenCalledOnce();
+    expect(settled.source).not.toHaveBeenCalled();
+    expect(settled.unread).not.toHaveBeenCalled();
+    expect(closeTimer.mock.calls.filter(([, delay]) => delay === 1400)).toHaveLength(0);
+  });
 
   it.each([
     ['discovery_failed', 'retryable-provider', true],

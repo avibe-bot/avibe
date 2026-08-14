@@ -849,7 +849,14 @@ def test_source_create_nonce_covers_in_flight_committed_and_deleted_states(tmp_p
             if source.get("client_nonce") == payload["client_nonce"]
         ] == [payload["client_nonce"]]
 
-        await service.delete_source(committed["source"]["id"], force=True)
+        with pytest.raises(ModelHubError) as delete_guard:
+            await service.delete_source(committed["source"]["id"])
+        await service.delete_source(
+            committed["source"]["id"],
+            force=True,
+            confirmed_remove_hops=delete_guard.value.data["would_remove_hops"],
+            confirmed_interruptions=delete_guard.value.data["would_interrupt"],
+        )
         recreated = await service.create_source(payload)
         assert recreated["source"]["id"] != committed["source"]["id"]
         assert recreated["source"]["client_nonce"] == payload["client_nonce"]
