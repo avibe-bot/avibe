@@ -931,6 +931,9 @@ def test_list_episodes_uses_exact_get_shape_and_projects_a_bounded_page() -> Non
         lambda data: data.update(episodes=[], count=0, total_count=1),
         lambda data: data["profiles"].append({"profile_data": {}}),
         lambda data: data["episodes"][0].update(timestamp="not-a-timestamp"),
+        lambda data: data["episodes"][0].update(
+            timestamp="0001-01-01T00:00:00+23:59"
+        ),
         lambda data: data["episodes"][0].update(summary="\ud800"),
         lambda data: (
             data["episodes"].append(dict(data["episodes"][0])),

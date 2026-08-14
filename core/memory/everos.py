@@ -1393,11 +1393,11 @@ def _record_timestamp(value: Any) -> str | None:
     elif isinstance(value, str) and len(value) <= 128:
         try:
             instant = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        except ValueError:
+            if instant.tzinfo is None:
+                return None
+            instant = instant.astimezone(timezone.utc)
+        except (OverflowError, ValueError):
             return None
-        if instant.tzinfo is None:
-            return None
-        instant = instant.astimezone(timezone.utc)
     else:
         return None
     return instant.isoformat().replace("+00:00", "Z")
