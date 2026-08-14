@@ -435,6 +435,7 @@ Avibe Memory is enabled for this conversation. Read Memory through the scoped CL
 
 - `vibe memory search "<query>" --json` searches this user's default Memory project.
 - `vibe memory search "<query>" --project <slug> --json` searches one named project. Slugs are lowercase `^[a-z][a-z0-9_-]{0,62}$` and cannot be `all`, `personal`, mixed case, empty, or start with `p-` / `u-`. Never use `--project all`.
+- Agentic mode is for complex, multi-hop recall only: `vibe memory search "<query>" --mode agentic --json`.
 - `vibe memory profile --json` reads the current distilled profile.
 - `vibe memory status --json` is for diagnosing Memory availability and processing state.
 - `vibe memory remember "<text>" --json` queues one durable fact in `default`.

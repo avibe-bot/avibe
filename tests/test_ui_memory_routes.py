@@ -1093,6 +1093,47 @@ def test_memory_search_requires_csrf_and_only_forwards_query_policy_and_optional
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_memory_search_rejects_agentic_policy_before_internal_transport(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def transport_must_not_run(*_args, **_kwargs):
+        raise AssertionError("agentic Web search reached internal transport")
+
+    monkeypatch.setattr(internal_client, "memory_search", transport_must_not_run)
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+
+    response = client.post(
+        "/api/memory/search",
+        json={
+            "query": "connect the clues",
+            "policy": {
+                "mode": "agentic",
+                "max_results": 8,
+                "include_profile": True,
+                "include_current_session": False,
+                "timeout_seconds": 30,
+                "max_model_calls": 2,
+                "cost_budget_tokens": 32_000,
+            },
+        },
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_capability_unavailable",
+    }
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

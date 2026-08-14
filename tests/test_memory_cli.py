@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
+from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS, RecallPolicy
+from core.system_prompt_injection import _MEMORY_CLI_PROMPT
 from vibe import cli, internal_client
 
 
@@ -22,7 +25,12 @@ _MEMORY_HELP_BY_LANGUAGE = {
         ),
         "status": ("Print machine-readable output",),
         "profile": ("Print machine-readable output",),
-        "search": ("Search query", "Maximum results (1-20)", "Print machine-readable output"),
+        "search": (
+            "Search query",
+            "Maximum results (1-20)",
+            "Recall mode (default: hybrid)",
+            "Print machine-readable output",
+        ),
         "remember": ("Text to remember (maximum 4,000 characters)", "Print machine-readable output"),
     },
     "zh": {
@@ -30,7 +38,7 @@ _MEMORY_HELP_BY_LANGUAGE = {
         "memory": ("显示记忆状态", "显示记忆档案", "搜索本地记忆", "将长期个人信息加入队列"),
         "status": ("输出机器可读格式",),
         "profile": ("输出机器可读格式",),
-        "search": ("搜索内容", "最大结果数（1-20）", "输出机器可读格式"),
+        "search": ("搜索内容", "最大结果数（1-20）", "召回模式（默认：hybrid）", "输出机器可读格式"),
         "remember": ("要记住的文本（最多 4,000 个字符）", "输出机器可读格式"),
     },
 }
@@ -76,22 +84,73 @@ def test_memory_help_copy_is_not_hardcoded_in_cli_module() -> None:
 
 def test_memory_search_json_is_a_presentation_of_the_uds_response(monkeypatch, capsys) -> None:
     args = cli.build_parser().parse_args(["memory", "search", "find this", "--limit", "3", "--json"])
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[str, int, str]] = []
 
-    def search(query: str, limit: int, **_kwargs):
-        calls.append((query, limit))
+    def search(query: str, limit: int, **kwargs):
+        calls.append((query, limit, kwargs["mode"]))
         return {"status_code": 200, "body": {"status": "ok", "items": [{"kind": "fact", "text": "result"}]}}
 
     monkeypatch.setattr(internal_client, "memory_search_sync", search)
 
     assert cli.cmd_memory(args) == 0
-    assert calls == [("find this", 3)]
+    assert calls == [("find this", 3, "hybrid")]
     assert json.loads(capsys.readouterr().out) == {
         "schema_version": 1,
         "ok": True,
         "kind": "memory_search",
         "result": {"status": "ok", "items": [{"kind": "fact", "text": "result"}]},
     }
+
+
+def test_injected_agentic_memory_example_is_accepted_by_the_live_parser() -> None:
+    example = 'vibe memory search "<query>" --mode agentic --json'
+    assert f"`{example}`" in _MEMORY_CLI_PROMPT
+
+    args = cli.build_parser().parse_args(shlex.split(example)[1:])
+
+    assert args.memory_command == "search"
+    assert args.query == "<query>"
+    assert args.mode == "agentic"
+    assert args.limit == 8
+
+
+def test_agentic_cli_builds_bounded_internal_recall_policy(
+    monkeypatch,
+    capsys,
+) -> None:
+    """Scenario: MEMORY-SEARCH-007."""
+
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def request_sync(method, path, *, payload, **_kwargs):
+        calls.append((method, path, payload))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "items": [], "warnings": []},
+        }
+
+    monkeypatch.setattr(internal_client, "_memory_request_sync", request_sync)
+    args = cli.build_parser().parse_args(
+        ["memory", "search", "connect the clues", "--mode", "agentic", "--json"]
+    )
+
+    assert cli.cmd_memory(args) == 0
+    assert len(calls) == 1
+    method, path, payload = calls[0]
+    assert method == "POST"
+    assert path == "/internal/memory/search"
+    assert payload["query"] == "connect the clues"
+    policy = RecallPolicy.from_payload(payload["policy"])
+    assert policy == RecallPolicy(
+        mode="agentic",
+        max_results=8,
+        include_profile=True,
+        include_current_session=False,
+        timeout_seconds=MAX_AGENTIC_TIMEOUT_SECONDS,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
 def test_memory_status_json_returns_a_closed_service_down_code(monkeypatch, capsys) -> None:

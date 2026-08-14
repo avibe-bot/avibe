@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, AsyncIterator, Literal, TypeVar
 
 from config import paths
@@ -23,7 +24,11 @@ from core.memory.attachments import (
     encode_pinned_bundle,
 )
 from core.memory.provider_root import ProviderRoot
-from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
+from core.memory.everos import (
+    AgenticRecallTelemetry,
+    MemoryProviderFailure,
+    MemoryProviderPort,
+)
 from core.memory.project_ids import (
     is_new_stored_memory_project_id,
     is_persisted_memory_project_id,
@@ -633,6 +638,71 @@ class MemoryModule:
         if self._clear_active or self._is_maintenance_open():
             return OperationFailed(error="memory_clear_failed")
 
+        agentic_started = (
+            monotonic()
+            if policy.mode == "agentic" and policy.timeout_seconds is not None
+            else None
+        )
+        agentic_deadline = (
+            agentic_started + float(policy.timeout_seconds)
+            if agentic_started is not None
+            else None
+        )
+        if agentic_deadline is None:
+            return await self._recall_validated(
+                normalized_query,
+                policy=policy,
+                principal_id=principal_id,
+                project_id=project_id,
+                current_session_id=current_session_id,
+                effective_mode=effective_mode,
+                agentic_deadline=None,
+                agentic_telemetry=None,
+            )
+        agentic_telemetry = AgenticRecallTelemetry()
+        try:
+            remaining = _remaining_timeout(agentic_deadline)
+            result = await asyncio.wait_for(
+                self._recall_validated(
+                    normalized_query,
+                    policy=policy,
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    current_session_id=current_session_id,
+                    effective_mode=effective_mode,
+                    agentic_deadline=agentic_deadline,
+                    agentic_telemetry=agentic_telemetry,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            result = OperationFailed(error="memory_provider_timeout")
+        except BaseException:
+            _log_agentic_recall_telemetry(
+                started=agentic_started,
+                telemetry=agentic_telemetry,
+                result=None,
+            )
+            raise
+        _log_agentic_recall_telemetry(
+            started=agentic_started,
+            telemetry=agentic_telemetry,
+            result=result,
+        )
+        return result
+
+    async def _recall_validated(
+        self,
+        normalized_query: str,
+        *,
+        policy: RecallPolicy,
+        principal_id: str,
+        project_id: str,
+        current_session_id: str | None,
+        effective_mode: Literal["keyword", "vector", "hybrid", "agentic"] | None,
+        agentic_deadline: float | None,
+        agentic_telemetry: AgenticRecallTelemetry | None,
+    ) -> RecallResult:
         async with self._lifecycle_lock:
             if not self._is_enabled():
                 return OperationFailed(error="memory_disabled")
@@ -659,15 +729,33 @@ class MemoryModule:
                     return OperationFailed(error="memory_store_unavailable")
 
             requested_mode = policy.mode
+            mode_was_pre_resolved = effective_mode is not None
             if effective_mode is None:
-                effective_mode = await self.resolve_recall_mode(policy)
+                effective_mode = await self.resolve_recall_mode(
+                    policy,
+                    timeout_seconds=(
+                        _remaining_timeout(agentic_deadline)
+                        if agentic_deadline is not None
+                        else None
+                    ),
+                    agentic_telemetry=agentic_telemetry,
+                )
                 if isinstance(effective_mode, OperationFailed):
                     return effective_mode
             if effective_mode == "agentic":
-                # EverOS 1.2.3 has no public model-call/token budget contract.
-                # A local timeout alone cannot make this policy enforceable.
-                if not bool(getattr(self._provider, "agentic_budget_enforced", False)):
+                if requested_mode != "agentic" or agentic_deadline is None:
                     return OperationFailed(error="memory_capability_unavailable")
+                if mode_was_pre_resolved:
+                    resolved_mode = await self.resolve_recall_mode(
+                        policy,
+                        timeout_seconds=_remaining_timeout(agentic_deadline),
+                        agentic_telemetry=agentic_telemetry,
+                    )
+                    if resolved_mode != "agentic":
+                        return OperationFailed(error="memory_capability_unavailable")
+                provider_timeout = _remaining_timeout(agentic_deadline)
+            else:
+                provider_timeout = None
             result = await self._provider_read(
                 lambda: self._provider.search(
                     principal_id,
@@ -677,7 +765,10 @@ class MemoryModule:
                     method=effective_mode,
                     include_profile=policy.include_profile,
                     session_ref=session_ref,
-                )
+                    timeout_seconds=provider_timeout,
+                    agentic_telemetry=agentic_telemetry,
+                ),
+                timeout_seconds=provider_timeout,
             )
         if isinstance(result, OperationFailed):
             return result
@@ -694,21 +785,46 @@ class MemoryModule:
     async def resolve_recall_mode(
         self,
         policy: RecallPolicy,
+        *,
+        timeout_seconds: float | None = None,
+        agentic_telemetry: AgenticRecallTelemetry | None = None,
     ) -> Literal["keyword", "vector", "hybrid", "agentic"] | OperationFailed:
         if policy.mode == "agentic":
             if not bool(getattr(self._provider, "agentic_budget_enforced", False)):
                 return OperationFailed(error="memory_capability_unavailable")
-            return "agentic"
         if policy.mode == "keyword":
             return "keyword"
         try:
             health = await asyncio.wait_for(
                 self._provider.health_snapshot(),
-                timeout=PROVIDER_READ_TIMEOUT_SECONDS,
+                timeout=(
+                    timeout_seconds
+                    if timeout_seconds is not None
+                    else PROVIDER_READ_TIMEOUT_SECONDS
+                ),
             )
             embed_available = health.capabilities.get("embed") is True
+            agentic_available = (
+                embed_available
+                and health.capabilities.get("llm") is True
+                and health.capabilities.get("rerank") is True
+                and "agentic_search" not in health.disabled_features
+            )
+        except (asyncio.TimeoutError, MemoryProviderFailure) as failure:
+            if agentic_telemetry is not None and (
+                isinstance(failure, asyncio.TimeoutError)
+                or failure.error == "memory_provider_timeout"
+            ):
+                agentic_telemetry.timed_out = True
+            embed_available = False
+            agentic_available = False
         except Exception:
             embed_available = False
+            agentic_available = False
+        if policy.mode == "agentic":
+            if not agentic_available:
+                return OperationFailed(error="memory_capability_unavailable")
+            return "agentic"
         if policy.mode == "auto":
             return "hybrid" if embed_available else "keyword"
         if not embed_available:
@@ -763,9 +879,14 @@ class MemoryModule:
     async def _provider_read(
         self,
         operation: Callable[[], Awaitable[tuple[MemoryItem, ...]]],
+        *,
+        timeout_seconds: float | None = None,
     ) -> tuple[MemoryItem, ...] | OperationFailed:
         try:
-            return await asyncio.wait_for(operation(), timeout=PROVIDER_READ_TIMEOUT_SECONDS)
+            return await asyncio.wait_for(
+                operation(),
+                timeout=timeout_seconds or PROVIDER_READ_TIMEOUT_SECONDS,
+            )
         except asyncio.TimeoutError:
             return OperationFailed(error="memory_provider_timeout")
         except MemoryProviderFailure as failure:
@@ -1014,3 +1135,29 @@ def _positive_timeout(value: float) -> float:
         return max(float(value), 0.001)
     except (TypeError, ValueError):
         return 0.001
+
+
+def _remaining_timeout(deadline: float) -> float:
+    remaining = deadline - monotonic()
+    if remaining <= 0.001:
+        raise asyncio.TimeoutError
+    return remaining
+
+
+def _log_agentic_recall_telemetry(
+    *,
+    started: float,
+    telemetry: AgenticRecallTelemetry,
+    result: RecallResult | None,
+) -> None:
+    success = isinstance(result, RecallItems)
+    timeout = telemetry.timed_out or (
+        isinstance(result, OperationFailed) and result.error == "memory_provider_timeout"
+    )
+    logger.info(
+        "Memory recall telemetry mode=agentic round=%s duration_ms=%s success=%s timeout=%s",
+        telemetry.round,
+        max(0, int((monotonic() - started) * 1000)),
+        str(success).lower(),
+        str(timeout).lower(),
+    )

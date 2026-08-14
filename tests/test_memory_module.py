@@ -658,8 +658,20 @@ async def test_auto_recall_selects_only_keyword_or_hybrid(
     assert provider.search_policies == [(effective_mode, True, None)]
 
 
-async def test_agentic_recall_fails_closed_without_provider_search(tmp_path: Path) -> None:
-    provider = FakeMemoryProvider()
+@pytest.mark.parametrize("missing_capability", ["embed", "llm", "rerank"])
+async def test_agentic_recall_fails_closed_when_a_capability_is_missing(
+    tmp_path: Path,
+    missing_capability: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = FakeMemoryProvider(agentic_budget_enforced_flag=True)
+    provider.health_snapshot_value = replace(
+        provider.health_snapshot_value,
+        capabilities={
+            **provider.health_snapshot_value.capabilities,
+            missing_capability: False,
+        },
+    )
     module, _store, _provider = _module(tmp_path, provider=provider)
     policy = RecallPolicy(
         mode="agentic",
@@ -667,6 +679,47 @@ async def test_agentic_recall_fails_closed_without_provider_search(tmp_path: Pat
         timeout_seconds=5,
         max_model_calls=1,
         cost_budget_tokens=1_000,
+    )
+
+    caplog.set_level("INFO", logger="core.memory.module")
+    result = await module.recall(
+        "query",
+        policy=policy,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_scopes == []
+    assert provider.search_policies == []
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "mode=agentic" in telemetry[0]
+    assert "round=unknown" in telemetry[0]
+    assert "success=false" in telemetry[0]
+    assert "timeout=false" in telemetry[0]
+    assert "query" not in telemetry[0]
+
+
+async def test_agentic_recall_fails_closed_when_health_disables_agentic_search(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(agentic_budget_enforced_flag=True)
+    provider.health_snapshot_value = replace(
+        provider.health_snapshot_value,
+        disabled_features=("agentic_search",),
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=5,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
     )
 
     result = await module.recall(
@@ -678,7 +731,183 @@ async def test_agentic_recall_fails_closed_without_provider_search(tmp_path: Pat
 
     assert result == OperationFailed(error="memory_capability_unavailable")
     assert provider.search_scopes == []
-    assert provider.search_policies == []
+
+
+async def test_agentic_mode_resolution_bounds_the_capability_probe(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(agentic_budget_enforced_flag=True)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    async def slow_health_snapshot():
+        await asyncio.sleep(1)
+        return provider.health_snapshot_value
+
+    provider.health_snapshot = slow_health_snapshot  # type: ignore[method-assign]
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=5,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+
+    result = await module.resolve_recall_mode(policy, timeout_seconds=0.001)
+
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_scopes == []
+
+
+async def test_agentic_recall_logs_capability_probe_timeout(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = FakeMemoryProvider(agentic_budget_enforced_flag=True)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    async def slow_health_snapshot():
+        await asyncio.sleep(1)
+        return provider.health_snapshot_value
+
+    provider.health_snapshot = slow_health_snapshot  # type: ignore[method-assign]
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=0.01,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+
+    caplog.set_level("INFO", logger="core.memory.module")
+    result = await module.recall(
+        "private query",
+        policy=policy,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == OperationFailed(error="memory_provider_timeout")
+    assert provider.search_scopes == []
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "mode=agentic" in telemetry[0]
+    assert "success=false" in telemetry[0]
+    assert "timeout=true" in telemetry[0]
+    assert "private query" not in telemetry[0]
+
+
+async def test_agentic_recall_logs_typed_provider_health_timeout(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = FakeMemoryProvider(
+        agentic_budget_enforced_flag=True,
+        health_failure=MemoryProviderFailure("memory_provider_timeout"),
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=30,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+
+    caplog.set_level("INFO", logger="core.memory.module")
+    result = await module.recall(
+        "private query",
+        policy=policy,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_scopes == []
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "mode=agentic" in telemetry[0]
+    assert "success=false" in telemetry[0]
+    assert "timeout=true" in telemetry[0]
+    assert "private query" not in telemetry[0]
+
+
+async def test_agentic_recall_reaches_provider_with_policy_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = FakeMemoryProvider(
+        agentic_budget_enforced_flag=True,
+        agentic_round="round2",
+        search_items=(MemoryItem(kind="fact", text="agentic result"),),
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=5,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+    monotonic_values = iter((100.0, 100.0, 100.0, 102.0, 102.0))
+    monkeypatch.setattr(
+        "core.memory.module.monotonic",
+        lambda: next(monotonic_values),
+    )
+    resolve_timeouts: list[float | None] = []
+    resolve_recall_mode = module.resolve_recall_mode
+
+    async def tracked_resolve_recall_mode(
+        tracked_policy: RecallPolicy,
+        *,
+        timeout_seconds: float | None = None,
+        agentic_telemetry=None,
+    ):
+        resolve_timeouts.append(timeout_seconds)
+        return await resolve_recall_mode(
+            tracked_policy,
+            timeout_seconds=timeout_seconds,
+            agentic_telemetry=agentic_telemetry,
+        )
+
+    monkeypatch.setattr(module, "resolve_recall_mode", tracked_resolve_recall_mode)
+
+    caplog.set_level("INFO", logger="core.memory.module")
+    result = await module.recall(
+        "private query",
+        policy=policy,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == RecallItems(
+        items=provider.search_items,
+        requested_mode="agentic",
+        effective_mode="agentic",
+    )
+    assert provider.search_policies == [("agentic", True, None)]
+    assert resolve_timeouts == [5.0]
+    assert provider.search_timeouts == [3.0]
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "mode=agentic" in telemetry[0]
+    assert "round=round2" in telemetry[0]
+    assert "duration_ms=2000" in telemetry[0]
+    assert "success=true" in telemetry[0]
+    assert "timeout=false" in telemetry[0]
+    assert "private query" not in telemetry[0]
 
 
 async def test_current_session_overlay_uses_the_trusted_canonical_reference(tmp_path: Path) -> None:

@@ -22,7 +22,7 @@ import logging
 import os
 import stat
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Literal, Optional
 
 import httpx
 
@@ -30,6 +30,7 @@ from config import paths
 from core.memory.processing_record import (
     PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
 )
+from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +48,10 @@ _CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 #
 # Most Memory reads wait on one provider operation bounded by
 # ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s). Search can first
-# probe capabilities and then issue the provider read, so it needs a separate
-# transport bound outside both sequential steps.
+# probe capabilities and then issue an agentic provider read bounded at 30s,
+# so it needs a separate transport bound outside both sequential steps.
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
-MEMORY_SEARCH_TIMEOUT_SECONDS = 45.0
+MEMORY_SEARCH_TIMEOUT_SECONDS = 55.0
 MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
 # Processing Record owns its complete identity/journal/provider/store work
 # budget; the transport imports that bound so the two processes cannot drift.
@@ -1010,19 +1011,29 @@ def memory_search_sync(
     query: str,
     limit: int,
     *,
+    mode: Literal["hybrid", "keyword", "vector", "agentic"] = "hybrid",
     caller_session_id: str | None = None,
     project: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_SEARCH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    policy: dict[str, object] = {
+        "mode": mode,
+        "max_results": limit,
+        "include_profile": True,
+        "include_current_session": False,
+    }
+    if mode == "agentic":
+        # RecallPolicy retains its complete legacy budget envelope. EverOSPort
+        # enforces the wall-clock field; EverOS 1.2.3 has no model/token gate.
+        policy.update(
+            timeout_seconds=MAX_AGENTIC_TIMEOUT_SECONDS,
+            max_model_calls=2,
+            cost_budget_tokens=32_000,
+        )
     payload: dict[str, object] = {
         "query": query,
-        "policy": {
-            "mode": "hybrid",
-            "max_results": limit,
-            "include_profile": True,
-            "include_current_session": False,
-        },
+        "policy": policy,
     }
     if project is not None:
         payload["project"] = project

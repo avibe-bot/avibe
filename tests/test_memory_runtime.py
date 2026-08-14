@@ -65,6 +65,8 @@ from core.memory.types import (
     MemoryItems,
     MemoryProfile,
     MemoryProfileExplicitInfo,
+    OperationFailed,
+    RecallPolicy,
     CaptureAttachment,
     CaptureRequest,
     ProviderSessionRef,
@@ -85,6 +87,25 @@ from config.v2_config import (
 
 PROJECT = "default"
 PRINCIPAL = "u-11111111111111111111111111111111"
+
+
+async def test_all_project_agentic_recall_is_rejected_before_project_access() -> None:
+    runtime = object.__new__(MemoryRuntime)
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=8,
+        timeout_seconds=30,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+
+    result = await runtime._recall_all_projects(
+        "connect the clues",
+        policy=policy,
+        principal_id=PRINCIPAL,
+    )
+
+    assert result == OperationFailed(error="memory_invalid_input")
 
 
 def _maintenance(runtime: MemoryRuntime) -> MemoryMaintenance:

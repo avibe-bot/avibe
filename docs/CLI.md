@@ -128,9 +128,20 @@ Read scoped local Memory or queue durable context to remember — facts the user
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
-vibe memory search <query> [--project <slug>] [--limit 1..20] [--json]
+vibe memory search <query> [--project <slug>] [--mode {hybrid|keyword|vector|agentic}] [--limit 1..20] [--json]
 vibe memory remember <text> [--project <slug>] [--json]
 ```
+
+Search defaults to `--mode hybrid` with `--limit 8`. Use `keyword` for exact
+terms, `vector` for semantic matches, and reserve `agentic` for complex,
+multi-hop recall. Agentic searches are bounded to 30 seconds and require the
+configured LLM, embedding, and rerank capabilities. They fail closed when any
+required capability is unavailable, and `--project all --mode agentic` is not
+supported.
+
+EverOS returns an empty `atomic_facts` list for agentic episode results. When
+EverOS receives unlimited `top_k`, agent case and skill results are capped at
+10; the Avibe CLI always sends its explicit bounded `--limit` value.
 
 ### `vibe doctor`
 

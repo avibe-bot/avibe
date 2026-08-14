@@ -27,6 +27,7 @@ from core.memory.types import (
     ProviderSessionRef,
     is_memory_error_code,
     MemoryPreflightDiagnostic,
+    MAX_AGENTIC_TIMEOUT_SECONDS,
 )
 from core.memory.observations import (
     AddAck,
@@ -48,6 +49,9 @@ _MAX_ITEM_BYTES = 64 * 1024
 _MAX_RESPONSE_DEPTH = 8
 _MAX_RESPONSE_COLLECTION = 200
 _SIDECAR_TIMEOUT_SECONDS = 20.0
+_AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
+_AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
+_SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS = 0.05
 _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
@@ -85,6 +89,14 @@ class ProviderHealthSnapshot:
             "cascade": dict(self.cascade) if self.cascade is not None else None,
             "recorder": dict(self.recorder),
         }
+
+
+@dataclass
+class AgenticRecallTelemetry:
+    """Scrub-safe state retained across one bounded agentic recall."""
+
+    round: Literal["round1", "round2", "unknown"] = "unknown"
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,9 +219,9 @@ class EverOSPort:
 
     @property
     def agentic_budget_enforced(self) -> bool:
-        """EverOS 1.2.3 exposes no model-call or token budget enforcement."""
+        """Whether this adapter enforces a bounded agentic wall-clock budget."""
 
-        return False
+        return True
 
     async def add(self, capture: ProviderCapture) -> AddResult:
         """Durably hand one capture to EverOS and return its acknowledgement."""
@@ -402,17 +414,28 @@ class EverOSPort:
         method: Literal["keyword", "vector", "hybrid", "agentic"] = "hybrid",
         include_profile: bool = True,
         session_ref: ProviderSessionRef | None = None,
+        timeout_seconds: float | None = None,
+        agentic_telemetry: AgenticRecallTelemetry | None = None,
     ) -> tuple[MemoryItem, ...]:
-        data = await self._search_data(
-            principal_id,
-            project_id,
-            query,
-            limit,
-            method=method,
-            include_profile=include_profile,
-            session_ref=session_ref,
-        )
-        return _map_search_items(data, principal_id=principal_id, limit=limit)
+        response_metadata: dict[str, str] = {}
+        try:
+            data = await self._search_data(
+                principal_id,
+                project_id,
+                query,
+                limit,
+                method=method,
+                include_profile=include_profile,
+                session_ref=session_ref,
+                timeout_seconds=timeout_seconds,
+                telemetry=response_metadata,
+            )
+            return _map_search_items(data, principal_id=principal_id, limit=limit)
+        finally:
+            if method == "agentic" and agentic_telemetry is not None:
+                round_value = response_metadata.get("round")
+                if round_value in {"round1", "round2"}:
+                    agentic_telemetry.round = round_value
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
         del project_id
@@ -589,14 +612,11 @@ class EverOSPort:
         method: Literal["keyword", "vector", "hybrid", "agentic"],
         include_profile: bool,
         session_ref: ProviderSessionRef | None,
+        timeout_seconds: float | None,
+        telemetry: dict[str, str],
     ) -> dict[str, Any]:
         if method not in {"keyword", "vector", "hybrid", "agentic"}:
             raise MemoryProviderFailure("memory_invalid_input", retryable=False)
-        if method == "agentic" and not self.agentic_budget_enforced:
-            raise MemoryProviderFailure(
-                "memory_capability_unavailable",
-                retryable=False,
-            )
         if session_ref is not None and (
             session_ref.principal_id != principal_id
             or session_ref.project_ref != project_id
@@ -614,18 +634,42 @@ class EverOSPort:
         }
         if session_ref is not None:
             request["filters"] = {"session_id": session_ref.session_id}
-        body = await self._sidecar_request(
-            "POST",
-            "/api/v2/memory/search",
-            request,
-            require_json=True,
-            capability_rejection=True,
-        )
-        if not isinstance(body, dict):
-            raise MemoryProviderFailure("memory_provider_response_invalid")
-        data = body.get("data")
-        if not isinstance(data, dict) or not _is_bounded_json_value(data):
-            raise MemoryProviderFailure("memory_provider_response_invalid")
+        try:
+            if method == "agentic":
+                request_timeout = min(
+                    _positive_timeout(
+                        timeout_seconds,
+                        MAX_AGENTIC_TIMEOUT_SECONDS,
+                    ),
+                    MAX_AGENTIC_TIMEOUT_SECONDS,
+                )
+                body = await asyncio.wait_for(
+                    self._sidecar_request(
+                        "POST",
+                        "/api/v2/memory/search",
+                        request,
+                        require_json=True,
+                        capability_rejection=True,
+                        timeout_seconds=request_timeout,
+                        response_metadata=telemetry,
+                    ),
+                    timeout=request_timeout,
+                )
+            else:
+                body = await self._sidecar_request(
+                    "POST",
+                    "/api/v2/memory/search",
+                    request,
+                    require_json=True,
+                    capability_rejection=True,
+                )
+            if not isinstance(body, dict):
+                raise MemoryProviderFailure("memory_provider_response_invalid")
+            data = body.get("data")
+            if not isinstance(data, dict) or not _is_bounded_json_value(data):
+                raise MemoryProviderFailure("memory_provider_response_invalid")
+        except asyncio.TimeoutError as exc:
+            raise MemoryProviderFailure("memory_provider_timeout") from exc
         return data
 
     async def _sidecar_request(
@@ -636,17 +680,44 @@ class EverOSPort:
         *,
         require_json: bool,
         capability_rejection: bool = False,
+        timeout_seconds: float | None = None,
+        response_metadata: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         started = time.monotonic()
+        request_timeout = _positive_timeout(
+            timeout_seconds,
+            self._sidecar_timeout_seconds,
+        )
+        headers = None
+        if timeout_seconds is not None:
+            sidecar_timeout = max(
+                0.001,
+                request_timeout - _SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS,
+            )
+            headers = {_AGENTIC_TIMEOUT_HEADER: str(sidecar_timeout)}
         transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))
         try:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://memory-sidecar",
-                timeout=httpx.Timeout(self._sidecar_timeout_seconds, connect=3.0),
+                timeout=httpx.Timeout(
+                    request_timeout,
+                    connect=min(3.0, request_timeout),
+                ),
                 trust_env=False,
             ) as client:
-                async with client.stream(method, route, json=payload) as response:
+                async with client.stream(
+                    method,
+                    route,
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    round_value = response.headers.get(_AGENTIC_ROUND_HEADER)
+                    if (
+                        response_metadata is not None
+                        and round_value in {"round1", "round2"}
+                    ):
+                        response_metadata["round"] = round_value
                     if not 200 <= response.status_code < 300:
                         logger.warning(
                             "EverOS sidecar request failed route=%s status=%s latency_ms=%s",
@@ -655,9 +726,13 @@ class EverOSPort:
                             _elapsed_ms(started),
                         )
                         raise MemoryProviderFailure(
-                            "memory_capability_unavailable"
-                            if capability_rejection and response.status_code == 422
-                            else "memory_processing_failed"
+                            "memory_provider_timeout"
+                            if timeout_seconds is not None and response.status_code == 504
+                            else (
+                                "memory_capability_unavailable"
+                                if capability_rejection and response.status_code == 422
+                                else "memory_processing_failed"
+                            )
                         )
                     if not require_json:
                         await _read_bounded_response(response)
@@ -1339,7 +1414,7 @@ def _normalized_endpoint_url(value: str | None) -> str | None:
     return normalized.rstrip("/") if normalized else None
 
 
-def _positive_timeout(value: float, fallback: float) -> float:
+def _positive_timeout(value: object, fallback: float) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
@@ -1367,6 +1442,8 @@ class MemoryProviderPort(Protocol):
         method: Literal["keyword", "vector", "hybrid", "agentic"] = "hybrid",
         include_profile: bool = True,
         session_ref: ProviderSessionRef | None = None,
+        timeout_seconds: float | None = None,
+        agentic_telemetry: AgenticRecallTelemetry | None = None,
     ) -> tuple[MemoryItem, ...]: ...
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
@@ -1398,12 +1475,15 @@ class FakeMemoryProvider:
     search_policies: list[
         tuple[str, bool, ProviderSessionRef | None]
     ] = field(default_factory=list)
+    search_timeouts: list[float | None] = field(default_factory=list)
     ingest_failures: Deque[BaseException] = field(default_factory=deque)
     add_results: Deque[AddResult] = field(default_factory=deque)
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
     health_failure: BaseException | None = None
+    agentic_budget_enforced_flag: bool = False
+    agentic_round: Literal["round1", "round2", "unknown"] = "unknown"
     processing_health_failure: BaseException | None = None
     recorder_health_state: dict[str, str | None] = field(
         default_factory=lambda: {"state": "disabled", "reason": None}
@@ -1456,9 +1536,14 @@ class FakeMemoryProvider:
         method: Literal["keyword", "vector", "hybrid", "agentic"] = "hybrid",
         include_profile: bool = True,
         session_ref: ProviderSessionRef | None = None,
+        timeout_seconds: float | None = None,
+        agentic_telemetry: AgenticRecallTelemetry | None = None,
     ) -> tuple[MemoryItem, ...]:
         self.search_scopes.append((principal_id, project_id))
         self.search_policies.append((method, include_profile, session_ref))
+        self.search_timeouts.append(timeout_seconds)
+        if method == "agentic" and agentic_telemetry is not None:
+            agentic_telemetry.round = self.agentic_round
         del query, limit
         if self.search_failure is not None:
             raise self.search_failure
@@ -1502,4 +1587,4 @@ class FakeMemoryProvider:
 
     @property
     def agentic_budget_enforced(self) -> bool:
-        return False
+        return self.agentic_budget_enforced_flag

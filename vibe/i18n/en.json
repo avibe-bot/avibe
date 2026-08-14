@@ -701,6 +701,7 @@
         "query": "Search query",
         "project": "Memory project: default or a named slug such as billing",
         "limit": "Maximum results (1-20)",
+        "mode": "Recall mode (default: hybrid)",
         "text": "Text to remember (maximum 4,000 characters)",
         "json": "Print machine-readable output"
       },

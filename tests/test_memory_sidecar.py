@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,10 +23,28 @@ LEGACY_PROJECT = "p-22222222222222222222222222222222"
 SESSION_ID = f"src--{'1' * 64}--e1"
 
 
+def _agentic_search_body() -> bytes:
+    return json.dumps(
+        {
+            "user_id": "u-11111111111111111111111111111111",
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "query": "connect the clues",
+            "method": "agentic",
+            "top_k": 8,
+            "include_profile": True,
+            "enable_llm_rerank": False,
+        }
+    ).encode()
+
+
 def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) -> None:
     import uvicorn
 
     captured: dict[str, object] = {}
+    round_logger = logging.getLogger("everos.memory.search.agentic")
+    original_round_logger_level = round_logger.level
+    round_logger.setLevel(logging.ERROR)
 
     class _App:
         def middleware(self, _kind: str):
@@ -37,7 +56,8 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
             return _App()
 
     class _Config:
-        def __init__(self, _app, **kwargs):
+        def __init__(self, configured_app, **kwargs):
+            captured["app"] = configured_app
             captured.update(kwargs)
 
     class _Server:
@@ -45,6 +65,7 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
             return None
 
         def run(self) -> None:
+            captured["round_logger_level"] = round_logger.level
             return None
 
     monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.3")
@@ -55,9 +76,134 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(uvicorn, "Server", _Server)
     monkeypatch.setenv("AVIBE_MEMORY_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
 
-    sidecar.serve(tmp_path / "everos.sock")
+    try:
+        sidecar.serve(tmp_path / "everos.sock")
+    finally:
+        round_logger.setLevel(original_round_logger_level)
 
     assert captured["timeout_graceful_shutdown"] == 1
+    assert captured["round_logger_level"] == logging.INFO
+    assert round_logger.level == original_round_logger_level
+    assert isinstance(captured["app"], sidecar._RecorderHealthProjection)
+    assert isinstance(captured["app"]._app, sidecar._AgenticDeadlineProjection)
+
+
+def test_agentic_deadline_projection_cancels_downstream_and_preserves_round() -> None:
+    downstream_cancelled = asyncio.Event()
+    sent: list[dict] = []
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _agentic_search_body(),
+            "more_body": False,
+        }
+    ]
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, downstream_receive, _send):
+        assert (await downstream_receive())["body"] == _agentic_search_body()
+        round_state = sidecar._AGENTIC_ROUND_STATE.get()
+        assert round_state is not None
+        round_state["round"] = "round2"
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            downstream_cancelled.set()
+            raise
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"0.001"),
+        ],
+    }
+
+    asyncio.run(
+        sidecar._AgenticDeadlineProjection(downstream)(scope, receive, capture)
+    )
+
+    assert downstream_cancelled.is_set()
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 504
+    headers = dict(sent[0]["headers"])
+    assert headers[sidecar._AGENTIC_ROUND_HEADER.lower().encode()] == b"round2"
+    assert json.loads(sent[1]["body"]) == {"detail": "memory_request_timed_out"}
+
+
+def test_agentic_deadline_projection_returns_allowlisted_round_header() -> None:
+    sent: list[dict] = []
+    request_messages = [
+        {
+            "type": "http.request",
+            "body": _agentic_search_body(),
+            "more_body": False,
+        }
+    ]
+    round_logger = logging.getLogger("everos.memory.search.agentic")
+    round_handler = sidecar._AgenticRoundHandler()
+    original_round_logger_level = round_logger.level
+    round_logger.setLevel(logging.INFO)
+    round_logger.addHandler(round_handler)
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def capture(message):
+        sent.append(message)
+
+    async def downstream(_scope, downstream_receive, send):
+        assert (await downstream_receive())["body"] == _agentic_search_body()
+        round_logger.info(
+            {
+                "event": "agentic_search_decision",
+                "round": "round2",
+                "query": "private query must not be projected",
+            }
+        )
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b'{"data":{}}'})
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/v2/memory/search",
+        "headers": [
+            (sidecar._AGENTIC_TIMEOUT_HEADER.lower().encode(), b"1"),
+        ],
+    }
+
+    try:
+        asyncio.run(
+            sidecar._AgenticDeadlineProjection(downstream)(
+                scope,
+                receive,
+                capture,
+            )
+        )
+    finally:
+        round_logger.removeHandler(round_handler)
+        round_logger.setLevel(original_round_logger_level)
+
+    headers = dict(sent[0]["headers"])
+    assert headers[sidecar._AGENTIC_ROUND_HEADER.lower().encode()] == b"round2"
+    assert all(b"private query" not in value for value in headers.values())
 
 
 def test_sidecar_rejects_artifact_before_everos_can_persist_diagnostics(
@@ -357,7 +503,7 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     assert _request_rejection("POST", "/unrelated", b"{}") == "route"
 
 
-def test_sidecar_guard_rejects_untrusted_search_scope_and_unbudgeted_agentic() -> None:
+def test_sidecar_guard_accepts_agentic_but_rejects_untrusted_search_scope() -> None:
     search = {
         "user_id": "u-11111111111111111111111111111111",
         "app_id": "avibe",
@@ -369,10 +515,29 @@ def test_sidecar_guard_rejects_untrusted_search_scope_and_unbudgeted_agentic() -
         "enable_llm_rerank": False,
     }
 
+    agentic_body = json.dumps({**search, "method": "agentic"}).encode()
+    assert _request_rejection("POST", "/api/v2/memory/search", agentic_body) is None
+    assert (
+        sidecar._agentic_request_timeout(
+            "/api/v2/memory/search",
+            agentic_body,
+            {sidecar._AGENTIC_TIMEOUT_HEADER: "30"},
+        )
+        == 30.0
+    )
+    assert sidecar._agentic_request_timeout(
+        "/api/v2/memory/search", agentic_body, {}
+    ) is False
+    assert sidecar._agentic_request_timeout(
+        "/api/v2/memory/search",
+        agentic_body,
+        {sidecar._AGENTIC_TIMEOUT_HEADER: "30.1"},
+    ) is False
+
     for invalid in (
-        {**search, "method": "agentic"},
         {**search, "filters": {"session_id": "raw-session"}},
         {**search, "filters": {"project_id": PROJECT}},
+        {**search, "enable_llm_rerank": True},
     ):
         assert (
             _request_rejection(

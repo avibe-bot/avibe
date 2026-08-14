@@ -662,6 +662,68 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
     ]
 
 
+def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    captured: list[tuple] = []
+
+    class Runtime:
+        async def search_payload(
+            self,
+            query,
+            policy,
+            principal_id,
+            project_id,
+            *,
+            current_session_id=None,
+        ):
+            captured.append(
+                (query, policy, principal_id, project_id, current_session_id)
+            )
+            return {"status": "ok", "items": []}
+
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/search",
+                headers={CALLER_SESSION_HEADER: "ses-memory"},
+                json={
+                    "query": "connect the clues",
+                    "policy": {
+                        "mode": "agentic",
+                        "max_results": 8,
+                        "include_profile": True,
+                        "include_current_session": False,
+                        "timeout_seconds": 30,
+                        "max_model_calls": 2,
+                        "cost_budget_tokens": 32_000,
+                    },
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": []}
+    assert len(captured) == 1
+    query, policy, principal_id, project_id, current_session_id = captured[0]
+    assert query == "connect the clues"
+    assert policy.mode == "agentic"
+    assert policy.timeout_seconds == 30
+    assert principal_id == "u-11111111111111111111111111111111"
+    assert project_id == "default"
+    assert current_session_id == "ses-memory"
+
+
 def test_memory_rebuild_requires_signed_ui_operator() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER

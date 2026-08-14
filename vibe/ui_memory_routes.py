@@ -1125,6 +1125,14 @@ def register_memory_routes(app) -> None:
                 policy = RecallPolicy.from_payload(payload.get("policy"))
             except (TypeError, ValueError):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
+            if policy.mode == "agentic":
+                return _memory_response(
+                    {
+                        "status": "failed",
+                        "error": "memory_capability_unavailable",
+                    },
+                    status_code=503,
+                )
             project = payload.get("project")
             if project is not None and not isinstance(project, str):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
