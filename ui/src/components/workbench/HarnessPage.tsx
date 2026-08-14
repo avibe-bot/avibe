@@ -989,8 +989,8 @@ const TasksList: React.FC<TasksListProps> = ({
 // their second line *says*, never in how the row is built. ``definitionRowLine``
 // owns that difference so this component stays a single anatomy.
 const STATE_DOT_CLASS: Record<HarnessLifecycleState, string> = {
-  running: 'bg-mint shadow-[0_0_5px_rgba(52,211,153,0.7)]',
-  waiting: 'bg-cyan',
+  running: 'bg-mint-ink shadow-[0_0_5px_rgba(52,211,153,0.7)]',
+  waiting: 'bg-cyan-ink',
   paused: 'bg-muted/70',
   finished: 'bg-border-strong',
 };
@@ -2008,7 +2008,7 @@ const LifecyclePill: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row }) =
       className="shrink-0 font-mono text-[9px] uppercase"
     >
       {state === 'running' ? (
-        <span className="size-1.5 rounded-full bg-mint" />
+        <span className="size-1.5 rounded-full bg-mint-ink" />
       ) : state === 'paused' ? (
         <PauseCircle className="size-2.5" />
       ) : null}

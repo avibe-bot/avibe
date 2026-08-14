@@ -134,7 +134,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         {isSourceBuild ? <GitCommitHorizontal size={12} /> : 'v'}
         {displayVersion}
         {hasUpdate && (
-          <span className="absolute -top-1 -right-1 size-2.5 rounded-full border-2 border-background bg-gold animate-pulse" />
+          <span className="absolute -top-1 -right-1 size-2.5 rounded-full border-2 border-background bg-gold-ink animate-pulse" />
         )}
       </button>
 

@@ -274,11 +274,11 @@ export const TerminalTabs: React.FC<{
           const persistentReady = persistent && st === 'ready';
           const dotClass =
             st === 'ready'
-              ? 'bg-mint'
+              ? 'bg-mint-ink'
               : st === 'connecting'
                 ? 'bg-amber-400'
                 : st === 'closed' || st === 'error'
-                  ? 'bg-destructive'
+                  ? 'bg-destructive-ink'
                   : 'bg-muted';
           return (
             <span

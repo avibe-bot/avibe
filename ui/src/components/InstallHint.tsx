@@ -64,7 +64,7 @@ export const InstallHint: React.FC = () => {
             aria-label={t('installHint.cta')}
             className="relative size-7 shrink-0 hover:bg-transparent"
           >
-            <span className="size-2.5 rounded-full bg-gold shadow-[0_0_8px_rgba(245,200,92,0.9)]" />
+            <span className="size-2.5 rounded-full bg-gold-ink shadow-[0_0_8px_rgba(245,200,92,0.9)]" />
             <span className="absolute inline-flex size-2.5 animate-ping rounded-full bg-gold/60" />
           </Button>
         </PopoverTrigger>

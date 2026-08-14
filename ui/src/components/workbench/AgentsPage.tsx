@@ -800,7 +800,7 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, onSel
         {description && <div className="text-[11px] text-muted">{description}</div>}
       </div>
       <Badge variant={agent.enabled ? 'success' : 'secondary'} className="font-mono uppercase">
-        <span className={clsx('size-1.5 rounded-full', agent.enabled ? 'bg-mint' : 'bg-muted')} />
+        <span className={clsx('size-1.5 rounded-full', agent.enabled ? 'bg-mint-ink' : 'bg-muted')} />
         {agent.enabled ? t('agents.statusEnabled') : t('agents.statusDisabled')}
       </Badge>
     </button>

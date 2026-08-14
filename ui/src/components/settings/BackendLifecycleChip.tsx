@@ -43,10 +43,10 @@ const BADGE_VARIANT: Record<Visual, BadgeVariant> = {
 
 const DOT_STYLES: Record<Visual, string> = {
   disabled: 'bg-muted/60',
-  ready: 'bg-mint',
-  updating: 'bg-cyan animate-pulse',
-  update: 'bg-gold animate-pulse',
-  error: 'bg-destructive',
+  ready: 'bg-mint-ink',
+  updating: 'bg-cyan-ink animate-pulse',
+  update: 'bg-gold-ink animate-pulse',
+  error: 'bg-destructive-ink',
   loading: 'bg-muted/60',
 };
 

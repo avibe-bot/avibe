@@ -347,7 +347,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
                 <span
                   className={clsx(
                     'size-1.5 rounded-full',
-                    watch?.runtime?.running ? 'bg-mint' : 'bg-muted',
+                    watch?.runtime?.running ? 'bg-mint-ink' : 'bg-muted',
                   )}
                 />
                 {defPending && !watch ? '…' : runtimeText}

@@ -10,9 +10,9 @@ interface StatusPillProps extends React.HTMLAttributes<HTMLSpanElement> {
 }
 
 const TONE_CLASSES: Record<Tone, { wrapper: string; dot: string }> = {
-  running: { wrapper: 'border-mint/40 bg-mint/[0.12] text-foreground', dot: 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.6)]' },
+  running: { wrapper: 'border-mint/40 bg-mint/[0.12] text-foreground', dot: 'bg-mint-ink shadow-[0_0_8px_rgba(91,255,160,0.6)]' },
   stopped: { wrapper: 'border-border-strong bg-surface-2 text-muted', dot: 'bg-muted' },
-  warning: { wrapper: 'border-gold/40 bg-gold/[0.12] text-gold-ink', dot: 'bg-gold' },
+  warning: { wrapper: 'border-gold/40 bg-gold/[0.12] text-gold-ink', dot: 'bg-gold-ink' },
   idle: { wrapper: 'border-border bg-surface text-muted', dot: 'bg-muted' },
 };
 

@@ -28,10 +28,10 @@ export const ACCENT_ICON: Record<Accent, string> = {
 // Status dot fill (composite pill · recent-switch list). Gold reserved for the
 // "entered metered" billing marker.
 export const ACCENT_DOT: Record<Accent, string> = {
-  mint: 'bg-mint',
-  gold: 'bg-gold',
-  cyan: 'bg-cyan',
-  violet: 'bg-violet',
+  mint: 'bg-mint-ink',
+  gold: 'bg-gold-ink',
+  cyan: 'bg-cyan-ink',
+  violet: 'bg-violet-ink',
   muted: 'bg-muted',
 };
 

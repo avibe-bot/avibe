@@ -980,7 +980,7 @@ export const VaultSecretForm: React.FC<{
         <SlidersHorizontal className="size-3.5 text-muted" />
         <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.dialog.advanced')}</span>
         {!advancedOpen && (allowHosts.length > 0 || fetchAuthMode !== 'bearer') && (
-          <span className="size-1.5 rounded-full bg-mint" aria-hidden />
+          <span className="size-1.5 rounded-full bg-mint-ink" aria-hidden />
         )}
       </button>
       {advancedOpen && (

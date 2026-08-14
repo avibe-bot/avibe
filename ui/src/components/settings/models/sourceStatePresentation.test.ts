@@ -29,13 +29,13 @@ describe('sourceStatePresentation', () => {
     })).toMatchObject({
       key: 'settings.models.upstream.state.supplying',
       values: { backends: 'Claude Code, Codex' },
-      dotClass: 'bg-mint',
+      dotClass: 'bg-mint-ink',
     });
     expect(sourceStatePresentation(state('active'), 'detail', 'en', 0, {
       known: true,
       backends: ['Claude Code'],
       native: true,
-    })).toMatchObject({ key: 'settings.models.sourceDetail.status.inUse', dotClass: 'bg-mint' });
+    })).toMatchObject({ key: 'settings.models.sourceDetail.status.inUse', dotClass: 'bg-mint-ink' });
   });
 
   it('renders a future cooldown as a localized duration', () => {

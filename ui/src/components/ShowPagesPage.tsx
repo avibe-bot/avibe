@@ -44,8 +44,8 @@ const LABEL = 'font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-
 // tile is now a letter avatar (hashed by session), so visibility reads from the
 // badge rather than a per-state icon.
 const STATUS: Record<Visibility, { badge: 'warning' | 'info' | 'secondary'; tone: SegmentedTone; dot: string }> = {
-  public: { badge: 'warning', tone: 'gold', dot: 'bg-gold' },
-  private: { badge: 'info', tone: 'cyan', dot: 'bg-cyan' },
+  public: { badge: 'warning', tone: 'gold', dot: 'bg-gold-ink' },
+  private: { badge: 'info', tone: 'cyan', dot: 'bg-cyan-ink' },
   offline: { badge: 'secondary', tone: 'muted', dot: 'bg-muted' },
 };
 

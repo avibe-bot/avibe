@@ -449,7 +449,7 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
   const [open, setOpen] = useState(false);
   const label = value === 'all' ? t('skills.backendAll') : BACKEND_LABEL[value];
   const dot = (key: Backend | 'all') =>
-    key === 'all' ? 'bg-muted' : key === 'claude' ? 'bg-mint' : key === 'opencode' ? 'bg-cyan' : 'bg-violet';
+    key === 'all' ? 'bg-muted' : key === 'claude' ? 'bg-mint-ink' : key === 'opencode' ? 'bg-cyan-ink' : 'bg-violet-ink';
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>

@@ -196,8 +196,8 @@ const InboxHoverPopover: React.FC<{
 // gray / green / red: idle → muted (gray), running → mint (green) + glow,
 // failed → destructive (red) + glow. Tokens resolve from src/index.css.
 const STATUS_DOT_CLASS: Record<string, string> = {
-  running: 'bg-mint shadow-[0_0_6px_0_rgba(91,255,160,0.65)]',
-  failed: 'bg-destructive shadow-[0_0_6px_0_rgba(255,107,107,0.6)]',
+  running: 'bg-mint-ink shadow-[0_0_6px_0_rgba(91,255,160,0.65)]',
+  failed: 'bg-destructive-ink shadow-[0_0_6px_0_rgba(255,107,107,0.6)]',
   idle: 'bg-muted',
 };
 

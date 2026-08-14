@@ -449,6 +449,151 @@ function assertAccentAliasesKeepTheirTokenName(source) {
 }
 
 assertAccentAliasesKeepTheirTokenName(css);
+
+// Which accent token a mark reaches for is not fill-versus-text. It is whether the
+// accent has a LABEL printed on it. A fill or hairline may stay vivid because it is
+// read through the paired --X-foreground sitting on it; anything read directly
+// against the canvas -- text, an icon, a wire, an end node, a status dot -- carries
+// no label and so must take --X-ink. The two assertions below cover the two places
+// that distinction gets lost: a CSS rule painting a wire, and a Tailwind utility
+// painting a dot.
+//
+// Both are needed because neither the ink nor the fill assertion above can see this.
+// They check that each token is legible against the surface it claims; they cannot
+// know that .model-hub-wire--gateway chose the fill. That is how the supply graph
+// shipped 2px --mint strokes at 2.35:1 on the light canvas with every token guard
+// passing. Light is where it bites: --mint reads 2.35:1 on --background and --gold
+// 2.95:1, both under the 3:1 non-text floor, while their inks clear it. In dark each
+// accent's ink IS its fill, so none of this moves a dark pixel.
+
+// A translucent value is a wash, not a mark -- it has no ratio of its own, exactly as
+// requireMeasurableColor says -- so only opaque declarations are held to the rule.
+const ACCENT_NAMES = ACCENT_FILLS.map((fill) => fill.slice(2));
+const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*\\)`);
+
+function assertMarksTakeTheInk(source, name) {
+  postcss.parse(source).walkDecls((decl) => {
+    if (decl.prop !== 'stroke' && decl.prop !== 'fill') {
+      return;
+    }
+
+    const value = normalizeCssValue(decl.value);
+    if (value.includes('color-mix') || value.includes('transparent') || !BARE_ACCENT_VAR.test(value)) {
+      return;
+    }
+
+    const accent = BARE_ACCENT_VAR.exec(value)[1];
+    throw new Error(
+      `${name}: ${decl.selector ?? decl.parent?.selector} paints ${decl.prop} with var(--${accent}), the fill. `
+      + 'A stroke or an SVG fill is a mark on the bare canvas -- no label is printed on it, so the '
+      + `pairing that licenses a vivid fill does not apply. Use var(--${accent}-ink), which is the same `
+      + 'value in dark and a legible one in light.',
+    );
+  });
+}
+
+assertMarksTakeTheInk(modelHubCss, 'model hub');
+
+// The same rule in Tailwind: `bg-mint` on a 6px dot is a mark, `bg-mint` under a
+// `text-primary-foreground` label is a fill. Only the label tells them apart, and it
+// is regularly a prop or two away (an icon tile passes `iconTileClassName="bg-gold"`
+// and `iconClassName="text-gold-foreground"` on adjacent lines), so the label is
+// looked for in a window rather than on the same line. A per-line check produced
+// three false positives on exactly that shape.
+//
+// mint/cyan/pink declare no -foreground of their own; they print --primary-foreground
+// and --accent-foreground, the aliases SEMANTIC_FILL_ALIASES keeps equal. pink has no
+// label token at all, so a bare bg-pink can only ever be an unlabeled mark.
+const FILL_LABEL = new Map([
+  ['primary', 'primary-foreground'],
+  ['mint', 'primary-foreground'],
+  ['accent', 'accent-foreground'],
+  ['cyan', 'accent-foreground'],
+  ['destructive', 'destructive-foreground'],
+  ['violet', 'violet-foreground'],
+  ['gold', 'gold-foreground'],
+]);
+const LABEL_WINDOW = 4;
+
+// Control chrome the owner has not ruled on: switch/toggle tracks and progress/step
+// bars, where the fill is a large shape whose state is already carried by knob
+// position or bar length rather than by the colour being legible on its own. They
+// are pinned rather than skipped, and pinned by count, so removing one goes stale
+// loudly and adding a sixth bare mark to a listed file still fails. Repainting them
+// is a design.pen decision, not a guard decision.
+const TRACK = 'toggle track: state is carried by knob position, not by the fill reading on its own';
+const STEP_DOTS = 'wizard step dots: progress is carried by how many are filled, not by one dot reading on its own';
+const ACCEPTED_BARE_FILLS = new Map([
+  ['src/components/ui/switch.tsx --primary', { marks: 1, reason: TRACK }],
+  ['src/components/settings/SettingsPrimitives.tsx --mint', { marks: 1, reason: TRACK }],
+  ['src/components/steps/PlatformSelection.tsx --mint', { marks: 1, reason: TRACK }],
+  ['src/components/visual/ProgressBar.tsx --mint', { marks: 1, reason: 'progress bar: progress is carried by bar length' }],
+  ['src/components/steps/SlackConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
+  ['src/components/steps/TelegramConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
+  ['src/components/steps/DiscordConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
+  ['src/components/steps/LarkConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
+  ['src/components/steps/WeChatConfig.tsx --mint', { marks: 1, reason: STEP_DOTS }],
+  ['src/components/visual/EmbeddedConfigShell.tsx --mint', { marks: 1, reason: STEP_DOTS }],
+]);
+
+function assertUnlabeledFillsTakeTheInk(root) {
+  const bare = new RegExp(`\\bbg-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-/])`, 'g');
+  const found = new Map();
+
+  const files = fs.readdirSync(root, { recursive: true })
+    .filter((entry) => /\.tsx?$/.test(entry))
+    .map((entry) => `${root}/${entry}`)
+    .sort();
+
+  for (const file of files) {
+    // A class name inside a comment paints nothing -- BackendRuntimeCard's JSDoc
+    // names ``"bg-gold"`` to document what callers pass -- so comment-only lines are
+    // blanked before the scan. Blanked for the label window too, and not merely
+    // skipped as marks: prose describing a pairing is not evidence that the pairing
+    // is rendered, and letting it stand in would excuse the next real mark beside it.
+    const lines = fs.readFileSync(file, 'utf8').split('\n')
+      .map((line) => (/^\s*(\*|\/\/|\/\*)/.test(line) ? '' : line));
+    lines.forEach((line, index) => {
+      for (const match of line.matchAll(bare)) {
+        const accent = match[1];
+        const label = FILL_LABEL.get(accent);
+        const window = lines
+          .slice(Math.max(0, index - LABEL_WINDOW), index + LABEL_WINDOW + 1)
+          .join('\n');
+        if (label && window.includes(`-${label}`)) {
+          continue;
+        }
+
+        const key = `${file} --${accent}`;
+        const entry = found.get(key) ?? { count: 0, lines: [] };
+        found.set(key, { count: entry.count + 1, lines: [...entry.lines, index + 1] });
+      }
+    });
+  }
+
+  const unpinned = [...found.entries()].filter(([key]) => !ACCEPTED_BARE_FILLS.has(key));
+  if (unpinned.length > 0) {
+    throw new Error(
+      'These paint a bare accent fill with no paired *-foreground label anywhere near it, so they are '
+      + 'marks read straight off the canvas and must use the -ink token (bg-mint-ink, bg-gold-ink, ...):\n'
+      + unpinned.map(([key, { lines }]) => `  ${key} at line ${lines.join(', ')}`).join('\n')
+      + '\nIf a mark is deliberately exempt, pin it in ACCEPTED_BARE_FILLS with its reason.',
+    );
+  }
+
+  for (const [key, { reason, marks }] of ACCEPTED_BARE_FILLS) {
+    const actual = found.get(key)?.count ?? 0;
+    if (actual !== marks) {
+      throw new Error(
+        `ACCEPTED_BARE_FILLS pins ${key} at ${marks} unlabeled mark(s) (${reason}) but found ${actual}. `
+        + 'An exemption covers the marks it was granted for, not whatever appears under the same key later '
+        + '-- re-count it here once the change is intended.',
+      );
+    }
+  }
+}
+
+assertUnlabeledFillsTakeTheInk('src');
 assertEveryAcceptedPairStillExists();
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });

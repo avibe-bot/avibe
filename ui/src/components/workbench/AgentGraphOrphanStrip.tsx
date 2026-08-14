@@ -23,7 +23,7 @@ const STATE_META: Record<
   LiveState,
   { dotClass: string; stateKey: string; endKey: string; Icon: typeof Square; needsConfirm: boolean }
 > = {
-  active: { dotClass: 'bg-mint', stateKey: 'agents.running.stateActive', endKey: 'agents.running.endActive', Icon: Square, needsConfirm: true },
+  active: { dotClass: 'bg-mint-ink', stateKey: 'agents.running.stateActive', endKey: 'agents.running.endActive', Icon: Square, needsConfirm: true },
   idle: { dotClass: 'bg-muted', stateKey: 'agents.running.stateIdle', endKey: 'agents.running.endIdle', Icon: Power, needsConfirm: false },
   orphan: { dotClass: 'bg-amber-500', stateKey: 'agents.running.stateOrphan', endKey: 'agents.running.endOrphan', Icon: Trash2, needsConfirm: true },
 };

@@ -686,7 +686,7 @@ export const EditorApp: React.FC<{
                   view === key && !explorerCollapsed ? 'text-foreground' : 'text-muted hover:text-foreground',
                 )}
               >
-                {view === key && !explorerCollapsed && <span className="absolute left-0 top-0 h-full w-0.5 bg-cyan" />}
+                {view === key && !explorerCollapsed && <span className="absolute left-0 top-0 h-full w-0.5 bg-cyan-ink" />}
                 <Icon className="size-5" />
               </button>
             ))}
@@ -788,7 +788,7 @@ export const EditorApp: React.FC<{
                           <CodeXml className="size-3.5 text-cyan-ink" />
                         )}
                         {tab.name}
-                        {dirty[tab.id] && <span className="size-1.5 rounded-full bg-mint" />}
+                        {dirty[tab.id] && <span className="size-1.5 rounded-full bg-mint-ink" />}
                       </button>
                       <button
                         type="button"

@@ -580,7 +580,7 @@ export const AgentGraphTab: React.FC = () => {
         <p className="min-w-0 flex-1 text-[12.5px] text-muted">{t('agents.graph.subtitle')}</p>
         {counts && (
           <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-mint/40 bg-mint-soft px-3 py-1 text-[12px] font-semibold text-mint-ink">
-            <span className="size-1.5 rounded-full bg-mint" />
+            <span className="size-1.5 rounded-full bg-mint-ink" />
             {t('agents.graph.livePill', { active: counts.active, queued: counts.queued })}
           </span>
         )}

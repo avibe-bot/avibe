@@ -93,11 +93,11 @@ export const SupplyLegend: React.FC<{ relations: SupplyRelation[] }> = ({ relati
         {LEGEND_ORDER.filter((kind) => visible.has(kind)).map((kind) => (
           <span key={kind} className="flex items-center gap-[7px] font-medium">
             <span className={cn(`model-hub-legend-swatch model-hub-legend-swatch--${kind}`, {
-              'bg-cyan': kind === 'native',
-              'bg-mint': kind === 'gateway',
+              'bg-cyan-ink': kind === 'native',
+              'bg-mint-ink': kind === 'gateway',
               'bg-foreground/15': kind === 'connected_unused',
-              'bg-violet': kind === 'takeover',
-              'bg-gold': kind === 'unavailable',
+              'bg-violet-ink': kind === 'takeover',
+              'bg-gold-ink': kind === 'unavailable',
             })} />
             {t(`settings.models.legend.${LEGEND_COPY[kind]}`)}
           </span>

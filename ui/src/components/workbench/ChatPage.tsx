@@ -3843,9 +3843,9 @@ export const ThinkingBubble: React.FC<{
         </div>
         <div className="w-fit rounded-2xl rounded-tl-md border border-mint/25 bg-mint/[0.09] px-3.5 py-2.5">
           <div className="flex items-center gap-1 py-0.5">
-            <span className="vr-typing-dot size-1.5 rounded-full bg-mint" />
-            <span className="vr-typing-dot size-1.5 rounded-full bg-mint [animation-delay:0.2s]" />
-            <span className="vr-typing-dot size-1.5 rounded-full bg-mint [animation-delay:0.4s]" />
+            <span className="vr-typing-dot size-1.5 rounded-full bg-mint-ink" />
+            <span className="vr-typing-dot size-1.5 rounded-full bg-mint-ink [animation-delay:0.2s]" />
+            <span className="vr-typing-dot size-1.5 rounded-full bg-mint-ink [animation-delay:0.4s]" />
           </div>
         </div>
       </div>

@@ -36,7 +36,7 @@ const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
       return {
         key: 'settings.models.upstream.state.unavailableDue',
         textClass: 'model-hub-ink-gold',
-        dotClass: 'bg-gold',
+        dotClass: 'bg-gold-ink',
       };
     }
     return {
@@ -45,7 +45,7 @@ const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
         delay: new Intl.NumberFormat(locale, { style: 'unit', unit: 'minute', unitDisplay: 'long' }).format(remainingMinutes),
       },
       textClass: 'model-hub-ink-gold',
-      dotClass: 'bg-gold',
+      dotClass: 'bg-gold-ink',
     };
   },
   needs_action: (state) => ({
@@ -53,12 +53,12 @@ const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
       ? NEEDS_ACTION_KEY[state.detail_key as NeedsActionDetailKey] ?? state.detail_key
       : 'settings.models.state.needs_action',
     textClass: 'text-destructive-ink',
-    dotClass: 'bg-destructive',
+    dotClass: 'bg-destructive-ink',
   }),
   error: () => ({
     key: 'settings.models.sourceDetail.status.error',
     textClass: 'text-destructive-ink',
-    dotClass: 'bg-destructive',
+    dotClass: 'bg-destructive-ink',
   }),
 };
 
@@ -77,7 +77,7 @@ export const sourceStatePresentation = (
       return {
         key: 'settings.models.sourceDetail.status.inUse',
         textClass: 'model-hub-ink-mint',
-        dotClass: 'bg-mint',
+        dotClass: 'bg-mint-ink',
       };
     }
     return {
@@ -88,7 +88,7 @@ export const sourceStatePresentation = (
         ? { backend: adoption.backends[0] }
         : { backends: adoption.backends.join(locale.startsWith('zh') ? '、' : ', ') },
       textClass: adoption.native ? 'text-cyan-ink' : 'model-hub-ink-mint',
-      dotClass: adoption.native ? 'bg-cyan' : 'bg-mint',
+      dotClass: adoption.native ? 'bg-cyan-ink' : 'bg-mint-ink',
     };
   }
   return STATUS_RULES[state.status](state, surface, locale, now);

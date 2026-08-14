@@ -695,7 +695,7 @@ export const OAuthConnectDialog: React.FC<{
                         )}
                         aria-hidden
                       >
-                        {selected && <span className="size-2 rounded-full bg-mint" />}
+                        {selected && <span className="size-2 rounded-full bg-mint-ink" />}
                       </span>
                     )}
                     <span className="model-hub-add-sub-option-copy min-w-0 flex flex-1 flex-col">
@@ -870,7 +870,7 @@ export const OAuthConnectDialog: React.FC<{
           <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
             {active ? (
               <span className="flex items-center gap-2 text-[12px] text-muted">
-                <span className="size-2 shrink-0 rounded-full bg-gold" aria-hidden />
+                <span className="size-2 shrink-0 rounded-full bg-gold-ink" aria-hidden />
                 {state === 'verifying'
                   ? t('settings.models.oauth.status.verifying')
                   : isDevice

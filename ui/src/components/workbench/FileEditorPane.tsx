@@ -396,7 +396,7 @@ export const FileEditorPane: React.FC<{
             </Button>
           )}
           <span className="flex-1 truncate font-mono text-[12px] text-foreground">{filename}</span>
-          {dirty && <span className="size-1.5 shrink-0 rounded-full bg-mint" title={t('apps.fileBrowser.unsaved')} />}
+          {dirty && <span className="size-1.5 shrink-0 rounded-full bg-mint-ink" title={t('apps.fileBrowser.unsaved')} />}
           {onPopOut && (
             <Button
               type="button"

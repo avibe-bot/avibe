@@ -685,7 +685,7 @@ export const AppShell: React.FC = () => {
                 <span
                   className={clsx(
                     'size-2 shrink-0 rounded-full',
-                    isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
+                    isRunning ? 'bg-mint-ink shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
                   )}
                 />
                 {isRunning ? t('common.running') : t('common.stopped')}

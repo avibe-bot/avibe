@@ -91,7 +91,7 @@ export const MoreConnectionSection: React.FC = () => {
         <span
           className={clsx(
             'size-2.5 shrink-0 rounded-full',
-            isRunning ? 'bg-mint shadow-[0_0_9px_rgba(91,255,160,0.9)]' : 'bg-muted',
+            isRunning ? 'bg-mint-ink shadow-[0_0_9px_rgba(91,255,160,0.9)]' : 'bg-muted',
           )}
         />
         <span className="flex-1 text-sm font-semibold">

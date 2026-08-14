@@ -284,7 +284,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                 <span
                   className={clsx(
                     'size-1.5 rounded-full',
-                    checked ? 'bg-mint shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted/50'
+                    checked ? 'bg-mint-ink shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted/50'
                   )}
                 />
                 {label}

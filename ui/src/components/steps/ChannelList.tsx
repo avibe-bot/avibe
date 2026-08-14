@@ -1666,7 +1666,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         <span
                           className={clsx(
                             'size-1.5 rounded-full',
-                            channelEnabled ? 'bg-mint shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted'
+                            channelEnabled ? 'bg-mint-ink shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted'
                           )}
                         />
                         {channelEnabled ? t('common.enabled') : t('common.disabled')}

@@ -122,11 +122,11 @@ const AgentModelCard: React.FC<{
       ? 'model-hub-ink-gold'
       : 'text-muted';
   const statusDot = switchFailed || health === 'interrupted'
-    ? 'bg-destructive'
+    ? 'bg-destructive-ink'
     : hasTakeover || health === 'degraded' || health === 'waiting'
-      ? 'bg-gold'
+      ? 'bg-gold-ink'
       : health === 'ok' && agent.mode === 'hub'
-        ? 'bg-mint'
+        ? 'bg-mint-ink'
         : 'bg-muted';
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-background" data-agent-backend={agent.backend}>

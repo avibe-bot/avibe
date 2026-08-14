@@ -26,7 +26,7 @@ const RadioDot: React.FC<{ selected: boolean }> = ({ selected }) => (
       selected ? 'border-mint' : 'border-border-strong',
     )}
   >
-    {selected && <span className="size-2 rounded-full bg-mint" />}
+    {selected && <span className="size-2 rounded-full bg-mint-ink" />}
   </span>
 );
 

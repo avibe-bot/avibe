@@ -18,10 +18,15 @@
  * dimmed toward transparency reads as "quiet" over black and "washed out" over
  * white; light re-anchors those on the full ink.
  *
- * Which accent token a rule reaches for follows index.css: a fill, hairline or
- * wire takes --X, and anything that renders as text or an icon takes --X-ink.
- * They are different values in light, where a vivid brand fill and a legible
- * label pull in opposite directions.
+ * Which accent token a rule reaches for follows index.css, and the split is not
+ * fill-versus-text — it is whether the accent has a label printed on it. A fill
+ * or hairline takes --X because it is read through the paired --X-foreground
+ * sitting on it. Everything read directly against the canvas takes --X-ink: text
+ * and icons, and equally a wire, an end node or a status dot, none of which
+ * carry a label to be read through. This file previously grouped wires with
+ * fills, which is how the supply graph shipped 2px --mint strokes at 2.35:1 on
+ * the light canvas. They are different values in light, where a vivid brand fill
+ * and a legible mark pull in opposite directions.
  */
 :root {
   /* Neutral wash channel: white over the dark frame. */
@@ -1316,16 +1321,25 @@
   stroke-linejoin: round;
 }
 
+/* Wires and their end nodes take the ink, not the fill. A wire carries no label,
+ * so nothing is printed on it and the fill/label pairing that licenses a vivid
+ * --X never applies: the only thing it is read against is the canvas. On light
+ * that is the difference between visible and not — a 2px --mint stroke sits at
+ * 2.35:1 on --background and --gold at 2.95:1, both under the 3:1 WCAG floor for
+ * non-text, while --mint-ink clears it. Dark is untouched: every accent's ink is
+ * the same value as its fill there, which is the whole reason the split exists.
+ * The glow follows the stroke so a light wire is not haloed in the colour it
+ * stopped being. See assertMarksTakeTheInk in scripts/validate-theme.mjs. */
 .model-hub-wire--native {
-  stroke: var(--cyan);
+  stroke: var(--cyan-ink);
   stroke-width: var(--model-hub-wire-active-width);
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--cyan) 40%, transparent));
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--cyan-ink) 40%, transparent));
 }
 
 .model-hub-wire--gateway {
-  stroke: var(--mint);
+  stroke: var(--mint-ink);
   stroke-width: var(--model-hub-wire-active-width);
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--mint) 40%, transparent));
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--mint-ink) 40%, transparent));
 }
 
 .model-hub-wire--connected_unused {
@@ -1334,13 +1348,13 @@
 }
 
 .model-hub-wire--takeover {
-  stroke: var(--violet);
+  stroke: var(--violet-ink);
   stroke-width: var(--model-hub-wire-active-width);
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--violet) 40%, transparent));
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--violet-ink) 40%, transparent));
 }
 
 .model-hub-wire--unavailable {
-  stroke: var(--gold);
+  stroke: var(--gold-ink);
   stroke-width: var(--model-hub-wire-muted-width);
 }
 
@@ -1348,15 +1362,15 @@
   r: calc(var(--model-hub-wire-node) / 2);
 }
 
-.model-hub-wire-node--native { fill: var(--cyan); }
-.model-hub-wire-node--gateway { fill: var(--mint); }
+.model-hub-wire-node--native { fill: var(--cyan-ink); }
+.model-hub-wire-node--gateway { fill: var(--mint-ink); }
 .model-hub-wire-node--connected_unused {
   fill: var(--background);
   stroke: color-mix(in srgb, var(--foreground) 15%, transparent);
   stroke-width: 1.25px;
 }
-.model-hub-wire-node--takeover { fill: var(--violet); }
-.model-hub-wire-node--unavailable { fill: var(--gold); }
+.model-hub-wire-node--takeover { fill: var(--violet-ink); }
+.model-hub-wire-node--unavailable { fill: var(--gold-ink); }
 
 .model-hub-rail-line {
   stroke: color-mix(in srgb, var(--mint) 20%, transparent);

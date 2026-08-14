@@ -39,8 +39,8 @@ import { useSessionActions } from './useSessionActions';
 import { SessionPinIndicator } from './SessionPinIndicator';
 
 const DOT: Record<string, string> = {
-  running: 'bg-mint shadow-[0_0_7px_rgba(91,255,160,0.9)]',
-  failed: 'bg-destructive',
+  running: 'bg-mint-ink shadow-[0_0_7px_rgba(91,255,160,0.9)]',
+  failed: 'bg-destructive-ink',
   idle: 'bg-muted',
 };
 const MOBILE_SESSION_PAGE_SIZE = 8;
