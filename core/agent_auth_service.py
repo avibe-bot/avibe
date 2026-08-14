@@ -1100,7 +1100,7 @@ class AgentAuthService:
         claude_login_method: str | None = None,
         on_irreversible_start: Callable[[], Callable[[], None] | None] | None = None,
     ) -> AgentAuthFlow | WebAuthFlow:
-        """Create and start the single flow model used by every caller."""
+        """Create and start the shared native-login flow used by every caller."""
         if backend not in self.WEB_BACKENDS:
             raise ValueError(f"unsupported_backend:{backend}")
         flow_key = self._make_flow_key(context, backend) if context is not None else None
@@ -1251,46 +1251,47 @@ class AgentAuthService:
         if not CLAUDE_SDK_AVAILABLE:
             raise ModuleNotFoundError("claude_agent_sdk is required for Claude setup flows")
 
-        attempt: ClaudeOAuthAttempt | None = None
+        if force_reset:
+            await self._run_utility_command(
+                self._get_cli_binary("claude"),
+                "auth",
+                "logout",
+                prepare_start=on_irreversible_start,
+            )
+        # Claude Code re-applies ``settings.json`` env at startup, so an
+        # OAuth flow must clear stale API-key settings before the control
+        # client or follow-up probes launch.
+        attempt = await self._begin_claude_oauth_attempt()
         client = None
+        self._claude_control_flow_starts_in_flight += 1
         try:
-            if force_reset:
-                await self._run_utility_command(
-                    self._get_cli_binary("claude"),
-                    "auth",
-                    "logout",
-                    prepare_start=on_irreversible_start,
-                )
-            # Claude Code re-applies ``settings.json`` env at startup, so an
-            # OAuth flow must clear stale API-key settings before the control
-            # client or follow-up probes launch.
-            attempt = await self._begin_claude_oauth_attempt()
-            self._claude_control_flow_starts_in_flight += 1
-            try:
-                client = await self._create_claude_control_client(context)
-                register_claude_owned_process(client, owner=AVIBE_CLAUDE_AUTH_OWNER)
-                response = await self._send_claude_control_request(
-                    client,
-                    {
-                        "subtype": "claude_authenticate",
-                        "loginWithClaudeAi": login_with_claude_ai,
-                    },
-                )
-            finally:
-                self._claude_control_flow_starts_in_flight = max(
-                    0,
-                    self._claude_control_flow_starts_in_flight - 1,
-                )
-
-            manual_url = str(response.get("manualUrl") or "").strip()
-            if not manual_url:
-                raise RuntimeError("Claude auth flow did not return a manual login URL")
-            return client, manual_url, attempt
-        except BaseException:
+            client = await self._create_claude_control_client(context)
+            register_claude_owned_process(client, owner=AVIBE_CLAUDE_AUTH_OWNER)
+            response = await self._send_claude_control_request(
+                client,
+                {
+                    "subtype": "claude_authenticate",
+                    "loginWithClaudeAi": login_with_claude_ai,
+                },
+            )
+        except Exception:
             await self._finish_claude_oauth_attempt(attempt, succeeded=False)
             if client is not None:
                 await self._disconnect_claude_client(client)
             raise
+        finally:
+            self._claude_control_flow_starts_in_flight = max(
+                0,
+                self._claude_control_flow_starts_in_flight - 1,
+            )
+
+        manual_url = str(response.get("manualUrl") or "").strip()
+        if not manual_url:
+            await self._finish_claude_oauth_attempt(attempt, succeeded=False)
+            if client is not None:
+                await self._disconnect_claude_client(client)
+            raise RuntimeError("Claude auth flow did not return a manual login URL")
+        return client, manual_url, attempt
 
     async def _create_claude_control_client(
         self, context: Optional[MessageContext] = None
@@ -1416,11 +1417,15 @@ class AgentAuthService:
         # OpenCode auth is provider-scoped and may keep multiple credentials.
         # `opencode auth logout` can become interactive, so refresh by re-running
         # login for the target provider instead of forcing a global logout.
-        master_fd: int | None = None
-        slave_fd: int | None = None
+        master_fd, slave_fd = os.openpty()
         try:
-            master_fd, slave_fd = os.openpty()
-            cmd = [binary, "auth", "login", "-p", provider]
+            cmd = [
+                binary,
+                "auth",
+                "login",
+                "-p",
+                provider,
+            ]
             if method:
                 cmd.extend(["-m", method])
             process = await asyncio.create_subprocess_exec(
@@ -1429,14 +1434,11 @@ class AgentAuthService:
                 stdout=slave_fd,
                 stderr=slave_fd,
             )
-        except BaseException:
-            if master_fd is not None:
-                os.close(master_fd)
+        except Exception:
+            os.close(master_fd)
             raise
         finally:
-            if slave_fd is not None:
-                os.close(slave_fd)
-        assert master_fd is not None
+            os.close(slave_fd)
         return process, master_fd, provider
 
     async def _run_utility_command(
@@ -1650,7 +1652,6 @@ class AgentAuthService:
                 callback_data=f"auth_setup:{flow.backend}",
             )
         except asyncio.CancelledError:
-            await self._terminate_flow(flow, cancel_waiter=False)
             raise
         except Exception as err:  # noqa: BLE001
             logger.error("Agent auth flow failed for %s: %s", flow.backend, err, exc_info=True)
@@ -1705,7 +1706,6 @@ class AgentAuthService:
             )
         except asyncio.CancelledError:
             await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
-            await self._terminate_flow(flow, cancel_waiter=False)
             raise
         except Exception as err:  # noqa: BLE001
             await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
@@ -2080,10 +2080,9 @@ class AgentAuthService:
         mapped = aliases.get(normalized)
         return mapped if mapped in CLAUDE_LOGIN_METHODS else None
 
-    async def _terminate_flow(self, flow: AgentAuthFlow, *, cancel_waiter: bool = True) -> None:
+    async def _terminate_flow(self, flow: AgentAuthFlow) -> None:
         await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
-        current_task = asyncio.current_task()
-        if cancel_waiter and flow.waiter_task and flow.waiter_task is not current_task and not flow.waiter_task.done():
+        if flow.waiter_task and not flow.waiter_task.done():
             flow.waiter_task.cancel()
             try:
                 await flow.waiter_task
@@ -3070,13 +3069,10 @@ class AgentAuthService:
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]:
         async with self._flow_lock:
-            flow = self._web_flows.get(flow_id)
+            flow = self._web_flows.pop(flow_id, None)
         if flow is None:
             return {"ok": False, "error": "flow_not_found"}
         await self._terminate_web_flow(flow, final_state="cancelled")
-        async with self._flow_lock:
-            if self._web_flows.get(flow_id) is flow:
-                self._web_flows.pop(flow_id, None)
         return {"ok": True}
 
     async def _opencode_server(self):
@@ -3259,16 +3255,11 @@ class AgentAuthService:
             # new auth state.
             await self._clear_opencode_provider_options_key_for_oauth(provider_id)
             await self._invoke_post_web_success_hook(flow.backend)
-            flow.source_signed_in = True
             flow.state = "success"
         except asyncio.TimeoutError:
             flow.state = "failed"
             flow.error = "timed_out"
         except asyncio.CancelledError:
-            # OpenCode has no daemon-side cancellation endpoint. Keep the
-            # credential reservation fail-closed until its waiter settles.
-            flow.state = "cancelled"
-            flow.error = "cancelled"
             raise
         except Exception as err:  # noqa: BLE001
             logger.error(
@@ -3340,7 +3331,6 @@ class AgentAuthService:
             if ok:
                 await self._invoke_post_web_success_hook(flow.backend)
                 await self._refresh_backend_runtime(flow.backend)
-                flow.source_signed_in = True
                 flow.state = "success"
             else:
                 flow.state = "failed"
@@ -3348,7 +3338,6 @@ class AgentAuthService:
         except asyncio.TimeoutError:
             await self._terminate_web_flow(flow, final_state="failed", error="timed_out")
         except asyncio.CancelledError:
-            await self._terminate_web_flow(flow, final_state="cancelled", error="cancelled", cancel_waiter=False)
             raise
         except Exception as err:  # noqa: BLE001
             logger.error("Web Codex auth flow failed: %s", err, exc_info=True)
@@ -3376,7 +3365,6 @@ class AgentAuthService:
                 await self._invoke_post_web_success_hook(flow.backend)
                 await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
                 await self._refresh_backend_runtime(flow.backend)
-                flow.source_signed_in = True
                 flow.state = "success"
             else:
                 await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
@@ -3388,7 +3376,6 @@ class AgentAuthService:
             flow.error = "timed_out"
         except asyncio.CancelledError:
             await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
-            await self._terminate_web_flow(flow, final_state="cancelled", error="cancelled", cancel_waiter=False)
             raise
         except Exception as err:  # noqa: BLE001
             await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
@@ -3840,7 +3827,6 @@ class AgentAuthService:
         *,
         final_state: WebFlowState,
         error: str | None = None,
-        cancel_waiter: bool = True,
     ) -> None:
         await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         if flow.reader_task and not flow.reader_task.done():
@@ -3849,13 +3835,7 @@ class AgentAuthService:
                 await flow.reader_task
             except asyncio.CancelledError:
                 pass
-        current_task = asyncio.current_task()
-        if (
-            cancel_waiter
-            and flow.waiter_task
-            and flow.waiter_task is not current_task
-            and not flow.waiter_task.done()
-        ):
+        if flow.waiter_task and not flow.waiter_task.done():
             flow.waiter_task.cancel()
             try:
                 await flow.waiter_task
