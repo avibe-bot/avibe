@@ -62,6 +62,64 @@ def test_memory_rebuild_result_preserves_closed_preflight_diagnostic() -> None:
     }
 
 
+def test_memory_settings_patch_accepts_optional_complete_rerank_endpoint() -> None:
+    current = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    target, confirm_rebuild = ui_memory_routes._memory_settings_patch(
+        current,
+        {
+            "processing": {
+                "rerank": {
+                    "base_url": "https://rerank.example.test/v1/inference",
+                    "model": "rerank-model",
+                    "api_key": "rerank-secret",
+                }
+            }
+        },
+    )
+    candidate = ui_memory_routes._memory_candidate_config(current, target)
+
+    assert confirm_rebuild is False
+    assert candidate.memory.processing.rerank == MemoryEndpointConfig(
+        "https://rerank.example.test/v1/inference",
+        "rerank-model",
+        "rerank-secret",
+    )
+
+
+def test_memory_settings_key_clear_removes_the_optional_rerank_endpoint() -> None:
+    current = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=MemoryConfig(
+            enabled=False,
+            processing=MemoryProcessingConfig(
+                rerank=MemoryEndpointConfig(
+                    "https://rerank.example.test/v1/inference",
+                    "rerank-model",
+                    "rerank-secret",
+                )
+            ),
+        ),
+    )
+
+    target, _confirm_rebuild = ui_memory_routes._memory_settings_patch(
+        current,
+        {"processing": {"rerank": {"api_key": None}}},
+    )
+    candidate = ui_memory_routes._memory_candidate_config(current, target)
+
+    assert candidate.memory.processing.rerank is None
+
+
 def _save_config(tmp_path) -> None:
     V2Config(
         mode="self_host",
@@ -79,6 +137,85 @@ def _save_memory(memory: MemoryConfig) -> V2Config:
         memory_config_to_payload(memory, include_secrets=True),
         recovery_intent=memory.recovery_intent,
     )
+
+
+def test_enabled_rerank_change_runs_typed_preflight_before_persisting(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(
+        MemoryConfig(
+            enabled=True,
+            processing=MemoryProcessingConfig(
+                llm=MemoryEndpointConfig(
+                    "https://llm.example.test/v1", "chat", "llm-key"
+                ),
+                embedding=MemoryEndpointConfig(
+                    "https://embed.example.test/v1", "embed", "embed-key"
+                ),
+            ),
+        )
+    )
+    from config.paths import get_config_path
+
+    config_before = get_config_path().read_bytes()
+
+    async def preflight(*, payload: dict, user_key: str):
+        rerank = payload["memory"]["processing"]["rerank"]
+        assert user_key == "avibe:local"
+        assert rerank["model"] == "rerank-model"
+        assert rerank["api_key"] == "rerank-secret"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_rerank_unavailable",
+                "diagnostic": {
+                    "side": "rerank",
+                    "http_status": 401,
+                    "provider_error_code": "invalid_key",
+                    "message": "provider_error",
+                },
+            },
+        }
+
+    async def unexpected_reconcile():
+        pytest.fail("failed rerank admission must not reconcile or persist")
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    monkeypatch.setattr(internal_client, "reconcile_memory", unexpected_reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {
+                "rerank": {
+                    "base_url": "https://rerank.example.test/v1/inference",
+                    "model": "rerank-model",
+                    "api_key": "rerank-secret",
+                }
+            }
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_rerank_unavailable",
+        "diagnostic": {
+            "side": "rerank",
+            "http_status": 401,
+            "provider_error_code": "invalid_key",
+            "message": "provider_error",
+        },
+    }
+    assert get_config_path().read_bytes() == config_before
+    assert V2Config.load().memory.processing.rerank is None
 
 
 def _save_remote_config(tmp_path) -> V2Config:

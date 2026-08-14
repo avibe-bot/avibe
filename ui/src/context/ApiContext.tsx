@@ -1845,6 +1845,7 @@ export type MemoryEndpointConfig = {
 export type MemoryProcessingConfig = {
   llm: MemoryEndpointConfig;
   embedding: MemoryEndpointConfig;
+  rerank?: MemoryEndpointConfig;
 };
 
 export type MemorySettings = {
@@ -1870,12 +1871,13 @@ export type MemorySettingsPatch = {
   processing?: {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
+    rerank?: MemoryEndpointPatch;
   };
   confirm_rebuild?: boolean;
 };
 
 export type MemoryFailureDiagnostic = {
-  side?: 'embedding' | 'llm';
+  side?: 'embedding' | 'llm' | 'rerank';
   http_status?: number | null;
   provider_error_code?: string | null;
   message?: string;

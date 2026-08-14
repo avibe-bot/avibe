@@ -4,14 +4,24 @@
 
 Confirmed embedding identity changes and retained rebuild retries validate the
 candidate with one bounded chat request and one bounded embeddings request
-before the active sidecar is quiesced. Provider failures identify the side,
-HTTP status, provider code, and a sanitized message; the durable candidate and
-rebuild intent remain available for Retry. Ordinary runtime restart keeps its
-existing behavior.
+before the active sidecar is quiesced. When the optional reranking endpoint is
+configured, preflight also makes one bounded reranking request. Provider
+failures identify the side, HTTP status, provider code, and a sanitized
+message; the durable candidate and rebuild intent remain available for Retry.
+Ordinary runtime restart keeps its existing behavior.
 
 Avibe Memory distills eligible Workbench and private-IM messages into a
 per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
 Processing Record, current profile, search results, and settings.
+
+## Optional reranking endpoint
+
+The third processing endpoint in **Settings > Memory** is optional. Configure
+its Base URL, model, and API key together to let the pinned Memory runtime use
+its reranking capability; changing a configured endpoint is admitted by the
+same bounded preflight before it is saved. Leave all three fields empty to keep
+the standard Memory search tier. Removing the saved reranking endpoint clears
+all three values and does not rebuild the embedding index.
 
 ## Processing Record
 
@@ -41,13 +51,13 @@ legacy `memory.diagnostics.log_provider_calls` field is still accepted when an
 older config file is loaded, but its value is normalized to `true` and there is
 no settings switch to turn recording off.
 
-Avibe retains bounded, scrubbed LLM, multimodal-LLM, and embedding request and
-response fields used during Memory processing. It does not store embedding
-vectors, attachment bytes, raw sidecar stdout/stderr, or unrelated Search and
-Get calls. Secrets, configured provider URLs, and absolute local paths are
-scrubbed, and large fields are truncated or replaced with omission markers.
-Diagnostic payloads can still contain sensitive conversation text; treat access
-to the operator log accordingly.
+Avibe retains bounded, scrubbed LLM, multimodal-LLM, embedding, and reranking
+request and response fields used during Memory processing. It does not store
+embedding vectors, attachment bytes, raw sidecar stdout/stderr, or unrelated
+Search and Get calls. Secrets, configured provider URLs, and absolute local
+paths are scrubbed, and large fields are truncated or replaced with omission
+markers. Diagnostic payloads can still contain sensitive conversation text;
+treat access to the operator log accordingly.
 
 Rows remain readable until normal expiry or Clear Memory Data. Retention runs while
 Memory is disabled as well: rows expire after 14 days and only the newest 5,000

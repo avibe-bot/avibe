@@ -70,6 +70,26 @@ def test_preflight_recorder_creates_private_call_log_directory(tmp_path: Path) -
         ]
 
 
+def test_preflight_recorder_accepts_rerank_provider_kind(tmp_path: Path) -> None:
+    db_path = _private_db_path(tmp_path)
+
+    record_preflight_call(
+        db_path,
+        started_at_ms=1_700_000_000_000,
+        duration_ms=125,
+        kind="rerank",
+        model="rerank-model",
+        request={"queries": ["OK"], "documents": ["OK"]},
+        response={"scores": [[0.9]]},
+        status="ok",
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT kind, stage FROM provider_call").fetchall() == [
+            ("rerank", "processing_preflight")
+        ]
+
+
 def test_normalize_provider_call_scrubs_every_serialized_column() -> None:
     secret = "sk-super-secret-value"
     unprefixed_secret = "plain-provider-credential"

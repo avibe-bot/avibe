@@ -131,7 +131,11 @@ class MemoryProviderSystemFailure(MemoryProviderFailure):
 
 @dataclass(frozen=True)
 class MemoryPreflightFailure:
-    error: Literal["memory_embedding_unavailable", "memory_llm_unavailable"]
+    error: Literal[
+        "memory_embedding_unavailable",
+        "memory_llm_unavailable",
+        "memory_rerank_unavailable",
+    ]
     diagnostic: MemoryPreflightDiagnostic
 
 
@@ -164,6 +168,9 @@ class EverOSPort:
         embedding_base_url: str | None = None,
         embedding_model: str | None = None,
         embedding_api_key: str | None = None,
+        rerank_base_url: str | None = None,
+        rerank_model: str | None = None,
+        rerank_api_key: str | None = None,
         processing_health_check: Callable[[], Awaitable[bool]] | None = None,
         sidecar_timeout_seconds: float = _SIDECAR_TIMEOUT_SECONDS,
         add_timeout_seconds: float = _ADD_TIMEOUT_SECONDS,
@@ -178,6 +185,9 @@ class EverOSPort:
         self._embedding_base_url = _normalized_endpoint_url(embedding_base_url)
         self._embedding_model = _optional_string(embedding_model)
         self._embedding_api_key = _optional_string(embedding_api_key)
+        self._rerank_base_url = _normalized_endpoint_url(rerank_base_url)
+        self._rerank_model = _optional_string(rerank_model)
+        self._rerank_api_key = _optional_string(rerank_api_key)
         self._processing_health_check = processing_health_check
         self._sidecar_timeout_seconds = _positive_timeout(sidecar_timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
         self._add_timeout_seconds = _positive_timeout(add_timeout_seconds, _ADD_TIMEOUT_SECONDS)
@@ -467,7 +477,7 @@ class EverOSPort:
                     return False
             if not self._processing_configured():
                 return False
-            return await self._probe_processing_endpoint(
+            healthy = await self._probe_processing_endpoint(
                 base_url=self._llm_base_url,
                 api_key=self._llm_api_key,
                 path="chat/completions",
@@ -485,17 +495,37 @@ class EverOSPort:
                 payload={"model": self._embedding_model, "input": "memory health check"},
                 validator=_valid_embedding_probe_response,
             )
+            if not healthy or not self._rerank_configured():
+                return healthy
+            return await self._probe_processing_endpoint(
+                base_url=self._rerank_base_url,
+                api_key=self._rerank_api_key,
+                path=self._rerank_model or "",
+                payload={"queries": ["OK"], "documents": ["OK"]},
+                validator=_valid_rerank_probe_response,
+            )
 
     async def preflight(self) -> MemoryPreflightResult:
         """Run one bounded request for each configured processing endpoint."""
-        checks = (
+        checks = [
             ("llm", self._llm_base_url, self._llm_api_key, "chat/completions", {
                 "model": self._llm_model, "messages": [{"role": "user", "content": "OK"}], "max_tokens": 1, "temperature": 0,
             }, _valid_chat_probe_response),
             ("embedding", self._embedding_base_url, self._embedding_api_key, "embeddings", {
                 "model": self._embedding_model, "input": "OK",
             }, _valid_embedding_probe_response),
-        )
+        ]
+        if self._rerank_configured():
+            checks.append(
+                (
+                    "rerank",
+                    self._rerank_base_url,
+                    self._rerank_api_key,
+                    self._rerank_model or "",
+                    {"queries": ["OK"], "documents": ["OK"]},
+                    _valid_rerank_probe_response,
+                )
+            )
         first_failure = None
         for side, base_url, api_key, path, payload, validator in checks:
             started_at_ms = int(time.time() * 1000)
@@ -515,7 +545,7 @@ class EverOSPort:
                     timeout=_PREFLIGHT_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                error_name = "memory_llm_unavailable" if side == "llm" else "memory_embedding_unavailable"
+                error_name = _preflight_error_name(side)
                 failure = MemoryPreflightFailure(
                     error_name,
                     MemoryPreflightDiagnostic(side, message="provider_request_timed_out"),
@@ -545,6 +575,9 @@ class EverOSPort:
                 self._embedding_api_key,
             )
         )
+
+    def _rerank_configured(self) -> bool:
+        return all((self._rerank_base_url, self._rerank_model, self._rerank_api_key))
 
     async def _search_data(
         self,
@@ -702,9 +735,9 @@ class EverOSPort:
         started_at_ms,
         started,
     ):
-        error_name = "memory_llm_unavailable" if side == "llm" else "memory_embedding_unavailable"
+        error_name = _preflight_error_name(side)
         diagnostic = MemoryPreflightDiagnostic(side)
-        if not base_url or not api_key:
+        if not base_url or not api_key or not path:
             failure = MemoryPreflightFailure(error_name, replace(diagnostic, message="endpoint_not_configured"))
             self._record_preflight(
                 side,
@@ -825,8 +858,14 @@ class EverOSPort:
         if self._preflight_call_recorder is None:
             return
         try:
+            model = {
+                "llm": self._llm_model,
+                "embedding": self._embedding_model,
+                "rerank": self._rerank_model,
+            }.get(side)
             self._preflight_call_recorder(
                 side=side,
+                model=model,
                 request=request,
                 response=response,
                 failure=failure,
@@ -1117,6 +1156,35 @@ def _valid_embedding_probe_response(value: Any) -> bool:
     )
 
 
+def _valid_rerank_probe_response(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    scores = value.get("scores")
+    return (
+        isinstance(scores, list)
+        and len(scores) == 1
+        and isinstance(scores[0], list)
+        and len(scores[0]) == 1
+        and isinstance(scores[0][0], (int, float))
+        and not isinstance(scores[0][0], bool)
+        and math.isfinite(scores[0][0])
+    )
+
+
+def _preflight_error_name(
+    side: Literal["llm", "embedding", "rerank"],
+) -> Literal[
+    "memory_llm_unavailable",
+    "memory_embedding_unavailable",
+    "memory_rerank_unavailable",
+]:
+    return {
+        "llm": "memory_llm_unavailable",
+        "embedding": "memory_embedding_unavailable",
+        "rerank": "memory_rerank_unavailable",
+    }[side]
+
+
 def _optional_string(value: str | None) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1155,11 +1223,16 @@ def _provider_health_snapshot(payload: dict[str, Any] | None) -> ProviderHealthS
     if not _safe_health_token(version, max_bytes=64, allow_dot=True):
         return None
     capabilities = payload.get("capabilities")
-    capability_keys = {"llm", "embed", "rerank", "multimodal_llm", "parser"}
+    required_capabilities = {"llm", "embed", "rerank", "multimodal_llm", "parser"}
     if (
         not isinstance(capabilities, dict)
-        or set(capabilities) != capability_keys
-        or any(type(capabilities[key]) is not bool for key in capability_keys)
+        or not required_capabilities.issubset(capabilities)
+        or len(capabilities) > 32
+        or any(
+            not _safe_health_token(key, max_bytes=64)
+            or type(value) is not bool
+            for key, value in capabilities.items()
+        )
     ):
         return None
     disabled = payload.get("disabled_features")
@@ -1178,7 +1251,7 @@ def _provider_health_snapshot(payload: dict[str, Any] | None) -> ProviderHealthS
     return ProviderHealthSnapshot(
         status="ok",
         version=version,
-        capabilities={key: capabilities[key] for key in sorted(capability_keys)},
+        capabilities={key: capabilities[key] for key in sorted(capabilities)},
         disabled_features=tuple(disabled),
         cascade=cascade,
         recorder=recorder,

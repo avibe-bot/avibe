@@ -3365,6 +3365,44 @@ async def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings
     await memory_runtime_factory.close(runtime)
 
 
+async def test_runtime_reconciliation_rolls_sidecar_for_rerank_configuration(
+    memory_runtime_factory,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig(
+            "https://embed.example.test/v1", "embed", "embed-key"
+        ),
+    )
+    initial = MemoryConfig(enabled=True, processing=processing)
+    runtime = memory_runtime_factory(
+        initial,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+    )
+    assert (await runtime.reconcile(initial))["ok"] is True
+
+    configured = replace(
+        initial,
+        processing=replace(
+            processing,
+            rerank=MemoryEndpointConfig(
+                "https://rerank.example.test/v1/inference",
+                "Qwen/Qwen3-Reranker-4B",
+                "rerank-key",
+            ),
+        ),
+    )
+    assert (await runtime.reconcile(configured))["ok"] is True
+
+    assert len(factory.supervised) == 2
+    assert factory.supervised[0].stopped is True
+    assert factory.supervised[1].settings.rerank_model == "Qwen/Qwen3-Reranker-4B"
+    assert factory.supervised[1].settings.rerank_api_key == "rerank-key"
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_runtime_preflight_failure_keeps_existing_sidecar_running(
     monkeypatch,
     memory_runtime_factory,

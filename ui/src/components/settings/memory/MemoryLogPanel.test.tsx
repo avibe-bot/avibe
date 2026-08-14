@@ -402,6 +402,8 @@ describe('Memory Log bounded helpers and static states', () => {
     expect(memoryLogEnumLabel(translate as never, 'reason', 'runs_missing'))
       .toBe('memory.log.reason.runsMissing');
     expect(memoryLogEnumLabel(translate as never, 'status', 'ok')).toBe('memory.log.status.ok');
+    expect(memoryLogEnumLabel(translate as never, 'callKind', 'rerank'))
+      .toBe('memory.log.callKind.rerank');
     expect(memoryLogEnumLabel(translate as never, 'status', 'future_status')).toBe('future_status');
   });
 });

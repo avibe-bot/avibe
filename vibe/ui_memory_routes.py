@@ -157,23 +157,38 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
     if not isinstance(confirm_rebuild, bool):
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
-    for endpoint in ("llm", "embedding"):
-        target["processing"][endpoint].pop("has_api_key", None)
+    endpoints = ("llm", "embedding", "rerank")
+    for endpoint in endpoints:
+        if endpoint in target["processing"]:
+            target["processing"][endpoint].pop("has_api_key", None)
     if "enabled" in patch_payload:
         if not isinstance(patch_payload["enabled"], bool):
             raise ValueError("invalid_memory_patch")
         target["enabled"] = patch_payload["enabled"]
     processing_patch = patch_payload.get("processing")
     if processing_patch is not None:
-        if not isinstance(processing_patch, dict) or not set(processing_patch).issubset({"llm", "embedding"}):
+        if not isinstance(processing_patch, dict) or not set(processing_patch).issubset(endpoints):
             raise ValueError("invalid_memory_patch")
-        for endpoint in ("llm", "embedding"):
+        for endpoint in endpoints:
             endpoint_patch = processing_patch.get(endpoint)
             if endpoint_patch is None:
                 continue
             if not isinstance(endpoint_patch, dict) or not set(endpoint_patch).issubset({"base_url", "model", "api_key"}):
                 raise ValueError("invalid_memory_patch")
-            target["processing"][endpoint].update(endpoint_patch)
+            target["processing"].setdefault(
+                endpoint,
+                {"base_url": None, "model": None, "api_key": None},
+            ).update(endpoint_patch)
+            if (
+                endpoint == "rerank"
+                and set(endpoint_patch) == {"api_key"}
+                and endpoint_patch["api_key"] in {None, ""}
+            ):
+                target["processing"][endpoint] = {
+                    "base_url": None,
+                    "model": None,
+                    "api_key": None,
+                }
 
     explicit_key_clear = any(
         endpoint_patch.get("api_key") in {None, ""}
@@ -211,6 +226,18 @@ def _memory_embedding_configuration_changed(current: V2Config, candidate: V2Conf
     )
 
 
+def _memory_rerank_configuration_changed(current: V2Config, candidate: V2Config) -> bool:
+    """Return whether the optional reranking provider configuration changed."""
+
+    def endpoint_values(config: V2Config) -> tuple[str | None, str | None, str | None]:
+        endpoint = config.memory.processing.rerank
+        if endpoint is None:
+            return (None, None, None)
+        return (endpoint.base_url, endpoint.model, endpoint.api_key)
+
+    return endpoint_values(current) != endpoint_values(candidate)
+
+
 def _memory_preflight_required(candidate: V2Config) -> bool:
     """Require live admission unless a disabled candidate is still incomplete."""
 
@@ -228,7 +255,7 @@ def _memory_api_key_only_patch(patch_payload: object) -> bool:
     processing = patch_payload.get("processing")
     if not isinstance(processing, dict) or not processing:
         return False
-    if not set(processing).issubset({"llm", "embedding"}):
+    if not set(processing).issubset({"llm", "embedding", "rerank"}):
         return False
     return all(
         isinstance(endpoint, dict) and set(endpoint) == {"api_key"}
@@ -251,7 +278,7 @@ def _memory_factory_reset_repair_patch(patch_payload: object) -> bool:
     processing = patch_payload.get("processing")
     if not isinstance(processing, dict) or not processing:
         return False
-    if not set(processing).issubset({"llm", "embedding"}):
+    if not set(processing).issubset({"llm", "embedding", "rerank"}):
         return False
     return all(
         isinstance(endpoint, dict)
@@ -506,6 +533,7 @@ def _memory_repair_result(payload: dict, status_code: int) -> tuple[dict, int]:
         "memory_repair_failed": 503,
         "memory_embedding_unavailable": 409,
         "memory_llm_unavailable": 409,
+        "memory_rerank_unavailable": 409,
     }.get(error)
     if expected_status is None or expected_status != status_code:
         return protocol_failure, 503
@@ -712,6 +740,7 @@ async def _apply_memory_settings_patch(
             target_payload, confirm_rebuild = _memory_settings_patch(current, patch_payload)
             candidate = _memory_candidate_config(current, target_payload)
             identity_changed = _memory_embedding_configuration_changed(current, candidate)
+            rerank_changed = _memory_rerank_configuration_changed(current, candidate)
             pending_marker = current.memory.recovery_intent == "rebuild"
             pending_factory_reset = current.memory.recovery_intent == "factory_reset"
         except (TypeError, ValueError):
@@ -792,7 +821,13 @@ async def _apply_memory_settings_patch(
 
         recovery_intent = "rebuild" if pending_marker or identity_changed else None
 
-        if identity_changed and confirm_rebuild and _memory_preflight_required(candidate):
+        rerank_preflight = (
+            rerank_changed and candidate.memory.processing.rerank is not None
+        )
+        if (
+            ((identity_changed and confirm_rebuild) or rerank_preflight)
+            and _memory_preflight_required(candidate)
+        ):
             from config.v2_config import memory_config_to_payload
             preflight = await _memory_internal_result(
                 lambda: internal_client.memory_preflight(

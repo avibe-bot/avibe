@@ -499,6 +499,9 @@ def test_processing_probe_builds_the_adapter_from_child_environment_only(monkeyp
     monkeypatch.setenv("EVEROS_EMBEDDING__BASE_URL", "https://embed.example.test/v1")
     monkeypatch.setenv("EVEROS_EMBEDDING__MODEL", "embed-model")
     monkeypatch.setenv("EVEROS_EMBEDDING__API_KEY", "embedding-secret")
+    monkeypatch.setenv("EVEROS_RERANK__BASE_URL", "https://rerank.example.test/v1/inference")
+    monkeypatch.setenv("EVEROS_RERANK__MODEL", "rerank-model")
+    monkeypatch.setenv("EVEROS_RERANK__API_KEY", "rerank-secret")
     monkeypatch.setattr(everos, "EverOSPort", _Provider)
 
     assert _processing_healthy_from_child_environment() is True
@@ -510,4 +513,7 @@ def test_processing_probe_builds_the_adapter_from_child_environment_only(monkeyp
         "embedding_base_url": "https://embed.example.test/v1",
         "embedding_model": "embed-model",
         "embedding_api_key": "embedding-secret",
+        "rerank_base_url": "https://rerank.example.test/v1/inference",
+        "rerank_model": "rerank-model",
+        "rerank_api_key": "rerank-secret",
     }

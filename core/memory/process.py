@@ -76,12 +76,14 @@ async def _probe_stderr_tail(task: asyncio.Task[bytes] | None, *, settings: Ever
                 value for value in (
                     settings.llm_base_url,
                     settings.embedding_base_url,
+                    settings.rerank_base_url,
                 ) if value
             ),
             exact_values=tuple(
                 value for value in (
                     settings.llm_api_key,
                     settings.embedding_api_key,
+                    settings.rerank_api_key,
                 ) if value
             ),
         )
@@ -130,6 +132,9 @@ class EverOSProcessSettings:
     embedding_base_url: str | None = None
     embedding_model: str | None = None
     embedding_api_key: str | None = field(default=None, repr=False)
+    rerank_base_url: str | None = None
+    rerank_model: str | None = None
+    rerank_api_key: str | None = field(default=None, repr=False)
     timezone: str | None = None
     call_log_db_path: Path | None = None
 
@@ -2390,7 +2395,7 @@ def _write_memory_child_config(
             "",
         )
     )
-    _validate_generated_config(everos_contents, ome_contents, timezone_name)
+    _validate_generated_config(everos_contents, ome_contents, timezone_name, settings)
     for path, contents in (
         (generated / "everos.toml", everos_contents),
         (generated / "ome.toml", ome_contents),
@@ -2434,6 +2439,9 @@ def _memory_child_environment(
         "EVEROS_EMBEDDING__BASE_URL": settings.embedding_base_url,
         "EVEROS_EMBEDDING__MODEL": settings.embedding_model,
         "EVEROS_EMBEDDING__API_KEY": settings.embedding_api_key,
+        "EVEROS_RERANK__BASE_URL": settings.rerank_base_url,
+        "EVEROS_RERANK__MODEL": settings.rerank_model,
+        "EVEROS_RERANK__API_KEY": settings.rerank_api_key,
     }
     env.update({key: value for key, value in optional.items() if value is not None})
     if settings.call_log_db_path is not None:
@@ -3433,17 +3441,32 @@ def _local_iana_timezone() -> str:
     return "UTC"
 
 
-def _validate_generated_config(everos_contents: str, ome_contents: str, timezone: str) -> None:
+def _validate_generated_config(
+    everos_contents: str,
+    ome_contents: str,
+    timezone: str,
+    settings: EverOSProcessSettings,
+) -> None:
     try:
         everos = tomllib.loads(everos_contents)
         ome = tomllib.loads(ome_contents)
     except tomllib.TOMLDecodeError as exc:
         raise RuntimeError("invalid generated EverOS config") from exc
+    rerank_settings = (
+        settings.rerank_base_url,
+        settings.rerank_model,
+        settings.rerank_api_key,
+    )
+    if any(rerank_settings) and not all(rerank_settings):
+        raise RuntimeError("Generated EverOS config received partial rerank settings")
     if (
         everos.get("memory", {}).get("timezone") != timezone
         or everos.get("memorize", {}).get("mode") != "chat"
+        # EverOS 1.2.3 gives env settings precedence over TOML. Keep these
+        # blank so configured rerank values have one child-process source.
         or everos.get("rerank", {}).get("model") != ""
         or everos.get("rerank", {}).get("base_url") != ""
+        or "api_key" in everos.get("rerank", {})
         or ome.get("strategies", {}).get("reflect_episodes", {}).get("enabled") is not False
         or ome.get("strategies", {}).get("extract_foresight", {}).get("enabled") is not False
     ):

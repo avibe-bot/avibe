@@ -852,6 +852,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     match = re.search(r"Config '([^']+)'", message)
     if match:
         path = match.group(1)
+        if path.startswith("memory.processing.rerank"):
+            return "memory.rerank"
         if path == "platform":
             return "platforms"
         if path.startswith("agents."):
@@ -861,6 +863,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
         return path.split(".", 1)[0]
 
     lowered = message.lower()
+    if "memory rerank endpoint" in lowered:
+        return "memory.rerank"
     if "unsupported enabled platform" in lowered:
         return "platforms"
     for platform_id in supported_platform_ids():
@@ -904,6 +908,13 @@ def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
+    if section == "memory.rerank":
+        memory = payload.get("memory")
+        processing = memory.get("processing") if isinstance(memory, dict) else None
+        if not isinstance(processing, dict):
+            return False
+        processing.pop("rerank", None)
+        return True
     if section == "runtime":
         # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
         # required cwd, so an empty object would make the recovery loop fail a
@@ -1403,10 +1414,19 @@ class MemoryEndpointConfig:
 class MemoryProcessingConfig:
     llm: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
     embedding: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
+    rerank: Optional[MemoryEndpointConfig] = None
 
     def validate(self) -> None:
         self.llm.validate(name="llm")
         self.embedding.validate(name="embedding")
+        if self.rerank is not None:
+            self.rerank.validate(name="rerank")
+            if not any((self.rerank.base_url, self.rerank.model, self.rerank.api_key)):
+                self.rerank = None
+            elif not self.rerank.complete():
+                raise ValueError(
+                    "Memory rerank endpoint must include base_url, model, and api_key"
+                )
 
 
 @dataclass
@@ -1542,12 +1562,15 @@ def memory_config_to_payload(
             "has_api_key": bool(key),
         }
 
+    processing = {
+        "llm": endpoint_payload(memory.processing.llm),
+        "embedding": endpoint_payload(memory.processing.embedding),
+    }
+    if memory.processing.rerank is not None:
+        processing["rerank"] = endpoint_payload(memory.processing.rerank)
     payload = {
         "enabled": memory.enabled,
-        "processing": {
-            "llm": endpoint_payload(memory.processing.llm),
-            "embedding": endpoint_payload(memory.processing.embedding),
-        },
+        "processing": processing,
         "diagnostics": {
             "log_provider_calls": memory.diagnostics.log_provider_calls,
         },
@@ -1581,6 +1604,12 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
         processing_payload.get("embedding", {}),
         name="memory.processing.embedding",
     )
+    rerank_payload = None
+    if "rerank" in processing_payload:
+        rerank_payload = _optional_memory_object(
+            processing_payload["rerank"],
+            name="memory.processing.rerank",
+        )
     diagnostics_payload = _optional_memory_object(
         payload.get("diagnostics", {}),
         name="memory.diagnostics",
@@ -1614,6 +1643,13 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
             ),
             embedding=MemoryEndpointConfig(
                 **_filter_dataclass_fields(MemoryEndpointConfig, embedding_payload)
+            ),
+            rerank=(
+                MemoryEndpointConfig(
+                    **_filter_dataclass_fields(MemoryEndpointConfig, rerank_payload)
+                )
+                if rerank_payload is not None
+                else None
             ),
         ),
         diagnostics=MemoryDiagnosticsConfig(
