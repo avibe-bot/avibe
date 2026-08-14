@@ -169,6 +169,29 @@ class _SteeringAwareOpenCodeServer:
             if part.get("type") == "text"
         )
 
+    @staticmethod
+    def _last_is_completed_error(messages: list[Dict[str, Any]]) -> bool:
+        if not messages:
+            return False
+        info = messages[-1].get("info", {}) or {}
+        return bool(
+            info.get("role") == "assistant"
+            and info.get("time", {}).get("completed")
+            and info.get("error")
+        )
+
+    @staticmethod
+    def _has_post_boundary_activity(
+        messages: list[Dict[str, Any]],
+        boundary_ids: set[str],
+    ) -> bool:
+        if not boundary_ids:
+            return True
+        return any(
+            (message.get("info", {}) or {}).get("id") not in boundary_ids
+            for message in messages
+        )
+
     @classmethod
     def _inserted_user_index(
         cls,
@@ -384,7 +407,27 @@ class _SteeringAwareOpenCodeServer:
                                         # settle like the idle path does.
                                         self._clear_awaiting_reconciliation()
                                         self._state.closing = True
-                                return messages
+                                if self._last_is_completed_error(messages):
+                                    # Keep terminal error snapshots gated while the
+                                    # native runtime has not settled: the poll loop
+                                    # would emit its own terminal failure (or a
+                                    # competing "continue") while OpenCode's native
+                                    # retry is still active.
+                                    wait_for_insert = True
+                                elif inserted_user_text is None and not self._has_post_boundary_activity(
+                                    messages,
+                                    awaiting,
+                                ):
+                                    # Restored boundary-sampled polls: a busy
+                                    # snapshot holding only boundary messages
+                                    # (ending in a pre-restore final answer) must
+                                    # not be handed back, or the restored poll
+                                    # loop would re-emit the old answer and drop
+                                    # the still-running poll. Wait for post-boundary
+                                    # or in-progress evidence.
+                                    wait_for_insert = True
+                                else:
+                                    return messages
                             wait_for_insert = True
                         else:
                             self._state.reconcile_initial_status = False
