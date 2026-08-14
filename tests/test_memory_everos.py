@@ -918,6 +918,7 @@ def test_processing_preflight_projects_sanitized_provider_error() -> None:
 
 def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
     requests: list[httpx.Request] = []
+    recorded: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -939,6 +940,7 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
             rerank_base_url="https://rerank.example.test/v1/inference",
             rerank_model="Qwen/Qwen3-Reranker-4B",
             rerank_api_key="rerank-secret",
+            preflight_call_recorder=lambda **kwargs: recorded.append(kwargs),
         ).preflight()
 
     real_async_client = httpx.AsyncClient
@@ -959,6 +961,8 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
         "documents": ["OK"],
     }
     assert requests[-1].headers["authorization"] == "Bearer rerank-secret"
+    assert recorded[-1]["model"] == "Qwen/Qwen3-Reranker-4B"
+    assert "model" not in recorded[-1]["request"]
 
 
 def test_processing_preflight_returns_typed_rerank_failure() -> None:

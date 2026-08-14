@@ -38,6 +38,7 @@ const ENUM_LABEL_KEYS = {
     llm: 'llm',
     multimodal_llm: 'multimodalLlm',
     embedding: 'embedding',
+    rerank: 'rerank',
   },
   callStage: {
     processing_preflight: 'processingPreflight',

@@ -43,6 +43,7 @@ const EndpointFields: React.FC<{
   disabled: boolean;
   identityHint?: string;
   canClearKey: boolean;
+  clearKeyLabel?: string;
 }> = ({
   title,
   help,
@@ -53,8 +54,10 @@ const EndpointFields: React.FC<{
   disabled,
   identityHint,
   canClearKey,
+  clearKeyLabel,
 }) => {
   const { t } = useTranslation();
+  const clearLabel = clearKeyLabel ?? t('memory.settings.clearKeyLabel');
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
       <div className="flex items-center gap-2">
@@ -107,7 +110,7 @@ const EndpointFields: React.FC<{
             type="button"
             role="checkbox"
             aria-checked={draft.clearKey}
-            aria-label={t('memory.settings.clearKeyLabel')}
+            aria-label={clearLabel}
             disabled={disabled}
             onClick={() => onChange({ ...draft, clearKey: !draft.clearKey, apiKey: '' })}
             className="mt-0.5 flex w-fit items-center gap-2 text-[11.5px] text-muted disabled:cursor-not-allowed disabled:opacity-50"
@@ -118,7 +121,7 @@ const EndpointFields: React.FC<{
               disabled={disabled}
               className="size-3.5"
             />
-            {t('memory.settings.clearKeyLabel')}
+            {clearLabel}
           </button>
         ) : null}
       </div>
@@ -209,6 +212,8 @@ export const MemorySettingsPanel: React.FC<{
       rerankDraft,
       settings.processing.rerank ?? EMPTY_ENDPOINT,
       allowClear,
+      false,
+      true,
     );
     if (llmPatch || embeddingPatch || rerankPatch) {
       patch.processing = {};
@@ -412,6 +417,7 @@ export const MemorySettingsPanel: React.FC<{
         disabled={busy}
         identityHint={t('memory.settings.rerankIdentityHint')}
         canClearKey={canClearKeys}
+        clearKeyLabel={t('memory.settings.rerankClearLabel')}
       />
 
       {error ? (

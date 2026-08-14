@@ -852,6 +852,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     match = re.search(r"Config '([^']+)'", message)
     if match:
         path = match.group(1)
+        if path.startswith("memory.processing.rerank"):
+            return "memory.rerank"
         if path == "platform":
             return "platforms"
         if path.startswith("agents."):
@@ -861,6 +863,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
         return path.split(".", 1)[0]
 
     lowered = message.lower()
+    if "memory rerank endpoint" in lowered:
+        return "memory.rerank"
     if "unsupported enabled platform" in lowered:
         return "platforms"
     for platform_id in supported_platform_ids():
@@ -904,6 +908,13 @@ def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
+    if section == "memory.rerank":
+        memory = payload.get("memory")
+        processing = memory.get("processing") if isinstance(memory, dict) else None
+        if not isinstance(processing, dict):
+            return False
+        processing.pop("rerank", None)
+        return True
     if section == "runtime":
         # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
         # required cwd, so an empty object would make the recovery loop fail a

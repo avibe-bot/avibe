@@ -179,6 +179,16 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
                 endpoint,
                 {"base_url": None, "model": None, "api_key": None},
             ).update(endpoint_patch)
+            if (
+                endpoint == "rerank"
+                and set(endpoint_patch) == {"api_key"}
+                and endpoint_patch["api_key"] in {None, ""}
+            ):
+                target["processing"][endpoint] = {
+                    "base_url": None,
+                    "model": None,
+                    "api_key": None,
+                }
 
     explicit_key_clear = any(
         endpoint_patch.get("api_key") in {None, ""}
@@ -214,6 +224,18 @@ def _memory_embedding_configuration_changed(current: V2Config, candidate: V2Conf
         or normalized(current_embedding.model)
         != normalized(candidate_embedding.model)
     )
+
+
+def _memory_rerank_configuration_changed(current: V2Config, candidate: V2Config) -> bool:
+    """Return whether the optional reranking provider configuration changed."""
+
+    def endpoint_values(config: V2Config) -> tuple[str | None, str | None, str | None]:
+        endpoint = config.memory.processing.rerank
+        if endpoint is None:
+            return (None, None, None)
+        return (endpoint.base_url, endpoint.model, endpoint.api_key)
+
+    return endpoint_values(current) != endpoint_values(candidate)
 
 
 def _memory_preflight_required(candidate: V2Config) -> bool:
@@ -718,6 +740,7 @@ async def _apply_memory_settings_patch(
             target_payload, confirm_rebuild = _memory_settings_patch(current, patch_payload)
             candidate = _memory_candidate_config(current, target_payload)
             identity_changed = _memory_embedding_configuration_changed(current, candidate)
+            rerank_changed = _memory_rerank_configuration_changed(current, candidate)
             pending_marker = current.memory.recovery_intent == "rebuild"
             pending_factory_reset = current.memory.recovery_intent == "factory_reset"
         except (TypeError, ValueError):
@@ -798,7 +821,13 @@ async def _apply_memory_settings_patch(
 
         recovery_intent = "rebuild" if pending_marker or identity_changed else None
 
-        if identity_changed and confirm_rebuild and _memory_preflight_required(candidate):
+        rerank_preflight = (
+            rerank_changed and candidate.memory.processing.rerank is not None
+        )
+        if (
+            ((identity_changed and confirm_rebuild) or rerank_preflight)
+            and _memory_preflight_required(candidate)
+        ):
             from config.v2_config import memory_config_to_payload
             preflight = await _memory_internal_result(
                 lambda: internal_client.memory_preflight(

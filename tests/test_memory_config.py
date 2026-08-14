@@ -138,6 +138,33 @@ def test_released_memory_config_without_rerank_loads_and_saves_without_shape_chu
     assert V2Config.load(tmp_path / "config.json").memory.processing.rerank is None
 
 
+def test_disk_load_degrades_only_a_malformed_optional_rerank_section(tmp_path) -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://rerank.example.test/v1/inference",
+        "model": "rerank-model",
+    }
+    payload = _payload(
+        {
+            "enabled": True,
+            "recovery_intent": "rebuild",
+            "processing": processing,
+        }
+    )
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.enabled is True
+    assert loaded.memory.processing.llm.model == "chat"
+    assert loaded.memory.processing.embedding.model == "embed"
+    assert loaded.memory.processing.rerank is None
+    assert loaded.memory.recovery_intent == "rebuild"
+    assert any("memory.rerank" in warning for warning in loaded.load_warnings)
+    assert "rerank" in json.loads(config_path.read_text(encoding="utf-8"))["memory"]["processing"]
+
+
 def test_memory_rerank_round_trips_without_projecting_its_key(tmp_path) -> None:
     processing = _complete_processing()
     processing["rerank"] = {

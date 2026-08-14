@@ -4366,6 +4366,7 @@
       "rerankTitle": "重排序模型（可选）",
       "rerankHelp": "记忆功能用这个模型为高级召回结果评分。填写重排序接口地址、模型名称和 API Key 后即可启用。",
       "rerankHelpLabel": "关于重排序模型",
+      "rerankClearLabel": "移除重排序端点",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "模型",

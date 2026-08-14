@@ -37,6 +37,7 @@ export function buildEndpointPatch(
   original: MemoryEndpointConfig,
   allowClear: boolean,
   identityLocked = false,
+  clearEndpoint = false,
 ): MemoryEndpointPatch | undefined {
   const patch: MemoryEndpointPatch = {};
   let changed = false;
@@ -58,6 +59,10 @@ export function buildEndpointPatch(
     changed = true;
   } else if (draft.clearKey && allowClear) {
     patch.api_key = null;
+    if (clearEndpoint) {
+      patch.base_url = null;
+      patch.model = null;
+    }
     changed = true;
   }
   return changed ? patch : undefined;

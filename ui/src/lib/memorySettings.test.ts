@@ -77,4 +77,24 @@ describe('buildEndpointPatch', () => {
       model: 'changed-model',
     });
   });
+
+  it('removes every field when clearing an optional endpoint', () => {
+    expect(buildEndpointPatch(
+      {
+        baseUrl: 'https://rerank.example.test/v1/inference',
+        model: 'rerank-model',
+        apiKey: '',
+        clearKey: true,
+      },
+      {
+        base_url: 'https://rerank.example.test/v1/inference',
+        model: 'rerank-model',
+        api_key: null,
+        has_api_key: true,
+      },
+      true,
+      false,
+      true,
+    )).toEqual({ api_key: null, base_url: null, model: null });
+  });
 });

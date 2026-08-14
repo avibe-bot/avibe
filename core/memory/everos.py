@@ -858,8 +858,14 @@ class EverOSPort:
         if self._preflight_call_recorder is None:
             return
         try:
+            model = {
+                "llm": self._llm_model,
+                "embedding": self._embedding_model,
+                "rerank": self._rerank_model,
+            }.get(side)
             self._preflight_call_recorder(
                 side=side,
+                model=model,
                 request=request,
                 response=response,
                 failure=failure,

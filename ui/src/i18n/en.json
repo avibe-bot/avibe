@@ -4366,6 +4366,7 @@
       "rerankTitle": "Reranking model (optional)",
       "rerankHelp": "Memory uses this model to score search results for advanced recall. Enter a reranking base URL, model name, and API key to enable it.",
       "rerankHelpLabel": "About the reranking model",
+      "rerankClearLabel": "Remove reranking endpoint",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "Model",
