@@ -206,12 +206,11 @@ turn ends because you armed a watch and are waiting, say exactly that.
   filtering, settling, retries, and delivery acknowledgement. Those mechanics
   belong to the reusable skill; this policy only constrains when and why the
   watch is armed.
-- Before arming any managed wait, run the background-watch-hook distribution
-  preflight from the active Avibe checkout. It must verify the canonical commit,
-  complete tree hash, readable skill version, and the combined `wait_pr.py`
-  capability flags. A failed check is an environment blocker: report it and
-  repair the installed skill with the canonical sync helper before waiting.
-  Never compensate for a stale copy by hand-rolling or patching an old waiter.
+- Before arming any managed wait, use `background-watch-hook` to resolve the
+  active skill and verify the combined `wait_pr.py` capability flags. A failed
+  check is an environment blocker: repair the harness registration or symlink
+  before waiting. Never compensate for a stale copy by hand-rolling or patching
+  an old waiter.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and

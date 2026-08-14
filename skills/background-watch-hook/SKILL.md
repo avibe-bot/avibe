@@ -235,67 +235,47 @@ test -f "$BACKGROUND_WATCH_HOOK_SKILL_FILE"
 BACKGROUND_WATCH_HOOK_DIR="$(dirname "$BACKGROUND_WATCH_HOOK_SKILL_FILE")"
 ```
 
-## Skill Distribution Preflight
+## Active Waiter Preflight
 
-Before arming a managed GitHub waiter, verify that the active harness copy is
-the canonical committed skill. The check is read-only and must pass before a
-wait starts:
+Skill distribution belongs to the agent environment, not to this skill. When
+multiple harnesses on one machine should use the same checkout, expose that
+canonical directory through harness-local symlinks instead of maintaining
+independent copies. This skill does not install, copy, or rewrite harness skill
+directories.
 
-```bash
-CALLER_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-if [ -n "${AVIBE_REPO_ROOT:-}" ]; then
-  AVIBE_REPO_ROOT="$(cd "$AVIBE_REPO_ROOT" && pwd)"
-else
-  SEARCH_ROOT="$CALLER_ROOT"
-  while :; do
-    for CANDIDATE in "$SEARCH_ROOT" "$SEARCH_ROOT/avibe"; do
-      if [ -f "$CANDIDATE/skills/background-watch-hook/scripts/sync_skill.py" ]; then
-        AVIBE_REPO_ROOT="$CANDIDATE"
-        break 2
-      fi
-    done
-    PARENT="$(dirname "$SEARCH_ROOT")"
-    [ "$PARENT" != "$SEARCH_ROOT" ] || break
-    SEARCH_ROOT="$PARENT"
-  done
-fi
-test -n "${AVIBE_REPO_ROOT:-}"
-SYNC_SKILL="$AVIBE_REPO_ROOT/skills/background-watch-hook/scripts/sync_skill.py"
-test -f "$SYNC_SKILL"
-python3 "$SYNC_SKILL" \
-  --repo-root "$AVIBE_REPO_ROOT" \
-  --caller-root "$CALLER_ROOT" \
-  --check
-```
-
-The search accepts `AVIBE_REPO_ROOT` as an explicit canonical checkout and
-otherwise walks caller ancestors for either that checkout or an `avibe`
-sibling. This keeps the preflight usable from companion and unrelated
-repositories without copying the sync helper into them.
-
-With no `--target`, the check follows the same active-skill resolution order as
-the waiter examples above. It hashes a repository-provided canonical tree
-directly, or validates the manifest of the selected harness installation. It
-also records the full tree SHA-256 and frontmatter version, and probes
-`wait_pr.py --help` for the combined `--sha`, `--workflow`, `--seed-state`,
-`--actionable-only`, and `--ignore-author` options. Capability probing executes
-only the committed materialization after the active tree matches; it never
-executes an unverified installation. A non-zero result is an environment
-blocker: report the canonical path and required commit, then repair the
-installation with the same helper before arming the watch. Do not patch an
-older harness copy in place or hand-roll a substitute waiter.
-
-To install the canonical committed copy into the configured harness targets:
+Before arming a managed GitHub waiter, check the waiter in the active directory
+resolved above. The preflight is capability-based so it works for repository,
+symlinked, and harness-managed installations without a second resolver or a
+custom package manifest:
 
 ```bash
-python3 "$SYNC_SKILL" \
-  --repo-root "$AVIBE_REPO_ROOT" \
-  --install
+WAIT_PR="$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py"
+test -f "$WAIT_PR"
+WAIT_PR_HELP="$(uv run --no-project "$WAIT_PR" --help 2>&1)" || {
+  printf '%s\n' "background-watch-hook waiter is not executable: $WAIT_PR" >&2
+  exit 1
+}
+for REQUIRED_FLAG in \
+  --sha \
+  --workflow \
+  --seed-state \
+  --actionable-only \
+  --ignore-author; do
+  case "$WAIT_PR_HELP" in
+    *"$REQUIRED_FLAG"*) ;;
+    *)
+      printf '%s\n' "background-watch-hook waiter is missing $REQUIRED_FLAG: $WAIT_PR" >&2
+      exit 1
+      ;;
+  esac
+done
 ```
 
-Default install destinations honor `CODEX_HOME`, `AGENTS_HOME`, `CLAUDE_HOME`,
-`OPENCODE_HOME`, and `XDG_CONFIG_HOME`. Pass one or more explicit `--target`
-values only when auditing or repairing a narrower installation set.
+The frontmatter version is a human-readable signal; the required command-line
+capabilities are the runtime contract. A failed preflight is an environment
+blocker. Repair the harness registration or symlink to the intended skill, then
+run the preflight again. Do not patch an older copy in place or hand-roll a
+substitute waiter.
 
 ## GitHub Example Waiter
 
