@@ -15,8 +15,9 @@ export const SourcesCard: React.FC<{
   onOpenSource: (source: Source) => void;
   onAddApiKey: () => void;
   onAddSubscription: () => void;
+  subscriptionPickerOpen?: boolean;
   subscriptionTriggerRef?: React.Ref<HTMLButtonElement>;
-}> = ({ read, onRetry, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionTriggerRef }) => {
+}> = ({ read, onRetry, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionPickerOpen, subscriptionTriggerRef }) => {
   const { t } = useTranslation();
   const sources = foldRegionRead<Source[], Source[] | undefined>(read, {
     loading: () => undefined,
@@ -58,6 +59,8 @@ export const SourcesCard: React.FC<{
           ref={subscriptionTriggerRef}
           variant="default"
           size="xs"
+          aria-haspopup="menu"
+          aria-expanded={subscriptionPickerOpen}
           className="model-hub-footer-action shadow-none disabled:opacity-100"
           onClick={onAddSubscription}
         >
