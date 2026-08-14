@@ -211,7 +211,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
             {/* Update Status */}
             {!isSourceBuild && (hasUpdate ? (
-              <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold">
+              <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
                 <AlertCircle size={16} className="shrink-0" />
                 <span>
                   {t('dashboard.updateHint', {
@@ -221,12 +221,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 </span>
               </div>
             ) : versionInfo && !versionInfo.error ? (
-              <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint">
+              <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint-ink">
                 <Check size={16} className="shrink-0" />
                 <span>{t('dashboard.upToDate')}</span>
               </div>
             ) : versionInfo?.error ? (
-              <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
                 <AlertCircle size={16} className="shrink-0" />
                 <span>{t('dashboard.checkFailed')}</span>
               </div>
@@ -238,8 +238,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 className={clsx(
                   'flex items-center gap-2 rounded-md border px-3 py-2 text-sm',
                   upgradeResult.ok
-                    ? 'border-mint/25 bg-mint/10 text-mint'
-                    : 'border-destructive/30 bg-destructive/10 text-destructive'
+                    ? 'border-mint/25 bg-mint/10 text-mint-ink'
+                    : 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                 )}
               >
                 {upgradeResult.ok ? <Check size={16} className="shrink-0" /> : <AlertCircle size={16} className="shrink-0" />}
@@ -251,7 +251,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
             {/* Restarting Status */}
             {restarting && (
-              <div className="flex items-center gap-2 rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan">
+              <div className="flex items-center gap-2 rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
                 <RefreshCw size={16} className="shrink-0 animate-spin" />
                 <span>{t('dashboard.restarting')}</span>
               </div>

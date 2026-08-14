@@ -250,7 +250,7 @@ export const ClaudeProviderConfig: React.FC<{
         description={t('settings.backends.claudeDescription')}
         Icon={Sparkles}
         iconTileClassName="bg-cyan-soft"
-        iconClassName="text-cyan"
+        iconClassName="text-cyan-ink"
         runtime={runtime}
         hideEnableToggle={hideEnableToggle}
       />
@@ -394,7 +394,7 @@ export const ClaudeProviderConfig: React.FC<{
                         size="xs"
                         onClick={() => void onRemoveApiKey()}
                         disabled={removingKey || editingKey}
-                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        className="text-destructive-ink hover:bg-destructive/10 hover:text-destructive-ink"
                       >
                         <Trash2 className="size-3" />
                         {removingKey
@@ -477,9 +477,9 @@ export const ClaudeProviderConfig: React.FC<{
                 overwrite Claude's own settings.json directly. */}
             {authMode === 'api_key' && authState?.settings_conflict && (
               <div className="flex items-start gap-2 rounded-lg border border-gold/30 bg-gold/[0.08] px-3 py-2.5">
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-gold" />
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-gold-ink" />
                 <div className="flex flex-col gap-1">
-                  <p className="text-[12px] font-medium text-gold">
+                  <p className="text-[12px] font-medium text-gold-ink">
                     {t('settings.backends.claudeSettingsConflictTitle')}
                   </p>
                   <p className="text-[12px] leading-relaxed text-muted">

@@ -57,7 +57,7 @@ const SecretRow: React.FC<{
     <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
       <div
         className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${
-          isKeypair ? 'bg-violet/10 text-violet' : 'bg-accent/10 text-accent'
+          isKeypair ? 'bg-violet/10 text-violet-ink' : 'bg-accent/10 text-accent-ink'
         }`}
       >
         {isKeypair ? <Wallet className="size-4" /> : <KeyRound className="size-4" />}
@@ -71,7 +71,7 @@ const SecretRow: React.FC<{
             <Badge variant="secondary">{t('vaults.standard')}</Badge>
           )}
           {isKeypair ? (
-            <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet">
+            <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet-ink">
               <Wallet className="size-3" />
               {t('vaults.signing')}
             </Badge>
@@ -83,7 +83,7 @@ const SecretRow: React.FC<{
             </Badge>
           ) : null}
           {skills.map((skill) => (
-            <Badge key={`skill:${skill}`} variant="outline" className="gap-1 border-violet/40 bg-violet-soft text-violet">
+            <Badge key={`skill:${skill}`} variant="outline" className="gap-1 border-violet/40 bg-violet-soft text-violet-ink">
               <Puzzle className="size-3" />
               {skill}
             </Badge>
@@ -159,7 +159,7 @@ const SecretRow: React.FC<{
                 setMenuOpen(false);
                 onDelete(s);
               }}
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-destructive transition-colors hover:bg-destructive/10"
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-destructive-ink transition-colors hover:bg-destructive/10"
             >
               <Trash2 className="size-4" />
               {t('vaults.delete')}
@@ -250,7 +250,7 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: V
     .join(' · ');
   return (
     <span
-      className="inline-flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-2.5 pr-1.5 text-xs text-mint"
+      className="inline-flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-2.5 pr-1.5 text-xs text-mint-ink"
       title={tip || undefined}
     >
       <Icon className="size-3.5 shrink-0" />
@@ -261,7 +261,7 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: V
       >
         {g.session_id ? <Link2 className="size-3 opacity-70" /> : <Globe className="size-3 opacity-70" />}
       </span>
-      <span className={cn('font-mono tabular-nums', rem.urgent ? 'text-warning' : 'text-mint/80')}>
+      <span className={cn('font-mono tabular-nums', rem.urgent ? 'text-gold-ink' : 'text-mint-ink/80')}>
         {rem.expired ? t('vaults.grants.expired') : chipCountdown(rem)}
       </span>
       {onRevoke ? (
@@ -269,7 +269,7 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: V
           type="button"
           onClick={() => onRevoke(g)}
           aria-label={t('vaults.grants.revoke')}
-          className="flex size-4 items-center justify-center rounded-full text-mint/70 transition-colors hover:bg-mint/15 hover:text-mint"
+          className="flex size-4 items-center justify-center rounded-full text-mint-ink/70 transition-colors hover:bg-mint/15 hover:text-mint-ink"
         >
           <X className="size-3" />
         </button>
@@ -292,7 +292,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
   const session = vaultRequestSessionDisplay(r);
   return (
     <div className="flex items-center gap-3.5 rounded-xl border border-gold/40 bg-gold/[0.06] px-4 py-3">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gold/10 text-gold">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gold/10 text-gold-ink">
         <Icon className="size-4" />
       </div>
       <div className="flex min-w-0 flex-col gap-1">
@@ -432,7 +432,7 @@ const PendingRequestsSection: React.FC<{
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2 px-1">
-        <Inbox className="size-4 text-gold" />
+        <Inbox className="size-4 text-gold-ink" />
         <span className="text-sm font-semibold">{t('vaults.requests.title')}</span>
         <Badge variant="warning">{requests.length}</Badge>
         <span className="hidden text-xs text-muted sm:inline">{t('vaults.requests.subtitle')}</span>
@@ -478,7 +478,7 @@ const FilterChip: React.FC<{ active: boolean; onClick: () => void; children: Rea
     onClick={onClick}
     className={cn(
       'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors',
-      active ? 'border-accent bg-accent/10 text-accent' : 'border-border bg-surface text-muted hover:bg-surface-2',
+      active ? 'border-accent bg-accent/10 text-accent-ink' : 'border-border bg-surface text-muted hover:bg-surface-2',
     )}
   >
     {children}
@@ -783,13 +783,13 @@ export const VaultsPage: React.FC = () => {
         }
       />
       {error && (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
+        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       )}
       {canManage ? <PendingRequestsSection onResolved={refresh} focusRequestId={focusRequestId} onFocusRequestOpened={clearFocusedRequest} /> : null}
       {canReadVaultState && grants.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 px-1">
-            <ShieldCheck className="size-4 text-mint" />
+            <ShieldCheck className="size-4 text-mint-ink" />
             <span className="text-sm font-semibold">{t('vaults.grants.title')}</span>
             <Badge variant="secondary">{grants.length}</Badge>
             <span className="hidden text-xs text-muted sm:inline">{t('vaults.grants.subtitle')}</span>
@@ -916,19 +916,19 @@ export const VaultsPage: React.FC = () => {
         {deleteTarget?.kind === 'keypair' ? (
           <div className="flex flex-col gap-2 rounded-[10px] border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
             <span className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive-ink" />
               <span>{t('vaults.deleteDialog.keypairIrreversible')}</span>
             </span>
             <span className="flex items-start gap-2">
-              <Wallet className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <Wallet className="mt-0.5 size-4 shrink-0 text-destructive-ink" />
               <span>{t('vaults.deleteDialog.keypairFunds')}</span>
             </span>
           </div>
         ) : null}
         {deleteTarget?.protection === 'protected' ? (
-          <div className="flex flex-col gap-2 rounded-[10px] border border-warning/30 bg-warning/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
+          <div className="flex flex-col gap-2 rounded-[10px] border border-gold/30 bg-gold/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
             <span className="flex items-start gap-2">
-              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-warning" />
+              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-gold-ink" />
               <span>{t('vaults.deleteDialog.protectedUnlockNote')}</span>
             </span>
           </div>

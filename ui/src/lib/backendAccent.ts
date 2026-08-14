@@ -15,9 +15,9 @@ export const BACKEND_LABEL: Record<Backend, string> = {
 
 // Text / icon accent — e.g. <Icon className={BACKEND_TEXT[b]} />.
 export const BACKEND_TEXT: Record<Backend, string> = {
-  claude: 'text-mint',
-  opencode: 'text-cyan',
-  codex: 'text-violet',
+  claude: 'text-mint-ink',
+  opencode: 'text-cyan-ink',
+  codex: 'text-violet-ink',
 };
 
 // Solid dot fill — e.g. a status dot inside a chip.
@@ -29,9 +29,9 @@ export const BACKEND_DOT: Record<Backend, string> = {
 
 // Full pill surface (soft bg + 40% border + accent text) for backend chips.
 export const BACKEND_CHIP: Record<Backend, string> = {
-  claude: 'bg-mint-soft border-mint/40 text-mint',
-  opencode: 'bg-cyan-soft border-cyan/40 text-cyan',
-  codex: 'bg-violet-soft border-violet/40 text-violet',
+  claude: 'bg-mint-soft border-mint/40 text-mint-ink',
+  opencode: 'bg-cyan-soft border-cyan/40 text-cyan-ink',
+  codex: 'bg-violet-soft border-violet/40 text-violet-ink',
 };
 
 export function isBackend(value: string): value is Backend {

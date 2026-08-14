@@ -83,7 +83,7 @@ const Toggle: React.FC<{ on: boolean; label: string; onClick: () => void; childr
     title={label}
     aria-label={label}
     onClick={onClick}
-    className={clsx('grid size-5 place-items-center rounded transition', on ? 'bg-cyan-soft text-cyan' : 'text-muted hover:bg-foreground/10 hover:text-foreground')}
+    className={clsx('grid size-5 place-items-center rounded transition', on ? 'bg-cyan-soft text-cyan-ink' : 'text-muted hover:bg-foreground/10 hover:text-foreground')}
   >
     {children}
   </button>
@@ -242,7 +242,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
         <button
           type="button"
           onClick={onOpenFolder}
-          className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint transition hover:bg-mint/[0.14]"
+          className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint-ink transition hover:bg-mint/[0.14]"
         >
           <FolderOpen className="size-3.5" />
           {t('apps.editor.openFolder')}
@@ -346,7 +346,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
             <Loader2 className="size-3 animate-spin" /> {t('apps.editor.search.searching')}
           </span>
         ) : error ? (
-          <span className="text-destructive">{error}</span>
+          <span className="text-destructive-ink">{error}</span>
         ) : data ? (
           <span>{t('apps.editor.search.summary', { matches: data.total_matches, files: data.total_files })}</span>
         ) : query ? null : (
@@ -355,13 +355,13 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
       </div>
 
       {data?.truncated && !loading && (
-        <div className="mx-3 mb-1 rounded border border-gold/30 bg-gold/[0.08] px-2 py-1 text-[11px] text-gold">
+        <div className="mx-3 mb-1 rounded border border-gold/30 bg-gold/[0.08] px-2 py-1 text-[11px] text-gold-ink">
           {t(data.truncated_reason === 'files' ? 'apps.editor.search.truncatedFiles' : 'apps.editor.search.truncatedMatches')}
         </div>
       )}
 
       {undo && (
-        <div className="mx-3 mb-1 flex items-center gap-2 rounded border border-mint/30 bg-mint/[0.08] px-2 py-1 text-[11px] text-mint">
+        <div className="mx-3 mb-1 flex items-center gap-2 rounded border border-mint/30 bg-mint/[0.08] px-2 py-1 text-[11px] text-mint-ink">
           <span className="flex-1">
             {t('apps.editor.search.replaced', { total: undo.total, files: undo.files })}
             {undo.skipped > 0 ? ` ${t('apps.editor.search.replaceSkipped', { n: undo.skipped })}` : ''}
@@ -372,7 +372,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
         </div>
       )}
 
-      {notice && <div className="mx-3 mb-1 rounded border border-gold/30 bg-gold/[0.08] px-2 py-1 text-[11px] text-gold">{notice}</div>}
+      {notice && <div className="mx-3 mb-1 rounded border border-gold/30 bg-gold/[0.08] px-2 py-1 text-[11px] text-gold-ink">{notice}</div>}
 
       {/* Results tree. `?? []` is defense-in-depth: parse() now rejects a non-JSON response so
           `data` is always a valid SearchResponse or null, but never crash the panel on a stray shape. */}
@@ -409,7 +409,7 @@ const FileGroup: React.FC<{
         className="flex items-center gap-1.5 rounded px-1.5 py-1 text-left transition hover:bg-foreground/[0.05]"
       >
         {collapsed ? <ChevronRight className="size-3 shrink-0 text-muted" /> : <ChevronDown className="size-3 shrink-0 text-muted" />}
-        <CodeXml className="size-3.5 shrink-0 text-cyan" />
+        <CodeXml className="size-3.5 shrink-0 text-cyan-ink" />
         <span className="shrink-0 text-[12.5px] font-semibold text-foreground">{name}</span>
         {dir && <span className="min-w-0 flex-1 truncate text-[11px] text-muted">{dir}</span>}
         <span className="ml-auto shrink-0 rounded-full bg-surface-3 px-1.5 font-mono text-[10px] text-muted">{file.match_count}</span>
@@ -437,8 +437,8 @@ const MatchRow: React.FC<{ match: SearchMatch; previewer: ((line: string, start:
         {pre}
         {replaced != null ? (
           <>
-            <span className="rounded-sm bg-destructive/20 text-destructive line-through">{hit}</span>
-            {replaced && <span className="rounded-sm bg-mint/20 text-mint">{replaced}</span>}
+            <span className="rounded-sm bg-destructive/20 text-destructive-ink line-through">{hit}</span>
+            {replaced && <span className="rounded-sm bg-mint/20 text-mint-ink">{replaced}</span>}
           </>
         ) : (
           <span className="rounded-sm bg-gold/25 font-semibold text-foreground">{hit}</span>

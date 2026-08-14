@@ -37,7 +37,7 @@ const AddressRow: React.FC<{ label: string; value: string }> = ({ label, value }
         aria-label={t('vaults.addresses.copy', { label })}
         className="shrink-0 text-muted transition-colors hover:text-foreground"
       >
-        {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5" />}
+        {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
       </button>
     </div>
   );

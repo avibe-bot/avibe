@@ -298,7 +298,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
               onClick={() => void openWindow()}
               className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
             >
-              <AppWindow className="size-3.5 shrink-0 text-cyan" />
+              <AppWindow className="size-3.5 shrink-0 text-cyan-ink" />
               <span>{t('chat.showPage.newWindow')}</span>
             </button>
             {linkHref && (
@@ -308,7 +308,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
                 onClick={() => void openLink()}
                 className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
               >
-                <ExternalLink className="size-3.5 shrink-0 text-mint" />
+                <ExternalLink className="size-3.5 shrink-0 text-mint-ink" />
                 <span>{t('chat.showPage.newLink')}</span>
               </button>
             )}

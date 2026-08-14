@@ -216,7 +216,7 @@ export const FilePicker: React.FC<{
           </Button>
         </div>
 
-        {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
+        {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive-ink">{error}</div>}
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Rail: favorites + projects */}
@@ -274,7 +274,7 @@ export const FilePicker: React.FC<{
                     isDir ? 'text-foreground hover:bg-foreground/[0.06]' : 'cursor-default text-muted/60',
                   )}
                 >
-                  {isDir ? <Folder className="size-4 shrink-0 text-cyan" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
+                  {isDir ? <Folder className="size-4 shrink-0 text-cyan-ink" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
                   <span className="truncate">{e.name}</span>
                 </button>
               );

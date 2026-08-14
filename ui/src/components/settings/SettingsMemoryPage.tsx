@@ -263,7 +263,7 @@ export const SettingsMemoryPage: React.FC = () => {
         </div>
       ) : !settings ? (
         settingsRead.error ? (
-          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
             {settingsRead.error}
           </div>
         ) : (
@@ -277,7 +277,7 @@ export const SettingsMemoryPage: React.FC = () => {
           {runtimeInstalled === false ? (
             <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
               <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
-                <Brain className="size-4 text-violet" />
+                <Brain className="size-4 text-violet-ink" />
                 {t('memory.setup.runtimeRequired')}
               </div>
               <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
@@ -350,7 +350,7 @@ export const SettingsMemoryPage: React.FC = () => {
                 {t('memory.settings.loading')}
               </div>
             ) : settingsRead.error && !settings ? (
-              <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
                 {settingsRead.error}
               </div>
             ) : (
@@ -381,7 +381,7 @@ export const SettingsMemoryPage: React.FC = () => {
               ))}
             </ul>
           </div>
-          <div className="rounded-[10px] border border-warning/30 bg-warning/5 px-3 py-2.5">
+          <div className="rounded-[10px] border border-gold/30 bg-gold/5 px-3 py-2.5">
             <div className="mb-1 font-semibold text-foreground">{t('memory.clear.keepsTitle')}</div>
             <ul className="flex flex-col gap-1">
               {(t('memory.clear.keeps', { returnObjects: true }) as string[]).map((line, idx) => (

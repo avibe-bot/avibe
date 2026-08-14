@@ -373,7 +373,7 @@ export const ShowPageShareControl: React.FC<{
             onConfirmationOpenChange={setWorkspaceConfirmationOpen}
           />
           {accessError ? (
-            <p className="mt-2 text-[11px] leading-snug text-destructive">
+            <p className="mt-2 text-[11px] leading-snug text-destructive-ink">
               {t('chat.showPage.accessLoadError')}
             </p>
           ) : null}
@@ -466,7 +466,7 @@ export const ShowPageShareControl: React.FC<{
             {showAddToHome && !offline ? (
               <div className="rounded-md border border-border bg-foreground/[0.02] px-2.5 py-2">
                 <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-                  <Plus className="size-3.5 shrink-0 text-cyan" />
+                  <Plus className="size-3.5 shrink-0 text-cyan-ink" />
                   {t('chat.showPage.addToHomeTitle')}
                 </div>
                 {iosStandalone ? (
@@ -502,7 +502,7 @@ export const ShowPageShareControl: React.FC<{
         {payload && shareCapabilities.canManageDock && (
           <div className="border-t border-border pt-3">
             <div className="flex items-center gap-3">
-              <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-foreground/[0.03] text-cyan">
+              <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-foreground/[0.03] text-cyan-ink">
                 <LayoutGrid className="size-4" />
               </span>
               <div className="min-w-0 flex-1">
@@ -528,7 +528,7 @@ export const ShowPageShareControl: React.FC<{
             </div>
             {dock.isDocked(showDockId(sessionId)) && (
               <div className="mt-2 flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.08] px-2.5 py-1.5 text-xs text-foreground">
-                <Check className="size-3.5 shrink-0 text-mint" />
+                <Check className="size-3.5 shrink-0 text-mint-ink" />
                 <span className="truncate">
                   {t('chat.showPage.pinnedConfirm', {
                     title: (payload.title ?? '').trim() || t('chat.showPage.title'),

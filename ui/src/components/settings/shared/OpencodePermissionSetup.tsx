@@ -38,7 +38,7 @@ export function OpencodePermissionSetup({
   if (!cliReady || permissionAllowed) return null;
   return (
     <div className={cn('rounded-lg border border-gold/30 bg-gold/10 px-3 py-2.5', className)}>
-      <p className="mb-2 text-[12px] text-gold">{t('agentDetection.permissionHintStrong')}</p>
+      <p className="mb-2 text-[12px] text-gold-ink">{t('agentDetection.permissionHintStrong')}</p>
       <div className="flex flex-wrap items-center gap-3">
         <Button
           type="button"
@@ -54,8 +54,8 @@ export function OpencodePermissionSetup({
           )}
           {t('agentDetection.setupPermission')}
         </Button>
-        {state === 'success' && <span className="text-[12px] text-mint">{message}</span>}
-        {state === 'error' && <span className="text-[12px] text-destructive">{message}</span>}
+        {state === 'success' && <span className="text-[12px] text-mint-ink">{message}</span>}
+        {state === 'error' && <span className="text-[12px] text-destructive-ink">{message}</span>}
       </div>
     </div>
   );

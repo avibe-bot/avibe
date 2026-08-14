@@ -401,7 +401,7 @@ export const RemoteAccess: React.FC = () => {
       <div className="flex items-start justify-between gap-4 border-b border-cyan/20 bg-cyan/[0.07] px-5 py-4">
         <div className="min-w-0 space-y-2">
           <h2 className="inline-flex items-center gap-2 text-[15px] font-semibold text-foreground">
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.12] text-cyan">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.12] text-cyan-ink">
               <Cloud className="size-4" strokeWidth={2.25} />
             </span>
             {t('remoteAccess.title')}
@@ -417,7 +417,7 @@ export const RemoteAccess: React.FC = () => {
                       href={VIBE_CLOUD_APP_URL}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-0.5 font-medium text-cyan hover:underline"
+                      className="inline-flex items-center gap-0.5 font-medium text-cyan-ink hover:underline"
                     />
                   ),
                 }}
@@ -456,7 +456,7 @@ export const RemoteAccess: React.FC = () => {
         </div>
         <div className="border-b border-border px-5 py-3.5 sm:border-b-0 sm:border-r">
           <div className="text-[12px] text-muted">{t('remoteAccess.vibeCloudService')}</div>
-          <a className="mt-1 inline-flex text-[13px] font-medium text-cyan" href={VIBE_CLOUD_URL} target="_blank" rel="noreferrer">
+          <a className="mt-1 inline-flex text-[13px] font-medium text-cyan-ink" href={VIBE_CLOUD_URL} target="_blank" rel="noreferrer">
             avibe.bot
             <ExternalLink className="ml-1 size-3.5" />
           </a>
@@ -482,7 +482,7 @@ export const RemoteAccess: React.FC = () => {
         <div className="border-b border-border px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <Network className="size-4 shrink-0 text-cyan" />
+              <Network className="size-4 shrink-0 text-cyan-ink" />
               <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.networkPath')}</h3>
             </div>
             <Badge variant={routeVariant}>{routeLabel}</Badge>
@@ -548,7 +548,7 @@ export const RemoteAccess: React.FC = () => {
                       {connectorPathLabel}
                     </div>
                     {requestPathUnavailable ? (
-                      <div className="break-words font-medium text-destructive">
+                      <div className="break-words font-medium text-destructive-ink">
                         {t('remoteAccess.requestPathUnavailable', {
                           success: requestPath?.success_count || 0,
                           count: requestPath?.sample_count || 0,
@@ -577,7 +577,7 @@ export const RemoteAccess: React.FC = () => {
         <details className="group border-b border-border">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 transition-colors hover:bg-surface/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-cyan/60">
             <div className="flex items-center gap-2">
-              <Settings2 className="size-4 text-cyan" />
+              <Settings2 className="size-4 text-cyan-ink" />
               <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.controls')}</h3>
             </div>
             <ChevronDown className="size-4 shrink-0 text-muted transition-transform group-open:rotate-180" />
@@ -684,7 +684,7 @@ export const RemoteAccess: React.FC = () => {
             <div className="mt-4 border-t border-border/70 pt-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <Activity className="size-4 text-cyan" />
+                  <Activity className="size-4 text-cyan-ink" />
                   <span className="text-[12px] font-medium text-foreground">{t('remoteAccess.diagnostics')}</span>
                   {diagnostics?.cloudflared_version && (
                     <span className="font-mono text-[10px] text-muted">
@@ -771,7 +771,7 @@ export const RemoteAccess: React.FC = () => {
       ) : (
         <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[13px] font-medium text-mint">
+            <div className="flex items-center gap-2 text-[13px] font-medium text-mint-ink">
               <CheckCircle2 className="size-3.5" />
               {t('remoteAccess.configuredBadge')}
             </div>
@@ -780,7 +780,7 @@ export const RemoteAccess: React.FC = () => {
                 href={publicUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="mt-1 inline-flex max-w-full items-center gap-1 truncate font-mono text-[11px] text-cyan hover:underline"
+                className="mt-1 inline-flex max-w-full items-center gap-1 truncate font-mono text-[11px] text-cyan-ink hover:underline"
                 title={publicUrl}
               >
                 <span className="truncate">{publicUrl}</span>
@@ -834,7 +834,7 @@ export const RemoteAccess: React.FC = () => {
 
       {actionMessage && (
         <div className={`border-t border-border px-4 py-3 text-[12px] ${
-          actionMessage.type === 'error' ? 'text-gold' : 'text-mint'
+          actionMessage.type === 'error' ? 'text-gold-ink' : 'text-mint-ink'
         }`}>
           {actionMessage.text}
         </div>

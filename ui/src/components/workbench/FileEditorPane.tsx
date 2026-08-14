@@ -431,7 +431,7 @@ export const FileEditorPane: React.FC<{
       )}
 
       {error && (
-        <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">
+        <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive-ink">
           {error}
         </div>
       )}
@@ -441,9 +441,9 @@ export const FileEditorPane: React.FC<{
           single-file page; wraps to two rows on narrow widths. Hidden while the Compare overlay is
           open, which carries its own copy of the actions. */}
       {conflict && !comparing && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warning/40 bg-warning/[0.08] px-3 py-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-gold/40 bg-gold/[0.08] px-3 py-2">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[11.5px] text-foreground">
-            <AlertTriangle className="size-3.5 shrink-0 text-warning" />
+            <AlertTriangle className="size-3.5 shrink-0 text-gold-ink" />
             <span className="min-w-0">{t('apps.editor.conflict.message')}</span>
           </div>
           {conflictActions('bar')}

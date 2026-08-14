@@ -22,7 +22,7 @@ export const ContextMenuItem: React.FC<{
     onClick={onClick}
     className={clsx(
       'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition',
-      danger ? 'text-destructive hover:bg-destructive/[0.1]' : 'text-foreground hover:bg-cyan-soft',
+      danger ? 'text-destructive-ink hover:bg-destructive/[0.1]' : 'text-foreground hover:bg-cyan-soft',
     )}
   >
     {icon !== undefined && <span className="grid size-4 shrink-0 place-items-center">{icon}</span>}

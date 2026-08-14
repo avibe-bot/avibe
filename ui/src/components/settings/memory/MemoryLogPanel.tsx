@@ -167,7 +167,7 @@ export const MemoryLogListContent: React.FC<{
         </Button>
       </div>
       {error ? (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
           {error}
         </div>
       ) : null}
@@ -253,7 +253,7 @@ const StepRow: React.FC<{ step: MemoryLogStep }> = ({ step }) => {
             {t('memory.log.unavailable', { reason: memoryLogEnumLabel(t, 'reason', step.reason) })}
           </div>
         ) : null}
-        {step.error ? <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-destructive">{step.error}</pre> : null}
+        {step.error ? <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-destructive-ink">{step.error}</pre> : null}
       </div>
     </div>
   );
@@ -271,7 +271,7 @@ export const ProviderCallRow: React.FC<{ call: MemoryProviderCall }> = ({ call }
   return (
     <div className="rounded-md border border-border bg-surface">
       {call.dropped_before > 0 ? (
-        <div className="flex items-center gap-2 border-b border-gold/30 bg-gold/[0.06] px-3 py-2 text-[11.5px] text-gold">
+        <div className="flex items-center gap-2 border-b border-gold/30 bg-gold/[0.06] px-3 py-2 text-[11.5px] text-gold-ink">
           <FileWarning className="size-3.5" />
           {t('memory.log.droppedCalls', { count: call.dropped_before })}
         </div>
@@ -307,7 +307,7 @@ export const ProviderCallRow: React.FC<{ call: MemoryProviderCall }> = ({ call }
             <span>{t('memory.log.usage')}: <strong>{usage || '-'}</strong></span>
             <span>{formatTimestamp(call.started_at_ms)}</span>
           </div>
-          {call.error ? <pre className="whitespace-pre-wrap break-words text-[11px] text-destructive">{call.error}</pre> : null}
+          {call.error ? <pre className="whitespace-pre-wrap break-words text-[11px] text-destructive-ink">{call.error}</pre> : null}
           <JsonPayload value={call.request} label={t('memory.log.request')} />
           {call.response !== null ? <JsonPayload value={call.response} label={t('memory.log.response')} /> : null}
         </div>
@@ -341,7 +341,7 @@ const MemoryLogDetail: React.FC<{
       <Card>
         <CardContent className="py-4">
           <div className="mb-4 flex items-center gap-2 text-[13px] font-semibold text-foreground">
-            <Clock3 className="size-4 text-cyan" />
+            <Clock3 className="size-4 text-cyan-ink" />
             {t('memory.log.timeline')}
           </div>
           <div>{detail.steps.map((step, index) => <StepRow key={`${step.type}-${step.run_id ?? index}`} step={step} />)}</div>
@@ -354,7 +354,7 @@ const MemoryLogDetail: React.FC<{
       </Card>
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2 text-[13px] font-semibold text-foreground">
-          <Database className="size-4 text-violet" />
+          <Database className="size-4 text-violet-ink" />
           {t('memory.log.callDetails')}
         </div>
         {detail.calls.length === 0 ? (
@@ -385,7 +385,7 @@ const MemoryLogDetail: React.FC<{
               </span>
             </div>
             {detail.current_state.indexing.error ? (
-              <div className="whitespace-pre-wrap break-words text-destructive">
+              <div className="whitespace-pre-wrap break-words text-destructive-ink">
                 {detail.current_state.indexing.error}
               </div>
             ) : null}
@@ -460,7 +460,7 @@ export const MemoryLogPanel: React.FC<{
               <ArrowLeft />
               {t('memory.log.back')}
             </Button>
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
               {detailRead.error ?? t('memory.log.detailUnavailable')}
             </div>
           </div>

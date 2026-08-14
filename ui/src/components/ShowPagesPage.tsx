@@ -150,7 +150,7 @@ function ShowPageRow({
               <span className="flex items-center gap-1.5">
                 <span
                   className={clsx(
-                    'truncate text-[13px] font-semibold text-foreground transition-colors group-hover:text-cyan',
+                    'truncate text-[13px] font-semibold text-foreground transition-colors group-hover:text-cyan-ink',
                     !page.title && 'font-mono',
                   )}
                 >
@@ -160,7 +160,7 @@ function ShowPageRow({
                 <ArrowUpRight
                   size={13}
                   aria-hidden
-                  className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan"
+                  className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan-ink"
                 />
               </span>
               {sub ? <span className="block truncate text-[11px] text-muted">{sub}</span> : null}
@@ -240,7 +240,7 @@ function ShowPageRow({
                   <span className={LABEL}>{t('showPages.liveLink')}</span>
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2">
-                      <Link2 size={14} className={page.visibility === 'public' ? 'text-gold' : 'text-cyan'} />
+                      <Link2 size={14} className={page.visibility === 'public' ? 'text-gold-ink' : 'text-cyan-ink'} />
                       <span className="truncate font-mono text-[12px] text-foreground">{shown}</span>
                     </div>
                     <Button type="button" variant="secondary" size="sm" onClick={onCopy} disabled={!href}>
@@ -270,9 +270,9 @@ function ShowPageRow({
                   </div>
                   {page.visibility === 'public' && !page.url_available ? (
                     <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                      <TriangleAlert size={13} className="text-gold" />
+                      <TriangleAlert size={13} className="text-gold-ink" />
                       <span className="text-muted">{t('showPages.cloudOff')}</span>
-                      <a href="/admin/remote-access" className="font-semibold text-gold hover:underline">
+                      <a href="/admin/remote-access" className="font-semibold text-gold-ink hover:underline">
                         {t('showPages.connectCloud')} →
                       </a>
                     </div>
@@ -320,7 +320,7 @@ function ShowPageRow({
                   {row.to ? (
                     <Link
                       to={row.to}
-                      className={clsx('break-all text-[12px] text-cyan transition-colors hover:text-foreground hover:underline', row.mono && 'font-mono')}
+                      className={clsx('break-all text-[12px] text-cyan-ink transition-colors hover:text-foreground hover:underline', row.mono && 'font-mono')}
                     >
                       {row.v}
                     </Link>

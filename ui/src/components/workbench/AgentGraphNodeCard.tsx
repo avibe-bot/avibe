@@ -111,7 +111,7 @@ const StatusGlyph: React.FC<{ node: AgentGraphNode }> = ({ node }) => {
   const meta = statusMeta(node.status);
   if (meta.glyph === 'check') return <Check className="size-3 shrink-0 text-muted" />;
   if (meta.glyph === 'cross') {
-    return <X className={clsx('size-3 shrink-0', meta.tone === 'destructive' ? 'text-destructive' : 'text-muted')} />;
+    return <X className={clsx('size-3 shrink-0', meta.tone === 'destructive' ? 'text-destructive-ink' : 'text-muted')} />;
   }
   return <span className={clsx('size-2 shrink-0 rounded-full', meta.dotClass, node.status === 'active' && 'animate-pulse')} />;
 };

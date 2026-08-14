@@ -179,7 +179,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
             <StepHeader
               step={1}
               title={t('discordConfig.step1Title')}
-              icon={<Plus size={16} className="text-cyan" />}
+              icon={<Plus size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[1]}
               onToggle={() => toggleStep(1)}
             />
@@ -204,7 +204,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
             <StepHeader
               step={2}
               title={t('discordConfig.step2Title')}
-              icon={<Settings size={16} className="text-cyan" />}
+              icon={<Settings size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[2]}
               onToggle={() => toggleStep(2)}
             />
@@ -215,7 +215,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                   <li>{t('discordConfig.step2Item1')}</li>
                   <li>{t('discordConfig.step2Item2')}</li>
                 </ol>
-                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan">
+                <div className="rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2 text-[12px] leading-[1.55] text-cyan-ink">
                   <strong>{t('slackConfig.tip')}:</strong> {t('discordConfig.step2Tip')}
                 </div>
               </div>
@@ -227,7 +227,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
             <StepHeader
               step={3}
               title={t('discordConfig.step3Title')}
-              icon={<ExternalLink size={16} className="text-cyan" />}
+              icon={<ExternalLink size={16} className="text-cyan-ink" />}
               expanded={expandedSteps[3]}
               onToggle={() => toggleStep(3)}
             />
@@ -242,7 +242,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                 </ol>
                 <div className="space-y-2">
                   <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                    <KeyRound size={14} className="text-cyan" /> {t('discordConfig.clientId')}
+                    <KeyRound size={14} className="text-cyan-ink" /> {t('discordConfig.clientId')}
                   </label>
                   <Input
                     type="text"
@@ -261,7 +261,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                     <button
                       onClick={copyInviteUrl}
                       disabled={!inviteUrl}
-                      className="inline-flex items-center gap-1 text-[11px] text-cyan transition hover:text-cyan/80 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex items-center gap-1 text-[11px] text-cyan-ink transition hover:text-cyan-ink/80 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {inviteCopied ? <Check size={12} /> : <Copy size={12} />}
                       {inviteCopied ? t('discordConfig.inviteUrlCopied') : t('discordConfig.inviteUrlCopy')}
@@ -286,11 +286,11 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                 </Button>
 
                 <div className="space-y-2 rounded-lg border border-gold/30 bg-gold/10 px-3 py-2.5">
-                  <div className="flex items-center gap-2 text-[12px] font-semibold text-gold">
-                    <AlertTriangle size={14} className="text-gold" />
+                  <div className="flex items-center gap-2 text-[12px] font-semibold text-gold-ink">
+                    <AlertTriangle size={14} className="text-gold-ink" />
                     {t('discordConfig.dmTroubleshootTitle')}
                   </div>
-                  <ol className="list-inside list-decimal space-y-1 pl-1 text-[11px] leading-[1.55] text-gold/90">
+                  <ol className="list-inside list-decimal space-y-1 pl-1 text-[11px] leading-[1.55] text-gold-ink/90">
                     <li>{t('discordConfig.dmTroubleshoot1')}</li>
                     <li>{t('discordConfig.dmTroubleshoot2')}</li>
                     <li>{t('discordConfig.dmTroubleshoot3')}</li>
@@ -305,7 +305,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
             <StepHeader
               step={4}
               title={t('discordConfig.step4Title')}
-              icon={<KeyRound size={16} className="text-cyan" />}
+              icon={<KeyRound size={16} className="text-cyan-ink" />}
               completed={isValid}
               expanded={expandedSteps[4]}
               onToggle={() => toggleStep(4)}
@@ -321,7 +321,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
 
                 <div className="space-y-2 pt-1">
                   <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                    <KeyRound size={14} className="text-cyan" /> {t('discordConfig.botToken')}
+                    <KeyRound size={14} className="text-cyan-ink" /> {t('discordConfig.botToken')}
                   </label>
                   <Input
                     type="password"
@@ -350,8 +350,8 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                       className={clsx(
                         'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium',
                         authResult.ok
-                          ? 'border-mint/30 bg-mint/[0.08] text-mint'
-                          : 'border-danger/30 bg-danger/10 text-danger'
+                          ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
+                          : 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                       )}
                     >
                       {authResult.ok ? <Check size={14} /> : null}
@@ -365,7 +365,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                 {authResult?.ok && (
                   <div className="space-y-2 pt-1">
                     <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-                      <Server size={14} className="text-cyan" /> {t('discordConfig.guild')}
+                      <Server size={14} className="text-cyan-ink" /> {t('discordConfig.guild')}
                     </label>
                     {guilds.length > 0 && (
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -376,7 +376,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                           <button
                             type="button"
                             onClick={selectAllGuilds}
-                            className="text-[11px] font-medium text-cyan transition hover:text-cyan/80"
+                            className="text-[11px] font-medium text-cyan-ink transition hover:text-cyan-ink/80"
                           >
                             {t('discordConfig.selectAllGuilds')}
                           </button>
@@ -451,7 +451,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
             </p>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
-            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
+            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedCount} / 4
             </span>
             <div className="flex gap-1">

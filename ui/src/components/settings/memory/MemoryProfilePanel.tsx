@@ -95,7 +95,7 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
         </Button>
       </div>
       {error ? (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
+        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       ) : loading && items === null ? (
         <div className="flex items-center gap-2 px-1 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />

@@ -1086,7 +1086,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               <p className="text-[14px] leading-[1.55] text-muted">{t('wechat.noChannels')}</p>
             </div>
             <div className="flex flex-col items-center gap-3 rounded-xl border border-cyan/30 bg-cyan/[0.06] px-6 py-10 text-center">
-              <div className="flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.08] text-cyan">
+              <div className="flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.08] text-cyan-ink">
                 <MessageSquare size={26} />
               </div>
               <p className="text-[12px] text-muted">{t('wechat.noChannels')}</p>
@@ -1128,7 +1128,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           </div>
         </div>
         <div className="rounded-2xl border border-border bg-surface-2/40 p-8 text-center shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
-          <div className="w-16 h-16 bg-accent/10 text-accent rounded-full flex items-center justify-center border border-accent/20 mx-auto mb-4">
+          <div className="w-16 h-16 bg-accent/10 text-accent-ink rounded-full flex items-center justify-center border border-accent/20 mx-auto mb-4">
             <MessageSquare size={32} />
           </div>
           <p className="text-muted mb-6">{t('wechat.noChannels')}</p>
@@ -1315,12 +1315,12 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   : 'border-transparent text-muted hover:text-foreground'
               )}
             >
-              <Globe size={16} className={pageTab === 'all' ? 'text-mint' : 'text-muted'} />
+              <Globe size={16} className={pageTab === 'all' ? 'text-mint-ink' : 'text-muted'} />
               <span>{t('channelList.allChannelsTab')}</span>
               <span
                 className={clsx(
                   'rounded-full px-1.5 py-0.5 font-mono text-[10px]',
-                  pageTab === 'all' ? 'bg-mint-soft text-mint' : 'bg-foreground/[0.06] text-muted'
+                  pageTab === 'all' ? 'bg-mint-soft text-mint-ink' : 'bg-foreground/[0.06] text-muted'
                 )}
               >
                 {allTabCounts.active}
@@ -1346,7 +1346,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   <span
                     className={clsx(
                       'rounded-full px-1.5 py-0.5 font-mono text-[10px]',
-                      active ? 'bg-mint-soft text-mint' : 'bg-foreground/[0.06] text-muted'
+                      active ? 'bg-mint-soft text-mint-ink' : 'bg-foreground/[0.06] text-muted'
                     )}
                   >
                     {counts.active}
@@ -1659,7 +1659,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         className={clsx(
                           'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
                           channelEnabled
-                            ? 'border-mint/40 bg-mint-soft text-mint'
+                            ? 'border-mint/40 bg-mint-soft text-mint-ink'
                             : 'border-border bg-foreground/[0.04] text-muted'
                         )}
                       >
@@ -1837,7 +1837,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
 
         {isPage && (
           <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-surface-2/40 px-4 py-3 text-sm text-muted shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
-            <span className="rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 text-xs font-medium text-mint">
+            <span className="rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 text-xs font-medium text-mint-ink">
               {t('channelList.enabledCount', { count: selectedCount })}
             </span>
             <span>{t('dashboard.metricGroupsHint', { count: channels.length })}</span>
@@ -1857,7 +1857,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-[12px] font-medium transition-colors',
                 platform === candidate
-                  ? 'border-mint/50 bg-mint/[0.16] text-mint shadow-[0_0_20px_-4px_rgba(91,255,160,0.4)]'
+                  ? 'border-mint/50 bg-mint/[0.16] text-mint-ink shadow-[0_0_20px_-4px_rgba(91,255,160,0.4)]'
                   : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
               )}
             >
@@ -1914,7 +1914,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               </span>
             </span>
             {channels.length === 0 && !loading && (
-              <span className="text-sm text-warning">{t('channelList.noChannelsFound')}</span>
+              <span className="text-sm text-gold-ink">{t('channelList.noChannelsFound')}</span>
             )}
           </div>
           <span className="text-sm text-muted font-mono">{t('channelList.enabledCount', { count: selectedCount })}</span>
@@ -2049,7 +2049,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       }
                       updateConfig(channel.id, patch);
                     }}
-                    className={clsx('shrink-0', channelConfig.enabled ? 'text-accent' : 'text-muted')}
+                    className={clsx('shrink-0', channelConfig.enabled ? 'text-accent-ink' : 'text-muted')}
                   >
                     {channelConfig.enabled ? <CheckSquare size={20} /> : <Square size={20} />}
                   </button>
@@ -2075,15 +2075,15 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       ? 'bg-surface text-foreground border-border'
                       : platform === 'telegram'
                         ? channel.supports_topics
-                          ? 'bg-accent/10 text-accent border-accent/20'
+                          ? 'bg-accent/10 text-accent-ink border-accent/20'
                           : channel.type === 'supergroup'
-                            ? 'bg-success/10 text-success border-success/20'
+                            ? 'bg-mint/10 text-mint-ink border-mint/20'
                             : channel.is_private
-                              ? 'bg-warning/10 text-warning border-warning/20'
+                              ? 'bg-gold/10 text-gold-ink border-gold/20'
                               : 'bg-surface text-foreground border-border'
                       : channel.is_private
-                        ? 'bg-warning/10 text-warning border-warning/20'
-                        : 'bg-success/10 text-success border-success/20'
+                        ? 'bg-gold/10 text-gold-ink border-gold/20'
+                        : 'bg-mint/10 text-mint-ink border-mint/20'
                   )}
                 >
                   {platform === 'discord'

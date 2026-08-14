@@ -1379,7 +1379,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               onClick={() => setSearchMode((m) => (m === 'content' ? 'name' : 'content'))}
               className={clsx(
                 'grid size-5 shrink-0 place-items-center rounded transition',
-                searchMode === 'content' ? 'bg-cyan-soft text-cyan' : 'text-muted hover:bg-foreground/10 hover:text-foreground',
+                searchMode === 'content' ? 'bg-cyan-soft text-cyan-ink' : 'text-muted hover:bg-foreground/10 hover:text-foreground',
               )}
             >
               <FileSearch className="size-3.5" />
@@ -1407,7 +1407,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               <Button type="button" size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-[12px]" onClick={() => void downloadItems(selectedItems)} disabled={selectedItems.length === 0}>
                 <Download className="size-3.5" /> {t('apps.fileBrowser.download')}
               </Button>
-              <Button type="button" size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-[12px] text-destructive" onClick={() => removeItems(selectedItems)} disabled={selectedItems.length === 0}>
+              <Button type="button" size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-[12px] text-destructive-ink" onClick={() => removeItems(selectedItems)} disabled={selectedItems.length === 0}>
                 <Trash2 className="size-3.5" /> {t('apps.fileBrowser.delete')}
               </Button>
               <Button type="button" size="icon" variant="ghost" className="size-7 text-muted" aria-label={t('apps.fileBrowser.clearSelection')} onClick={clearSelection}>
@@ -1484,7 +1484,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                     active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
                   )}
                 >
-                  <Folder className={clsx('size-3.5 shrink-0', active ? 'text-cyan' : 'text-cyan/70')} />
+                  <Folder className={clsx('size-3.5 shrink-0', active ? 'text-cyan-ink' : 'text-cyan-ink/70')} />
                   <span className="max-w-[140px] truncate">{f.label}</span>
                 </button>
               );
@@ -1492,7 +1492,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           </div>
         )}
 
-        {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
+        {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive-ink">{error}</div>}
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Rail: Favorites THEN Projects (design nknn2 order). Folders here are drop targets too. */}
@@ -1519,7 +1519,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             {projectFavs.map((f) => (
               <RailRow
                 key={f.path}
-                icon={<Folder className="size-3.5 text-cyan" />}
+                icon={<Folder className="size-3.5 text-cyan-ink" />}
                 label={f.label}
                 active={cwd === f.path}
                 dropActive={dropTarget === f.path}
@@ -1565,7 +1565,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 // menu (paste) instead of our blank-space New menu from the container below.
                 <div className="flex items-center px-3 py-1.5" onContextMenu={(e) => e.stopPropagation()}>
                   <span className="flex min-w-0 flex-1 items-center gap-2">
-                    {newEntry.kind === 'folder' ? <Folder className="size-4 shrink-0 text-cyan" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
+                    {newEntry.kind === 'folder' ? <Folder className="size-4 shrink-0 text-cyan-ink" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
                     <InlineNameInput
                       initial=""
                       placeholder={t(newEntry.kind === 'folder' ? 'apps.fileBrowser.newFolderPlaceholder' : 'apps.fileBrowser.newFilePrompt')}
@@ -1719,7 +1719,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               type="button"
               size="sm"
               variant="ghost"
-              className="h-6 shrink-0 gap-1 px-2 text-[12px] text-cyan"
+              className="h-6 shrink-0 gap-1 px-2 text-[12px] text-cyan-ink"
               disabled={undoBusy}
               onClick={() => void performUndo()}
             >
@@ -1744,7 +1744,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             {t('apps.fileBrowser.showHidden')}
           </label>
           {uploadProgress && (
-            <span className="flex items-center gap-1.5 text-cyan">
+            <span className="flex items-center gap-1.5 text-cyan-ink">
               <Loader2 className="size-3 animate-spin" />
               {t('apps.fileBrowser.uploading', { done: uploadProgress.done, total: uploadProgress.total })}
             </span>
@@ -1798,7 +1798,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               type="button"
               size="icon"
               variant="ghost"
-              className="size-7 shrink-0 text-mint"
+              className="size-7 shrink-0 text-mint-ink"
               aria-label={t('apps.fileBrowser.download')}
               onClick={() => downloadFile(preview.path)}
             >
@@ -1903,7 +1903,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   onClick={() => copyRowsToClipboard(menu.items)}
                 />
                 <ContextMenuItem
-                  icon={<FolderInput className="size-3.5 text-cyan" />}
+                  icon={<FolderInput className="size-3.5 text-cyan-ink" />}
                   label={t('apps.fileBrowser.move')}
                   onClick={() => {
                     const items = menu.items;
@@ -1912,7 +1912,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   }}
                 />
                 <ContextMenuItem
-                  icon={<Download className="size-3.5 text-mint" />}
+                  icon={<Download className="size-3.5 text-mint-ink" />}
                   label={t('apps.fileBrowser.download')}
                   onClick={() => void downloadItems(menu.items)}
                 />
@@ -1921,7 +1921,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             ) : (
               <>
                 <ContextMenuItem
-                  icon={menu.item.entry.kind === 'dir' ? <Folder className="size-3.5 text-cyan" /> : <FileText className="size-3.5 text-cyan" />}
+                  icon={menu.item.entry.kind === 'dir' ? <Folder className="size-3.5 text-cyan-ink" /> : <FileText className="size-3.5 text-cyan-ink" />}
                   label={t('apps.fileBrowser.open')}
                   onClick={() => {
                     const it = menu.item as RowItem;
@@ -1931,7 +1931,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 />
                 {menuPreviewable && menuEntry && (
                   <ContextMenuItem
-                    icon={<Eye className="size-3.5 text-cyan" />}
+                    icon={<Eye className="size-3.5 text-cyan-ink" />}
                     label={t('apps.fileBrowser.preview')}
                     onClick={() => {
                       const it = menu.item as RowItem;
@@ -1944,7 +1944,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 )}
                 {menuEditable && (
                   <ContextMenuItem
-                    icon={<FileCode2 className="size-3.5 text-mint" />}
+                    icon={<FileCode2 className="size-3.5 text-mint-ink" />}
                     label={t('apps.fileBrowser.openInEditor')}
                     onClick={() => {
                       const it = menu.item as RowItem;
@@ -1956,7 +1956,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 )}
                 {menu.item.entry.kind === 'dir' && (
                   <ContextMenuItem
-                    icon={<SquareTerminal className="size-3.5 text-mint" />}
+                    icon={<SquareTerminal className="size-3.5 text-mint-ink" />}
                     label={t('apps.fileBrowser.openTerminalHere')}
                     onClick={() => {
                       const it = menu.item as RowItem;
@@ -1967,7 +1967,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 )}
                 {menu.item.entry.kind !== 'dir' && (
                   <ContextMenuItem
-                    icon={<Download className="size-3.5 text-mint" />}
+                    icon={<Download className="size-3.5 text-mint-ink" />}
                     label={t('apps.fileBrowser.download')}
                     onClick={() => {
                       const it = menu.item as RowItem;
@@ -1977,7 +1977,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   />
                 )}
                 <ContextMenuItem icon={<Copy className="size-3.5" />} label={t('apps.fileBrowser.copy')} onClick={() => copyRowsToClipboard(menu.items)} />
-                <ContextMenuItem icon={<Copy className="size-3.5 text-gold" />} label={t('apps.fileBrowser.duplicate')} onClick={() => void duplicateItem(menu.item as RowItem)} />
+                <ContextMenuItem icon={<Copy className="size-3.5 text-gold-ink" />} label={t('apps.fileBrowser.duplicate')} onClick={() => void duplicateItem(menu.item as RowItem)} />
                 <ContextMenuItem
                   icon={<Pencil className="size-3.5" />}
                   label={t('apps.fileBrowser.rename')}
@@ -1993,10 +1993,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           ) : (
             <>
               {clipboard.length > 0 && cwd && (
-                <ContextMenuItem icon={<ClipboardPaste className="size-3.5 text-cyan" />} label={t('apps.fileBrowser.paste')} onClick={() => void pasteRows(clipboard, cwd)} />
+                <ContextMenuItem icon={<ClipboardPaste className="size-3.5 text-cyan-ink" />} label={t('apps.fileBrowser.paste')} onClick={() => void pasteRows(clipboard, cwd)} />
               )}
               <ContextMenuItem
-                icon={<FilePlus className="size-3.5 text-mint" />}
+                icon={<FilePlus className="size-3.5 text-mint-ink" />}
                 label={t('apps.fileBrowser.newFile')}
                 onClick={() => {
                   closeMenu();
@@ -2004,7 +2004,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 }}
               />
               <ContextMenuItem
-                icon={<FolderPlus className="size-3.5 text-gold" />}
+                icon={<FolderPlus className="size-3.5 text-gold-ink" />}
                 label={t('apps.fileBrowser.newFolder')}
                 onClick={() => {
                   closeMenu();
@@ -2013,7 +2013,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               />
               {cwd && (
                 <ContextMenuItem
-                  icon={<SquareTerminal className="size-3.5 text-mint" />}
+                  icon={<SquareTerminal className="size-3.5 text-mint-ink" />}
                   label={t('apps.fileBrowser.openTerminalHere')}
                   onClick={() => {
                     closeMenu();

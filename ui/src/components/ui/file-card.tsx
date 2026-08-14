@@ -25,11 +25,11 @@ const DOC_EXT = new Set(['doc', 'docx', 'txt', 'md', 'rtf', 'csv', 'json', 'log'
 // Literal class strings (Tailwind can't see interpolated names) so the tint
 // utilities are actually generated.
 function kindOf(ext: string): { Icon: LucideIcon; tile: string } {
-  if (IMAGE_EXT.has(ext)) return { Icon: ImageIcon, tile: 'bg-cyan/15 text-cyan' };
-  if (ARCHIVE_EXT.has(ext)) return { Icon: FileArchive, tile: 'bg-gold/15 text-gold' };
-  if (ext === 'pdf') return { Icon: FileText, tile: 'bg-cyan/15 text-cyan' };
-  if (DOC_EXT.has(ext)) return { Icon: FileText, tile: 'bg-violet/15 text-violet' };
-  return { Icon: File, tile: 'bg-mint/15 text-mint' };
+  if (IMAGE_EXT.has(ext)) return { Icon: ImageIcon, tile: 'bg-cyan/15 text-cyan-ink' };
+  if (ARCHIVE_EXT.has(ext)) return { Icon: FileArchive, tile: 'bg-gold/15 text-gold-ink' };
+  if (ext === 'pdf') return { Icon: FileText, tile: 'bg-cyan/15 text-cyan-ink' };
+  if (DOC_EXT.has(ext)) return { Icon: FileText, tile: 'bg-violet/15 text-violet-ink' };
+  return { Icon: File, tile: 'bg-mint/15 text-mint-ink' };
 }
 
 function nodeText(node: React.ReactNode): string {
@@ -106,7 +106,7 @@ export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = 
               </a>
             </Button>
           ))}
-        <Button asChild variant="ghost" size="icon" className="size-8 text-mint" aria-label={t('chat.media.download')}>
+        <Button asChild variant="ghost" size="icon" className="size-8 text-mint-ink" aria-label={t('chat.media.download')}>
           <a
             href={mediaDownloadHref(href)}
             download

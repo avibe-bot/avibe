@@ -31,20 +31,20 @@ const STATUS_TONE: Record<
 > = {
   pass: {
     row: '',
-    icon: 'text-mint',
+    icon: 'text-mint-ink',
     text: 'text-foreground',
     iconNode: <CheckCircle className="size-4" />,
   },
   warn: {
     row: 'bg-gold/[0.05]',
-    icon: 'text-gold',
-    text: 'text-gold font-semibold',
+    icon: 'text-gold-ink',
+    text: 'text-gold-ink font-semibold',
     iconNode: <AlertTriangle className="size-4" />,
   },
   fail: {
-    row: 'bg-danger/[0.06]',
-    icon: 'text-danger',
-    text: 'text-danger font-semibold',
+    row: 'bg-destructive/[0.06]',
+    icon: 'text-destructive-ink',
+    text: 'text-destructive-ink font-semibold',
     iconNode: <XCircle className="size-4" />,
   },
 };
@@ -97,7 +97,7 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-mint/30 bg-surface-2 px-6 py-5 shadow-[0_16px_32px_-8px_rgba(91,255,160,0.078)]">
         <div className="flex min-w-0 items-center gap-3.5">
           <div className="flex size-[42px] shrink-0 items-center justify-center rounded-full border border-mint/35 bg-mint/[0.08] shadow-[0_0_16px_-4px_rgba(91,255,160,0.44)]">
-            <Activity className="size-5 text-mint" strokeWidth={2.25} />
+            <Activity className="size-5 text-mint-ink" strokeWidth={2.25} />
           </div>
           <div className="flex min-w-0 flex-col gap-0.5">
             <h2 className="text-[16px] font-semibold tracking-[-0.2px] text-foreground">
@@ -199,7 +199,7 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
                   <span
                     className={clsx(
                       'font-mono text-[10px] font-bold',
-                      groupPass === groupTotal ? 'text-mint' : 'text-gold'
+                      groupPass === groupTotal ? 'text-mint-ink' : 'text-gold-ink'
                     )}
                   >
                     {groupPass} / {groupTotal}
@@ -220,7 +220,7 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
                         <div className="flex min-w-0 flex-1 flex-col gap-1">
                           <div className={clsx('text-[12px]', tone.text)}>{item.message}</div>
                           {item.action && (
-                            <div className="cursor-pointer text-[11px] text-cyan underline-offset-2 hover:underline">
+                            <div className="cursor-pointer text-[11px] text-cyan-ink underline-offset-2 hover:underline">
                               {item.action}
                             </div>
                           )}
@@ -245,9 +245,9 @@ const SummaryTile: React.FC<{
   icon: React.ReactNode;
 }> = ({ tone, label, value, icon }) => {
   const cfg = {
-    success: 'border-mint/30 bg-mint/[0.06] text-mint',
-    warning: 'border-gold/30 bg-gold/[0.06] text-gold',
-    danger: 'border-danger/30 bg-danger/[0.06] text-danger',
+    success: 'border-mint/30 bg-mint/[0.06] text-mint-ink',
+    warning: 'border-gold/30 bg-gold/[0.06] text-gold-ink',
+    danger: 'border-destructive/30 bg-destructive/[0.06] text-destructive-ink',
   }[tone];
   return (
     <div className={clsx('flex items-center gap-3 rounded-xl border px-4 py-3', cfg)}>

@@ -56,11 +56,11 @@ export const ModeSelection: React.FC<ModeSelectionProps> = ({ data, onNext, onBa
                 isDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-accent/50'
               )}
             >
-              <div className={clsx("p-3 rounded-lg", isSelected ? "bg-accent/10 text-accent" : "bg-muted-soft text-muted")}>
+              <div className={clsx("p-3 rounded-lg", isSelected ? "bg-accent/10 text-accent-ink" : "bg-muted-soft text-muted")}>
                   <Icon size={24} />
               </div>
               <div>
-                <h3 className={clsx("font-semibold text-lg font-display", isSelected ? "text-accent" : "text-text")}>{m.title}</h3>
+                <h3 className={clsx("font-semibold text-lg font-display", isSelected ? "text-accent-ink" : "text-text")}>{m.title}</h3>
                 <p className="text-muted mt-1">{m.description}</p>
               </div>
             </button>

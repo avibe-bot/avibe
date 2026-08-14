@@ -387,7 +387,7 @@ export const SourceOrderDrawer: React.FC<{
           </div>
 
           <footer className="model-hub-order-foot flex shrink-0 items-center justify-end border-t border-border">
-            {saveFailed && <span className="mr-auto text-[11px] text-destructive">{t('settings.models.order.fail.save')}</span>}
+            {saveFailed && <span className="mr-auto text-[11px] text-destructive-ink">{t('settings.models.order.fail.save')}</span>}
             <Button type="button" variant="outline" className="model-hub-order-action" disabled={saving} onClick={onClose}>
               {t('settings.models.order.cancel')}
             </Button>

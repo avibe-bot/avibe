@@ -782,7 +782,7 @@ export const OpencodeProviderConfig: React.FC<{
         description={t('settings.backends.opencodeDescription')}
         Icon={Terminal}
         iconTileClassName="bg-violet-soft"
-        iconClassName="text-violet"
+        iconClassName="text-violet-ink"
         runtime={runtime}
         hideEnableToggle={hideEnableToggle}
         extraSlot={
@@ -808,7 +808,7 @@ export const OpencodeProviderConfig: React.FC<{
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="flex items-center gap-3">
               <div className="flex size-11 shrink-0 items-center justify-center rounded-[10px] bg-cyan-soft">
-                <Server size={22} className="text-cyan" />
+                <Server size={22} className="text-cyan-ink" />
               </div>
               <div className="flex flex-col gap-0.5">
                 <div className="flex flex-wrap items-center gap-2">
@@ -1001,7 +1001,7 @@ export const OpencodeProviderConfig: React.FC<{
                     </div>
                   </div>
                   {customProviderDraft.error && (
-                    <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+                    <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive-ink">
                       {customProviderDraft.error}
                     </div>
                   )}
@@ -1074,7 +1074,7 @@ export const OpencodeProviderConfig: React.FC<{
                       disabled={!providers || providers.length === 0}
                       className="justify-between gap-2 text-[12px]"
                     >
-                      <Star className="size-3.5 text-mint" />
+                      <Star className="size-3.5 text-mint-ink" />
                       <span className="text-muted">
                         {t('settings.backends.opencodeDefaultLabel')}:
                       </span>
@@ -1157,7 +1157,7 @@ export const OpencodeProviderConfig: React.FC<{
                                         {t('settings.backends.opencodeBadgeUnset')}
                                       </Badge>
                                     )}
-                                    {isCurrent && <Check className="size-3.5 text-mint" />}
+                                    {isCurrent && <Check className="size-3.5 text-mint-ink" />}
                                   </span>
                                 </Button>
                               </li>
@@ -1173,9 +1173,9 @@ export const OpencodeProviderConfig: React.FC<{
               {/* Server-starting / error banner. */}
               {providersError && (
                 <div className="flex items-start gap-2 rounded-lg border border-gold/30 bg-gold/[0.08] px-3 py-2.5">
-                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-gold" />
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-gold-ink" />
                   <div className="flex flex-1 flex-col gap-1">
-                    <p className="text-[12px] font-medium text-gold">
+                    <p className="text-[12px] font-medium text-gold-ink">
                       {serverStartAttempts < SERVER_START_MAX_RETRIES
                         ? t('settings.backends.opencodeServerStarting')
                         : t('settings.backends.opencodeServerUnreachable')}
@@ -1196,7 +1196,7 @@ export const OpencodeProviderConfig: React.FC<{
               {/* Initial loading skeleton. */}
               {providersLoading && !providers && (
                 <div className="rounded-lg border border-border bg-surface-2/60 px-3 py-6 text-center text-[12px] text-muted">
-                  <RefreshCw className="mx-auto mb-2 size-4 animate-spin text-cyan" />
+                  <RefreshCw className="mx-auto mb-2 size-4 animate-spin text-cyan-ink" />
                   {t('settings.backends.opencodeProvidersLoading')}
                 </div>
               )}
@@ -1297,7 +1297,7 @@ export const OpencodeProviderConfig: React.FC<{
                                   size="xs"
                                   onClick={() => void onRemoveProviderAuth(provider)}
                                   disabled={edit.deletingProvider || edit.saving}
-                                  className="text-destructive"
+                                  className="text-destructive-ink"
                                 >
                                   {edit.deletingProvider ? (
                                     <RefreshCw className="size-3.5 animate-spin" />
@@ -1324,7 +1324,7 @@ export const OpencodeProviderConfig: React.FC<{
                                   size="xs"
                                   onClick={() => void onDeleteCustomProvider(provider)}
                                   disabled={edit.removing || edit.saving}
-                                  className="text-destructive"
+                                  className="text-destructive-ink"
                                 >
                                   {edit.removing ? (
                                     <RefreshCw className="size-3.5 animate-spin" />
@@ -1501,7 +1501,7 @@ export const OpencodeProviderConfig: React.FC<{
                                 </div>
 
                                 {edit.error && (
-                                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+                                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive-ink">
                                     {edit.error}
                                   </div>
                                 )}
@@ -1696,7 +1696,7 @@ export const OpencodeProviderConfig: React.FC<{
                                                 {edit.removingModelId === model ? (
                                                   <RefreshCw className="size-3 animate-spin" />
                                                 ) : (
-                                                  <Trash2 className="size-3 text-destructive" />
+                                                  <Trash2 className="size-3 text-destructive-ink" />
                                                 )}
                                               </Button>
                                             )}

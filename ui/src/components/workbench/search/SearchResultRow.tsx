@@ -35,9 +35,9 @@ export const SearchResultRow: React.FC<SearchResultRowProps> = ({ match, selecte
     agent: t('workbench.search.roleAgent'),
   }[role];
   const roleClass = {
-    you: 'bg-cyan-soft text-cyan',
-    automated: 'bg-violet-soft text-violet',
-    agent: 'bg-mint-soft text-mint',
+    you: 'bg-cyan-soft text-cyan-ink',
+    automated: 'bg-violet-soft text-violet-ink',
+    agent: 'bg-mint-soft text-mint-ink',
   }[role];
 
   return (

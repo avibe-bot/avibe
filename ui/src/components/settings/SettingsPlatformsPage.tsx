@@ -253,7 +253,7 @@ export const SettingsPlatformsPage: React.FC = () => {
             aria-live="polite"
             className="sticky top-2 z-10 flex items-center gap-3 rounded-xl border border-cyan/35 bg-cyan/[0.08] px-4 py-3 shadow-[0_8px_24px_-8px_rgba(0,212,255,0.35)]"
           >
-            <Loader2 size={16} className="shrink-0 animate-spin text-cyan" />
+            <Loader2 size={16} className="shrink-0 animate-spin text-cyan-ink" />
             <div className="min-w-0 flex-1">
               <div className="text-[13px] font-semibold text-foreground">
                 {t('platform.applyingConfig')}
@@ -353,12 +353,12 @@ export const SettingsPlatformsPage: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <span className="text-[14px] font-semibold text-foreground">{label}</span>
                       {runnable ? (
-                        <span className="inline-flex items-center gap-1 rounded border border-mint/30 bg-mint/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-mint">
+                        <span className="inline-flex items-center gap-1 rounded border border-mint/30 bg-mint/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-mint-ink">
                           <Check size={10} />
                           {t('platform.validationSuccess')}
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded border border-gold/30 bg-gold/10 px-1.5 py-0.5 text-[10px] font-medium text-gold">
+                        <span className="inline-flex items-center gap-1 rounded border border-gold/30 bg-gold/10 px-1.5 py-0.5 text-[10px] font-medium text-gold-ink">
                           {t('platform.stepAddBotToken')}
                         </span>
                       )}
@@ -445,7 +445,7 @@ const PlatformCard: React.FC<{
           className={clsx(
             'inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-medium transition',
             expanded
-              ? 'border-mint/35 bg-mint/[0.08] text-mint'
+              ? 'border-mint/35 bg-mint/[0.08] text-mint-ink'
               : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
           )}
         >

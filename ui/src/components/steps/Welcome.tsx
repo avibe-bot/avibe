@@ -18,19 +18,19 @@ export const Welcome: React.FC<WelcomeProps> = ({ onNext }) => {
   const features = [
     {
       Icon: HardDrive,
-      iconClass: 'text-mint',
+      iconClass: 'text-mint-ink',
       title: t('welcome.card1Title'),
       body: t('welcome.feature1'),
     },
     {
       Icon: PlugZap,
-      iconClass: 'text-cyan',
+      iconClass: 'text-cyan-ink',
       title: t('welcome.card2Title'),
       body: t('welcome.feature2'),
     },
     {
       Icon: Sparkles,
-      iconClass: 'text-violet',
+      iconClass: 'text-violet-ink',
       title: t('welcome.card3Title'),
       body: t('welcome.feature3'),
     },
@@ -47,7 +47,7 @@ export const Welcome: React.FC<WelcomeProps> = ({ onNext }) => {
           className="mx-auto flex size-20 items-center justify-center rounded-[20px] border-2 border-mint/40 bg-mint/[0.16] shadow-[0_0_48px_-8px_rgba(91,255,160,0.44)]"
           aria-hidden
         >
-          <Radio className="size-10 text-mint" strokeWidth={1.75} />
+          <Radio className="size-10 text-mint-ink" strokeWidth={1.75} />
         </div>
 
         {/* welHead (OpTFX) gap 14 */}

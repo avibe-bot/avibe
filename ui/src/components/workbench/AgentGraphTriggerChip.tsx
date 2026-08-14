@@ -48,12 +48,12 @@ export const AgentGraphTriggerChip: React.FC<AgentGraphTriggerChipProps> = ({
         className,
       )}
     >
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-violet/30 bg-violet/[0.12] text-violet">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-violet/30 bg-violet/[0.12] text-violet-ink">
         <Icon className="size-3.5" />
       </span>
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-[12px] font-semibold text-foreground">{name}</span>
-        <span className="truncate font-mono text-[10px] uppercase tracking-wide text-violet">
+        <span className="truncate font-mono text-[10px] uppercase tracking-wide text-violet-ink">
           {kindLabel}
           {disabled && <span className="text-muted"> · {t('agents.graph.trigger.disabled')}</span>}
           {trigger.schedule_label && <span className="text-muted"> · {trigger.schedule_label}</span>}

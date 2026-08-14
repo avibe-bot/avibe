@@ -179,7 +179,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#05050B]/[0.72] p-10 backdrop-blur-[6px]">
       <div className="flex w-full max-w-[560px] flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)]">
         <div className="flex items-center gap-3 border-b border-border px-5 py-4">
-          <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-mint/40 bg-mint-soft text-mint">
+          <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-mint/40 bg-mint-soft text-mint-ink">
             <PackagePlus className="size-[17px]" />
           </span>
           <div className="flex flex-1 flex-col">
@@ -224,7 +224,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
                   type="button"
                   onClick={fetchGithub}
                   disabled={!url.trim() || busy === 'fetch'}
-                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-cyan/40 bg-cyan-soft px-2.5 py-1.5 text-[11.5px] font-semibold text-cyan transition hover:brightness-110 disabled:opacity-50"
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-cyan/40 bg-cyan-soft px-2.5 py-1.5 text-[11.5px] font-semibold text-cyan-ink transition hover:brightness-110 disabled:opacity-50"
                 >
                   {busy === 'fetch' ? <Loader2 className="size-3 animate-spin" /> : <Search className="size-3" />}
                   {t('skills.addDialog.fetch')}
@@ -248,7 +248,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
           {discovered ? (
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-1.5">
-                <PackageCheck className="size-3.5 text-mint" />
+                <PackageCheck className="size-3.5 text-mint-ink" />
                 <span className="font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-muted">
                   {t('skills.addDialog.found', { count: discovered.length })}
                 </span>
@@ -308,7 +308,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
           </div>
 
           {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">{error}</div>
+            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">{error}</div>
           ) : null}
         </div>
 

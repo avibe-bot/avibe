@@ -84,7 +84,7 @@ const ShellNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
           : 'border border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground'
       )}
     >
-      <Icon className={clsx('size-4', active ? 'text-mint' : 'text-muted group-hover:text-foreground')} />
+      <Icon className={clsx('size-4', active ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
       <span>{item.label}</span>
     </NavLink>
   );
@@ -113,7 +113,7 @@ const ShellNavGroup: React.FC<{ item: ShellNavItem }> = ({ item }) => {
           childActive ? 'text-foreground' : 'text-muted hover:text-foreground'
         )}
       >
-        <Icon className={clsx('size-4', childActive ? 'text-mint' : 'text-muted group-hover:text-foreground')} />
+        <Icon className={clsx('size-4', childActive ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
         <span className="flex-1 text-left">{item.label}</span>
         <ChevronDown className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-180')} />
       </button>
@@ -134,7 +134,7 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 
   const className = clsx(
     'flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] transition-colors',
-    isWorkbench ? 'text-mint' : active ? 'bg-mint/[0.08] text-mint' : 'text-muted'
+    isWorkbench ? 'text-mint-ink' : active ? 'bg-mint/[0.08] text-mint-ink' : 'text-muted'
   );
   const inner = (
     <>
@@ -147,7 +147,7 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
           // desktop sidebar's distinct mint mode-switch button. Sized to fill the
           // slot so it sits on the same baseline as the plain icons.
           <span className="grid size-7 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-[0_0_12px_-3px_rgba(91,255,160,0.6)]">
-            <Icon className="size-4 text-mint" />
+            <Icon className="size-4 text-mint-ink" />
           </span>
         ) : (
           <Icon className="size-4" />
@@ -237,7 +237,7 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
 
   return (
     <div className="fixed inset-x-2 top-2 z-[70] mx-auto flex max-w-3xl items-start gap-3 rounded-lg border border-gold/45 bg-surface px-3 py-2.5 shadow-xl" role="alert">
-      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
+      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold-ink" />
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-semibold text-foreground">{t('configRecovery.title')}</p>
         <p className="mt-0.5 break-words text-[12px] text-muted">
@@ -246,7 +246,7 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
       </div>
       <Link
         to="/admin/settings/diagnostics"
-        className="shrink-0 text-[12px] font-semibold text-gold hover:underline"
+        className="shrink-0 text-[12px] font-semibold text-gold-ink hover:underline"
       >
         {t('configRecovery.action')}
       </Link>
@@ -654,7 +654,7 @@ export const AppShell: React.FC = () => {
             {shellMode === 'admin' && (
               <Link
                 to="/"
-                className="flex items-center justify-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.06] px-3 py-2.5 text-[13px] font-semibold text-mint transition hover:bg-mint/[0.12]"
+                className="flex items-center justify-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.06] px-3 py-2.5 text-[13px] font-semibold text-mint-ink transition hover:bg-mint/[0.12]"
               >
                 <ArrowLeft className="size-3.5 shrink-0" />
                 <span className="truncate">{t('appShell.backToWorkbench')}</span>

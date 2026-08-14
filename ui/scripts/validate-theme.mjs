@@ -164,12 +164,16 @@ assertEqual('system dark background', systemDark.get('--background'), '#080812')
 assertEqual('system light color-scheme', systemLight.get('color-scheme'), 'light');
 assertEqual('system dark color-scheme', systemDark.get('color-scheme'), 'dark');
 
-// An accent doubles as small status text — text-mint / text-gold / text-cyan /
-// text-destructive are used app-wide — and every X / X-foreground pair is a fill
-// plus the label printed on it. Both have to clear WCAG AA for small text, in
-// both themes. Light is the fragile side: the dark palette's vivid accents read
-// at 2.5-4.2:1 on a light surface, which is what this guard exists to catch.
+// Each accent is a fill (--X, painted as a background or hairline) and an ink
+// (--X-ink, printed as small status text app-wide). They are separate tokens
+// because on a light surface they pull in opposite directions: the fill has to
+// stay vivid to read as the brand, while the ink has to go deep to stay legible.
+// Both sides are guarded, but against different backdrops — an ink against the
+// neutral surfaces it sits on, a fill against the --X-foreground label printed
+// on it. Light is the fragile side: the dark palette's vivid accents read at
+// 2.2-4.2:1 as text on a light surface, which is what this guard exists to catch.
 const AA_SMALL_TEXT = 4.5;
+const AA_NON_TEXT = 3;
 
 function parseColor(value) {
   const match = /^#([\da-f]{3}|[\da-f]{6})$/i.exec((value ?? '').trim());
@@ -199,6 +203,36 @@ function requireMeasurableColor(name, prop, value) {
   return rgb;
 }
 
+// A translucent token has no value of its own, but it does have one once you name
+// the backdrop -- which is the whole reason the ring regressed unnoticed. Parsed
+// separately from requireMeasurableColor so the strict rule stays strict: this
+// path is only for tokens the guard deliberately composites against a stated
+// surface, never a fallback for one that failed the opaque check.
+function requireCompositableColor(name, prop, value) {
+  const raw = (value ?? '').trim();
+  const rgb = parseColor(raw);
+  if (rgb) {
+    return { rgb, alpha: 1 };
+  }
+
+  const match = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(raw);
+  if (!match) {
+    throw new Error(
+      `${name}: ${prop} is ${value ?? 'undefined'}, which the guard cannot composite. `
+      + 'Composited tokens must be an opaque hex or an rgb()/rgba() with numeric channels.',
+    );
+  }
+
+  return {
+    rgb: [match[1], match[2], match[3]].map((channel) => Number.parseInt(channel, 10)),
+    alpha: match[4] === undefined ? 1 : Number.parseFloat(match[4]),
+  };
+}
+
+function compositeOver({ rgb, alpha }, backdrop) {
+  return rgb.map((channel, index) => Math.round(alpha * channel + (1 - alpha) * backdrop[index]));
+}
+
 function relativeLuminance(rgb) {
   const [r, g, b] = rgb.map((channel) => {
     const ratio = channel / 255;
@@ -225,19 +259,34 @@ function assertContrast(name, tokens, inkProp, surfaceProp) {
   }
 }
 
-const INK_TOKENS = ['--foreground', '--muted', '--mint', '--cyan', '--violet', '--gold', '--pink', '--destructive'];
+// Every accent painted as a fill also gets used as text somewhere, so each one
+// owes the palette an ink. Listing the fills (rather than deriving the pairs from
+// whatever inks happen to exist) is what makes a new accent shipped without an
+// ink a failure instead of a silent gap.
+const ACCENT_FILLS = ['--primary', '--accent', '--destructive', '--mint', '--cyan', '--violet', '--gold', '--pink'];
+const NEUTRAL_INKS = ['--foreground', '--muted'];
 const INK_SURFACES = ['--card', '--background', '--surface-3'];
 
 for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
-  for (const ink of INK_TOKENS) {
+  for (const fill of ACCENT_FILLS) {
+    assertEqual(`${theme} ${fill} is defined`, tokens.has(fill), true);
+    assertEqual(`${theme} ${fill} declares an ink`, tokens.has(`${fill}-ink`), true);
+  }
+
+  // Inks are read as small text on a bare surface, so every one of them clears AA
+  // against the darkest surface the theme owns. Derived from the token map rather
+  // than from ACCENT_FILLS so an ink added on its own is still covered.
+  const inks = [...NEUTRAL_INKS, ...[...tokens.keys()].filter((prop) => prop.endsWith('-ink'))];
+  for (const ink of inks) {
     assertEqual(`${theme} ${ink} is defined`, tokens.has(ink), true);
     for (const surface of INK_SURFACES) {
       assertContrast(`${theme} ink`, tokens, ink, surface);
     }
   }
 
-  // Every fill that declares its own foreground is checked against it, so a
-  // deepened or lightened fill can never silently strand its label.
+  // Fills are read through the label printed on them, so every fill that declares
+  // its own foreground is checked against it. A fill can then stay as vivid as the
+  // design asks without ever silently stranding that label.
   const pairs = [...tokens.keys()]
     .filter((prop) => prop.endsWith('-foreground') && tokens.has(prop.slice(0, -'-foreground'.length)))
     .map((prop) => [prop, prop.slice(0, -'-foreground'.length)]);
@@ -245,7 +294,58 @@ for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
   for (const [foreground, fill] of pairs) {
     assertContrast(`${theme} fill`, tokens, foreground, fill);
   }
+
+  // The focus ring is the one keyboard-only affordance in the app, and it is
+  // translucent by design, so it is measured composited against the surfaces it
+  // is drawn over rather than as a token. Non-text, hence the 3:1 floor.
+  const ring = requireCompositableColor(`${theme} ring`, '--ring', tokens.get('--ring'));
+  for (const surfaceProp of INK_SURFACES) {
+    const surface = requireMeasurableColor(`${theme} ring`, surfaceProp, tokens.get(surfaceProp));
+    const ratio = contrastRatio(compositeOver(ring, surface), surface);
+    if (ratio < AA_NON_TEXT) {
+      throw new Error(
+        `${theme} ring: --ring over ${surfaceProp} is ${ratio.toFixed(2)}:1, below WCAG AA ${AA_NON_TEXT}:1 for non-text`,
+      );
+    }
+  }
 }
+
+// A Tailwind utility is named after the @theme alias, not after the token behind
+// it, so an alias is free to expose an accent under a name that hides which side
+// of the fill/ink split it lands on. That is exactly how `text-success` survived
+// the split: it resolved through `--color-success: var(--mint)` to the vivid
+// fill, landing at 2.5:1 as text, while the ink guard above saw nothing wrong --
+// `--mint-ink` was correct, nothing simply pointed at it. So an alias onto an
+// accent token must carry that token's own name, which puts every accent utility
+// back under the ink and fill assertions.
+function assertAccentAliasesKeepTheirTokenName(source) {
+  const accentTokens = new Set(ACCENT_FILLS.flatMap((fill) => [
+    fill,
+    `${fill}-ink`,
+    `${fill}-soft`,
+    `${fill}-foreground`,
+  ]));
+
+  postcss.parse(source).walkAtRules('theme', (atRule) => {
+    atRule.walkDecls((decl) => {
+      const target = /^var\(\s*(--[\w-]+)\s*\)$/.exec(normalizeCssValue(decl.value))?.[1];
+      if (!target || !accentTokens.has(target)) {
+        return;
+      }
+
+      const expected = `--color-${target.slice(2)}`;
+      if (decl.prop !== expected) {
+        throw new Error(
+          `@theme alias ${decl.prop}: var(${target}) renames an accent token. It ships a utility whose `
+          + `name hides whether it paints the fill or the ink, so it escapes both contrast assertions. `
+          + `Name it ${expected} and let each call site pick the fill or the ink explicitly.`,
+        );
+      }
+    });
+  });
+}
+
+assertAccentAliasesKeepTheirTokenName(css);
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });
 const modelHubSystemDark = modelHub({ prefersLight: false, themeAttr: null });

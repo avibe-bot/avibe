@@ -340,7 +340,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
                         isCompleted
                           ? 'bg-mint text-primary-foreground'
                           : isActive
-                            ? 'bg-cyan/15 text-cyan'
+                            ? 'bg-cyan/15 text-cyan-ink'
                             : 'bg-foreground/[0.06] text-muted'
                       )}
                     >
@@ -367,7 +367,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           {isAlreadyBound && (
             <div className="rounded-xl border border-border bg-background px-6 py-6">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint shadow-[0_0_32px_-6px_rgba(91,255,160,0.5)]">
+                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-[0_0_32px_-6px_rgba(91,255,160,0.5)]">
                   <Check size={32} />
                 </div>
                 <div>
@@ -403,7 +403,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           {/* Starting */}
           {loginState === 'idle' && !botToken && !isAlreadyBound && (
             <div className="rounded-xl border border-border bg-background px-6 py-8 text-center">
-              <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.06] text-cyan">
+              <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.06] text-cyan-ink">
                 {starting || autoStartLogin ? (
                   <Loader2 size={26} className="animate-spin" />
                 ) : (
@@ -432,9 +432,9 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
                 <div
                   className={clsx(
                     'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[12px] font-medium',
-                    loginState === 'qr_ready' && 'border-cyan/30 bg-cyan/[0.06] text-cyan',
+                    loginState === 'qr_ready' && 'border-cyan/30 bg-cyan/[0.06] text-cyan-ink',
                     (loginState === 'scanning' || loginState === 'confirming') &&
-                      'border-gold/30 bg-gold/10 text-gold'
+                      'border-gold/30 bg-gold/10 text-gold-ink'
                   )}
                 >
                   {loginState === 'qr_ready' && (
@@ -473,14 +473,14 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           {loginState === 'connected' && (
             <div className="rounded-xl border border-mint/35 bg-surface-2 px-6 py-6 shadow-[0_8px_32px_-8px_rgba(91,255,160,0.078)]">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint shadow-[0_0_32px_-6px_rgba(91,255,160,0.5)]">
+                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-[0_0_32px_-6px_rgba(91,255,160,0.5)]">
                   <Check size={32} />
                 </div>
                 <div>
                   <h3 className="text-[16px] font-semibold text-foreground">{t('wechatConfig.connectedTitle')}</h3>
                   <p className="mt-1 text-[12px] text-muted">{message}</p>
                 </div>
-                <div className="inline-flex items-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.08] px-3 py-1.5 text-[12px] font-medium text-mint">
+                <div className="inline-flex items-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.08] px-3 py-1.5 text-[12px] font-medium text-mint-ink">
                   <Wifi size={14} />
                   {t('wechatConfig.connectionEstablished')}
                 </div>
@@ -494,14 +494,14 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
 
           {/* Error */}
           {loginState === 'error' && (
-            <div className="rounded-xl border border-danger/30 bg-danger/10 px-6 py-6">
+            <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-6 py-6">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-14 items-center justify-center rounded-full border border-danger/30 bg-danger/15 text-danger">
+                <div className="flex size-14 items-center justify-center rounded-full border border-destructive/30 bg-destructive/15 text-destructive-ink">
                   <AlertTriangle size={28} />
                 </div>
                 <div>
                   <h3 className="text-[14px] font-semibold text-foreground">{t('wechatConfig.errorTitle')}</h3>
-                  <p className="mt-1 text-[12px] text-danger">{message}</p>
+                  <p className="mt-1 text-[12px] text-destructive-ink">{message}</p>
                 </div>
                 <Button variant="brand" size="sm" onClick={startLogin} disabled={starting}>
                   <RefreshCw size={14} strokeWidth={2.25} />
@@ -548,7 +548,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
             </p>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
-            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
+            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedDots} / 3
             </span>
             <div className="flex gap-1">

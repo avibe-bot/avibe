@@ -152,7 +152,7 @@ export function ShowPageEmailAccessEditor({
 
         {gate === 'error' ? (
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] leading-snug text-destructive">
+            <span className="text-[11px] leading-snug text-destructive-ink">
               {t('chat.showPage.emailAccessError')}
             </span>
             <Button
@@ -192,7 +192,7 @@ export function ShowPageEmailAccessEditor({
                   className={clsx('h-8 text-xs', draftInvalid && 'border-destructive')}
                 />
                 {draftInvalid ? (
-                  <p className="mt-1 text-[11px] text-destructive">
+                  <p className="mt-1 text-[11px] text-destructive-ink">
                     {t('chat.showPage.emailInvalid')}
                   </p>
                 ) : null}

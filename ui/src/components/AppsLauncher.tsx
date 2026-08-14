@@ -135,10 +135,10 @@ export const AppsLauncher: React.FC = () => {
             : 'border-cyan/45 shadow-[0_0_14px_-5px_rgba(63,224,229,0.55)] hover:border-cyan/70',
         )}
       >
-        <LayoutGrid className="size-4 shrink-0 text-cyan" />
+        <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />
         <span className="flex-1 whitespace-nowrap text-left">{t('apps.title')}</span>
         {pinned ? (
-          <Pin className="size-3.5 shrink-0 rotate-45 fill-cyan text-cyan" />
+          <Pin className="size-3.5 shrink-0 rotate-45 fill-cyan text-cyan-ink" />
         ) : (
           <ChevronUp className={clsx('size-3.5 shrink-0 text-muted transition-transform', !visible && 'rotate-180')} />
         )}
@@ -159,7 +159,7 @@ export const AppsLauncher: React.FC = () => {
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} width={184} itemCount={1}>
           <ContextMenuItem
-            icon={<LayoutGrid className="size-[15px] text-cyan" />}
+            icon={<LayoutGrid className="size-[15px] text-cyan-ink" />}
             label={t('apps.launcher.openLibrary')}
             onClick={openLibrary}
           />

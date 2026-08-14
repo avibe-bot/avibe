@@ -606,7 +606,7 @@ export const HarnessPage: React.FC = () => {
       <CapabilityTabs />
       {/* Header */}
       <div className="flex items-center gap-4">
-        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-violet/30 bg-violet/[0.08] text-violet shadow-[0_0_24px_-6px_rgba(124,91,255,0.5)]">
+        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-violet/30 bg-violet/[0.08] text-violet-ink shadow-[0_0_24px_-6px_rgba(124,91,255,0.5)]">
           <Activity className="size-5" />
         </div>
         <div className="flex flex-1 flex-col">
@@ -660,7 +660,7 @@ export const HarnessPage: React.FC = () => {
               }}
               className={clsx(
                 'flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-3 text-[13px] transition',
-                active ? 'border-b-2 border-violet font-bold text-violet' : 'font-medium text-muted hover:text-foreground',
+                active ? 'border-b-2 border-violet font-bold text-violet-ink' : 'font-medium text-muted hover:text-foreground',
               )}
             >
               <HarnessTabIcon tab={key} active={active} />
@@ -669,7 +669,7 @@ export const HarnessPage: React.FC = () => {
                 className={clsx(
                   'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
                   active
-                    ? 'border-violet/30 bg-violet/[0.10] text-violet'
+                    ? 'border-violet/30 bg-violet/[0.10] text-violet-ink'
                     : 'border-border-strong bg-foreground/[0.04] text-muted',
                 )}
               >
@@ -705,7 +705,7 @@ export const HarnessPage: React.FC = () => {
               className={clsx(
                 'rounded px-2.5 py-1 text-[11px] font-medium transition',
                 activeStatus === opt
-                  ? 'bg-violet/[0.12] text-violet'
+                  ? 'bg-violet/[0.12] text-violet-ink'
                   : 'text-muted hover:text-foreground',
               )}
             >
@@ -713,7 +713,7 @@ export const HarnessPage: React.FC = () => {
               <span
                 className={clsx(
                   'ml-1 tabular-nums',
-                  activeStatus === opt ? 'text-violet/70' : 'text-muted/70',
+                  activeStatus === opt ? 'text-violet-ink/70' : 'text-muted/70',
                 )}
               >
                 {statusCount(opt)}
@@ -744,7 +744,7 @@ export const HarnessPage: React.FC = () => {
           </select>
         )}
         {sessionFilter && (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan/30 bg-cyan/[0.10] py-1 pl-2.5 pr-1.5 text-[11px] font-medium text-cyan">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan/30 bg-cyan/[0.10] py-1 pl-2.5 pr-1.5 text-[11px] font-medium text-cyan-ink">
             <Filter className="size-3 shrink-0" />
             <span className="max-w-[180px] truncate">
               {t('harness.sessionFilter.chip', { id: sessionFilter })}
@@ -754,7 +754,7 @@ export const HarnessPage: React.FC = () => {
               onClick={clearSessionFilter}
               aria-label={t('harness.sessionFilter.clear')}
               title={t('harness.sessionFilter.clear')}
-              className="rounded-full p-0.5 text-cyan/80 transition-colors hover:bg-cyan/20 hover:text-cyan"
+              className="rounded-full p-0.5 text-cyan-ink/80 transition-colors hover:bg-cyan/20 hover:text-cyan-ink"
             >
               <X className="size-3" />
             </button>
@@ -768,7 +768,7 @@ export const HarnessPage: React.FC = () => {
       </div>
 
       {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
           {error}
         </div>
       )}
@@ -887,7 +887,7 @@ interface TabIconProps {
 }
 
 const HarnessTabIcon: React.FC<TabIconProps> = ({ tab, active }) => {
-  const cls = clsx('size-3.5', active ? 'text-violet' : 'text-muted');
+  const cls = clsx('size-3.5', active ? 'text-violet-ink' : 'text-muted');
   if (tab === 'tasks') return <Calendar className={cls} />;
   if (tab === 'watches') return <Eye className={cls} />;
   return <History className={cls} />;
@@ -1002,12 +1002,12 @@ function stateDotClass(state: HarnessLifecycleState | null): string {
 }
 
 const ALERT_CLASS: Record<HarnessRowAlert, string> = {
-  error: 'text-pink',
+  error: 'text-pink-ink',
   timeout: 'text-amber',
   // A waiter that is supposed to be waiting but whose process is gone. It is
   // not an error the store recorded — it is the absence of one, which is
   // exactly why nothing used to show it.
-  dead: 'text-pink',
+  dead: 'text-pink-ink',
   // Recovered but not clean: the newest verdict succeeded while a failure is
   // still in the window. Amber rather than pink — it is a "look at this", not a
   // "this is broken right now".
@@ -1046,7 +1046,7 @@ export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row
       variant="secondary"
       className={clsx(
         'shrink-0 font-mono text-[9px] uppercase',
-        health === 'failing' ? 'text-pink' : health === 'degraded' ? 'text-amber' : 'text-muted',
+        health === 'failing' ? 'text-pink-ink' : health === 'degraded' ? 'text-amber' : 'text-muted',
       )}
       title={failureSummaryKey ? t(failureSummaryKey) : undefined}
     >
@@ -1076,7 +1076,7 @@ export const ProcessingHealthBadge: React.FC<{ row: HarnessWatch }> = ({ row }) 
       variant="secondary"
       className={clsx(
         'shrink-0 font-mono text-[9px] uppercase',
-        health === 'failing' ? 'text-pink' : health === 'degraded' ? 'text-amber' : 'text-muted',
+        health === 'failing' ? 'text-pink-ink' : health === 'degraded' ? 'text-amber' : 'text-muted',
       )}
     >
       {t(`harness.processingHealth.${health}`)}
@@ -1211,7 +1211,7 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
           'flex size-7 items-center justify-center rounded-md border transition',
           enabled
             ? 'border-border-strong text-muted hover:bg-foreground/[0.06] hover:text-foreground'
-            : 'border-mint/40 bg-mint/[0.08] text-mint hover:brightness-110',
+            : 'border-mint/40 bg-mint/[0.08] text-mint-ink hover:brightness-110',
           pending && 'cursor-wait opacity-60',
         )}
       >
@@ -1234,7 +1234,7 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
         title={t('harness.row.delete')}
         className={clsx(
           'flex size-7 items-center justify-center rounded-md border border-border-strong text-muted transition',
-          'hover:border-pink/40 hover:bg-pink/[0.08] hover:text-pink',
+          'hover:border-pink/40 hover:bg-pink/[0.08] hover:text-pink-ink',
           pending && 'cursor-wait opacity-60',
         )}
       >
@@ -1335,7 +1335,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 items-center gap-2">
-        <Calendar className="size-4 shrink-0 text-violet" />
+        <Calendar className="size-4 shrink-0 text-violet-ink" />
         <div className="min-w-0 flex-1 truncate text-[15px] font-bold text-foreground" title={title}>
           {title}
         </div>
@@ -1464,7 +1464,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           <span
             className={clsx(
               'font-mono text-[11px]',
-              definitionExitCodeTone(task) === 'failure' ? 'text-pink' : 'text-muted',
+              definitionExitCodeTone(task) === 'failure' ? 'text-pink-ink' : 'text-muted',
             )}
           >
             {task.last_exit_code}
@@ -1559,7 +1559,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 items-center gap-2">
-        <Eye className="size-4 shrink-0 text-violet" />
+        <Eye className="size-4 shrink-0 text-violet-ink" />
         <div className="min-w-0 flex-1 truncate text-[15px] font-bold text-foreground" title={title}>
           {title}
         </div>
@@ -1614,7 +1614,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
       {showRuntime && (
         <DetailField label={t('harness.detail.runtime')}>
           <span
-            className={clsx('text-[12px]', watch.process_alive ? 'text-foreground' : 'text-pink')}
+            className={clsx('text-[12px]', watch.process_alive ? 'text-foreground' : 'text-pink-ink')}
           >
             {t(watch.process_alive ? 'harness.row.processAlive' : 'harness.row.processDead')}
           </span>
@@ -1632,7 +1632,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
           <span
             className={clsx(
               'font-mono text-[11px]',
-              definitionExitCodeTone(watch) === 'failure' ? 'text-pink' : 'text-muted',
+              definitionExitCodeTone(watch) === 'failure' ? 'text-pink-ink' : 'text-muted',
             )}
           >
             {watch.last_exit_code}
@@ -1770,7 +1770,7 @@ export const RunTriggerChip: React.FC<{ run: HarnessRun }> = ({ run }) => {
     <Link
       to={`/harness?tab=${run.definition_kind === 'watch' ? 'watches' : 'tasks'}&definition=${encodeURIComponent(run.definition_id!)}`}
       onClick={(e) => e.stopPropagation()}
-      className="pointer-events-auto inline-flex min-w-0 items-center gap-1 text-violet hover:underline"
+      className="pointer-events-auto inline-flex min-w-0 items-center gap-1 text-violet-ink hover:underline"
     >
       {body}
     </Link>
@@ -1888,7 +1888,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
         <DetailField label={t('harness.detail.parentRun')}>
           <Link
             to={`/harness?tab=runs&run=${encodeURIComponent(run.parent_run_id)}`}
-            className="inline-flex items-center gap-1 font-mono text-[11px] text-violet hover:underline"
+            className="inline-flex items-center gap-1 font-mono text-[11px] text-violet-ink hover:underline"
           >
             {run.parent_run_id}
             <ArrowUpRight className="size-3" />
@@ -1911,7 +1911,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
             )}
           </div>
           {run.callback_error && (
-            <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
+            <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive-ink">
               {run.callback_error}
             </div>
           )}
@@ -1943,7 +1943,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
       )}
       {run.error && (
         <DetailField label={t('harness.detail.error')}>
-          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-destructive/40 bg-destructive/[0.06] p-2 font-mono text-[11px] text-destructive">
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-destructive/40 bg-destructive/[0.06] p-2 font-mono text-[11px] text-destructive-ink">
             {run.error}
           </pre>
         </DetailField>
@@ -1980,19 +1980,19 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
 // ---------------------------------------------------------------------------
 
 const STATUS_PILL_CLASS: Record<HarnessRunStatus, string> = {
-  queued: 'border-cyan/30 bg-cyan/[0.08] text-cyan',
-  running: 'border-violet/30 bg-violet/[0.08] text-violet',
-  succeeded: 'border-mint/30 bg-mint/[0.08] text-mint',
-  failed: 'border-pink/30 bg-pink/[0.08] text-pink',
+  queued: 'border-cyan/30 bg-cyan/[0.08] text-cyan-ink',
+  running: 'border-violet/30 bg-violet/[0.08] text-violet-ink',
+  succeeded: 'border-mint/30 bg-mint/[0.08] text-mint-ink',
+  failed: 'border-pink/30 bg-pink/[0.08] text-pink-ink',
   canceled: 'border-border-strong bg-foreground/[0.04] text-muted',
 };
 
 const RunStatusIcon: React.FC<{ status: HarnessRunStatus }> = ({ status }) => {
   const cls = 'size-4 shrink-0';
-  if (status === 'succeeded') return <CheckCircle2 className={clsx(cls, 'text-mint')} />;
-  if (status === 'failed') return <XCircle className={clsx(cls, 'text-pink')} />;
-  if (status === 'running') return <Loader2 className={clsx(cls, 'animate-spin text-violet')} />;
-  if (status === 'queued') return <Clock className={clsx(cls, 'text-cyan')} />;
+  if (status === 'succeeded') return <CheckCircle2 className={clsx(cls, 'text-mint-ink')} />;
+  if (status === 'failed') return <XCircle className={clsx(cls, 'text-pink-ink')} />;
+  if (status === 'running') return <Loader2 className={clsx(cls, 'animate-spin text-violet-ink')} />;
+  if (status === 'queued') return <Clock className={clsx(cls, 'text-cyan-ink')} />;
   if (status === 'canceled') return <AlertTriangle className={clsx(cls, 'text-muted')} />;
   return <Activity className={clsx(cls, 'text-muted')} />;
 };
@@ -2048,7 +2048,7 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
     : '';
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <Bot className="size-3.5 shrink-0 text-violet" />
+      <Bot className="size-3.5 shrink-0 text-violet-ink" />
       <span className="shrink-0 text-[12px] font-medium text-foreground">{agent?.display_name || agentName}</span>
       {meta && <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted">{meta}</span>}
       {!agent?.archived && (
@@ -2056,7 +2056,7 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
           // This opens the agent's definition, so it asks for the Definitions tab
           // explicitly rather than resuming whichever tab was left on.
           to="/agents?tab=definitions"
-          className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
+          className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet-ink hover:underline"
         >
           {t('harness.detail.openInAgents')}
           <ArrowUpRight className="size-3" />
@@ -2099,7 +2099,7 @@ export const DetailSession: React.FC<{ summary: HarnessSessionSummary; sessionId
   const body =
     state === 'workbench' ? (
       <>
-        <MessageSquare className="size-3.5 shrink-0 text-cyan" />
+        <MessageSquare className="size-3.5 shrink-0 text-cyan-ink" />
         <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">
           {summary.session_title || sessionId || '—'}
         </span>
@@ -2123,7 +2123,7 @@ export const DetailSession: React.FC<{ summary: HarnessSessionSummary; sessionId
   return (
     <Link to={`/chat/${sessionId}`} className="flex min-w-0 items-center gap-2 hover:underline">
       {body}
-      <ArrowUpRight className="size-3.5 shrink-0 text-cyan" />
+      <ArrowUpRight className="size-3.5 shrink-0 text-cyan-ink" />
     </Link>
   );
 };
@@ -2176,7 +2176,7 @@ const FailureDetails: React.FC<{
           <div
             className={clsx(
               'flex min-w-0 flex-wrap items-center gap-2 text-[12px]',
-              circuitPaused ? 'text-amber' : 'text-pink',
+              circuitPaused ? 'text-amber' : 'text-pink-ink',
             )}
           >
             <span>{t(summaryKey)}</span>

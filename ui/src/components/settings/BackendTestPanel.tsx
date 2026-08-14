@@ -132,7 +132,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-mint/30 bg-mint-soft">
-            <Zap size={18} className="text-mint" />
+            <Zap size={18} className="text-mint-ink" />
           </div>
           <div className="flex flex-col gap-0.5">
             <p className="text-[14px] font-bold text-foreground">
@@ -167,7 +167,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
             <span
               className={clsx(
                 'font-mono text-[11px] font-semibold',
-                lastResult?.ok ? 'text-mint' : 'text-destructive',
+                lastResult?.ok ? 'text-mint-ink' : 'text-destructive-ink',
               )}
             >
               {resultLine}
@@ -208,7 +208,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
           existed. */}
       {lastResult && !lastResult.ok && lastResult.detail && (
         <details className="rounded-md border border-destructive/30 bg-destructive/[0.04] px-3 py-2 [&[open]>summary]:mb-2">
-          <summary className="cursor-pointer font-mono text-[11px] uppercase tracking-wide text-destructive">
+          <summary className="cursor-pointer font-mono text-[11px] uppercase tracking-wide text-destructive-ink">
             {t('settings.backends.testConnectionRawOutputLabel')}
           </summary>
           <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-background px-3 py-2 font-mono text-[11px] leading-relaxed text-muted">
