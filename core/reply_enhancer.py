@@ -394,7 +394,6 @@ def process_reply(
     text: str,
     *,
     include_quick_replies: bool = True,
-    allow_unseparated_quick_replies: bool = True,
     keep_file_links: bool = False,
 ) -> EnhancedReply:
     """Parse *text* and return an ``EnhancedReply``.
@@ -408,8 +407,6 @@ def process_reply(
     for inline rendering; IM keeps the default (links stripped to plain labels and
     uploaded to the platform separately).
 
-    ``allow_unseparated_quick_replies`` gates only the compatibility syntax;
-    explicit ``---`` button blocks retain their existing behavior.
     """
     text, markdown_mask = _strip_silent_blocks_with_mask(text)
     visible_text = text
@@ -424,11 +421,7 @@ def process_reply(
             markdown_mask,
         )
     if include_quick_replies:
-        buttons, text_clean = _extract_buttons(
-            text_no_files,
-            mask_no_files,
-            allow_unseparated=allow_unseparated_quick_replies,
-        )
+        buttons, text_clean = _extract_buttons(text_no_files, mask_no_files)
     else:
         buttons, text_clean = [], text_no_files
     return EnhancedReply(
@@ -1437,14 +1430,12 @@ def _raw_html_end(
 def _extract_buttons(
     text: str,
     markdown_mask: str | None = None,
-    *,
-    allow_unseparated: bool = True,
 ) -> Tuple[List[QuickReplyButton], str]:
     """Extract trailing quick-reply buttons and return ``(buttons, cleaned_text)``."""
     mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
     pattern = _BUTTON_BLOCK_RE
     masked_match = pattern.search(mask)
-    if masked_match is None and allow_unseparated:
+    if masked_match is None:
         pattern = _UNSEPARATED_BUTTON_ROW_RE
         masked_match = pattern.search(mask)
     if masked_match is None:
@@ -1493,9 +1484,3 @@ def _extract_buttons(
 
     cleaned = text[: m.start()]
     return buttons, cleaned
-
-
-def strip_quick_reply_buttons(text: str) -> str:
-    """Remove a trailing quick-reply row while preserving all other markup."""
-    _, cleaned = _extract_buttons(text)
-    return cleaned

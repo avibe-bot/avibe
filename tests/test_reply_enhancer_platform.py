@@ -1463,22 +1463,6 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([file.path for file in reply.files], ["/tmp/report.txt"])
         self.assertEqual(reply.buttons, [])
 
-    def test_process_reply_can_disable_only_separator_free_parsing(self):
-        reply = process_reply(
-            "Done.\n[A] | [B]",
-            allow_unseparated_quick_replies=False,
-        )
-
-        self.assertEqual(reply.text, "Done.\n[A] | [B]")
-        self.assertEqual(reply.buttons, [])
-
-        explicit = process_reply(
-            "Done.\n---\n[A] | [B]",
-            allow_unseparated_quick_replies=False,
-        )
-        self.assertEqual(explicit.text, "Done.")
-        self.assertEqual([button.text for button in explicit.buttons], ["A", "B"])
-
     def test_process_reply_accepts_markdown_link_style_quick_reply_button(self):
         reply = process_reply(
             "Done.\n\n---\n"

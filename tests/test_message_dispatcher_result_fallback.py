@@ -810,49 +810,6 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reply_to)
         self.assertEqual([button.text for button in keyboard.buttons[0]], ["Continue", "Stop"])
 
-    async def test_wechat_result_preserves_separator_free_button_like_text(self):
-        im_client = _StubIMClient()
-        controller = _StubController(
-            platform="wechat",
-            im_client=im_client,
-            reply_enhancements=True,
-        )
-        dispatcher = ConsolidatedMessageDispatcher(controller)
-        context = MessageContext(user_id="wx1", channel_id="wx1", platform="wechat")
-
-        message_id = await dispatcher.emit_agent_message(
-            context,
-            "result",
-            "Compare:\n[A] | [B]",
-        )
-
-        self.assertEqual(message_id, "msg-1")
-        self.assertEqual(im_client.sent_messages[0][1], "Compare:\n[A] | [B]")
-
-    async def test_separator_free_parsing_uses_delivery_target_capability(self):
-        im_client = _StubIMClient()
-        controller = _StubController(
-            platform="slack",
-            im_client=im_client,
-            reply_enhancements=True,
-        )
-        dispatcher = ConsolidatedMessageDispatcher(controller)
-        context = MessageContext(
-            user_id="U1",
-            channel_id="C1",
-            platform="slack",
-            platform_specific={
-                "delivery_override": {
-                    "platform": "wechat",
-                    "channel_id": "wx1",
-                }
-            },
-        )
-
-        await dispatcher.emit_agent_message(context, "result", "Compare:\n[A] | [B]")
-
-        self.assertEqual(im_client.sent_messages[0][1], "Compare:\n[A] | [B]")
-
     async def test_result_footer_rides_subtext_on_status_bubble_platform(self):
         """On a ``supports_status_bubble`` platform (Slack) the show_duration
         footnote is delivered as the de-emphasized ``subtext`` footer and the body
@@ -1008,20 +965,6 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persist.call_args.args[1], "result")
         self.assertEqual(persist.call_args.kwargs.get("quick_replies"), ["✅ Yes", "🙅 No"])
         # The block is still stripped from the persisted text itself.
-        self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
-        self.assertIn("Pick one", persist.call_args.args[2])
-
-    async def test_avibe_result_persists_unseparated_quick_replies_for_workbench(self):
-        controller = _StubController(platform="avibe", reply_enhancements=True)
-        dispatcher = ConsolidatedMessageDispatcher(controller)
-        context = MessageContext(user_id="U1", channel_id="C1", platform="avibe")
-        raw = "Pick one:\n[✅ Yes] | [🙅 No]"
-
-        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
-            await dispatcher.emit_agent_message(context, "result", raw)
-
-        persist.assert_called_once()
-        self.assertEqual(persist.call_args.kwargs.get("quick_replies"), ["✅ Yes", "🙅 No"])
         self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
         self.assertIn("Pick one", persist.call_args.args[2])
 
