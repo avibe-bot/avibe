@@ -4414,7 +4414,7 @@ def test_memory_list_cursor_bound_covers_maximum_valid_catalog() -> None:
         project_id: (timestamp, chr(ord("a") + index) * 128)
         for index, project_id in enumerate(projects)
     }
-    fingerprint = memory_runtime._memory_list_catalog_fingerprint(projects)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
 
     cursor = memory_runtime._encode_memory_list_cursor(fingerprint, boundaries)
 
@@ -4424,6 +4424,54 @@ def test_memory_list_cursor_bound_covers_maximum_valid_catalog() -> None:
         projects=projects,
         fingerprint=fingerprint,
     ) == boundaries
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_rejects_cursor_from_another_principal() -> None:
+    items = (
+        MemoryListItem(
+            id="entry-1",
+            subject="Subject 1",
+            summary="",
+            body="Body 1",
+            timestamp="2026-08-14T12:00:00Z",
+            project="default",
+        ),
+        MemoryListItem(
+            id="entry-2",
+            subject="Subject 2",
+            summary="",
+            body="Body 2",
+            timestamp="2026-08-14T11:00:00Z",
+            project="default",
+        ),
+    )
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            start = (page - 1) * page_size
+            entries = items[start : start + page_size]
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=len(entries),
+                total_count=len(items),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    first = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=1)
+    other = await runtime.list_all_episodes_payload(
+        "u-22222222222222222222222222222222",
+        cursor=first["next_cursor"],
+        limit=1,
+    )
+
+    assert other == {"status": "failed", "error": "memory_invalid_input"}
 
 
 @pytest.mark.asyncio

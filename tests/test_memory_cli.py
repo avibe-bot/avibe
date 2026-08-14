@@ -169,6 +169,53 @@ def test_memory_list_json_preserves_opaque_entry_id_and_page_contract(
     assert output["result"]["page"] == 2
 
 
+@pytest.mark.parametrize(
+    ("language", "warning"),
+    [
+        (
+            "en",
+            "Memory listing reached the provider ordering limit. Later pages may be incomplete.",
+        ),
+        ("zh", "记忆列表已达到服务排序上限，后续页面可能不完整。"),
+    ],
+)
+def test_memory_list_human_surfaces_truncation_warning(
+    language,
+    warning,
+    monkeypatch,
+    capsys,
+) -> None:
+    args = cli.build_parser().parse_args(["memory", "list"])
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: language)
+    monkeypatch.setattr(
+        internal_client,
+        "memory_list_sync",
+        lambda **_kwargs: {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "items": [
+                    {
+                        "id": "opaque-entry-id",
+                        "kind": "episode",
+                        "subject": "Subject",
+                        "summary": "",
+                        "body": "Body",
+                        "timestamp": "2026-08-14T12:00:00Z",
+                        "project": "default",
+                    }
+                ],
+                "warnings": ["memory_list_truncated"],
+            },
+        },
+    )
+
+    assert cli.cmd_memory(args) == 0
+    captured = capsys.readouterr()
+    assert warning in captured.err
+    assert "2026-08-14T12:00:00Z Subject" in captured.out
+
+
 def test_memory_list_parser_defaults_match_everos_page_semantics() -> None:
     args = cli.build_parser().parse_args(["memory", "list"])
 

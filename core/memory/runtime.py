@@ -1503,7 +1503,7 @@ class MemoryRuntime:
         if not projects:
             projects = (DEFAULT_MEMORY_PROJECT_ID,)
         projects = tuple(sorted(projects))
-        fingerprint = _memory_list_catalog_fingerprint(projects)
+        fingerprint = _memory_list_catalog_fingerprint(principal_id, projects)
         try:
             boundaries = _decode_memory_list_cursor(
                 cursor,
@@ -3578,9 +3578,13 @@ def _merge_search_items(items: list[MemoryItem], *, limit: int) -> tuple[MemoryI
     return tuple(merged)
 
 
-def _memory_list_catalog_fingerprint(projects: tuple[str, ...]) -> str:
+def _memory_list_catalog_fingerprint(
+    principal_id: str,
+    projects: tuple[str, ...],
+) -> str:
     material = json.dumps(
         {
+            "principal": principal_id,
             "projects": list(projects),
             "sort": "timestamp:desc,project:id:asc",
         },

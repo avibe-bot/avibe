@@ -1230,6 +1230,33 @@ def test_memory_list_rejects_invalid_pagination_before_internal_transport(
     }
 
 
+def test_memory_list_rejects_unpaired_surrogate_cursor(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def transport_must_not_run(**_kwargs):
+        raise AssertionError("invalid list cursor reached internal transport")
+
+    monkeypatch.setattr(internal_client, "memory_list", transport_must_not_run)
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    headers["content-type"] = "application/json"
+
+    response = client.post(
+        "/api/memory/list",
+        content=b'{"project":"all","cursor":"\\ud800"}',
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+
+
 def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
