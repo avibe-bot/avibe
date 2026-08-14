@@ -605,6 +605,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_unseparated_button_row_in_raw_html(self):
+        text = "<div>\n[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_process_reply_ignores_indented_code_when_scanning_table_context(self):
         text = "    Head | Status\n    --- | ---\n[A] | [B]"
 

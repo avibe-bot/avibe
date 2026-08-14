@@ -1450,6 +1450,16 @@ def _extract_buttons(
     if pattern is _UNSEPARATED_BUTTON_ROW_RE and not text[: m.start()].strip():
         return [], text
 
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE:
+        code_ranges, _, blocking_ranges = _markdown_block_ranges(text)
+        html_block_ranges = [
+            source_range
+            for source_range in blocking_ranges
+            if source_range not in code_ranges
+        ]
+        if any(start <= m.start() < end for start, end in html_block_ranges):
+            return [], text
+
     if pattern is _UNSEPARATED_BUTTON_ROW_RE and _is_markdown_table_delimiter_before(
         mask, m.start()
     ):
