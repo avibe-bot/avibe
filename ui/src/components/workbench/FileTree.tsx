@@ -35,14 +35,14 @@ import { InlineNameInput } from '../ui/inline-name-input';
 
 // Icon + accent per file extension (matches the explorer in design dnYPx).
 const EXT: Record<string, { Icon: typeof FileIcon; color: string }> = {
-  ts: { Icon: FileCode2, color: 'var(--cyan)' },
-  tsx: { Icon: FileCode2, color: 'var(--cyan)' },
-  js: { Icon: FileCode2, color: 'var(--gold)' },
-  jsx: { Icon: FileCode2, color: 'var(--gold)' },
-  json: { Icon: Braces, color: 'var(--gold)' },
-  css: { Icon: Hash, color: 'var(--violet)' },
-  scss: { Icon: Hash, color: 'var(--violet)' },
-  md: { Icon: FileText, color: 'var(--mint)' },
+  ts: { Icon: FileCode2, color: 'var(--cyan-ink)' },
+  tsx: { Icon: FileCode2, color: 'var(--cyan-ink)' },
+  js: { Icon: FileCode2, color: 'var(--gold-ink)' },
+  jsx: { Icon: FileCode2, color: 'var(--gold-ink)' },
+  json: { Icon: Braces, color: 'var(--gold-ink)' },
+  css: { Icon: Hash, color: 'var(--violet-ink)' },
+  scss: { Icon: Hash, color: 'var(--violet-ink)' },
+  md: { Icon: FileText, color: 'var(--mint-ink)' },
   png: { Icon: ImageIcon, color: 'var(--muted)' },
   jpg: { Icon: ImageIcon, color: 'var(--muted)' },
   svg: { Icon: ImageIcon, color: 'var(--muted)' },

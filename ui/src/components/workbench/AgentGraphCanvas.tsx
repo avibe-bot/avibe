@@ -115,8 +115,8 @@ const NODE_TYPES = { session: SessionRFNode, trigger: TriggerRFNode };
 // panel's "REPORTS TO · callback status" is the only callback surface), so the
 // canvas renders spawn + trigger only.
 function edgeVars(kind: AgentGraphEdge['kind']): { color: string; dashed: boolean } {
-  if (kind === 'spawn') return { color: 'var(--mint)', dashed: false };
-  return { color: 'var(--violet)', dashed: true }; // trigger
+  if (kind === 'spawn') return { color: 'var(--mint-ink)', dashed: false };
+  return { color: 'var(--violet-ink)', dashed: true }; // trigger
 }
 
 // Build an undirected adjacency map so hovering a node can highlight its whole
@@ -420,10 +420,10 @@ const Legend: React.FC<{
 }> = ({ t, showDisabled, onToggleDisabled }) => (
   <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-border-strong bg-surface/90 px-3 py-2 text-[11px] text-muted backdrop-blur">
     <LegendItem label={t('agents.graph.legend.spawn')}>
-      <span className="h-[2px] w-5" style={{ background: 'var(--mint)' }} />
+      <span className="h-[2px] w-5" style={{ background: 'var(--mint-ink)' }} />
     </LegendItem>
     <LegendItem label={t('agents.graph.legend.trigger')}>
-      <span className="h-0 w-5 border-t-2 border-dashed" style={{ borderColor: 'var(--violet)' }} />
+      <span className="h-0 w-5 border-t-2 border-dashed" style={{ borderColor: 'var(--violet-ink)' }} />
     </LegendItem>
     <LegendItem label={t('agents.graph.legend.background')}>
       <span className="text-muted">◎</span>

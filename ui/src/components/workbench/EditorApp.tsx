@@ -774,7 +774,7 @@ export const EditorApp: React.FC<{
                       key={tab.id}
                       className={clsx(
                         'group/tab flex shrink-0 items-center gap-2 border-r border-border px-3 py-2 text-[12px] transition',
-                        active === tab.id ? 'bg-surface text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-foreground/[0.04]',
+                        active === tab.id ? 'bg-surface text-foreground shadow-[inset_0_2px_0_0_var(--cyan-ink)]' : 'text-muted hover:bg-foreground/[0.04]',
                       )}
                     >
                       <button

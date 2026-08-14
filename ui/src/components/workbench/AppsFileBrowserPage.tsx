@@ -82,15 +82,15 @@ import { FilePicker } from './FilePicker';
 
 // A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
 const EXT_ICON: Record<string, { Icon: LucideIcon; color: string }> = {
-  ts: { Icon: FileCode2, color: 'var(--cyan)' },
-  tsx: { Icon: FileCode2, color: 'var(--cyan)' },
-  js: { Icon: FileCode2, color: 'var(--gold)' },
-  jsx: { Icon: FileCode2, color: 'var(--gold)' },
-  json: { Icon: Braces, color: 'var(--gold)' },
-  css: { Icon: Hash, color: 'var(--violet)' },
-  scss: { Icon: Hash, color: 'var(--violet)' },
-  md: { Icon: FileText, color: 'var(--mint)' },
-  markdown: { Icon: FileText, color: 'var(--mint)' },
+  ts: { Icon: FileCode2, color: 'var(--cyan-ink)' },
+  tsx: { Icon: FileCode2, color: 'var(--cyan-ink)' },
+  js: { Icon: FileCode2, color: 'var(--gold-ink)' },
+  jsx: { Icon: FileCode2, color: 'var(--gold-ink)' },
+  json: { Icon: Braces, color: 'var(--gold-ink)' },
+  css: { Icon: Hash, color: 'var(--violet-ink)' },
+  scss: { Icon: Hash, color: 'var(--violet-ink)' },
+  md: { Icon: FileText, color: 'var(--mint-ink)' },
+  markdown: { Icon: FileText, color: 'var(--mint-ink)' },
   png: { Icon: ImageIcon, color: 'var(--muted)' },
   jpg: { Icon: ImageIcon, color: 'var(--muted)' },
   jpeg: { Icon: ImageIcon, color: 'var(--muted)' },
@@ -98,7 +98,7 @@ const EXT_ICON: Record<string, { Icon: LucideIcon; color: string }> = {
 };
 
 function entryIcon(e: FsEntry): { Icon: LucideIcon; color: string } {
-  if (e.kind === 'dir') return { Icon: Folder, color: 'var(--cyan)' };
+  if (e.kind === 'dir') return { Icon: Folder, color: 'var(--cyan-ink)' };
   return EXT_ICON[e.ext?.toLowerCase()] ?? { Icon: FileIcon, color: 'var(--muted)' };
 }
 

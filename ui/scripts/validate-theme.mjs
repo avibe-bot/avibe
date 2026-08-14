@@ -456,17 +456,51 @@ assertAccentAliasesKeepTheirTokenName(css);
 // accent has a LABEL printed on it. A fill or hairline may stay vivid because it is
 // read through the paired --X-foreground sitting on it; anything read directly
 // against the canvas -- text, an icon, a wire, an end node, a status dot -- carries
-// no label and so must take --X-ink. The two assertions below cover the two places
-// that distinction gets lost: a CSS rule painting a wire, and a Tailwind utility
-// painting a dot.
+// no label and so must take --X-ink. The assertions below cover the places that
+// distinction gets lost: a CSS rule painting a wire, a Tailwind utility painting a
+// dot, and a TypeScript string smuggling the token past both.
 //
-// Both are needed because neither the ink nor the fill assertion above can see this.
+// They are needed because neither the ink nor the fill assertion above can see this.
 // They check that each token is legible against the surface it claims; they cannot
 // know that .model-hub-wire--gateway chose the fill. That is how the supply graph
 // shipped 2px --mint strokes at 2.35:1 on the light canvas with every token guard
 // passing. Light is where it bites: --mint reads 2.35:1 on --background and --gold
 // 2.95:1, both under the 3:1 non-text floor, while their inks clear it. In dark each
 // accent's ink IS its fill, so none of this moves a dark pixel.
+//
+// What these assertions do NOT claim. Each decides fail-closed on what it reads -- an
+// unprovable pairing fails, a wash needs a written pin, a bare accent in a TS string is
+// rejected outright -- but two of them read an enumeration: Tailwind utility names in
+// src/*.tsx, and stroke/fill declarations in the Model Hub stylesheet. An accent can
+// reach a pixel by other routes, and five review rounds walked through them one at a
+// time. Each route was measured rather than argued about:
+//
+// Closed here, because closing them was cheap and total. Bare `text-<accent>`
+// (INK_UTILITIES) at 0 sites -- the #1406 codemod had already moved all 806 onto -ink,
+// which is exactly why the rule belongs here rather than nowhere. And every
+// `var(--<accent>)` written into a TypeScript string (assertNoBareAccentVarInSource),
+// which had 24 live sites: 1.6px spawn edges in the agent graph, two file-extension icon
+// maps, and the editor and terminal active-tab underlines. Those 24 are why the rule is
+// a carrier class and not one more utility name -- they reached pixels through a style
+// object, an arbitrary value and a lookup table, and no utility name catches any of them.
+//
+// Zero live sites, so what stays open is a hypothesis rather than a defect: a JSX paint
+// attribute (`fill="var(--mint)"`), `<svg color=>` / `stopColor`, an SVG `<animate to>`,
+// a runtime `setProperty`, a `:root` alias in a third stylesheet (src/ has exactly two),
+// and a conditional label paired with an unconditional fill.
+//
+// Deliberately out of scope, with the numbers attached: the
+// border/ring/outline/shadow/accent utilities. 1000 bare-accent references across 164
+// files, 844 of them opacity washes. bg/fill/stroke are already guarded above, which
+// leaves 488 on those five utilities -- and only 46 of the 488 are opaque (38 border,
+// 3 ring, 2 outline, 3 accent). The 443 washes are decoration whose legibility nobody
+// reads, which is not the defect this guard exists for. The 46 opaque ones are a visible
+// design change, and recolouring a border is design.pen's call -- the same reason the ten
+// ACCEPTED_BARE_FILLS pins are still bare. Both sets are named in the PR's
+// known-by-design ledger.
+//
+// Chasing that last group here would trade a guard people trust for one they route
+// around. So the scope is a decision with evidence under it, not an oversight.
 
 const ACCENT_NAMES = ACCENT_FILLS.map((fill) => fill.slice(2));
 const BARE_ACCENT_VAR = new RegExp(`var\\(\\s*--(${ACCENT_NAMES.join('|')})\\s*\\)`);
@@ -504,7 +538,8 @@ const ACCEPTED_ACCENT_WASHES = new Map([
 // mint while naming neither. modelHubSurface.css already routes ~20 accents through
 // --model-hub-* aliases, so this is one refactor away rather than hypothetical.
 //
-// Every definition of a name counts, not the last one. This file defines 11 properties
+// Every definition of a name counts, not the last one, and every stylesheet that ships
+// alongside is a place one can live -- hence the variadic sources. This file defines 11 properties
 // twice, once per theme -- `--model-hub-wash-channel` is `8 8 18` in dark and
 // `255 255 255` in light -- so a name-to-value map is not a simplification of this
 // file, it is a misreading of it. A last-write-wins resolver would read a light
@@ -523,15 +558,17 @@ const ACCEPTED_ACCENT_WASHES = new Map([
 // its input would spin. Cutting the cycle can under-report a cyclic definition, which
 // is correct rather than a hole -- a var() cycle is invalid at computed-value time, so
 // the browser paints nothing there either.
-function accentAliasIndex(source) {
+function accentAliasIndex(...sources) {
   const definitions = new Map();
-  postcss.parse(source).walkDecls((decl) => {
-    if (decl.prop.startsWith('--')) {
-      const values = definitions.get(decl.prop) ?? new Set();
-      values.add(normalizeCssValue(decl.value));
-      definitions.set(decl.prop, values);
-    }
-  });
+  for (const source of sources) {
+    postcss.parse(source).walkDecls((decl) => {
+      if (decl.prop.startsWith('--')) {
+        const values = definitions.get(decl.prop) ?? new Set();
+        values.add(normalizeCssValue(decl.value));
+        definitions.set(decl.prop, values);
+      }
+    });
+  }
 
   const reached = new Map();
 
@@ -567,8 +604,8 @@ function accentAliasIndex(source) {
   return accentsOfValue;
 }
 
-function assertMarksTakeTheInk(source, name) {
-  const accentsOfValue = accentAliasIndex(source);
+function assertMarksTakeTheInk(source, name, ...aliasSources) {
+  const accentsOfValue = accentAliasIndex(source, ...aliasSources);
   const seen = new Set();
 
   postcss.parse(source).walkDecls((decl) => {
@@ -606,7 +643,13 @@ function assertMarksTakeTheInk(source, name) {
   return seen;
 }
 
-const accentPaints = assertMarksTakeTheInk(modelHubCss, 'model hub');
+// index.css comes in as a definition source, not as a scan target. A custom property is
+// global once it is on :root, so `--wire-color: var(--mint)` in the app stylesheet is
+// visible to `stroke: var(--wire-color)` here -- the browser resolves it across files and
+// an index built from this file alone would see no definition and clear the wire. The
+// union is the answer for the same reason it is within one file: the question is whether
+// ANY definition can put a bare accent on this stroke.
+const accentPaints = assertMarksTakeTheInk(modelHubCss, 'model hub', css);
 
 // A pin that outlives what it excused is a silent exemption, so every entry has to
 // match a declaration that is really there.
@@ -761,11 +804,54 @@ function classStrings(file, source) {
     return '(module)';
   };
 
+  // The sibling class strings that apply whenever the marked one does -- which is not
+  // the same as every string in the opening element. A label reached only through a
+  // condition (`active ? 'text-mint-foreground' : ''`, `active && '...'`) leaves an
+  // unlabeled resting element behind, and that resting state is exactly what the guard
+  // is asked about. Raw source text cannot tell the two apart, so it cleared a mark on
+  // the strength of a branch that may never be taken -- the one direction a fail-closed
+  // guard must not fail.
+  //
+  // Both operands of a gate are excluded, not just the fallback. A label written into
+  // every branch does apply unconditionally, but proving that means evaluating the
+  // condition; the guard fails closed instead and the fix is to merge the label into the
+  // fill's own string, which is where it belonged anyway.
+  const unconditionalStrings = (scope) => {
+    const parts = [];
+    const walk = (node, gated) => {
+      if (!gated) {
+        if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+          parts.push(node.text);
+        } else if (ts.isTemplateExpression(node)) {
+          parts.push(node.head.text, ...node.templateSpans.map((span) => span.literal.text));
+        }
+      }
+      if (ts.isConditionalExpression(node)) {
+        walk(node.condition, gated);
+        walk(node.whenTrue, true);
+        walk(node.whenFalse, true);
+        return;
+      }
+      if (ts.isBinaryExpression(node) && [
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(node.operatorToken.kind)) {
+        walk(node.left, true);
+        walk(node.right, true);
+        return;
+      }
+      ts.forEachChild(node, (child) => walk(child, gated));
+    };
+    walk(scope, false);
+    return parts.join(' ');
+  };
+
   const record = (node, text) => {
     strings.push({
       text,
       owner: ownerOf(node),
-      scope: scopeOf(node).getText(ast),
+      scope: unconditionalStrings(scopeOf(node)),
       line: ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1,
     });
   };
@@ -791,6 +877,20 @@ function classStrings(file, source) {
 // A 14px filled glyph is read like small text rather than like a large non-text shape,
 // which is the bar its ink clears and its fill does not.
 const MARK_UTILITIES = ['bg', 'fill', 'stroke'];
+
+// `text-mint` is not a fill that might carry a label. It IS the label -- and through
+// `currentColor`, so is every icon under it that names no colour of its own, which is
+// how one class on a wrapper tints a whole glyph. So the pairing that licenses `bg-mint`
+// cannot license it: nothing is printed on top of text, and there is no second token to
+// look for. The answer is always the ink, which is the same value in dark and a legible
+// one in light -- so unlike a toggle track, this rule takes no exemption. A vivid accent
+// used as text has no reading under which it was intended.
+//
+// Zero sites violate this today; the #1406 codemod moved all 806 onto -ink (240 mint,
+// 214 cyan, 138 destructive, 115 gold, 58 violet, 28 pink, 12 accent, 1 primary). That
+// is exactly why the rule belongs here: the codemod is what made it true, and nothing
+// was stopping the next `text-mint` from undoing it one site at a time.
+const INK_UTILITIES = ['text'];
 
 // `bg-mint/100` is not a wash. It is `bg-mint` spelled with a modifier -- same token,
 // same opacity, same 2.35:1 -- and a `/` in the lookahead let it leave the scan
@@ -837,28 +937,40 @@ const labelCovers = (haystack, label, fillPrefix) => {
   return false;
 };
 
-function assertUnlabeledFillsTakeTheInk(root) {
-  const bare = new RegExp(
-    `\\b(?:${MARK_UTILITIES.join('|')})-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-])(/[\\w.%[\\]]+)?`,
-    'g',
-  );
-  const found = new Map();
-
-  // readdirSync(recursive) yields platform separators, so on Windows an entry arrives
-  // as `components\ui\switch.tsx`. Normalise before it becomes a lookup key, or every
-  // pin below misses and validate:theme fails on an unchanged checkout.
-  const files = fs.readdirSync(root, { recursive: true })
+// Every TypeScript source under a root, in a stable order. Shared by the two scans
+// below so the normalisation cannot drift between them.
+//
+// readdirSync(recursive) yields platform separators, so on Windows an entry arrives
+// as `components\ui\switch.tsx`. Normalise before it becomes a lookup key, or every
+// pin below misses and validate:theme fails on an unchanged checkout.
+function sourceFiles(root) {
+  return fs.readdirSync(root, { recursive: true })
     .map((entry) => entry.split(path.sep).join('/'))
     .filter((entry) => /\.tsx?$/.test(entry))
     .map((entry) => `${root}/${entry}`)
     .sort();
+}
 
-  for (const file of files) {
+function assertUnlabeledFillsTakeTheInk(root) {
+  const bare = new RegExp(
+    `\\b(${[...MARK_UTILITIES, ...INK_UTILITIES].join('|')})-(${[...FILL_LABEL.keys(), 'pink'].join('|')})(?![\\w-])(/[\\w.%[\\]]+)?`,
+    'g',
+  );
+  const found = new Map();
+  const inkMarks = [];
+
+  for (const file of sourceFiles(root)) {
     for (const { text, owner, scope, line } of classStrings(file, fs.readFileSync(file, 'utf8'))) {
       for (const match of text.matchAll(bare)) {
-        const accent = match[1];
-        const modifier = match[2];
+        const utility = match[1];
+        const accent = match[2];
+        const modifier = match[3];
         if (modifier && !FULLY_OPAQUE_MODIFIER.test(modifier)) {
+          continue;
+        }
+        // Ink takes no label and no pin, so it never reaches the pairing logic below.
+        if (INK_UTILITIES.includes(utility)) {
+          inkMarks.push({ file, line, utility, accent, signature: markSignature(owner, text) });
           continue;
         }
         const label = FILL_LABEL.get(accent);
@@ -874,16 +986,28 @@ function assertUnlabeledFillsTakeTheInk(root) {
     }
   }
 
+  if (inkMarks.length > 0) {
+    throw new Error(
+      'These paint text (and, through currentColor, the icons inside it) with a bare accent, which '
+      + 'is the ink side of the split by definition -- no label can sit on top of text, so there is '
+      + 'nothing to pair it with. Use the -ink token:\n'
+      + inkMarks.map(({ file, line, utility, accent, signature }) => (
+        `  ${file}:${line} ${utility}-${accent} -> ${utility}-${accent}-ink\n    ${signature}`
+      )).join('\n'),
+    );
+  }
+
   const unpinned = [...found.entries()].filter(([key]) => !ACCEPTED_BARE_FILLS.has(key));
   if (unpinned.length > 0) {
     throw new Error(
-      'These paint a bare accent with no paired *-foreground label in the same class string or on '
-      + 'a sibling attribute/property, so they are marks read straight off the canvas and must use the '
+      'These paint a bare accent with no paired *-foreground label in the same class string or in an '
+      + 'unconditional sibling attribute/property, so they are marks read straight off the canvas and must use the '
       + '-ink token (bg-mint-ink, fill-cyan-ink, stroke-gold-ink, ...):\n'
       + unpinned.map(([key, marks]) => marks.map(({ signature, line }) => `  ${key} at line ${line}\n    ${signature}`).join('\n')).join('\n')
       + '\nIf the label is real but lives on a child element, move it into the same class string. '
       + 'If it is real but gated behind a state the fill is not, the resting element is still unlabeled '
-      + '-- give the label the same variant prefix or drop the prefix. '
+      + '-- give the label the same variant prefix or drop the prefix, and for a JS condition '
+      + '(`active ? ... : ...`, `active && ...`) merge the label into the fill\'s own string. '
       + 'If a mark is deliberately exempt, pin it in ACCEPTED_BARE_FILLS with its reason.',
     );
   }
@@ -904,7 +1028,54 @@ function assertUnlabeledFillsTakeTheInk(root) {
   }
 }
 
+// The scan above reads Tailwind utility NAMES, so it only sees an accent that arrives as
+// one. `var(--mint)` written into a TypeScript string does not: it reaches a pixel through
+// a `style={{ stroke }}` object, a `shadow-[inset_0_2px_0_0_var(--cyan)]` arbitrary value,
+// or a lookup table read two files away from the element it paints. All three shipped --
+// the agent graph drew 1.6px `var(--mint)` spawn edges, two file-extension icon maps
+// tinted their glyphs through `currentColor`, and the editor and terminal tab strips
+// underlined the active tab -- and the utility scan saw none of them.
+//
+// So this fence is the class of carrier rather than another utility name: no TypeScript
+// string literal may name a bare accent. One rule closes the style object, the JSX paint
+// attribute, the arbitrary value and the lookup table together, and it closes the carrier
+// nobody has invented yet, because what it constrains is the string and not the place the
+// string is used. `var(--mint-ink)` and `var(--mint-foreground)` are unaffected -- only
+// the bare token is a mark with no reading under which it was intended.
+//
+// No pin map, deliberately. The remedy is never an exemption: a mark takes the -ink
+// token, and a fill that genuinely carries a label belongs in a class string where the
+// pairing assertion above can read it -- an inline `style` is exactly where such a
+// pairing goes to hide. Zero sites need an exception after this change, so a pin map
+// would be speculative; add one when a real site earns it.
+function assertNoBareAccentVarInSource(root) {
+  const bareVar = new RegExp(BARE_ACCENT_VAR.source, 'g');
+  const marks = [];
+
+  for (const file of sourceFiles(root)) {
+    for (const { text, owner, line } of classStrings(file, fs.readFileSync(file, 'utf8'))) {
+      for (const [, accent] of text.matchAll(bareVar)) {
+        marks.push({ file, line, accent, signature: markSignature(owner, text) });
+      }
+    }
+  }
+
+  if (marks.length > 0) {
+    throw new Error(
+      'These name a bare accent inside a TypeScript string, so it reaches a pixel without ever '
+      + 'being a Tailwind utility -- through an inline style, an arbitrary value, or a lookup table '
+      + 'read somewhere else -- and the class scan cannot see it. Use the ink token:\n'
+      + marks.map(({ file, line, accent, signature }) => (
+        `  ${file}:${line} var(--${accent}) -> var(--${accent}-ink)\n    ${signature}`
+      )).join('\n')
+      + '\nIf it is genuinely a labelled fill, move the paint into a class string '
+      + '(bg-mint text-mint-foreground) where the pairing assertion can read the label.',
+    );
+  }
+}
+
 assertUnlabeledFillsTakeTheInk('src');
+assertNoBareAccentVarInSource('src');
 assertEveryAcceptedPairStillExists();
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });

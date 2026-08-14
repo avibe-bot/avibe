@@ -216,7 +216,7 @@ export const TerminalTabs: React.FC<{
               key={tab.key}
               className={clsx(
                 'group/tab flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] transition',
-                tab.key === active ? 'bg-surface text-foreground shadow-[inset_0_-2px_0_0_var(--mint)]' : 'text-muted hover:bg-foreground/[0.05]',
+                tab.key === active ? 'bg-surface text-foreground shadow-[inset_0_-2px_0_0_var(--mint-ink)]' : 'text-muted hover:bg-foreground/[0.05]',
               )}
             >
               {editing && editing.key === tab.key ? (
