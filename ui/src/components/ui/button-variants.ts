@@ -25,14 +25,19 @@ export const buttonVariants = cva(
         // inverted direction surfaces at build time rather than in review. The glow
         // shadow no longer brightens with the fill; the fill swap carries the
         // affordance. See the --primary-hover note in index.css.
+        //
+        // Glow blur is 16px on all four accents (owner decision 2026-08-14: 24px read
+        // too heavy). One radius, four accents — a per-accent radius would be the same
+        // drift this variant exists to remove. design.pen has no glow on any Button, so
+        // the value is ours to hold, not the design's; keep the four in lockstep.
         brand:
-          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_24px_-4px_rgba(91,255,160,0.6)] hover:bg-mint-hover disabled:shadow-none',
+          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_16px_-4px_rgba(91,255,160,0.6)] hover:bg-mint-hover disabled:shadow-none',
         'brand-cyan':
-          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_24px_-4px_rgba(63,224,229,0.6)] hover:bg-cyan-hover disabled:shadow-none',
+          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_16px_-4px_rgba(63,224,229,0.6)] hover:bg-cyan-hover disabled:shadow-none',
         'brand-gold':
-          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_24px_-4px_rgba(255,200,87,0.55)] hover:bg-gold-hover disabled:shadow-none',
+          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_16px_-4px_rgba(255,200,87,0.55)] hover:bg-gold-hover disabled:shadow-none',
         'brand-violet':
-          'gap-2 bg-violet font-bold text-violet-foreground shadow-[0_0_24px_-4px_rgba(124,91,255,0.55)] hover:bg-violet-hover disabled:shadow-none',
+          'gap-2 bg-violet font-bold text-violet-foreground shadow-[0_0_16px_-4px_rgba(124,91,255,0.55)] hover:bg-violet-hover disabled:shadow-none',
         secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong',
         // Outline — bg matches page surface so it sits cleanly on glow gradients.
         outline:
