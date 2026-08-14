@@ -75,6 +75,7 @@ from .migration import (
     apply_native_migration,
     scan_native_configs,
 )
+from .native_oauth import NativeLoginSlotTakenError
 from .oauth import (
     NativeOAuthAdapter,
     NativeOAuthUnavailableError,
@@ -675,6 +676,14 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=404) from None
         except (EngineUnavailableError, NativeOAuthUnavailableError):
             raise ModelHubError("engine_down", status=503) from None
+        except NativeLoginSlotTakenError as error:
+            data = {"existing_source_id": error.owner_ref} if error.owner_ref else None
+            raise ModelHubError(
+                "native_source_already_exists",
+                status=409,
+                detail="modelHub.errors.native_subscription_exists",
+                data=data,
+            ) from None
         except ModelHubError:
             raise
         except Exception:
@@ -1286,6 +1295,11 @@ class ModelHubService:
 
     def _raise_if_flow_expired(self, flow_id: str, flow: OAuthFlowState) -> None:
         if not flow.expires_at_iso or flow.state in {"success", "failed", "cancelled"}:
+            return
+        # Native CLI settlement is owned by AgentAuthService's waiter. The
+        # journal timestamp is identity metadata, not a timer that may release
+        # a live CLI credential while its process is still running.
+        if flow.channel == "native_cli":
             return
         try:
             expired = _parse_datetime(flow.expires_at_iso) <= self.now()
@@ -2110,6 +2124,10 @@ class ModelHubService:
                 binding,
                 flow,
             )
+            if binding.channel == "native_cli":
+                release = getattr(self.native_oauth_adapter, "release_login_slot", None)
+                if callable(release):
+                    release(flow_id)
             return flow, repair_result
         await self._create_oauth_source(
             [],
@@ -2122,6 +2140,10 @@ class ModelHubService:
             completed_flow=flow,
             idempotent=True,
         )
+        if binding.channel == "native_cli":
+            release = getattr(self.native_oauth_adapter, "release_login_slot", None)
+            if callable(release):
+                release(flow_id)
         completed = self._completed_oauth_flow(flow_id, binding)
         if completed is None:
             raise ModelHubError("flow_not_found", status=404)

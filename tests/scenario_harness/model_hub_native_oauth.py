@@ -52,6 +52,8 @@ class FakeAgentAuthService:
         backend: str,
         *,
         force_reset: bool = True,
+        owner_ref: str | None = None,
+        hold_after_success: bool = False,
         on_irreversible_start=None,
     ):
         if force_reset and on_irreversible_start is not None:
@@ -99,6 +101,9 @@ class FakeAgentAuthService:
             return {"ok": False, "error": "flow_not_found"}
         self.cancelled.append(flow_id)
         return {"ok": True}
+
+    def release_login_slot(self, flow_id: str) -> None:
+        return None
 
     def expose_codex_device_flow(self, flow_id: str) -> None:
         flow = self.flows[flow_id]

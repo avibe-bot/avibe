@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol
 
+from core.agent_auth_service import BackendLoginInProgressError
+
 from .adapter import OAuthFlowState, RetainedMaterialDisposition
 from .events import contains_credential_material
 from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError
@@ -22,6 +24,24 @@ _GENERIC_ERROR_KEY = "settings.models.oauth.error.generic"
 _MAX_FLOWS = 100
 
 
+class NativeLoginSlotTakenError(RuntimeError):
+    """A native credential is already owned by another login flow."""
+
+    def __init__(
+        self,
+        vendor: str,
+        backend: str,
+        *,
+        owner_ref: str | None = None,
+        flow_id: str | None = None,
+    ) -> None:
+        self.vendor = vendor
+        self.backend = backend
+        self.owner_ref = owner_ref
+        self.flow_id = flow_id
+        super().__init__(f"native login already in progress for {vendor}/{backend}")
+
+
 class AgentAuthService(Protocol):
     setup_timeout_seconds: float
 
@@ -30,6 +50,8 @@ class AgentAuthService(Protocol):
         backend: str,
         *,
         force_reset: bool = True,
+        owner_ref: str | None = None,
+        hold_after_success: bool = False,
         on_irreversible_start: Callable[
             [], Callable[[], None] | None
         ] | None = None,
@@ -40,6 +62,8 @@ class AgentAuthService(Protocol):
     async def submit_web_code(self, flow_id: str, code: str) -> dict[str, Any]: ...
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]: ...
+
+    def release_login_slot(self, flow_id: str) -> None: ...
 
 
 @dataclass
@@ -165,24 +189,43 @@ class AgentAuthNativeOAuthAdapter:
         if backend is None:
             raise NativeOAuthUnavailableError
 
-        flow = await self._agent_auth_service.start_web_setup(
-            backend,
-            force_reset=force_reset,
-            on_irreversible_start=on_irreversible_start,
-        )
+        try:
+            flow = await self._agent_auth_service.start_web_setup(
+                backend,
+                force_reset=force_reset,
+                owner_ref=source_id,
+                hold_after_success=True,
+                on_irreversible_start=on_irreversible_start,
+            )
+        except BackendLoginInProgressError as error:
+            raise NativeLoginSlotTakenError(
+                vendor,
+                backend,
+                owner_ref=error.owner_ref,
+                flow_id=error.flow_id,
+            ) from None
         flow_id = getattr(flow, "flow_id", None)
         if not isinstance(flow_id, str) or not flow_id:
             raise NativeOAuthUnavailableError
         expires_at = self._now() + timedelta(seconds=self._agent_auth_service.setup_timeout_seconds)
-        self._remember(
-            flow_id,
-            _FlowBinding(
-                source_id=source_id,
-                vendor=vendor,
-                backend=backend,
-                expires_at_iso=expires_at.isoformat(),
-            ),
-        )
+        try:
+            self._remember(
+                flow_id,
+                _FlowBinding(
+                    source_id=source_id,
+                    vendor=vendor,
+                    backend=backend,
+                    expires_at_iso=expires_at.isoformat(),
+                ),
+            )
+        except BaseException:
+            # The provider may already be waiting on the browser. Retain the
+            # native claim until the auth service confirms process/flow cleanup.
+            try:
+                await self._agent_auth_service.cancel_web_flow(flow_id)
+            except BaseException:
+                pass
+            raise
         return await self._state_from_payload(flow_id, self._flow_payload(flow))
 
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
@@ -225,6 +268,9 @@ class AgentAuthNativeOAuthAdapter:
         if status is None:
             raise KeyError(flow_id)
         return status
+
+    def release_login_slot(self, flow_id: str) -> None:
+        self._agent_auth_service.release_login_slot(flow_id)
 
     def _binding(self, flow_id: str) -> _FlowBinding:
         try:
