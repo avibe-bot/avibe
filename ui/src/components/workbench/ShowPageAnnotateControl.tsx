@@ -149,16 +149,18 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
         <div className="hidden items-center md:flex">
           {enabled ? (
             <div className="flex h-7 items-center gap-0.5 rounded-lg border border-mint/40 bg-mint/[0.06] p-0.5 shadow-[0_0_16px_-6px_rgba(91,255,160,0.5)]">
-              <button
+              <Button
                 type="button"
+                variant="default"
+                size={null}
                 onClick={onDisable}
                 aria-label={offLabel}
                 title={offLabel}
                 aria-pressed
-                className="grid size-6 shrink-0 place-items-center rounded-[5px] bg-mint text-primary-foreground transition hover:bg-mint-hover"
+                className="size-6 shrink-0 rounded-[5px]"
               >
                 <MessageSquarePlus className="size-3.5" />
-              </button>
+              </Button>
               <div
                 role="radiogroup"
                 aria-label={t('chat.showPage.annotate.modeTitle')}

@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useApi } from '../../../context/ApiContext';
 import type { SkillDiscovered, SkillScope } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
+import { Button } from '../../ui/button';
 import { SegmentedRadio } from '../../ui/segmented';
 import { Checkbox } from '../../ui/checkbox';
 import { BACKEND_CHIP, BACKEND_LABEL, BACKEND_ORDER, type Backend } from '../../../lib/backendAccent';
@@ -321,15 +322,17 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
             <button type="button" onClick={onClose} className="rounded-lg border border-border-strong px-3.5 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]">
               {t('skills.addDialog.cancel')}
             </button>
-            <button
+            <Button
               type="button"
+              variant="brand"
+              size={null}
               onClick={install}
               disabled={!discovered || selected.size === 0 || backends.size === 0 || busy === 'install'}
-              className="flex items-center gap-1.5 rounded-lg bg-mint px-4 py-2 text-[12px] font-semibold text-primary-foreground shadow-[0_4px_16px_-4px_rgba(91,255,160,0.5)] transition hover:bg-mint-hover disabled:opacity-50"
+              className="gap-1.5 px-4 py-2 text-[12px] font-semibold"
             >
               {busy === 'install' ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
               {busy === 'install' ? t('skills.addDialog.installing') : t('skills.addDialog.install', { count: selected.size })}
-            </button>
+            </Button>
           </div>
         </div>
       </div>

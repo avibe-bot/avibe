@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
+import { Button } from './button';
 import { errorMessage } from '@/lib/errorMessage';
 
 interface DirectoryBrowserProps {
@@ -594,19 +595,16 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                   >
                     {t('directoryBrowser.cancel')}
                   </button>
-                  <button
+                  <Button
                     type="button"
+                    variant="default"
+                    size={null}
                     onClick={submitNewFolder}
                     disabled={!newFolderName.trim()}
-                    className={clsx(
-                      'rounded-md px-2.5 py-0.5 text-[11px] font-semibold transition',
-                      newFolderName.trim()
-                        ? 'bg-mint text-primary-foreground hover:bg-mint-hover'
-                        : 'bg-muted-soft text-muted',
-                    )}
+                    className="rounded-md px-2.5 py-0.5 text-[11px] font-semibold"
                   >
                     {t('directoryBrowser.newFolder')}
-                  </button>
+                  </Button>
                 </div>
                 {createError && <div className="pl-6 text-[11px] text-destructive-ink">{createError}</div>}
               </div>
@@ -635,20 +633,17 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
           >
             {t('directoryBrowser.cancel')}
           </button>
-          <button
+          <Button
             type="button"
+            variant="brand"
+            size={null}
             onClick={() => canConfirm && onSelect(currentPath)}
             disabled={!canConfirm}
-            className={clsx(
-              'flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-semibold transition',
-              canConfirm
-                ? 'bg-mint text-primary-foreground shadow-[0_0_14px_-4px_rgba(91,255,160,0.6)] hover:bg-mint-hover'
-                : 'cursor-not-allowed bg-muted-soft text-muted',
-            )}
+            className="gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-semibold"
           >
             <Check className="size-3.5" />
             {t('directoryBrowser.select')}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
