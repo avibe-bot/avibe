@@ -264,10 +264,13 @@ def test_chat_message_font_size_is_clamped() -> None:
 
     assert config.ui.chat_message_font_size == 20
 
+    # A size out of range still names a size, so it is clamped. One that names
+    # no size is refused rather than answered with the default: this is the
+    # write path for /api/config, where substituting a default would return 200
+    # holding a value the caller never sent.
     payload["ui"]["chat_message_font_size"] = "bad"
-    config = V2Config.from_payload(payload)
-
-    assert config.ui.chat_message_font_size == 14
+    with pytest.raises(ValueError, match="chat_message_font_size"):
+        V2Config.from_payload(payload)
 
 
 def test_show_agent_activity_defaults_off_and_round_trips() -> None:

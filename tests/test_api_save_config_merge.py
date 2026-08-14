@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import copy
+import json
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -1212,57 +1214,124 @@ def test_malformed_cloud_section_disables_pairing_instead_of_failing_reads(tmp_p
     _assert_degrades(config)
 
 
-def test_malformed_asr_switches_keep_the_surface_and_the_runtime_in_step(tmp_path, monkeypatch):
-    """An ASR switch is a boolean, so what Settings shows is what ASR does.
+def _settings_write_paths() -> list[tuple[str, ...]]:
+    """Every preference path the shared Settings pages may write.
 
-    Seeded over every field the dataclass declares as ``bool`` and over the
-    JSON values that are not booleans, rather than over the three switches and
-    the falsy shapes a review happened to name: the section is copied verbatim
-    out of the posted or stored payload, and an Editor may now write it, so
-    the shape nobody enumerated is exactly the one that would slip through.
+    Read out of the route's own allowlists instead of restated here, so a
+    preference added to them is covered by the tests below without editing
+    them.
+    """
+    paths: list[tuple[str, ...]] = []
+    for key in sorted(api._EDITOR_CONFIG_WRITE_FIELDS):
+        if key == "ui":
+            paths += [("ui", sub) for sub in sorted(api._EDITOR_CONFIG_UI_WRITE_FIELDS)]
+        elif key == "audio_asr":
+            paths += [("audio_asr", sub) for sub in sorted(api._EDITOR_AUDIO_ASR_WRITE_FIELDS)]
+        else:
+            paths.append((key,))
+    # ``show_pages_prompt`` is Owner-only, so it is absent from the Editor
+    # allowlist while sharing the same validation block.
+    return [*paths, ("show_pages_prompt",)]
 
-    The defect is a disagreement, not a bad value. The Settings pages read
-    ``value !== false`` as on while ``AudioAsrService`` reads the same value
-    for truth, so a stored ``[]`` renders ASR as enabled while transcription
-    is off. Asserting that agreement rather than the constant it falls back to
-    keeps the test true if the fallback ever changes.
+
+def _nested_patch(path: tuple[str, ...], value: object) -> dict:
+    patch: object = value
+    for key in reversed(path):
+        patch = {key: patch}
+    return patch  # type: ignore[return-value]
+
+
+def _walk(root: object, path: tuple[str, ...], *, attr: bool) -> object:
+    for key in path:
+        root = getattr(root, key) if attr else root[key]  # type: ignore[index]
+    return root
+
+
+def test_wrong_typed_settings_writes_are_refused_instead_of_silently_defaulted(
+    tmp_path, monkeypatch
+):
+    """``/api/config`` stores what the caller sent, or it refuses the write.
+
+    Seeded over the whole Settings write surface and driven through both roles,
+    rather than over the preferences a review happened to name: the paths come
+    from the allowlists the route itself uses, so the field nobody enumerated
+    is covered too.
+
+    The defect being pinned is silent success, not a bad stored value. A stale
+    or non-browser client posting ``{"show_duration": "true"}`` was answered
+    200 while the stored value became ``False`` — a request to switch a
+    preference on switched it off, and nothing said so. ``ack_mode``, three
+    lines above the same block, already raised; this asserts the whole surface
+    answers alike.
     """
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    boolean_fields = [info.name for info in fields(AudioAsrConfig) if info.type in (bool, "bool")]
-    assert boolean_fields
+    api.save_config(_full_config_payload())
 
-    def _load(audio_asr: dict) -> V2Config:
-        payload = _full_config_payload()
-        payload["remote_access"] = {
-            "provider": "vibe_cloud",
-            "vibe_cloud": {
-                "enabled": True,
-                "backend_url": "https://avibe.bot",
-                "instance_id": "inst_123",
-                "instance_secret": "instance-secret",
-            },
-        }
-        payload["audio_asr"] = audio_asr
-        return V2Config.from_payload(payload)
+    def _stored() -> dict:
+        return api.config_to_payload(api.load_config(), include_secrets=True, include_internal=True)
 
-    for value in ([], [1], {}, "", "yes", 0, 1, 1.0, None):
-        config = _load({name: value for name in boolean_fields})
-        stored = config.audio_asr
-        assert [name for name in boolean_fields if not isinstance(getattr(stored, name), bool)] == [], value
+    baseline = _stored()
+    paths = _settings_write_paths()
+    assert paths
 
-        projected = api.non_owner_config_payload(config)["audio_asr"]
-        # ``enabled !== false`` is what the shared Settings pages render.
-        assert AudioAsrService(config).is_available() is (projected["enabled"] is not False), value
+    for path in paths:
+        for value in ([], {}, None):
+            label = (".".join(path), value)
+            with pytest.raises(ValueError):
+                api.save_config(_nested_patch(path, value))
+            if path[0] in api._EDITOR_CONFIG_WRITE_FIELDS:
+                with pytest.raises(ValueError):
+                    api.save_config(api.editor_config_write_payload(_nested_patch(path, value)))
+            assert _stored() == baseline, label
 
-    # A switch that really is a boolean is still persisted as posted, so the
-    # agreement above cannot be produced by a route that forces one answer.
-    honest = _load({"enabled": False, "echo_transcript": False, "enabled_configured": True})
-    assert api.non_owner_config_payload(honest)["audio_asr"] == {
-        "enabled": False,
-        "echo_transcript": False,
-        "enabled_configured": True,
-    }
-    assert AudioAsrService(honest).is_available() is False
+    # Posting each stored value back still succeeds, so the refusals above
+    # cannot be produced by a route that refuses every write.
+    for path in paths:
+        api.save_config(_nested_patch(path, _walk(baseline, path, attr=False)))
+    assert _stored() == baseline
+
+    # The review's own payload: asking to switch a preference on must never be
+    # answered 200 with the preference switched off.
+    api.save_config({"show_duration": True})
+    with pytest.raises(ValueError, match="show_duration"):
+        api.save_config({"show_duration": "true"})
+    assert api.load_config().show_duration is True
+
+
+def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_path, monkeypatch):
+    """Refusing over HTTP must not turn a hand-edited config into a dead start.
+
+    ``from_payload`` is the strict boundary and ``load`` is the recovering one
+    (``_reset_recoverable_config_section`` says so in as many words), so every
+    refusal added above has to come back out of the recovery table rather than
+    reaching the caller. Seeded over the same surface as the write test, which
+    is what makes the two halves one statement instead of two lists.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
+    healthy = api.config_to_payload(
+        V2Config.from_payload(_full_config_payload()), include_secrets=True, include_internal=True
+    )
+    config_path.write_text(json.dumps(healthy), encoding="utf-8")
+    assert V2Config.load(config_path).load_warnings == ()
+
+    for path in _settings_write_paths():
+        label = ".".join(path)
+        payload = copy.deepcopy(healthy)
+        _walk(payload, path[:-1], attr=False)[path[-1]] = []  # type: ignore[index]
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        config = V2Config.load(config_path)
+
+        assert any(path[0] in warning for warning in config.load_warnings), label
+        assert _walk(config, path, attr=True) == _walk(V2Config.default(), path, attr=True), label
+        # Everything outside the corrupted section survives. Without this the
+        # test would pass just as well for a recovery that threw the whole file
+        # away, which for a scalar looks identical to repairing that scalar.
+        recovered = api.config_to_payload(config, include_secrets=True, include_internal=True)
+        assert {key: value for key, value in recovered.items() if key != path[0]} == {
+            key: value for key, value in healthy.items() if key != path[0]
+        }, label
 
 
 def test_editor_config_write_payload_keeps_messaging_fields_only():

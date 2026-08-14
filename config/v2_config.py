@@ -1384,35 +1384,27 @@ class AudioAsrConfig:
     max_file_bytes: Optional[int] = None
 
     def __post_init__(self) -> None:
-        """Keep every field declared ``bool`` a boolean, whatever was written.
+        """Refuse a switch that is not the boolean this class declares.
 
-        ``from_payload`` copies this section's switches verbatim while it
-        already normalises the scalars beside them, and an Editor may now
-        persist the section, so a stale client or a hand-edited config can put
-        ``[]`` where a switch belongs. Nothing further down coerces it: the
-        Settings pages read ``value !== false`` as on while
+        ``from_payload`` copies this section's switches verbatim, and an Editor
+        may now persist the section, so a stale client or a hand-edited config
+        can put ``[]`` where a switch belongs. Nothing further down coerces it:
+        the Settings pages read ``value !== false`` as on while
         ``AudioAsrService`` reads the same value for truth, so ASR renders as
-        enabled while transcription is off — the surface and the runtime
-        disagreeing about one stored value.
+        enabled while transcription is off.
 
         Stated over the declared fields rather than over the three switches
         that exist today, so a boolean added later is covered without editing
-        this method. A non-boolean is not a usable switch, so it falls back to
-        the declared default and is logged, matching the sibling scalars in
-        ``from_payload`` rather than rejecting the rest of the patch.
+        this method.
         """
-        defaults = {info.name: info.default for info in fields(self)}
-        dropped = [
+        invalid = sorted(
             info.name
             for info in fields(self)
             if info.type in (bool, "bool") and not isinstance(getattr(self, info.name), bool)
-        ]
-        for name in dropped:
-            setattr(self, name, defaults[name])
-        if dropped:
-            logger.warning(
-                "Ignoring non-boolean audio_asr fields: %s",
-                ", ".join(sorted(dropped)),
+        )
+        if invalid:
+            raise ValueError(
+                "Config 'audio_asr' fields must be booleans: " + ", ".join(invalid)
             )
 
 
@@ -2955,28 +2947,29 @@ class V2Config:
         if not isinstance(ui_payload, dict):
             raise ValueError("Config 'ui' must be an object")
         ui = UiConfig(**_filter_dataclass_fields(UiConfig, ui_payload))
+        # Clamping an out-of-range size still honours what the caller asked for;
+        # answering an unparseable one with the default does not, so it raises.
         try:
             ui.chat_message_font_size = max(
                 MIN_CHAT_MESSAGE_FONT_SIZE_PX,
                 min(MAX_CHAT_MESSAGE_FONT_SIZE_PX, int(ui.chat_message_font_size)),
             )
-        except (TypeError, ValueError):
-            ui.chat_message_font_size = DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX
-        # Accept real booleans; parse known string forms explicitly (a config file
-        # or API client may supply "false"/"0", and ``bool("false")`` is True).
-        raw_show_activity = ui.show_agent_activity
-        if isinstance(raw_show_activity, str):
-            ui.show_agent_activity = raw_show_activity.strip().lower() in ("1", "true", "yes", "on")
-        else:
-            ui.show_agent_activity = bool(raw_show_activity)
-        # ``show_tool_calls`` defaults true; a string "false"/"0" must coerce to False
-        # (``bool("false")`` is True) — same parse as above, applied when a string form
-        # is supplied; a missing key keeps the ``UiConfig`` default (True).
-        raw_show_tools = ui.show_tool_calls
-        if isinstance(raw_show_tools, str):
-            ui.show_tool_calls = raw_show_tools.strip().lower() in ("1", "true", "yes", "on")
-        else:
-            ui.show_tool_calls = bool(raw_show_tools)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Config 'ui.chat_message_font_size' must be a number") from exc
+
+        # These two switches accept the several spellings a hand-edited config
+        # may use for a boolean — ``true``/``1``/``"yes"``/``"off"`` all name a
+        # side the caller meant. A value that spells no side at all (``[]``,
+        # ``{}``, ``null``) is refused rather than silently read as false.
+        def _spelled_bool(name: str, value: object) -> bool:
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            if isinstance(value, (bool, int)):
+                return bool(value)
+            raise ValueError(f"Config 'ui.{name}' must be a boolean")
+
+        ui.show_agent_activity = _spelled_bool("show_agent_activity", ui.show_agent_activity)
+        ui.show_tool_calls = _spelled_bool("show_tool_calls", ui.show_tool_calls)
 
         remote_access_payload = payload.get("remote_access") or {}
         if not isinstance(remote_access_payload, dict):
@@ -3053,19 +3046,22 @@ class V2Config:
         audio_asr = AudioAsrConfig(**_filter_dataclass_fields(AudioAsrConfig, audio_asr_payload))
         if audio_asr_enabled_present and audio_asr.enabled is False and not audio_asr.enabled_configured:
             audio_asr.enabled_configured = True
+        # Same split as the preferences below: a value that names a legal
+        # setting is clamped to the nearest legal one, a value that names no
+        # setting is refused instead of being answered with the default.
         try:
             audio_asr.timeout_seconds = max(0.1, float(audio_asr.timeout_seconds))
-        except (TypeError, ValueError):
-            audio_asr.timeout_seconds = 60.0
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Config 'audio_asr.timeout_seconds' must be a number") from exc
         if audio_asr.max_file_bytes is not None:
             try:
                 audio_asr.max_file_bytes = max(1, int(audio_asr.max_file_bytes))
-            except (TypeError, ValueError):
-                audio_asr.max_file_bytes = None
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Config 'audio_asr.max_file_bytes' must be an integer") from exc
         if not isinstance(audio_asr.endpoint_path, str) or not audio_asr.endpoint_path.startswith("/"):
-            audio_asr.endpoint_path = "/v1/audio/transcriptions"
+            raise ValueError("Config 'audio_asr.endpoint_path' must be a path starting with '/'")
         if not isinstance(audio_asr.model, str) or not audio_asr.model.strip():
-            audio_asr.model = "qwen3-asr-flash"
+            raise ValueError("Config 'audio_asr.model' must be a non-empty string")
 
         update_payload = payload.get("update") or {}
         if not isinstance(update_payload, dict):
@@ -3079,31 +3075,32 @@ class V2Config:
         if not isinstance(ack_mode, str) or ack_mode not in {"reaction", "message", "typing"}:
             raise ValueError("Config 'ack_mode' must be 'reaction', 'message', or 'typing'")
 
-        show_duration = payload.get("show_duration", False)
-        if not isinstance(show_duration, bool):
-            show_duration = False
+        # Every preference below answers a wrong-typed value the way
+        # ``ack_mode`` above already does — by raising. This module's split is
+        # that ``from_payload`` validates and only disk loading recovers (see
+        # ``_reset_recoverable_config_section``), so a preference that quietly
+        # substituted its default broke the split in both directions: over HTTP
+        # the route answered 200 having stored a value the caller never sent
+        # (turning an enabled preference off on a request that asked to turn it
+        # on), and on disk the recovery entries written for these very fields
+        # were unreachable, so a hand-edit degraded with no warning.
+        def _declared_bool(name: str, default: bool) -> bool:
+            value = payload.get(name, default)
+            if not isinstance(value, bool):
+                raise ValueError(f"Config '{name}' must be a boolean")
+            return value
 
-        include_user_info = payload.get("include_user_info", True)
-        if not isinstance(include_user_info, bool):
-            include_user_info = True
-
-        include_time_info = payload.get("include_time_info", True)
-        if not isinstance(include_time_info, bool):
-            include_time_info = True
-
-        reply_enhancements = payload.get("reply_enhancements", True)
-        if not isinstance(reply_enhancements, bool):
-            reply_enhancements = True
-
-        show_pages_prompt = payload.get("show_pages_prompt", True)
-        if not isinstance(show_pages_prompt, bool):
-            show_pages_prompt = True
+        show_duration = _declared_bool("show_duration", False)
+        include_user_info = _declared_bool("include_user_info", True)
+        include_time_info = _declared_bool("include_time_info", True)
+        reply_enhancements = _declared_bool("reply_enhancements", True)
+        show_pages_prompt = _declared_bool("show_pages_prompt", True)
 
         language = normalize_language(payload.get("language"), default="en")
 
         agent_progress_style = payload.get("agent_progress_style", DEFAULT_AGENT_PROGRESS_STYLE)
         if agent_progress_style not in ("concise", "verbose", "off"):
-            agent_progress_style = DEFAULT_AGENT_PROGRESS_STYLE
+            raise ValueError("Config 'agent_progress_style' must be 'concise', 'verbose', or 'off'")
 
         def _positive_int(value, default, maximum):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0 or value > maximum:
@@ -3112,6 +3109,9 @@ class V2Config:
 
         # Cap to sane upper bounds so a fat-fingered value can't silence the
         # heartbeat (heartbeat ≤ 1h, no-output hint ≤ 24h); out-of-range → default.
+        # These two keep the fallback the settings above give up: they are not on
+        # the Settings write surface, and ``test_status_bubble_settings`` states
+        # the tolerance as a contract rather than as an accident.
         agent_status_heartbeat_ms = _positive_int(payload.get("agent_status_heartbeat_ms"), 8000, 3_600_000)
         agent_status_no_output_ms = _positive_int(payload.get("agent_status_no_output_ms"), 180000, 86_400_000)
 
@@ -3119,8 +3119,9 @@ class V2Config:
         # when present; otherwise leave it ``None`` here and derive it below
         # from the legacy "setup done" heuristic so installs configured before
         # this flag existed are not bounced back into the wizard.
-        setup_completed_raw = payload.get("setup_completed")
-        setup_completed = setup_completed_raw if isinstance(setup_completed_raw, bool) else None
+        setup_completed = payload.get("setup_completed")
+        if setup_completed is not None and not isinstance(setup_completed, bool):
+            raise ValueError("Config 'setup_completed' must be a boolean")
 
         config = cls(
             platform=platform,
