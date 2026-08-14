@@ -658,8 +658,19 @@ async def test_auto_recall_selects_only_keyword_or_hybrid(
     assert provider.search_policies == [(effective_mode, True, None)]
 
 
-async def test_agentic_recall_fails_closed_without_provider_search(tmp_path: Path) -> None:
-    provider = FakeMemoryProvider()
+@pytest.mark.parametrize("missing_capability", ["embed", "llm", "rerank"])
+async def test_agentic_recall_fails_closed_when_a_capability_is_missing(
+    tmp_path: Path,
+    missing_capability: str,
+) -> None:
+    provider = FakeMemoryProvider(agentic_budget_enforced_flag=True)
+    provider.health_snapshot_value = replace(
+        provider.health_snapshot_value,
+        capabilities={
+            **provider.health_snapshot_value.capabilities,
+            missing_capability: False,
+        },
+    )
     module, _store, _provider = _module(tmp_path, provider=provider)
     policy = RecallPolicy(
         mode="agentic",
@@ -679,6 +690,66 @@ async def test_agentic_recall_fails_closed_without_provider_search(tmp_path: Pat
     assert result == OperationFailed(error="memory_capability_unavailable")
     assert provider.search_scopes == []
     assert provider.search_policies == []
+
+
+async def test_agentic_recall_fails_closed_when_health_disables_agentic_search(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(agentic_budget_enforced_flag=True)
+    provider.health_snapshot_value = replace(
+        provider.health_snapshot_value,
+        disabled_features=("agentic_search",),
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=5,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+
+    result = await module.recall(
+        "query",
+        policy=policy,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_scopes == []
+
+
+async def test_agentic_recall_reaches_provider_with_policy_timeout(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(
+        agentic_budget_enforced_flag=True,
+        search_items=(MemoryItem(kind="fact", text="agentic result"),),
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=5,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+
+    result = await module.recall(
+        "query",
+        policy=policy,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == RecallItems(
+        items=provider.search_items,
+        requested_mode="agentic",
+        effective_mode="agentic",
+    )
+    assert provider.search_policies == [("agentic", True, None)]
+    assert provider.search_timeouts == [5.0]
 
 
 async def test_current_session_overlay_uses_the_trusted_canonical_reference(tmp_path: Path) -> None:

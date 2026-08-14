@@ -659,15 +659,21 @@ class MemoryModule:
                     return OperationFailed(error="memory_store_unavailable")
 
             requested_mode = policy.mode
+            mode_was_pre_resolved = effective_mode is not None
             if effective_mode is None:
                 effective_mode = await self.resolve_recall_mode(policy)
                 if isinstance(effective_mode, OperationFailed):
                     return effective_mode
             if effective_mode == "agentic":
-                # EverOS 1.2.3 has no public model-call/token budget contract.
-                # A local timeout alone cannot make this policy enforceable.
-                if not bool(getattr(self._provider, "agentic_budget_enforced", False)):
+                if requested_mode != "agentic":
                     return OperationFailed(error="memory_capability_unavailable")
+                if mode_was_pre_resolved:
+                    resolved_mode = await self.resolve_recall_mode(policy)
+                    if resolved_mode != "agentic":
+                        return OperationFailed(error="memory_capability_unavailable")
+                provider_timeout = float(policy.timeout_seconds or 0)
+            else:
+                provider_timeout = None
             result = await self._provider_read(
                 lambda: self._provider.search(
                     principal_id,
@@ -677,7 +683,9 @@ class MemoryModule:
                     method=effective_mode,
                     include_profile=policy.include_profile,
                     session_ref=session_ref,
-                )
+                    timeout_seconds=provider_timeout,
+                ),
+                timeout_seconds=(provider_timeout + 1.0 if provider_timeout else None),
             )
         if isinstance(result, OperationFailed):
             return result
@@ -698,7 +706,6 @@ class MemoryModule:
         if policy.mode == "agentic":
             if not bool(getattr(self._provider, "agentic_budget_enforced", False)):
                 return OperationFailed(error="memory_capability_unavailable")
-            return "agentic"
         if policy.mode == "keyword":
             return "keyword"
         try:
@@ -707,8 +714,19 @@ class MemoryModule:
                 timeout=PROVIDER_READ_TIMEOUT_SECONDS,
             )
             embed_available = health.capabilities.get("embed") is True
+            agentic_available = (
+                embed_available
+                and health.capabilities.get("llm") is True
+                and health.capabilities.get("rerank") is True
+                and "agentic_search" not in health.disabled_features
+            )
         except Exception:
             embed_available = False
+            agentic_available = False
+        if policy.mode == "agentic":
+            if not agentic_available:
+                return OperationFailed(error="memory_capability_unavailable")
+            return "agentic"
         if policy.mode == "auto":
             return "hybrid" if embed_available else "keyword"
         if not embed_available:
@@ -763,9 +781,14 @@ class MemoryModule:
     async def _provider_read(
         self,
         operation: Callable[[], Awaitable[tuple[MemoryItem, ...]]],
+        *,
+        timeout_seconds: float | None = None,
     ) -> tuple[MemoryItem, ...] | OperationFailed:
         try:
-            return await asyncio.wait_for(operation(), timeout=PROVIDER_READ_TIMEOUT_SECONDS)
+            return await asyncio.wait_for(
+                operation(),
+                timeout=timeout_seconds or PROVIDER_READ_TIMEOUT_SECONDS,
+            )
         except asyncio.TimeoutError:
             return OperationFailed(error="memory_provider_timeout")
         except MemoryProviderFailure as failure:

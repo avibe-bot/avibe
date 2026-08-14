@@ -357,7 +357,7 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     assert _request_rejection("POST", "/unrelated", b"{}") == "route"
 
 
-def test_sidecar_guard_rejects_untrusted_search_scope_and_unbudgeted_agentic() -> None:
+def test_sidecar_guard_accepts_agentic_but_rejects_untrusted_search_scope() -> None:
     search = {
         "user_id": "u-11111111111111111111111111111111",
         "app_id": "avibe",
@@ -369,10 +369,19 @@ def test_sidecar_guard_rejects_untrusted_search_scope_and_unbudgeted_agentic() -
         "enable_llm_rerank": False,
     }
 
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/search",
+            json.dumps({**search, "method": "agentic"}).encode(),
+        )
+        is None
+    )
+
     for invalid in (
-        {**search, "method": "agentic"},
         {**search, "filters": {"session_id": "raw-session"}},
         {**search, "filters": {"project_id": PROJECT}},
+        {**search, "enable_llm_rerank": True},
     ):
         assert (
             _request_rejection(

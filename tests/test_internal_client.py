@@ -526,6 +526,12 @@ def test_memory_sync_read_helpers_use_verified_uds(socket_path):
             "status": "ok",
             "items": [],
         }
+        assert internal_client.memory_search_sync(
+            "connect the clues",
+            6,
+            mode="agentic",
+            socket_path=socket_path,
+        )["body"] == {"status": "ok", "items": []}
 
     assert captured == [
         ("/internal/memory/status", None),
@@ -539,6 +545,21 @@ def test_memory_sync_read_helpers_use_verified_uds(socket_path):
                     "max_results": 4,
                     "include_profile": True,
                     "include_current_session": False,
+                },
+            },
+        ),
+        (
+            "/internal/memory/search",
+            {
+                "query": "connect the clues",
+                "policy": {
+                    "mode": "agentic",
+                    "max_results": 6,
+                    "include_profile": True,
+                    "include_current_session": False,
+                    "timeout_seconds": 30.0,
+                    "max_model_calls": 2,
+                    "cost_budget_tokens": 32_000,
                 },
             },
         ),

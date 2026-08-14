@@ -6,6 +6,7 @@ capability:
     - tests/test_memory_admission.py
     - tests/test_memory_store.py
     - tests/test_internal_server.py
+    - tests/test_memory_cli.py
 status_legend:
   covered: executable evidence exists
   partial: contract coverage exists
@@ -46,3 +47,9 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_memory_store.py::test_session_scope_recovery_survives_store_reopen_and_separates_sessions
+  - id: MEMORY-SEARCH-007
+    name: Agentic CLI recall is explicit, bounded, and parser-backed
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_memory_cli.py::test_injected_agentic_memory_example_is_accepted_by_the_live_parser

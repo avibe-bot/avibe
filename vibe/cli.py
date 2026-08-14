@@ -557,6 +557,7 @@ def cmd_memory(args) -> int:
             response = internal_client.memory_search_sync(
                 query,
                 args.limit,
+                mode=args.mode,
                 project=getattr(args, "project", None),
                 **access,
             )
@@ -14250,6 +14251,12 @@ def build_parser():
         type=int,
         default=8,
         help=i18n_t("memory.cli.help.limit", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--mode",
+        choices=("hybrid", "keyword", "vector", "agentic"),
+        default="hybrid",
+        help=i18n_t("memory.cli.help.mode", memory_help_language),
     )
     memory_search_parser.add_argument(
         "--project",

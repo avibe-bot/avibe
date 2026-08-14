@@ -9,6 +9,7 @@ from typing import Any, Literal, TypeAlias
 
 MemoryKind = Literal["profile", "episode", "fact"]
 RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
+MAX_AGENTIC_TIMEOUT_SECONDS = 30.0
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
 MemoryFailureKind = Literal[
     "boot_recovery",
@@ -393,7 +394,7 @@ class RecallPolicy:
                 or isinstance(self.timeout_seconds, bool)
                 or not isinstance(self.timeout_seconds, (int, float))
                 or not math.isfinite(float(self.timeout_seconds))
-                or not 0 < float(self.timeout_seconds) <= 30
+                or not 0 < float(self.timeout_seconds) <= MAX_AGENTIC_TIMEOUT_SECONDS
                 or isinstance(self.max_model_calls, bool)
                 or not isinstance(self.max_model_calls, int)
                 or not 1 <= self.max_model_calls <= 4

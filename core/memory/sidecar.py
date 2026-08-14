@@ -316,7 +316,7 @@ def _validate_search(payload: dict[str, Any]) -> str | None:
     if (
         not _valid_principal(payload.get("user_id"))
         or not isinstance(payload.get("query"), str)
-        or payload.get("method") not in {"keyword", "vector", "hybrid"}
+        or payload.get("method") not in {"keyword", "vector", "hybrid", "agentic"}
         or not isinstance(payload.get("top_k"), int)
         or isinstance(payload.get("top_k"), bool)
         or not 1 <= payload["top_k"] <= 20

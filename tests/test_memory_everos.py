@@ -651,29 +651,118 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
     assert items[1].text == "Uses Python for automation."
 
 
-def test_agentic_search_fails_before_any_sidecar_request(monkeypatch) -> None:
+def test_agentic_search_uses_bounded_public_request_and_scrub_safe_telemetry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"episodes": []}})
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        assert provider.agentic_budget_enforced is True
+        return await provider.search(
+            PRINCIPAL,
+            PROJECT,
+            "private multi-hop query",
+            2,
+            method="agentic",
+            timeout_seconds=5,
+        )
+
+    caplog.set_level("INFO", logger="core.memory.everos")
+    with _sidecar_transport(handler):
+        assert asyncio.run(run()) == ()
+
+    assert requests == [
+        {
+            "user_id": PRINCIPAL,
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "query": "private multi-hop query",
+            "method": "agentic",
+            "top_k": 2,
+            "include_profile": True,
+            "enable_llm_rerank": False,
+        }
+    ]
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "mode=agentic" in telemetry[0]
+    assert "success=true" in telemetry[0]
+    assert "timeout=false" in telemetry[0]
+    assert "private multi-hop query" not in telemetry[0]
+
+
+def test_agentic_search_wall_clock_timeout_is_typed_and_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     provider = EverOSPort(Path("/tmp/everos.sock"))
 
-    async def unexpected_request(*_args, **_kwargs):
-        pytest.fail("agentic search must fail before an HTTP request")
+    async def slow_request(*_args, **_kwargs):
+        await asyncio.sleep(1)
+        return {"data": {"episodes": []}}
 
-    monkeypatch.setattr(provider, "_sidecar_request", unexpected_request)
+    monkeypatch.setattr(provider, "_sidecar_request", slow_request)
 
     async def run() -> MemoryProviderFailure:
         with pytest.raises(MemoryProviderFailure) as raised:
             await provider.search(
                 PRINCIPAL,
                 PROJECT,
-                "language",
+                "private multi-hop query",
                 2,
                 method="agentic",
+                timeout_seconds=0.01,
             )
         return raised.value
 
+    caplog.set_level("INFO", logger="core.memory.everos")
     failure = asyncio.run(run())
 
+    assert failure.error == "memory_provider_timeout"
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "success=false" in telemetry[0]
+    assert "timeout=true" in telemetry[0]
+    assert "private multi-hop query" not in telemetry[0]
+
+
+def test_agentic_search_maps_provider_422_to_closed_capability_error() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={"error": {"code": "PROVIDER_NOT_CONFIGURED"}},
+        )
+
+    async def run() -> MemoryProviderFailure:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).search(
+                PRINCIPAL,
+                PROJECT,
+                "connect the clues",
+                2,
+                method="agentic",
+                timeout_seconds=5,
+            )
+        return raised.value
+
+    with _sidecar_transport(handler):
+        failure = asyncio.run(run())
+
     assert failure.error == "memory_capability_unavailable"
-    assert failure.retryable is False
+    assert "422" not in str(failure)
 
 
 def test_profile_uses_get_and_reports_empty_profile_as_non_failure() -> None:

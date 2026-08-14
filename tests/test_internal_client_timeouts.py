@@ -15,6 +15,7 @@ from pathlib import Path
 
 from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
 from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
+from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 from core.memory.processing_record import (
     PROCESSING_RECORD_TRANSPORT_MARGIN_SECONDS,
     PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
@@ -125,7 +126,10 @@ def test_processing_record_client_covers_identity_journals_and_parallel_sources(
 
 
 def test_search_clients_outlast_capability_probe_and_provider_search() -> None:
-    assert MEMORY_SEARCH_TIMEOUT_SECONDS > 2 * PROVIDER_READ_TIMEOUT_SECONDS
+    assert (
+        MEMORY_SEARCH_TIMEOUT_SECONDS
+        > PROVIDER_READ_TIMEOUT_SECONDS + MAX_AGENTIC_TIMEOUT_SECONDS + 1.0
+    )
     for search in (memory_search, memory_search_sync):
         assert (
             inspect.signature(search).parameters["timeout"].default
