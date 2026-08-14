@@ -1294,6 +1294,96 @@ _NON_OWNER_CONFIG_UI_FIELDS = (
 )
 
 
+_NON_OWNER_AUDIO_ASR_FIELDS = (
+    "enabled",
+    "echo_transcript",
+    "enabled_configured",
+)
+
+_EDITOR_CONFIG_WRITE_FIELDS = frozenset(
+    {
+        "ack_mode",
+        "show_duration",
+        "include_time_info",
+        "include_user_info",
+        "reply_enhancements",
+        "agent_progress_style",
+        "audio_asr",
+        "ui",
+    }
+)
+
+_EDITOR_CONFIG_UI_WRITE_FIELDS = frozenset(_NON_OWNER_CONFIG_UI_FIELDS)
+_EDITOR_AUDIO_ASR_WRITE_FIELDS = frozenset(_NON_OWNER_AUDIO_ASR_FIELDS)
+
+
+def _remote_access_pairing_projection(payload: dict) -> dict:
+    remote_access = payload.get("remote_access")
+    if not isinstance(remote_access, dict):
+        return {}
+    vibe_cloud = remote_access.get("vibe_cloud")
+    if not isinstance(vibe_cloud, dict):
+        return {}
+    return {
+        "vibe_cloud": {
+            "enabled": bool(vibe_cloud.get("enabled")),
+            "instance_id": vibe_cloud.get("instance_id") or "",
+        }
+    }
+
+
+def _audio_asr_preference_projection(payload: dict) -> dict:
+    audio_asr = payload.get("audio_asr")
+    if not isinstance(audio_asr, dict):
+        return {}
+    return {
+        key: audio_asr[key]
+        for key in _NON_OWNER_AUDIO_ASR_FIELDS
+        if key in audio_asr
+    }
+
+
+def editor_config_write_payload(payload: dict) -> dict:
+    """Keep only the messaging preferences an Editor may persist."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Config payload must be an object")
+    unknown = set(payload) - _EDITOR_CONFIG_WRITE_FIELDS
+    if unknown:
+        raise ValueError("Editors may only save messaging preferences")
+
+    projected: dict = {}
+    for key in payload:
+        if key == "audio_asr":
+            audio_asr = payload.get("audio_asr")
+            if not isinstance(audio_asr, dict):
+                raise ValueError("Config 'audio_asr' must be an object")
+            extra = set(audio_asr) - _EDITOR_AUDIO_ASR_WRITE_FIELDS
+            if extra:
+                raise ValueError("Editors may only save messaging preferences")
+            projected["audio_asr"] = {
+                field: audio_asr[field]
+                for field in _EDITOR_AUDIO_ASR_WRITE_FIELDS
+                if field in audio_asr
+            }
+            continue
+        if key == "ui":
+            ui_payload = payload.get("ui")
+            if not isinstance(ui_payload, dict):
+                raise ValueError("Config 'ui' must be an object")
+            extra = set(ui_payload) - _EDITOR_CONFIG_UI_WRITE_FIELDS
+            if extra:
+                raise ValueError("Editors may only save messaging preferences")
+            projected["ui"] = {
+                field: ui_payload[field]
+                for field in _EDITOR_CONFIG_UI_WRITE_FIELDS
+                if field in ui_payload
+            }
+            continue
+        projected[key] = payload[key]
+    return projected
+
+
 def non_owner_config_payload(config: V2Config) -> dict:
     """Return the configuration projection available below the Owner role.
 
@@ -1316,6 +1406,8 @@ def non_owner_config_payload(config: V2Config) -> dict:
         "include_user_info": payload.get("include_user_info"),
         "reply_enhancements": payload.get("reply_enhancements"),
         "agent_progress_style": payload.get("agent_progress_style"),
+        "audio_asr": _audio_asr_preference_projection(payload),
+        "remote_access": _remote_access_pairing_projection(payload),
         "ui": {
             key: ui_payload[key]
             for key in _NON_OWNER_CONFIG_UI_FIELDS

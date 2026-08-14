@@ -5872,6 +5872,15 @@ async def config_post():
     from vibe import remote_access
 
     payload = request.json or {}
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is not None and not authorization_context.can_manage_instance:
+        from vibe import api as vibe_api
+
+        try:
+            payload = vibe_api.editor_config_write_payload(payload)
+        except ValueError as exc:
+            message = str(exc)
+            return jsonify({"ok": False, "error": message, "message": message}), 400
     remote_access_runtime = None
     try:
         (

@@ -40,6 +40,8 @@ const baseConfig = {
   reply_enhancements: true,
   show_pages_prompt: true,
   agent_progress_style: 'off',
+  audio_asr: { enabled: true, echo_transcript: true, enabled_configured: true },
+  remote_access: { vibe_cloud: { enabled: true, instance_id: 'inst_123' } },
   ui: { chat_message_font_size: 14, show_agent_activity: false, show_tool_calls: true },
   slack: { disable_link_unfurl: false },
   agents: {
@@ -71,6 +73,12 @@ const remoteEditor: InstanceAuthorizationValue = {
   ...remoteOwner,
   instanceRole: 'editor',
 };
+
+function asrToggle() {
+  const title = screen.getByText('dashboard.audioTranscription');
+  const row = title.closest('.flex.flex-col.gap-3') ?? title.parentElement?.parentElement;
+  return row?.querySelector('[role="switch"]') as HTMLButtonElement | null;
+}
 
 function renderPage(context: InstanceAuthorizationValue) {
   return render(
@@ -119,5 +127,29 @@ describe('SettingsMessagingPage locality gating', () => {
     expect(screen.queryByText('dashboard.errorRetryLimit')).toBeNull();
     expect(screen.queryByText('dashboard.opencodeActiveTurnTimeout')).toBeNull();
     expect(screen.queryByText('dashboard.showPagesPrompt')).toBeNull();
+  });
+
+  it('shows a paired Editor the live ASR preference instead of a forced-off toggle', async () => {
+    renderPage(remoteEditor);
+
+    await screen.findByText('dashboard.audioTranscription');
+    const toggle = asrToggle();
+    expect(toggle).toBeTruthy();
+    expect(toggle?.getAttribute('aria-checked')).toBe('true');
+    expect(toggle?.disabled).toBe(false);
+    expect(screen.queryByText('dashboard.audioTranscriptionRequiresVibeCloud')).toBeNull();
+  });
+
+  it('keeps a paired Editor able to turn ASR off', async () => {
+    api.getConfig.mockResolvedValue({
+      ...baseConfig,
+      audio_asr: { enabled: false, echo_transcript: true, enabled_configured: true },
+    });
+    renderPage(remoteEditor);
+
+    await screen.findByText('dashboard.audioTranscription');
+    const toggle = asrToggle();
+    expect(toggle?.getAttribute('aria-checked')).toBe('false');
+    expect(toggle?.disabled).toBe(false);
   });
 });

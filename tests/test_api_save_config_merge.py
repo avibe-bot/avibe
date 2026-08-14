@@ -1077,3 +1077,62 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path)
     from config import paths
 
     _assert_complete("V2Config.save", json.loads(paths.get_config_path().read_text(encoding="utf-8")))
+
+
+def test_non_owner_config_keeps_asr_and_pairing_without_host_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.from_payload(_full_config_payload())
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "inst_123"
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-secret"
+    config.remote_access.vibe_cloud.session_secret = "session-secret"
+    config.audio_asr.enabled = True
+    config.audio_asr.echo_transcript = False
+    config.audio_asr.model = "secret-model"
+
+    payload = api.non_owner_config_payload(config)
+
+    assert payload["audio_asr"] == {
+        "enabled": True,
+        "echo_transcript": False,
+        "enabled_configured": False,
+    }
+    assert payload["remote_access"] == {
+        "vibe_cloud": {"enabled": True, "instance_id": "inst_123"},
+    }
+    serialized = str(payload)
+    assert "tunnel-secret" not in serialized
+    assert "session-secret" not in serialized
+    assert "secret-model" not in serialized
+    assert "runtime" not in payload
+    assert "agents" not in payload
+
+
+def test_editor_config_write_payload_keeps_messaging_fields_only():
+    projected = api.editor_config_write_payload(
+        {
+            "audio_asr": {"enabled": False, "enabled_configured": True, "echo_transcript": False},
+            "ack_mode": "message",
+            "ui": {"chat_message_font_size": 16},
+        }
+    )
+
+    assert projected == {
+        "audio_asr": {"enabled": False, "enabled_configured": True, "echo_transcript": False},
+        "ack_mode": "message",
+        "ui": {"chat_message_font_size": 16},
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"runtime": {"default_cwd": "/tmp/owned"}},
+        {"audio_asr": {"enabled": False, "model": "owned-model"}},
+        {"ui": {"setup_host": "0.0.0.0"}},
+        {"show_pages_prompt": False},
+    ],
+)
+def test_editor_config_write_payload_rejects_owner_fields(payload):
+    with pytest.raises(ValueError, match="Editors may only save messaging preferences"):
+        api.editor_config_write_payload(payload)
