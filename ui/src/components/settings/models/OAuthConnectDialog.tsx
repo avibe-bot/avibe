@@ -38,7 +38,7 @@ import {
 } from './asyncLifetime';
 import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
-import { NATIVE_SUBSCRIPTION_SLOT_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
+import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
@@ -662,7 +662,7 @@ export const OAuthConnectDialog: React.FC<{
   };
 
   const retryStart = async () => {
-    if (startFailureCode === NATIVE_SUBSCRIPTION_SLOT_FAILURE && !isReauth) {
+    if (startFailureCode === NATIVE_SUBSCRIPTION_EXISTS_FAILURE && !isReauth) {
       // The start route checked the current store under its mutation lock, so
       // this error is newer and more authoritative than the page snapshot.
       setNativeSlotTaken(true);

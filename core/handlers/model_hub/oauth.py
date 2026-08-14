@@ -88,25 +88,9 @@ class NativeOAuthAdapter(OAuthAdapter, Protocol):
 
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus: ...
 
-    def release_login_slot(self, flow_id: str) -> None: ...
-
-    def login_in_progress(self, vendor: str) -> bool: ...
-
 
 class NativeOAuthUnavailableError(RuntimeError):
     pass
-
-
-class NativeLoginSlotTakenError(RuntimeError):
-    """The vendor's sanctioned CLI credential is held by a live login.
-
-    ``occupant_ref`` is the Source id that login was started for, when the
-    holder named one.
-    """
-
-    def __init__(self, occupant_ref: str | None = None):
-        super().__init__("native_login_slot_taken")
-        self.occupant_ref = occupant_ref
 
 
 class UnavailableNativeOAuthAdapter:
@@ -137,13 +121,6 @@ class UnavailableNativeOAuthAdapter:
 
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus:
         raise NativeOAuthUnavailableError
-
-    def release_login_slot(self, flow_id: str) -> None:
-        return None
-
-    def login_in_progress(self, vendor: str) -> bool:
-        # No native login can be running when none can be started.
-        return False
 
 
 class OAuthFlowRegistry:

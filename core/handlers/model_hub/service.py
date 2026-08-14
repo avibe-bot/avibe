@@ -76,7 +76,6 @@ from .migration import (
     scan_native_configs,
 )
 from .oauth import (
-    NativeLoginSlotTakenError,
     NativeOAuthAdapter,
     NativeOAuthUnavailableError,
     OAuthAdapter,
@@ -650,32 +649,6 @@ class ModelHubService:
             None,
         )
 
-    def _native_login_in_progress(self, vendor: str) -> bool:
-        """Ask the credential's owner whether a live login is rewriting it.
-
-        Migration adopts the credential the CLI already holds rather than
-        starting a login, so it cannot reach the owner through the login path
-        the way create and reauth do.
-        """
-
-        return self.native_oauth_adapter.login_in_progress(vendor)
-
-    def _release_native_login_slot(self, flow_id: str) -> None:
-        """Tell the credential's owner this native login is fully settled.
-
-        The auth service holds the vendor's CLI credential past success so the
-        window between "credential written" and "Source persisted" cannot be
-        overwritten by a second login. Model Hub is the only layer that knows
-        when that window closes.
-        """
-
-        try:
-            self.native_oauth_adapter.release_login_slot(flow_id)
-        except Exception:  # noqa: BLE001
-            # The hold is already bounded by the owner's own reap; failing to
-            # shorten it must never fail the settled flow.
-            logger.debug("native login slot release failed", exc_info=True)
-
     async def _engine_call(self, awaitable):
         try:
             return await awaitable
@@ -700,20 +673,6 @@ class ModelHubService:
             if flow_id is not None:
                 self.oauth_flows.forget(flow_id)
             raise ModelHubError("flow_not_found", status=404) from None
-        except NativeLoginSlotTakenError as taken:
-            # Every native login — create and reauth alike — reaches the CLI
-            # through this call, so the owner's refusal surfaces here for all
-            # of them instead of only where Model Hub remembered to ask.
-            raise ModelHubError(
-                "native_source_already_exists",
-                status=409,
-                detail="modelHub.errors.native_subscription_slot_taken",
-                data=(
-                    {"existing_source_id": taken.occupant_ref}
-                    if taken.occupant_ref
-                    else None
-                ),
-            ) from None
         except (EngineUnavailableError, NativeOAuthUnavailableError):
             raise ModelHubError("engine_down", status=503) from None
         except ModelHubError:
@@ -1501,7 +1460,6 @@ class ModelHubService:
             rollback_credential_ref: Optional[str] = None
             source_id = ""
             persisted = False
-            native_slot_safe = False
             try:
                 binding = self._oauth_binding(oauth_ref)
                 if binding.channel != channel:
@@ -1529,7 +1487,6 @@ class ModelHubService:
                         self.oauth_flows.complete(oauth_ref)
                     except (KeyError, OSError):
                         pass
-                    native_slot_safe = True
                     return existing.to_payload()
                 if existing is not None:
                     raise ModelHubError("migration_item_conflict", status=409)
@@ -1546,7 +1503,6 @@ class ModelHubService:
                         )
                         if not cleanup_confirmed:
                             raise ModelHubError("engine_down", status=503)
-                        native_slot_safe = True
                         try:
                             self.oauth_flows.forget(oauth_ref)
                         except OSError:
@@ -1554,7 +1510,7 @@ class ModelHubService:
                         raise ModelHubError(
                             "native_source_already_exists",
                             status=409,
-                            detail="modelHub.errors.native_subscription_slot_taken",
+                            detail="modelHub.errors.native_subscription_exists",
                             data={"existing_source_id": occupied.id},
                         )
                 account_label: str | None = None
@@ -1649,7 +1605,6 @@ class ModelHubService:
                     previous=previous,
                 )
                 persisted = True
-                native_slot_safe = True
                 try:
                     self.oauth_flows.complete(oauth_ref)
                 except (KeyError, OSError):
@@ -1684,13 +1639,6 @@ class ModelHubService:
                     except OSError:
                         pass
                 raise
-            finally:
-                if channel == "native_cli" and native_slot_safe:
-                    # Release only after the Source is durable or provider
-                    # cleanup is confirmed. A materialization failure leaves
-                    # the hold in place so a retry cannot overwrite a
-                    # credential this flow may still own.
-                    self._release_native_login_slot(oauth_ref)
 
     @staticmethod
     def _source_matches_binding(
@@ -2144,8 +2092,6 @@ class ModelHubService:
         flow: OAuthFlowState,
     ) -> tuple[OAuthFlowState, dict | None]:
         if flow.state != "success":
-            # A failed or cancelled flow stops holding the CLI credential in
-            # the layer that owns it; nothing has to be released from here.
             if (
                 self._is_hub_unsuccessful_terminal(binding, flow)
                 and binding.source_id is not None
@@ -2159,20 +2105,11 @@ class ModelHubService:
         if binding.source_id is None or binding.vendor is None:
             raise ModelHubError("flow_not_found", status=404)
         if binding.intent == "reauth":
-            try:
-                repair_result = await self._materialize_reauth(
-                    flow_id,
-                    binding,
-                    flow,
-                )
-            finally:
-                if binding.channel == "native_cli":
-                    # Reauth overwrites the credential of a Source that already
-                    # exists, so once this materialization has run there is no
-                    # later write left for the hold to protect — on every
-                    # outcome, including the ones that mark the Source
-                    # needs_action.
-                    self._release_native_login_slot(flow_id)
+            repair_result = await self._materialize_reauth(
+                flow_id,
+                binding,
+                flow,
+            )
             return flow, repair_result
         await self._create_oauth_source(
             [],
@@ -3935,10 +3872,13 @@ class ModelHubService:
 
         if oauth_channel == "native_cli":
             async with self._mutation_lock:
-                # Only the persisted Source is Model Hub's to know about; the
-                # in-flight login is refused by the layer that owns the CLI
-                # credential. The lock serializes this read with migration's
-                # native Source writer.
+                # The sanctioned CLI keeps one credential per vendor, so a
+                # second native Source would describe a credential the first
+                # one already owns. The lock serializes this read with
+                # migration's native Source writer and with the re-check in
+                # ``_create_oauth_source``, so a flow that started before the
+                # first Source was persisted still cannot materialize a
+                # sibling.
                 existing = self._existing_native_source(self.store.load(), vendor)
                 if existing is not None:
                     # This request owns a new nonce claim, so release it before
@@ -3953,7 +3893,7 @@ class ModelHubService:
                     raise ModelHubError(
                         "native_source_already_exists",
                         status=409,
-                        detail="modelHub.errors.native_subscription_slot_taken",
+                        detail="modelHub.errors.native_subscription_exists",
                         data={"existing_source_id": existing.id},
                     )
 
@@ -4160,9 +4100,6 @@ class ModelHubService:
                     else:
                         self.oauth_flows.forget(flow_id)
                 else:
-                    # Cancelling the provider flow removes it from the layer
-                    # that owns the CLI credential, so the singleton is already
-                    # free for the next attempt.
                     if binding.client_nonce is not None:
                         self.oauth_flows.retain_cancelled(flow_id)
                     else:

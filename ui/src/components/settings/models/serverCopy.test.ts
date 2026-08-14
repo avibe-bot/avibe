@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { NATIVE_SUBSCRIPTION_SLOT_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText } from './serverCopy';
+import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText } from './serverCopy';
 
 const t = (lng: 'en' | 'zh'): TFunction => {
   const i18n = createInstance();
@@ -122,7 +122,7 @@ describe('oauthFailureKey', () => {
 
 describe('oauthStartFailureKey', () => {
   it('surfaces the native singleton race with the dedicated already-bound copy', () => {
-    expect(oauthStartFailureKey(NATIVE_SUBSCRIPTION_SLOT_FAILURE)).toBe(
+    expect(oauthStartFailureKey(NATIVE_SUBSCRIPTION_EXISTS_FAILURE)).toBe(
       'settings.models.addSub.error.alreadyBound',
     );
   });

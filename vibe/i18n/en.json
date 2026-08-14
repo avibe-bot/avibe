@@ -797,7 +797,7 @@
       "authentication_failed": "Authentication failed. Check whether the API key is valid.",
       "observation_failed": "Connected, but the response did not prove a valid model interface.",
       "adapter_error": "We could not confirm whether the service is reachable. Retry the connection.",
-      "native_subscription_slot_taken": "This subscription's native login slot is already occupied.",
+      "native_subscription_exists": "This vendor already has a native subscription source.",
       "source_timeout": "The connection timed out. Check the network and retry.",
       "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",

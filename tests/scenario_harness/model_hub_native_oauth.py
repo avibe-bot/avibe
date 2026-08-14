@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
-from core.agent_auth_service import BackendLoginInProgressError
 from core.handlers.model_hub.adapter import OAuthFlowState
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
@@ -47,39 +46,14 @@ class FakeAgentAuthService:
         self.submissions: list[tuple[str, str]] = []
         self.cancelled: list[str] = []
         self.start_calls: list[tuple[str, bool]] = []
-        self.released: list[str] = []
-
-    def _slot_holder(self, backend: str) -> SimpleNamespace | None:
-        # Mirrors the real per-vendor single flight: a live flow holds the
-        # backend's one CLI credential, and a successful one keeps holding it
-        # until its caller says the credential has been inherited. The real
-        # enforcement is unit-tested against AgentAuthService itself.
-        for flow in self.flows.values():
-            if flow.backend != backend or flow.slot_released:
-                continue
-            if flow.state in {"failed", "cancelled"}:
-                continue
-            if flow.state == "success" and not flow.hold_after_success:
-                continue
-            return flow
-        return None
 
     async def start_web_setup(
         self,
         backend: str,
         *,
         force_reset: bool = True,
-        owner_ref: str | None = None,
-        hold_after_success: bool = False,
         on_irreversible_start=None,
     ):
-        holder = self._slot_holder(backend)
-        if holder is not None:
-            raise BackendLoginInProgressError(
-                backend,
-                flow_id=holder.flow_id,
-                owner_ref=holder.owner_ref,
-            )
         if force_reset and on_irreversible_start is not None:
             on_irreversible_start()
         self.start_calls.append((backend, force_reset))
@@ -91,20 +65,9 @@ class FakeAgentAuthService:
             url=("https://claude.ai/oauth/authorize?test=true" if backend == "claude" else None),
             device_code=None,
             error=None,
-            owner_ref=owner_ref,
-            hold_after_success=hold_after_success,
-            slot_released=False,
         )
         self.flows[flow_id] = flow
         return flow
-
-    def release_login_slot(self, flow_id: str) -> bool:
-        flow = self.flows.get(flow_id)
-        if flow is None:
-            return False
-        flow.slot_released = True
-        self.released.append(flow_id)
-        return True
 
     def get_web_flow_status(self, flow_id: str) -> dict[str, Any]:
         flow = self.flows.get(flow_id)

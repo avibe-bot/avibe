@@ -57,8 +57,6 @@ class MigrationHost(Protocol):
     now: Callable[[], datetime]
     migration_claude_oauth_probe: Optional[Callable[[], bool]]
 
-    def _native_login_in_progress(self, vendor: str) -> bool: ...
-
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig: ...
 
@@ -685,18 +683,6 @@ async def apply_native_migration(
         updated = host._clone_config(previous)
         existing_ids = {source.id for source in updated.sources}
         if any(item.source_id in existing_ids for item in selected):
-            raise MigrationConflictError
-        held_vendors = {
-            item.vendor
-            for item in selected
-            if item.proposed_action == "keep_native"
-            and host._native_login_in_progress(item.vendor)
-        }
-        if held_vendors:
-            # Adoption records the credential the CLI holds right now, and a
-            # live login is about to replace it — so the Source would describe
-            # an account that no longer exists. Refuse instead of guessing
-            # which of the two wins.
             raise MigrationConflictError
 
         provisioned: list[tuple[str, str]] = []
