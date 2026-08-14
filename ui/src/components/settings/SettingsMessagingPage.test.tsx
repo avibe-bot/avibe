@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import { SettingsMessagingPage } from './SettingsMessagingPage';
@@ -70,8 +71,37 @@ const remoteOwner: InstanceAuthorizationValue = {
 };
 
 const remoteEditor: InstanceAuthorizationValue = {
-  ...remoteOwner,
+  remote: true,
+  instanceKind: null,
   instanceRole: 'editor',
+  capabilities: {
+    ...OWNER_INSTANCE_CAPABILITIES,
+    can_manage_instance: false,
+    can_use_system: false,
+    can_manage_projects: false,
+    can_manage_agents: false,
+  },
+};
+
+const remoteViewer: InstanceAuthorizationValue = {
+  remote: true,
+  instanceKind: null,
+  instanceRole: 'viewer',
+  capabilities: {
+    ...OWNER_INSTANCE_CAPABILITIES,
+    can_chat: false,
+    can_manage_instance: false,
+    can_use_system: false,
+    can_manage_projects: false,
+    can_manage_agents: false,
+    can_use_agents: false,
+    can_use_skills: false,
+    can_use_vault_secrets: false,
+    can_use_show_pages: false,
+    can_use_terminal_files: false,
+    can_use_terminal: false,
+    can_use_files: false,
+  },
 };
 
 function asrToggle() {
@@ -151,5 +181,28 @@ describe('SettingsMessagingPage locality gating', () => {
     const toggle = asrToggle();
     expect(toggle?.getAttribute('aria-checked')).toBe('false');
     expect(toggle?.disabled).toBe(false);
+  });
+
+  it('shows a paired Viewer the live ASR state without making it clickable', async () => {
+    renderPage(remoteViewer);
+
+    await screen.findByText('dashboard.audioTranscription');
+    const toggle = asrToggle();
+    expect(toggle?.getAttribute('aria-checked')).toBe('true');
+    expect(toggle?.disabled).toBe(true);
+  });
+
+  it('sends only the changed ASR field when an Editor toggles transcription', async () => {
+    const user = userEvent.setup();
+    renderPage(remoteEditor);
+
+    await screen.findByText('dashboard.audioTranscription');
+    const toggle = asrToggle();
+    expect(toggle).toBeTruthy();
+    await user.click(toggle!);
+
+    expect(api.saveConfig).toHaveBeenCalledWith({
+      audio_asr: { enabled: false, enabled_configured: true },
+    });
   });
 });

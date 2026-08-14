@@ -5879,8 +5879,8 @@ async def config_post():
         try:
             payload = vibe_api.editor_config_write_payload(payload)
         except ValueError as exc:
-            message = str(exc)
-            return jsonify({"ok": False, "error": message, "message": message}), 400
+            code = str(exc) or "editor_config_write_invalid"
+            return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
     remote_access_runtime = None
     try:
         (

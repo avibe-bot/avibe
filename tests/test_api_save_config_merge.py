@@ -1136,5 +1136,5 @@ def test_editor_config_write_payload_keeps_messaging_fields_only():
     ],
 )
 def test_editor_config_write_payload_rejects_owner_fields(payload):
-    with pytest.raises(ValueError, match="Editors may only save messaging preferences"):
+    with pytest.raises(ValueError, match="editor_config_write_forbidden"):
         api.editor_config_write_payload(payload)

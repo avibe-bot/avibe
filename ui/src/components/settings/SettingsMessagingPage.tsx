@@ -26,7 +26,7 @@ import {
   normalizeChatMessageFontSize,
 } from '@/lib/chatDisplay';
 
-const SAVE_KEYS = [
+const OWNER_SAVE_KEYS = [
   'platforms',
   'ack_mode',
   'show_duration',
@@ -44,16 +44,21 @@ const SAVE_KEYS = [
   'agents',
 ] as const;
 
-function buildMessagePatch(config: any, extraPatch: Record<string, unknown> = {}) {
-  // ``save_config`` merges onto the stored config and the backend derives the
-  // internal default platform from ``platforms.enabled``, so this messaging
-  // save no longer sends a ``platform``/primary field.
+function buildMessagePatch(
+  config: any,
+  extraPatch: Record<string, unknown> = {},
+  { fieldSpecific }: { fieldSpecific: boolean },
+) {
+  // Owners still send the existing messaging snapshot so a first-time save of
+  // an older page does not drop sibling fields. Editors send only the changed
+  // field so an unrelated autosave cannot overwrite a newer ASR value.
+  if (fieldSpecific) {
+    return extraPatch;
+  }
   const patch: Record<string, unknown> = {};
-
-  for (const key of SAVE_KEYS) {
+  for (const key of OWNER_SAVE_KEYS) {
     patch[key] = config?.[key];
   }
-
   return { ...patch, ...extraPatch };
 }
 
@@ -73,6 +78,7 @@ export const SettingsMessagingPage: React.FC = () => {
   const api = useApi();
   const { capabilities } = useInstanceAuthorization();
   const canUseSystem = capabilities.can_use_system;
+  const canEditMessaging = capabilities.can_chat || canUseSystem;
   const [config, setConfig] = useState<any>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -100,7 +106,9 @@ export const SettingsMessagingPage: React.FC = () => {
     setConfig(nextConfig);
     setSaveError(null);
     try {
-      await api.saveConfig(buildMessagePatch(nextConfig, extraPatch));
+      await api.saveConfig(buildMessagePatch(nextConfig, extraPatch, {
+        fieldSpecific: !canUseSystem,
+      }));
       setSavedAt(Date.now());
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : t('common.saveFailed'));
@@ -237,12 +245,17 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={audioAsrEnabled}
-              disabled={!vibeCloudPaired}
+              disabled={!canEditMessaging || !vibeCloudPaired}
               onClick={() =>
                 void persist({
                   ...config,
                   audio_asr: {
                     ...audioAsr,
+                    enabled: !audioAsrEnabled,
+                    enabled_configured: true,
+                  },
+                }, {
+                  audio_asr: {
                     enabled: !audioAsrEnabled,
                     enabled_configured: true,
                   },
@@ -258,7 +271,7 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={audioEchoEnabled}
-              disabled={!audioAsrEnabled}
+              disabled={!canEditMessaging || !audioAsrEnabled}
               onClick={() =>
                 void persist({
                   ...config,
@@ -266,6 +279,8 @@ export const SettingsMessagingPage: React.FC = () => {
                     ...audioAsr,
                     echo_transcript: !audioEchoEnabled,
                   },
+                }, {
+                  audio_asr: { echo_transcript: !audioEchoEnabled },
                 })
               }
             />

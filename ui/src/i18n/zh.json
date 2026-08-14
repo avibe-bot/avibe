@@ -1547,6 +1547,8 @@
     "remote_access_public_url_invalid": "远程访问配置有误（公网地址无效）。请重新配对此设备或修正远程访问设置。",
     "remote_access_session_secret_missing": "远程访问配置有误（缺少会话密钥）。请重新配对此设备以恢复访问。",
     "remote_access_unknown": "操作没有完成。请刷新状态后再试一次；如果仍然失败，请查看远程访问运行日志。",
+    "editor_config_write_forbidden": "当前角色只能保存消息偏好。",
+    "editor_config_write_invalid": "这条消息设置无法保存。",
     "show_page_email_access_transient": "邮箱权限暂时不可用，请重试。",
     "invalid_pairing_key": "这个 pairing key 无效或已过期。请回到 avibe.bot 重新生成一个 key，然后粘贴到这里。",
     "missing_pairing_key": "请先粘贴 pairing key。",

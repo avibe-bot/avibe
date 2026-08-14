@@ -1356,17 +1356,17 @@ def editor_config_write_payload(payload: dict) -> dict:
         raise ValueError("Config payload must be an object")
     unknown = set(payload) - _EDITOR_CONFIG_WRITE_FIELDS
     if unknown:
-        raise ValueError("Editors may only save messaging preferences")
+        raise ValueError("editor_config_write_forbidden")
 
     projected: dict = {}
     for key in payload:
         if key == "audio_asr":
             audio_asr = payload.get("audio_asr")
             if not isinstance(audio_asr, dict):
-                raise ValueError("Config 'audio_asr' must be an object")
+                raise ValueError("editor_config_write_invalid")
             extra = set(audio_asr) - _EDITOR_AUDIO_ASR_WRITE_FIELDS
             if extra:
-                raise ValueError("Editors may only save messaging preferences")
+                raise ValueError("editor_config_write_forbidden")
             projected["audio_asr"] = {
                 field: audio_asr[field]
                 for field in _EDITOR_AUDIO_ASR_WRITE_FIELDS
@@ -1376,10 +1376,10 @@ def editor_config_write_payload(payload: dict) -> dict:
         if key == "ui":
             ui_payload = payload.get("ui")
             if not isinstance(ui_payload, dict):
-                raise ValueError("Config 'ui' must be an object")
+                raise ValueError("editor_config_write_invalid")
             extra = set(ui_payload) - _EDITOR_CONFIG_UI_WRITE_FIELDS
             if extra:
-                raise ValueError("Editors may only save messaging preferences")
+                raise ValueError("editor_config_write_forbidden")
             projected["ui"] = {
                 field: ui_payload[field]
                 for field in _EDITOR_CONFIG_UI_WRITE_FIELDS
