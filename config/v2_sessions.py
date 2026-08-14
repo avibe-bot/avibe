@@ -476,6 +476,23 @@ class SessionsStore:
             self.load()
         return bound_id
 
+    def replace_agent_session_native(
+        self,
+        agent_session_id: str,
+        *,
+        expected_native_session_id: Any,
+        replacement_native_session_id: Any,
+    ) -> Optional[str]:
+        self._ensure_service()
+        replaced_id = self._service.replace_agent_session_native(
+            session_id=agent_session_id,
+            expected_native_session_id=expected_native_session_id,
+            replacement_native_session_id=replacement_native_session_id,
+        )
+        if replaced_id:
+            self.load()
+        return replaced_id
+
     def remove_agent_session(self, user_id: str, agent_name: str, thread_id: str) -> bool:
         self._ensure_service()
         self._ensure_user_namespace(user_id)

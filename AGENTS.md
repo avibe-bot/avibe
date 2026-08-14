@@ -40,6 +40,11 @@ Decision checklist before writing code:
 
 - `main.py` - entry point wiring `config.V2Config` into `core/controller.py`
 - `core/controller.py` - orchestration and dependency wiring
+- `vibe/ui_server.py` and `vibe/api.py` run in a separate process from the
+  controller and reach controller-owned state over the internal socket;
+  `vibe/api.py` builds its own `AgentAuthService`. In-memory registries therefore
+  cannot span IM and Web surfaces: cross-surface exclusion needs an explicit IPC
+  hop or a documented per-instance scope. See PR #1417's Known-by-design ledger.
 - `core/handlers/` - platform/backend-agnostic business workflows
 - `core/message_dispatcher.py` - outbound message routing and reply enhancement flow
 - `core/reply_enhancer.py` - file-link and quick-reply prompt injection helpers

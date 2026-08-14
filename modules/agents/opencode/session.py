@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from core.services.session_fork import fork_source_state, pending_native_fork
 from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
@@ -33,10 +34,91 @@ class OpenCodeResumeUnavailableError(RuntimeError):
             "Not creating a new one to avoid silently losing context — start a new session to continue."
         )
 
+
 logger = logging.getLogger(__name__)
 
 
+_OPENCODE_MESSAGE_ID_RE = re.compile(r"^msg_([0-9a-fA-F]{12})")
+_OPENCODE_ID_CLOCK_BITS = 48
+_OPENCODE_ID_COUNTER_BITS = 12
+_OPENCODE_ID_CLOCK_MODULUS = 1 << _OPENCODE_ID_CLOCK_BITS
+_OPENCODE_ID_CLOCK_PERIOD_MS = 1 << (
+    _OPENCODE_ID_CLOCK_BITS - _OPENCODE_ID_COUNTER_BITS
+)
+_OPENCODE_TIME_ORDERED_MESSAGES_VERSION = (1, 18, 15)
+
+
 RequestSessionTuple = Tuple[str, str, str]
+
+
+def _message_id_clock_value(message_id: object) -> Optional[int]:
+    match = _OPENCODE_MESSAGE_ID_RE.match(str(message_id or ""))
+    return int(match.group(1), 16) if match else None
+
+
+def _message_created_at(message: Dict[str, Any]) -> Optional[float]:
+    info = message.get("info") or {}
+    time_info = info.get("time") or {}
+    created = time_info.get("created")
+    if not isinstance(created, (int, float)):
+        return None
+    return float(created)
+
+
+def _uses_legacy_message_ordering(version: Optional[str]) -> bool:
+    match = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", str(version or "").strip())
+    if not match:
+        return True
+    parsed = tuple(int(part) for part in match.groups())
+    return parsed < _OPENCODE_TIME_ORDERED_MESSAGES_VERSION
+
+
+def requires_message_order_repair(
+    messages: list[Dict[str, Any]],
+    *,
+    now_ms: Optional[int] = None,
+) -> bool:
+    """Detect histories that legacy OpenCode would order by the wrong message.
+
+    OpenCode <= 1.18.14 encoded a millisecond clock plus counter into only
+    48 bits, then selected the latest user/assistant message by lexicographic
+    ID. The clock wrapped in August 2026. A full native fork reassigns IDs in
+    creation order, preserving context while making those releases usable.
+    """
+
+    candidates: list[tuple[str, str, float, int]] = []
+    for message in messages:
+        info = message.get("info") or {}
+        role = str(info.get("role") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        message_id = str(info.get("id") or "")
+        clock_value = _message_id_clock_value(message_id)
+        created_at = _message_created_at(message)
+        if clock_value is None or created_at is None:
+            continue
+        candidates.append((role, message_id, created_at, clock_value))
+
+    for role in ("user", "assistant"):
+        role_messages = [candidate for candidate in candidates if candidate[0] == role]
+        if len(role_messages) < 2:
+            continue
+        latest_by_time = max(role_messages, key=lambda candidate: (candidate[2], candidate[1]))
+        latest_by_id = max(role_messages, key=lambda candidate: candidate[1])
+        if latest_by_time[1] != latest_by_id[1]:
+            return True
+
+    if not candidates:
+        return False
+
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    current_clock = (current_ms << _OPENCODE_ID_COUNTER_BITS) % _OPENCODE_ID_CLOCK_MODULUS
+    current_cycle = current_ms // _OPENCODE_ID_CLOCK_PERIOD_MS
+    return any(
+        int(created_at) // _OPENCODE_ID_CLOCK_PERIOD_MS < current_cycle
+        and clock_value > current_clock
+        for _role, _message_id, created_at, clock_value in candidates
+    )
 
 
 class OpenCodeSessionManager:
@@ -107,6 +189,16 @@ class OpenCodeSessionManager:
             return
         payload = dict(request.context.platform_specific or {})
         payload["agent_session_id"] = agent_session_id
+        request.context.platform_specific = payload
+
+    def _set_request_native_session_id(self, request: AgentRequest, native_session_id: str) -> None:
+        payload = dict(request.context.platform_specific or {})
+        target = payload.get("agent_session_target")
+        if isinstance(target, dict):
+            payload["agent_session_target"] = {
+                **target,
+                "native_session_id": native_session_id,
+            }
         request.context.platform_specific = payload
 
     def _reserved_agent_session_id(self, request: AgentRequest) -> Optional[str]:
@@ -245,6 +337,70 @@ class OpenCodeSessionManager:
             return False
         self._initialized_sessions.add(opencode_session_id)
         return True
+
+    async def repair_message_order(
+        self,
+        request: AgentRequest,
+        server: OpenCodeServerManager,
+        session_id: str,
+        messages: list[Dict[str, Any]],
+    ) -> str:
+        """Reindex a wrapped OpenCode history without dropping context."""
+
+        if not requires_message_order_repair(messages):
+            return session_id
+
+        runtime_version = await server.get_version()
+        if not _uses_legacy_message_ordering(runtime_version):
+            logger.info(
+                "OpenCode %s already uses time-ordered messages; leaving session %s unchanged",
+                runtime_version,
+                session_id,
+            )
+            return session_id
+
+        session_data = await server.fork_session(
+            session_id,
+            directory=request.working_path,
+            message_id=None,
+        )
+        repaired_session_id = str(session_data.get("id") or "").strip()
+        if not repaired_session_id:
+            raise RuntimeError(f"OpenCode returned no session ID while repairing wrapped history {session_id}")
+
+        payload = request.context.platform_specific or {}
+        target = payload.get("agent_session_target") if isinstance(payload, dict) else None
+        agent_session_id = (
+            str(target.get("id") or "").strip()
+            if isinstance(target, dict)
+            else ""
+        ) or str(payload.get("agent_session_id") or "").strip()
+        sessions = getattr(self._settings_manager, "sessions", self._settings_manager)
+        replace_native = getattr(sessions, "replace_agent_session_native", None)
+        if not agent_session_id or not callable(replace_native):
+            raise RuntimeError(
+                f"Cannot persist repaired OpenCode session {repaired_session_id}: "
+                "the Avibe session replacement API is unavailable"
+            )
+        replaced_id = replace_native(
+            agent_session_id,
+            expected_native_session_id=session_id,
+            replacement_native_session_id=repaired_session_id,
+        )
+        if not replaced_id:
+            raise RuntimeError(
+                f"Cannot persist repaired OpenCode session {repaired_session_id}: "
+                f"Avibe session {agent_session_id} no longer points to {session_id}"
+            )
+        self._set_request_agent_session_id(request, replaced_id)
+        self._set_request_native_session_id(request, repaired_session_id)
+        logger.warning(
+            "Reindexed OpenCode session %s as %s for Avibe session %s after detecting non-monotonic message IDs",
+            session_id,
+            repaired_session_id,
+            replaced_id,
+        )
+        return repaired_session_id
 
     def get_session_lock(self, base_session_id: str) -> asyncio.Lock:
         if base_session_id not in self._session_locks:

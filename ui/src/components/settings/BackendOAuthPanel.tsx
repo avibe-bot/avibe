@@ -195,7 +195,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           ? await api.startOAuthWebForOpencodeProvider(opencodeProviderId || '', true)
           : await api.startOAuthWeb(backend, true);
       if (!result.ok || !result.flow_id) {
-        setError(result.error || result.detail || 'start_failed');
+        setError(result.detail || result.error || 'start_failed');
         setState('failed');
         return;
       }

@@ -1025,12 +1025,15 @@ Minimum v5 set:
 `source_in_route_chain`,
 `source_model_in_route_chain`, `mode_switch_blocked`, `engine_down`,
 `runtime_platform_unsupported`, `reauth_confirmation_required`,
-`native_source_already_exists`,
+`native_source_already_exists`, `native_login_in_progress`,
 `migration_item_conflict`, `turn_not_found`,
 `provenance_unavailable`, `probe_no_candidate`, `direct_mode`.
 
 `native_source_already_exists` is an API-boundary refusal for native OAuth start;
 its structured sibling is `{existing_source_id}` and the adapter is not invoked.
+`native_login_in_progress` is a distinct transient `409` from the shared native-login
+owner. It means another login currently owns the same credential; retry remains on the
+native channel and the response does not assert that a native Source already exists.
 
 Boundary-only action-refusal values cover operations the UI already does not offer but
 a script or regression can call directly. `reauth_confirmation_required` is API/test-

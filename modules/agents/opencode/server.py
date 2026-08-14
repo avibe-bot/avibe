@@ -1725,6 +1725,25 @@ class OpenCodeServerManager:
                     raise RuntimeError(f"Failed to list messages: {resp.status} {error_text}")
                 return await resp.json()
 
+    async def get_version(self) -> Optional[str]:
+        """Return the running OpenCode version advertised by its health endpoint."""
+
+        try:
+            async with self._request_scope():
+                session = await self._get_http_session()
+                async with session.get(
+                    f"{self.base_url}/global/health",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+                    version = data.get("version") if isinstance(data, dict) else None
+                    return str(version).strip() if version else None
+        except Exception as err:
+            logger.debug("Failed to read OpenCode runtime version: %s", err)
+            return None
+
     async def get_session_status(
         self,
         session_id: str,

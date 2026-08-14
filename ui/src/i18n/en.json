@@ -1155,6 +1155,7 @@
           "oauthFailed": "Sign-in did not complete. You can retry.",
           "startFailed": "Could not confirm the sign-in started — you can retry",
           "engineDown": "The gateway is not responding. Please retry.",
+          "loginInProgress": "Another native login is already in progress. Finish or cancel it, then retry.",
           "alreadyBound": "This backend's native login slot is already taken. Add it as a gateway-held source instead."
         }
       },

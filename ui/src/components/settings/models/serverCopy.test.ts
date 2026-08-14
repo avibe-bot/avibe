@@ -11,7 +11,13 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText } from './serverCopy';
+import {
+  NATIVE_LOGIN_IN_PROGRESS_FAILURE,
+  NATIVE_SUBSCRIPTION_EXISTS_FAILURE,
+  oauthFailureKey,
+  oauthStartFailureKey,
+  serverText,
+} from './serverCopy';
 
 const t = (lng: 'en' | 'zh'): TFunction => {
   const i18n = createInstance();
@@ -125,6 +131,13 @@ describe('oauthStartFailureKey', () => {
     expect(oauthStartFailureKey(NATIVE_SUBSCRIPTION_EXISTS_FAILURE)).toBe(
       'settings.models.addSub.error.alreadyBound',
     );
+  });
+
+  it('keeps a transient native login conflict retryable on its current channel', () => {
+    const key = oauthStartFailureKey(NATIVE_LOGIN_IN_PROGRESS_FAILURE);
+    expect(key).toBe('settings.models.addSub.error.loginInProgress');
+    expect(t('en')(key)).toMatch(/already in progress/i);
+    expect(t('zh')(key)).toContain('正在进行中');
   });
 
   it('keeps unknown start failures retryable without inventing a cause', () => {
