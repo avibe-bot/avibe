@@ -181,7 +181,12 @@ class _AgenticDeadlineProjection:
                 timeout=agentic_timeout,
             )
         except asyncio.TimeoutError:
-            await _send_json_error(send, status=504, detail="memory_request_timed_out")
+            await _send_json_error(
+                send,
+                status=504,
+                detail="memory_request_timed_out",
+                agentic_round=round_state.get("round"),
+            )
             return
         finally:
             _AGENTIC_ROUND_STATE.reset(token)
@@ -213,16 +218,30 @@ async def _buffer_request(receive: Any) -> tuple[list[dict[str, Any]], bytes]:
     return messages, b"".join(chunks)
 
 
-async def _send_json_error(send: Any, *, status: int, detail: str) -> None:
+async def _send_json_error(
+    send: Any,
+    *,
+    status: int,
+    detail: str,
+    agentic_round: str | None = None,
+) -> None:
     body = json.dumps({"detail": detail}, separators=(",", ":")).encode("utf-8")
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]
+    if agentic_round in {"round1", "round2"}:
+        headers.append(
+            (
+                _AGENTIC_ROUND_HEADER.lower().encode("ascii"),
+                agentic_round.encode("ascii"),
+            )
+        )
     await send(
         {
             "type": "http.response.start",
             "status": status,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode("ascii")),
-            ],
+            "headers": headers,
         }
     )
     await send({"type": "http.response.body", "body": body})

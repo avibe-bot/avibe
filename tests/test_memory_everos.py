@@ -817,11 +817,14 @@ def test_agentic_search_maps_provider_422_to_closed_capability_error() -> None:
     assert "422" not in str(failure)
 
 
-def test_agentic_search_maps_sidecar_deadline_to_typed_timeout() -> None:
+def test_agentic_search_maps_sidecar_deadline_with_round_telemetry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert float(request.headers[_AGENTIC_TIMEOUT_HEADER]) <= 5
         return httpx.Response(
             504,
+            headers={_AGENTIC_ROUND_HEADER: "round2"},
             json={"detail": "memory_request_timed_out"},
         )
 
@@ -837,10 +840,20 @@ def test_agentic_search_maps_sidecar_deadline_to_typed_timeout() -> None:
             )
         return raised.value
 
+    caplog.set_level("INFO", logger="core.memory.everos")
     with _sidecar_transport(handler):
         failure = asyncio.run(run())
 
     assert failure.error == "memory_provider_timeout"
+    telemetry = [
+        record.getMessage()
+        for record in caplog.records
+        if "telemetry" in record.getMessage()
+    ]
+    assert len(telemetry) == 1
+    assert "round=round2" in telemetry[0]
+    assert "success=false" in telemetry[0]
+    assert "timeout=true" in telemetry[0]
 
 
 def test_profile_uses_get_and_reports_empty_profile_as_non_failure() -> None:

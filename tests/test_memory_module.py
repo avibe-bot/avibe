@@ -720,8 +720,34 @@ async def test_agentic_recall_fails_closed_when_health_disables_agentic_search(
     assert provider.search_scopes == []
 
 
+async def test_agentic_mode_resolution_bounds_the_capability_probe(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(agentic_budget_enforced_flag=True)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    async def slow_health_snapshot():
+        await asyncio.sleep(1)
+        return provider.health_snapshot_value
+
+    provider.health_snapshot = slow_health_snapshot  # type: ignore[method-assign]
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=5,
+        max_model_calls=2,
+        cost_budget_tokens=32_000,
+    )
+
+    result = await module.resolve_recall_mode(policy, timeout_seconds=0.001)
+
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_scopes == []
+
+
 async def test_agentic_recall_reaches_provider_with_policy_timeout(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = FakeMemoryProvider(
         agentic_budget_enforced_flag=True,
@@ -735,6 +761,26 @@ async def test_agentic_recall_reaches_provider_with_policy_timeout(
         max_model_calls=2,
         cost_budget_tokens=32_000,
     )
+    monotonic_values = iter((100.0, 100.0, 100.0, 102.0))
+    monkeypatch.setattr(
+        "core.memory.module.monotonic",
+        lambda: next(monotonic_values),
+    )
+    resolve_timeouts: list[float | None] = []
+    resolve_recall_mode = module.resolve_recall_mode
+
+    async def tracked_resolve_recall_mode(
+        tracked_policy: RecallPolicy,
+        *,
+        timeout_seconds: float | None = None,
+    ):
+        resolve_timeouts.append(timeout_seconds)
+        return await resolve_recall_mode(
+            tracked_policy,
+            timeout_seconds=timeout_seconds,
+        )
+
+    monkeypatch.setattr(module, "resolve_recall_mode", tracked_resolve_recall_mode)
 
     result = await module.recall(
         "query",
@@ -749,7 +795,8 @@ async def test_agentic_recall_reaches_provider_with_policy_timeout(
         effective_mode="agentic",
     )
     assert provider.search_policies == [("agentic", True, None)]
-    assert provider.search_timeouts == [5.0]
+    assert resolve_timeouts == [5.0]
+    assert provider.search_timeouts == [3.0]
 
 
 async def test_current_session_overlay_uses_the_trusted_canonical_reference(tmp_path: Path) -> None:

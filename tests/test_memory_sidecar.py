@@ -79,7 +79,7 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
     assert isinstance(captured["app"]._app, sidecar._AgenticDeadlineProjection)
 
 
-def test_agentic_deadline_projection_cancels_owned_downstream_asgi_task() -> None:
+def test_agentic_deadline_projection_cancels_downstream_and_preserves_round() -> None:
     downstream_cancelled = asyncio.Event()
     sent: list[dict] = []
     request_messages = [
@@ -100,6 +100,9 @@ def test_agentic_deadline_projection_cancels_owned_downstream_asgi_task() -> Non
 
     async def downstream(_scope, downstream_receive, _send):
         assert (await downstream_receive())["body"] == _agentic_search_body()
+        round_state = sidecar._AGENTIC_ROUND_STATE.get()
+        assert round_state is not None
+        round_state["round"] = "round2"
         try:
             await asyncio.sleep(1)
         except asyncio.CancelledError:
@@ -122,6 +125,8 @@ def test_agentic_deadline_projection_cancels_owned_downstream_asgi_task() -> Non
     assert downstream_cancelled.is_set()
     assert sent[0]["type"] == "http.response.start"
     assert sent[0]["status"] == 504
+    headers = dict(sent[0]["headers"])
+    assert headers[sidecar._AGENTIC_ROUND_HEADER.lower().encode()] == b"round2"
     assert json.loads(sent[1]["body"]) == {"detail": "memory_request_timed_out"}
 
 
