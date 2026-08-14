@@ -14,7 +14,7 @@ import time
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -1504,7 +1504,7 @@ class MemoryRuntime:
             projects = (DEFAULT_MEMORY_PROJECT_ID,)
         fingerprint = _memory_list_catalog_fingerprint(projects)
         try:
-            offsets = _decode_memory_list_cursor(
+            boundaries = _decode_memory_list_cursor(
                 cursor,
                 projects=projects,
                 fingerprint=fingerprint,
@@ -1516,17 +1516,21 @@ class MemoryRuntime:
         candidates: list[MemoryListItem] = []
         warnings: list[MemoryListWarningCode] = []
         totals: dict[str, int] = {}
+        failures: list[OperationFailed] = []
+        available_counts: dict[str, int] = {}
+        project_has_more: dict[str, bool] = {}
         complete = True
         for project_id in projects:
             window = await self._list_project_window(
                 principal_id,
                 project_id,
-                offset=offsets[project_id],
+                boundary=boundaries[project_id],
                 limit=limit,
                 deadline=deadline,
             )
             if isinstance(window, OperationFailed):
                 complete = False
+                failures.append(window)
                 warning: MemoryListWarningCode = (
                     "memory_list_truncated"
                     if window.error == "memory_provider_timeout"
@@ -1536,26 +1540,45 @@ class MemoryRuntime:
                 if window.error == "memory_provider_timeout":
                     break
                 continue
-            items, total_count, project_warnings = window
+            items, total_count, project_warnings, has_more = window
             candidates.extend(items)
             totals[project_id] = total_count
+            available_counts[project_id] = len(items)
+            project_has_more[project_id] = has_more
             warnings.extend(project_warnings)
 
+        if not totals and failures:
+            failure = next(
+                (
+                    item
+                    for item in failures
+                    if item.error == "memory_provider_timeout"
+                ),
+                failures[0],
+            )
+            return {"status": failure.status, "error": failure.error}
+
         ordered = sorted(candidates, key=lambda item: (item.project, item.id))
-        ordered.sort(key=lambda item: item.timestamp, reverse=True)
+        ordered.sort(
+            key=lambda item: _memory_list_instant(item.timestamp),
+            reverse=True,
+        )
         selected = tuple(ordered[:limit])
-        next_offsets = dict(offsets)
+        next_boundaries = dict(boundaries)
+        selected_counts = {project_id: 0 for project_id in projects}
         for item in selected:
-            next_offsets[item.project] += 1
+            selected_counts[item.project] += 1
+            next_boundaries[item.project] = (item.timestamp, item.id)
 
         has_more = any(
-            next_offsets[project_id] < total_count
-            for project_id, total_count in totals.items()
+            project_has_more[project_id]
+            or selected_counts[project_id] < available_counts[project_id]
+            for project_id in totals
         )
         if not complete and selected:
             has_more = True
         next_cursor = (
-            _encode_memory_list_cursor(fingerprint, next_offsets)
+            _encode_memory_list_cursor(fingerprint, next_boundaries)
             if has_more and selected
             else None
         )
@@ -1581,19 +1604,23 @@ class MemoryRuntime:
         principal_id: str,
         project_id: str,
         *,
-        offset: int,
+        boundary: tuple[str, str] | None,
         limit: int,
         deadline: float,
     ) -> (
-        tuple[tuple[MemoryListItem, ...], int, tuple[MemoryListWarningCode, ...]]
+        tuple[
+            tuple[MemoryListItem, ...],
+            int,
+            tuple[MemoryListWarningCode, ...],
+            bool,
+        ]
         | OperationFailed
     ):
-        page = offset // _MEMORY_LIST_PROVIDER_PAGE_SIZE + 1
-        skip = offset % _MEMORY_LIST_PROVIDER_PAGE_SIZE
-        items: list[MemoryListItem] = []
+        page = 1
+        items_by_id: dict[str, MemoryListItem] = {}
         warnings: list[MemoryListWarningCode] = []
         total_count = 0
-        while len(items) < limit:
+        while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return OperationFailed(error="memory_provider_timeout")
@@ -1613,13 +1640,36 @@ class MemoryRuntime:
                 return result
             total_count = result.total_count
             warnings.extend(result.warnings)
-            available = result.items[skip:]
-            items.extend(available[: limit - len(items)])
-            if result.count < _MEMORY_LIST_PROVIDER_PAGE_SIZE or page * _MEMORY_LIST_PROVIDER_PAGE_SIZE >= total_count:
+            for item in result.items:
+                if item.id not in items_by_id and _memory_list_after_boundary(
+                    item,
+                    boundary,
+                ):
+                    items_by_id[item.id] = item
+
+            ordered = _order_project_memory_list_items(items_by_id.values())
+            exhausted = (
+                result.count < _MEMORY_LIST_PROVIDER_PAGE_SIZE
+                or page * _MEMORY_LIST_PROVIDER_PAGE_SIZE >= total_count
+            )
+            if exhausted:
                 break
+            if len(ordered) > limit and result.items:
+                cutoff = _memory_list_instant(ordered[limit - 1].timestamp)
+                oldest_in_page = min(
+                    _memory_list_instant(item.timestamp)
+                    for item in result.items
+                )
+                if oldest_in_page < cutoff:
+                    break
             page += 1
-            skip = 0
-        return tuple(items), total_count, tuple(dict.fromkeys(warnings))
+        ordered = _order_project_memory_list_items(items_by_id.values())
+        return (
+            tuple(ordered[:limit]),
+            total_count,
+            tuple(dict.fromkeys(warnings)),
+            len(ordered) > limit,
+        )
 
     def list_memory_projects(self, principal_id: str) -> tuple[str, ...]:
         if not self.available:
@@ -3504,7 +3554,10 @@ def _merge_search_items(items: list[MemoryItem], *, limit: int) -> tuple[MemoryI
 
 def _memory_list_catalog_fingerprint(projects: tuple[str, ...]) -> str:
     material = json.dumps(
-        {"projects": list(projects), "sort": "timestamp:desc"},
+        {
+            "projects": list(projects),
+            "sort": "timestamp:desc,project:id:asc",
+        },
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
@@ -3512,9 +3565,24 @@ def _memory_list_catalog_fingerprint(projects: tuple[str, ...]) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
-def _encode_memory_list_cursor(fingerprint: str, offsets: dict[str, int]) -> str:
+def _encode_memory_list_cursor(
+    fingerprint: str,
+    boundaries: dict[str, tuple[str, str] | None],
+) -> str:
+    encoded_boundaries = {
+        project_id: (
+            {"t": boundary[0], "i": boundary[1]}
+            if boundary is not None
+            else None
+        )
+        for project_id, boundary in boundaries.items()
+    }
     raw = json.dumps(
-        {"v": _MEMORY_LIST_CURSOR_VERSION, "f": fingerprint, "o": offsets},
+        {
+            "v": _MEMORY_LIST_CURSOR_VERSION,
+            "f": fingerprint,
+            "b": encoded_boundaries,
+        },
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
@@ -3530,9 +3598,9 @@ def _decode_memory_list_cursor(
     *,
     projects: tuple[str, ...],
     fingerprint: str,
-) -> dict[str, int]:
+) -> dict[str, tuple[str, str] | None]:
     if cursor is None:
-        return {project_id: 0 for project_id in projects}
+        return {project_id: None for project_id in projects}
     if (
         not isinstance(cursor, str)
         or not cursor
@@ -3551,19 +3619,64 @@ def _decode_memory_list_cursor(
         raise ValueError("invalid Memory list cursor") from None
     if (
         not isinstance(payload, dict)
-        or set(payload) != {"v", "f", "o"}
+        or set(payload) != {"v", "f", "b"}
         or payload.get("v") != _MEMORY_LIST_CURSOR_VERSION
         or payload.get("f") != fingerprint
-        or not isinstance(payload.get("o"), dict)
-        or set(payload["o"]) != set(projects)
+        or not isinstance(payload.get("b"), dict)
+        or set(payload["b"]) != set(projects)
     ):
         raise ValueError("invalid Memory list cursor")
-    offsets = payload["o"]
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 0 <= value <= 20_000
-        for value in offsets.values()
-    ):
-        raise ValueError("invalid Memory list cursor")
-    return {project_id: offsets[project_id] for project_id in projects}
+    boundaries: dict[str, tuple[str, str] | None] = {}
+    for project_id in projects:
+        value = payload["b"][project_id]
+        if value is None:
+            boundaries[project_id] = None
+            continue
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"t", "i"}
+            or not isinstance(value.get("t"), str)
+            or not isinstance(value.get("i"), str)
+            or not value["i"]
+            or len(value["i"].encode("utf-8")) > 128
+            or "\x00" in value["i"]
+            or len(value["t"]) > 64
+        ):
+            raise ValueError("invalid Memory list cursor")
+        try:
+            _memory_list_instant(value["t"])
+        except ValueError:
+            raise ValueError("invalid Memory list cursor") from None
+        boundaries[project_id] = (value["t"], value["i"])
+    return boundaries
+
+
+def _memory_list_instant(value: str) -> datetime:
+    instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if instant.tzinfo is None:
+        raise ValueError("invalid Memory list timestamp")
+    return instant.astimezone(timezone.utc)
+
+
+def _order_project_memory_list_items(
+    items: Iterable[MemoryListItem],
+) -> list[MemoryListItem]:
+    ordered = sorted(items, key=lambda item: item.id)
+    ordered.sort(
+        key=lambda item: _memory_list_instant(item.timestamp),
+        reverse=True,
+    )
+    return ordered
+
+
+def _memory_list_after_boundary(
+    item: MemoryListItem,
+    boundary: tuple[str, str] | None,
+) -> bool:
+    if boundary is None:
+        return True
+    item_instant = _memory_list_instant(item.timestamp)
+    boundary_instant = _memory_list_instant(boundary[0])
+    return item_instant < boundary_instant or (
+        item_instant == boundary_instant and item.id > boundary[1]
+    )
