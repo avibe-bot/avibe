@@ -119,7 +119,10 @@ def _tree_sha256(skill_root: Path) -> str:
     files = sorted(
         path
         for path in skill_root.rglob("*")
-        if path.is_file() and path.name != MANIFEST_NAME
+        if path.is_file()
+        and path.name != MANIFEST_NAME
+        and "__pycache__" not in path.parts
+        and path.suffix != ".pyc"
     )
     for path in files:
         relative = path.relative_to(skill_root).as_posix().encode("utf-8")

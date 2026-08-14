@@ -84,6 +84,10 @@ def test_install_records_commit_hash_and_check_detects_drift(tmp_path: Path) -> 
     assert checked.returncode == 0, checked.stderr
     assert json.loads(checked.stdout)["ok"] is True
 
+    checked_again = _run(repo, target, "--check")
+    assert checked_again.returncode == 0, checked_again.stderr
+    assert json.loads(checked_again.stdout)["ok"] is True
+
     (target / "scripts/wait_pr.py").write_text(
         (target / "scripts/wait_pr.py").read_text(encoding="utf-8") + "\n# drift\n",
         encoding="utf-8",
