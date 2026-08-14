@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
@@ -16,7 +16,10 @@ const mocks = vi.hoisted(() => ({
     listSessionQueue: vi.fn(),
     onSessionArchived: vi.fn(),
   },
-  events: null as null | { onConnected: () => void },
+  events: null as null | {
+    onConnected: () => void;
+    onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
+  },
 }));
 
 vi.mock('react-i18next', () => ({
@@ -100,15 +103,40 @@ import { ChatPage } from './ChatPage';
 type Deferred<T> = {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
 };
 
 const deferred = <T,>(): Deferred<T> => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 };
+
+const idleTurnState = {
+  foreground: 'idle',
+  native_turn_started: false,
+  pending_input_count: 0,
+  background_activities: [],
+  pending_activity_output_count: 0,
+  connection: 'connected',
+};
+
+const bootstrapPayload = (sessionId: string) => ({
+  session: { id: sessionId },
+  capabilities: { can_chat: true },
+  agents: [],
+  default_agent_name: null,
+  config: { ui: {} },
+  messages: [],
+  next_before_id: null,
+  turn_state: idleTurnState,
+  queued: [],
+  draft: { text: '' },
+});
 
 describe('ChatPage transcript hydration', () => {
   let sessionRow: Deferred<{ id: string }>;
@@ -127,14 +155,7 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.getCachedSessionDraft.mockReturnValue(null);
     mocks.api.getSession.mockReturnValue(sessionRow.promise);
     mocks.api.getSessionBootstrap.mockReturnValue(bootstrap.promise);
-    mocks.api.getTurnState.mockResolvedValue({
-      foreground: 'idle',
-      native_turn_started: false,
-      pending_input_count: 0,
-      background_activities: [],
-      pending_activity_output_count: 0,
-      connection: 'connected',
-    });
+    mocks.api.getTurnState.mockResolvedValue(idleTurnState);
     mocks.api.getWorkbenchPrefs.mockResolvedValue({});
     mocks.api.listSessionMessages.mockResolvedValue({ messages: [] });
     mocks.api.listSessionQueue.mockResolvedValue([]);
@@ -157,6 +178,60 @@ describe('ChatPage transcript hydration', () => {
 
     act(() => mocks.events?.onConnected());
     await act(async () => sessionRow.resolve({ id: 'session-new' }));
+
+    expect(screen.getByText('common.loading')).toBeTruthy();
+    expect(screen.queryByText('chat.transcriptEmpty')).toBeNull();
+  });
+
+  it('ignores a bootstrap failure after a newer same-route refresh starts', async () => {
+    const staleBootstrap = deferred<never>();
+    const currentBootstrap = deferred<never>();
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap
+      .mockReset()
+      .mockReturnValueOnce(staleBootstrap.promise)
+      .mockReturnValueOnce(currentBootstrap.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(1));
+    act(() => mocks.events?.onAuthorizationChanged({ resource_kinds: [] }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(2));
+
+    await act(async () => staleBootstrap.reject(new Error('stale bootstrap failed')));
+
+    expect(screen.getByText('common.loading')).toBeTruthy();
+    expect(screen.queryByText('stale bootstrap failed')).toBeNull();
+  });
+
+  it('ignores a bootstrap success after a newer same-route refresh starts', async () => {
+    const staleBootstrap = deferred<ReturnType<typeof bootstrapPayload>>();
+    const currentBootstrap = deferred<never>();
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap
+      .mockReset()
+      .mockReturnValueOnce(staleBootstrap.promise)
+      .mockReturnValueOnce(currentBootstrap.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(1));
+    act(() => mocks.events?.onAuthorizationChanged({ resource_kinds: [] }));
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(2));
+
+    await act(async () => staleBootstrap.resolve(bootstrapPayload('session-new')));
 
     expect(screen.getByText('common.loading')).toBeTruthy();
     expect(screen.queryByText('chat.transcriptEmpty')).toBeNull();
