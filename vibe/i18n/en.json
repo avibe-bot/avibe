@@ -614,6 +614,7 @@
       "opencodeCodeRetryPrompt": "OpenCode is still waiting for the `{provider}` API key. The previous value may not have been accepted. Reply with the key directly in this chat.",
       "timedOut": "{backend} setup timed out. Start setup again to retry.",
       "success": "{backend} login is active again.",
+      "loginInProgress": "A {vendor} login for {backend} is already in progress. Finish or cancel it before starting another.",
       "failed": "{backend} setup failed: {detail}",
       "unknownFailure": "Unknown login failure."
     },

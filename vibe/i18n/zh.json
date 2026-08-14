@@ -614,6 +614,7 @@
       "opencodeCodeRetryPrompt": "OpenCode 仍在等待 `{provider}` 的 API key，上一条值可能没有被接受。请直接在当前聊天里回复 key。",
       "timedOut": "{backend} 登录修复已超时，请重新发起 setup 再试一次。",
       "success": "{backend} 已重新登录，可继续使用。",
+      "loginInProgress": "{vendor}（{backend}）登录正在进行中，请先完成或取消后再重新发起。",
       "failed": "{backend} 登录修复失败：{detail}",
       "unknownFailure": "未知登录失败。"
     },

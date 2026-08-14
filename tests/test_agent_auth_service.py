@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from core.agent_auth_service import (
     AgentAuthFlow,
     AgentAuthService,
+    BackendLoginInProgressError,
     classify_auth_error,
     verify_opencode_auth_list_output,
 )
@@ -532,7 +533,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             waiter_task=done_task,
             claude_client=_client(501),
         )
-        service._flows[im_flow.flow_key] = im_flow
+        service._flow_registry.put(im_flow, flow_key=im_flow.flow_key)
         service._web_flows["web-flow"] = SimpleNamespace(
             backend="claude",
             claude_client=_client(502),
@@ -561,7 +562,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             waiter_task=done_task,
             claude_client=SimpleNamespace(),
         )
-        service._flows[flow.flow_key] = flow
+        service._flow_registry.put(flow, flow_key=flow.flow_key)
 
         self.assertEqual(service.active_claude_auth_client_pids(), set())
         self.assertTrue(service.has_active_claude_auth_client_with_unknown_pid())
@@ -583,6 +584,26 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertIn("Failed to clear Claude Code settings env", text)
         self.assertEqual(keyboard.buttons[0][0].callback_data, "auth_setup:claude")
         self.assertNotIn("C1:claude", service._flows)
+
+    async def test_start_setup_localizes_native_login_conflict(self):
+        controller = _StubController()
+        controller._get_lang = lambda: "zh"
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        service._start_auth_flow = AsyncMock(
+            side_effect=BackendLoginInProgressError("anthropic", "claude")
+        )
+
+        await service.start_setup(
+            context,
+            backend="claude",
+            force_reset=True,
+            claude_login_method="console",
+        )
+
+        _, text, _keyboard = controller.im_client.sent_button_messages[0]
+        self.assertIn("登录正在进行中", text)
+        self.assertNotIn("native_login_in_progress", text)
 
     async def test_start_claude_control_flow_restores_settings_on_auth_start_failure(self):
         controller = _StubController()

@@ -65,6 +65,8 @@ CLAUDE_PROBE_PROCESS_EXIT_GRACE_SECONDS = 0.2
 class BackendLoginInProgressError(RuntimeError):
     """Raised when a native credential already has a live login owner."""
 
+    code = "native_login_in_progress"
+
     def __init__(
         self,
         vendor: str,
@@ -77,7 +79,7 @@ class BackendLoginInProgressError(RuntimeError):
         self.backend = backend
         self.owner_ref = owner_ref
         self.flow_id = flow_id
-        super().__init__(f"native login already in progress for {vendor}/{backend}")
+        super().__init__(self.code)
 
 
 def _pick_probe_response_excerpt(stdout_text: str) -> str:
@@ -470,10 +472,7 @@ class AgentAuthService:
 
     def _active_claude_auth_clients(self) -> list[Any]:
         clients: list[Any] = []
-        flows = list(self._flows_by_id.values()) + [
-            flow for flow in self._flows.values() if flow not in self._flows_by_id.values()
-        ]
-        for flow in flows:
+        for flow in self._flows_by_id.values():
             if flow.backend != "claude" or flow.claude_client is None:
                 continue
             clients.append(flow.claude_client)
@@ -790,6 +789,22 @@ class AgentAuthService:
                 force_reset=force_reset,
                 claude_login_method=claude_login_method,
             )
+        except BackendLoginInProgressError as err:
+            logger.info(
+                "Agent auth setup already in progress for %s/%s",
+                err.vendor,
+                err.backend,
+            )
+            await self._send_setup_start_failure(
+                context,
+                resolved_backend,
+                self._t(
+                    "command.setup.loginInProgress",
+                    vendor=err.vendor,
+                    backend=resolved_backend,
+                ),
+            )
+            return
         except Exception as err:  # noqa: BLE001
             logger.error("Agent auth setup failed to start for %s: %s", resolved_backend, err, exc_info=True)
             await self._send_setup_start_failure(context, resolved_backend, str(err))

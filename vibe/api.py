@@ -9395,6 +9395,8 @@ async def start_oauth_web_async(
     recovery_message = _config_recovery_message()
     if recovery_message:
         return {"ok": False, "error": "config_recovery", "message": recovery_message}
+    from core.agent_auth_service import BackendLoginInProgressError
+
     service = _get_oauth_service()
     try:
         flow = await service.start_web_setup(
@@ -9402,6 +9404,21 @@ async def start_oauth_web_async(
             force_reset=force_reset,
             provider_id=(provider_id.strip() if isinstance(provider_id, str) else None),
         )
+    except BackendLoginInProgressError as exc:
+        try:
+            lang = load_config().language
+        except Exception:  # noqa: BLE001
+            lang = "en"
+        return {
+            "ok": False,
+            "error": exc.code,
+            "detail": backend_t(
+                "command.setup.loginInProgress",
+                lang,
+                vendor=exc.vendor,
+                backend=backend,
+            ),
+        }
     except Exception as exc:  # noqa: BLE001
         logger.error("Web OAuth start failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "start_failed", "detail": str(exc)}

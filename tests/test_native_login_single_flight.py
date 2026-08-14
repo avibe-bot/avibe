@@ -34,7 +34,12 @@ class _Controller:
 
 
 @pytest.mark.asyncio
-async def test_im_web_and_model_hub_use_the_same_flow_registry() -> None:
+async def test_single_service_fixture_routes_all_callers_to_the_same_registry() -> None:
+    """Prove in-instance reuse, not cross-process production exclusion.
+
+    Production intentionally constructs separate AgentAuthService instances in
+    the controller and UI-server processes.
+    """
     controller = _Controller()
     service = AgentAuthService(controller)
     process = SimpleNamespace(stdout=object(), returncode=0)
@@ -66,6 +71,7 @@ async def test_im_web_and_model_hub_use_the_same_flow_registry() -> None:
 
 @pytest.mark.asyncio
 async def test_model_hub_drives_the_shared_web_flow_through_submit_and_cancel() -> None:
+    """Model Hub delegates one Web flow lifecycle within a service instance."""
     service = AgentAuthService(_Controller())
     client = object()
     service._start_claude_control_flow = AsyncMock(

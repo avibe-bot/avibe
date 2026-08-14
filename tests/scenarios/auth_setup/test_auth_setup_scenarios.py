@@ -1453,6 +1453,29 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered_flow, lost_flow)
         self.assertEqual(provider_calls, 1)
 
+    async def test_cross_surface_native_login_conflict_is_localized(self):
+        """Scenario: AUTH-SETUP-211."""
+        harness = AuthSetupScenarioHarness()
+        harness.controller.config.language = "zh"
+        process = FakeProcess()
+        harness.service._start_codex_process = AsyncMock(return_value=process)
+        harness.service._read_codex_output_web = AsyncMock()
+        harness.service._wait_for_codex_completion_web = AsyncMock()
+
+        web_flow = await harness.service.start_web_setup(
+            "codex",
+            force_reset=False,
+        )
+        await harness.service.start_setup(
+            harness.context,
+            backend="codex",
+            force_reset=False,
+        )
+
+        self.assertEqual(harness.service._start_codex_process.await_count, 1)
+        ScenarioExpect.text_contains(harness, "登录正在进行中")
+        await harness.service.cancel_web_flow(web_flow.flow_id)
+
     async def test_codex_failure_scenario_emits_reset_path(self):
         """Scenario: AUTH-SETUP-202"""
         harness = AuthSetupScenarioHarness()

@@ -6,7 +6,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SERVICE = ROOT / "core" / "agent_auth_service.py"
+CONTROLLER = ROOT / "core" / "controller.py"
 NATIVE_ADAPTER = ROOT / "core" / "handlers" / "model_hub" / "native_oauth.py"
+WEB_API = ROOT / "vibe" / "api.py"
 
 
 def _functions(tree: ast.AST) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
@@ -76,15 +78,9 @@ def _reachable(graph: dict[str, set[str]], root: str) -> set[str]:
     return reached
 
 
-def test_one_registry_and_one_start_path_are_structural_invariants() -> None:
+def test_all_callers_reuse_the_shared_start_path() -> None:
     tree = ast.parse(SERVICE.read_text(encoding="utf-8"))
     functions = {function.name: function for function in _functions(tree)}
-    registry_inits = [
-        call
-        for call in ast.walk(tree)
-        if isinstance(call, ast.Call) and _call_name(call) == "AuthFlowRegistry"
-    ]
-    assert len(registry_inits) == 1
     assert "_start_auth_flow" in functions
 
     for public_name in ("start_setup", "start_web_setup"):
@@ -115,6 +111,25 @@ def test_one_registry_and_one_start_path_are_structural_invariants() -> None:
         if isinstance(call, ast.Call) and _call_name(call) == "start_web_setup"
     ]
     assert adapter_starts, "Model Hub does not route through the shared start path"
+
+
+def test_web_api_owns_a_separate_service_instance_by_design() -> None:
+    """Record the production boundary: Web and controller registries are distinct."""
+    web_tree = ast.parse(WEB_API.read_text(encoding="utf-8"))
+    web_functions = {function.name: function for function in _functions(web_tree)}
+    web_constructors = [
+        call
+        for call in ast.walk(web_functions["_get_oauth_service"])
+        if isinstance(call, ast.Call) and _call_name(call) == "AgentAuthService"
+    ]
+    controller_tree = ast.parse(CONTROLLER.read_text(encoding="utf-8"))
+    controller_constructors = [
+        call
+        for call in ast.walk(controller_tree)
+        if isinstance(call, ast.Call) and _call_name(call) == "AgentAuthService"
+    ]
+    assert len(web_constructors) == 1
+    assert len(controller_constructors) == 1
 
 
 def test_every_discovered_spawn_site_is_reachable_from_shared_start_path() -> None:
