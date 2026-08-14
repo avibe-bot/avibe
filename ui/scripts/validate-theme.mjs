@@ -262,6 +262,11 @@ const ACCEPTED_BRAND_PAIRS = new Map([
   ['light fill: --primary-foreground on --primary', 2.54],
   ['light fill: --accent-foreground on --accent', 3.68],
   ['light fill: --gold-foreground on --gold', 3.19],
+  // Dark violet is not a new exemption: the Button already printed a hard-coded
+  // text-white on this fill, so the pair shipped at 4.38:1 while no token declared
+  // it and this guard could not see it. Naming --violet-foreground brings it under
+  // the same pin as the rest instead of leaving it undeclared.
+  ['dark fill: --violet-foreground on --violet', 4.38],
 ]);
 const PIN_TOLERANCE = 0.01;
 const consultedBrandPairs = new Set();
@@ -318,6 +323,20 @@ const INK_SURFACES = ['--card', '--background', '--surface-3'];
 // --primary would keep passing while the CTA it claims to describe drifted away.
 const SEMANTIC_FILL_ALIASES = [['--primary', '--mint'], ['--accent', '--cyan']];
 
+// Pointing at a control must never cost contrast. Every interactive brand fill
+// therefore declares the value it hovers to, and the hovered fill is measured against
+// the same label as the resting one. Naming the hovered value is the point: a filter
+// scales the label along with the background, so it cannot be aimed — brightness(1.1)
+// on light --primary read 2.09:1 against the 2.54:1 it started from, and no brightness
+// value fixes it, because a white label is already clamped at the top.
+//
+// The direction follows the LABEL, not the theme. Mint, cyan and gold carry a dark
+// label in dark and a white one in light, so they lighten there and darken here;
+// --violet's label is white in both, so it darkens in both. That inversion is exactly
+// what a single shared mix token got wrong, and what this assertion catches.
+// --mint / --cyan ride along through SEMANTIC_FILL_ALIASES above.
+const HOVER_FILLS = ['--primary', '--accent', '--gold', '--violet', '--destructive'];
+
 for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
   for (const fill of ACCENT_FILLS) {
     assertEqual(`${theme} ${fill} is defined`, tokens.has(fill), true);
@@ -325,11 +344,33 @@ for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
   }
 
   for (const [semantic, palette] of SEMANTIC_FILL_ALIASES) {
-    if (tokens.get(semantic) !== tokens.get(palette)) {
+    // The hover pair is aliased for the same reason as the resting one: `brand` pairs
+    // bg-mint with --primary-foreground, so a --mint-hover that drifted from
+    // --primary-hover would render a pairing no assertion below ever measures.
+    for (const suffix of ['', '-hover']) {
+      const [a, b] = [`${semantic}${suffix}`, `${palette}${suffix}`];
+      if (tokens.get(a) !== tokens.get(b)) {
+        throw new Error(
+          `${theme} ${a} is ${tokens.get(a)} but ${b} is ${tokens.get(b)}. `
+            + `Button prints ${semantic}-foreground on ${palette}, so the contrast measured on ${a} `
+            + 'is only the contrast users see while the two stay equal. Move both or neither.',
+        );
+      }
+    }
+  }
+
+  for (const fill of HOVER_FILLS) {
+    assertEqual(`${theme} ${fill} declares a hover fill`, tokens.has(`${fill}-hover`), true);
+    const name = `${theme} hover`;
+    const label = requireMeasurableColor(name, `${fill}-foreground`, tokens.get(`${fill}-foreground`));
+    const resting = contrastRatio(label, requireMeasurableColor(name, fill, tokens.get(fill)));
+    const hovered = contrastRatio(label, requireMeasurableColor(name, `${fill}-hover`, tokens.get(`${fill}-hover`)));
+    if (hovered < resting) {
       throw new Error(
-        `${theme} ${semantic} is ${tokens.get(semantic)} but ${palette} is ${tokens.get(palette)}. `
-          + `Button prints ${semantic}-foreground on ${palette}, so the contrast measured on ${semantic} `
-          + 'is only the contrast users see while the two stay equal. Move both or neither.',
+        `${theme} ${fill}-hover reads ${hovered.toFixed(2)}:1 against ${fill}-foreground, worse than `
+          + `${fill}'s own ${resting.toFixed(2)}:1. Hovering a control must not cost contrast, so the `
+          + `hovered fill has to move AWAY from its label — darker under a light label, lighter under a `
+          + 'dark one. Check which way this theme\'s label points before picking the value.',
       );
     }
   }
@@ -385,6 +426,7 @@ function assertAccentAliasesKeepTheirTokenName(source) {
     `${fill}-ink`,
     `${fill}-soft`,
     `${fill}-foreground`,
+    `${fill}-hover`,
   ]));
 
   postcss.parse(source).walkAtRules('theme', (atRule) => {

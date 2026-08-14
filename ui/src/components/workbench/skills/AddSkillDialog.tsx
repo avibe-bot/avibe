@@ -325,7 +325,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
               type="button"
               onClick={install}
               disabled={!discovered || selected.size === 0 || backends.size === 0 || busy === 'install'}
-              className="flex items-center gap-1.5 rounded-lg bg-mint px-4 py-2 text-[12px] font-semibold text-primary-foreground shadow-[0_4px_16px_-4px_rgba(91,255,160,0.5)] transition hover:brightness-110 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-lg bg-mint px-4 py-2 text-[12px] font-semibold text-primary-foreground shadow-[0_4px_16px_-4px_rgba(91,255,160,0.5)] transition hover:bg-mint-hover disabled:opacity-50"
             >
               {busy === 'install' ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
               {busy === 'install' ? t('skills.addDialog.installing') : t('skills.addDialog.install', { count: selected.size })}
