@@ -311,10 +311,27 @@ const ACCENT_FILLS = ['--primary', '--accent', '--destructive', '--mint', '--cya
 const NEUTRAL_INKS = ['--foreground', '--muted'];
 const INK_SURFACES = ['--card', '--background', '--surface-3'];
 
+// A semantic fill and the palette token behind it must hold the same value, because
+// the pair measured here is not always the pair rendered: Button's `brand` prints
+// --primary-foreground on bg-mint and `brand-cyan` prints --accent-foreground on
+// bg-cyan. They match today by convention only, so without this the pinned ratio on
+// --primary would keep passing while the CTA it claims to describe drifted away.
+const SEMANTIC_FILL_ALIASES = [['--primary', '--mint'], ['--accent', '--cyan']];
+
 for (const [theme, tokens] of [['light', systemLight], ['dark', systemDark]]) {
   for (const fill of ACCENT_FILLS) {
     assertEqual(`${theme} ${fill} is defined`, tokens.has(fill), true);
     assertEqual(`${theme} ${fill} declares an ink`, tokens.has(`${fill}-ink`), true);
+  }
+
+  for (const [semantic, palette] of SEMANTIC_FILL_ALIASES) {
+    if (tokens.get(semantic) !== tokens.get(palette)) {
+      throw new Error(
+        `${theme} ${semantic} is ${tokens.get(semantic)} but ${palette} is ${tokens.get(palette)}. `
+          + `Button prints ${semantic}-foreground on ${palette}, so the contrast measured on ${semantic} `
+          + 'is only the contrast users see while the two stay equal. Move both or neither.',
+      );
+    }
   }
 
   // Inks are read as small text on a bare surface, so every one of them clears AA

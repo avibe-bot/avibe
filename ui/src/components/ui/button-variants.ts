@@ -9,20 +9,28 @@ export const buttonVariants = cva(
     variants: {
       variant: {
         // Mint primary — flat, no glow shadow (design.pen Button/Default).
-        default: 'gap-1.5 bg-primary text-primary-foreground hover:brightness-110',
-        // Brand CTA — bright bg + brand-color glow shadow + bold text + brighten on hover.
+        default:
+          'gap-1.5 bg-primary text-primary-foreground hover:bg-[color-mix(in_srgb,var(--primary)_88%,var(--brand-hover-mix))]',
+        // Brand CTA — bright bg + brand-color glow shadow + bold text.
         // The fill is the accent itself and the label its paired *-foreground: a dark
         // ink on the dark theme's neon accents, white on light's vivid ones. Both are
         // the design's own pairing; see the ACCEPTED_BRAND_PAIRS note in
         // ui/scripts/validate-theme.mjs for why light's white label is deliberate.
+        //
+        // Hover shifts the *fill* toward --brand-hover-mix rather than filtering the
+        // button, because brightness() scales the label along with the background: on
+        // light's white labels that made hover strictly worse than the pairing the
+        // owner accepted. Mixing the background instead moves the fill away from its
+        // label in either theme. The glow shadow no longer brightens with the fill —
+        // the fill shift carries the affordance. See --brand-hover-mix in index.css.
         brand:
-          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_24px_-4px_rgba(91,255,160,0.6)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_24px_-4px_rgba(91,255,160,0.6)] hover:bg-[color-mix(in_srgb,var(--mint)_92%,var(--brand-hover-mix))] disabled:shadow-none',
         'brand-cyan':
-          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_24px_-4px_rgba(63,224,229,0.6)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_24px_-4px_rgba(63,224,229,0.6)] hover:bg-[color-mix(in_srgb,var(--cyan)_92%,var(--brand-hover-mix))] disabled:shadow-none',
         'brand-gold':
-          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_24px_-4px_rgba(255,200,87,0.55)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_24px_-4px_rgba(255,200,87,0.55)] hover:bg-[color-mix(in_srgb,var(--gold)_92%,var(--brand-hover-mix))] disabled:shadow-none',
         'brand-violet':
-          'gap-2 bg-violet font-bold text-white shadow-[0_0_24px_-4px_rgba(124,91,255,0.55)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-violet font-bold text-white shadow-[0_0_24px_-4px_rgba(124,91,255,0.55)] hover:bg-[color-mix(in_srgb,var(--violet)_92%,var(--brand-hover-mix))] disabled:shadow-none',
         secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong',
         // Outline — bg matches page surface so it sits cleanly on glow gradients.
         outline:

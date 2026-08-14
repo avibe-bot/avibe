@@ -120,6 +120,15 @@
   --primary: #5bffa0;
   --primary-foreground: #080812;
   --primary-ink: #5bffa0;
+  /* Hover on a brand fill moves the fill AWAY from its label, so the pairing
+     improves under the cursor instead of degrading. This theme's labels are dark
+     ink, so the fill mixes toward white; light's labels are white, so it mixes
+     toward black. A brightness() filter cannot express this: it scales the label
+     with the fill, and a white label is already clamped at the top, so
+     brightness(1.1) only lowered light --primary from 2.54:1 to 2.09:1 while
+     brightness(0.95) bought nothing back (2.50:1). Mixing the background alone
+     leaves the label at full luminance and lifts hover to 3.23:1. */
+  --brand-hover-mix: #ffffff;
   --secondary: #11111c;
   --secondary-foreground: #f5f1e8;
   --muted: #9ba3b8;
@@ -218,6 +227,9 @@
     --primary: #10b981;
     --primary-foreground: #ffffff;
     --primary-ink: #067a55;
+    /* Mixes toward black because this theme's brand labels are white — see the
+       dark block for why hover shifts the fill rather than filtering the button. */
+    --brand-hover-mix: #000000;
     --secondary: #eef1f7;
     --secondary-foreground: #0a0a14;
     --muted: #5c6079;
@@ -316,6 +328,9 @@
   --primary: #10b981;
   --primary-foreground: #ffffff;
   --primary-ink: #067a55;
+  /* Mixes toward black because this theme's brand labels are white — see the
+     dark block for why hover shifts the fill rather than filtering the button. */
+  --brand-hover-mix: #000000;
   --secondary: #eef1f7;
   --secondary-foreground: #0a0a14;
   --muted: #5c6079;
