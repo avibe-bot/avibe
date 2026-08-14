@@ -249,6 +249,15 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
     void settlement.source(source).catch(() => undefined);
   }, [continuation, onClose]);
 
+  const publishReplacementFailure = React.useCallback((
+    seq: ContinuationTicket,
+    failureClass: ModelHubFailureClass,
+    settle?: () => Promise<void>,
+  ) => {
+    continuation.settle(seq, () => setReplacePhase({ kind: 'failure', failureClass }));
+    if (settle) void settle().catch(() => undefined);
+  }, [continuation]);
+
   const draft = React.useCallback((protocolOrder?: SourceProtocol[]): ApiKeySourceCreate => ({
     kind: 'api_key',
     vendor: 'custom',
@@ -374,14 +383,24 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         }
         let failureClass = classifyModelHubFailure(failure);
         if (failure?.code === 'source_not_found') {
-          await settlement.gone(latest.id);
+          publishReplacementFailure(
+            seq,
+            failureClass,
+            () => settlement.gone(latest.id),
+          );
+          return;
         } else if (mayHaveWritten(failure)) {
           try {
             const inventory = await settlement.readInventory();
             const current = inventory.sources.find((source) => source.id === latest.id);
             if (!current) {
               failureClass = 'authoritative-terminal';
-              await settlement.gone(latest.id, inventory);
+              publishReplacementFailure(
+                seq,
+                failureClass,
+                () => settlement.gone(latest.id, inventory),
+              );
+              return;
             } else if (!wasBlocked(current.state)) {
               publishReplacementEvidence(
                 seq,
@@ -393,13 +412,14 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               return;
             }
           } catch {
-            await settlement.unread();
+            publishReplacementFailure(seq, failureClass, settlement.unread);
+            return;
           }
         } else settlement.release();
-        continuation.settle(seq, () => setReplacePhase({ kind: 'failure', failureClass }));
+        publishReplacementFailure(seq, failureClass);
       }
     });
-  }, [apiKey, continuation, props, publishReplacementEvidence, replacePhase]);
+  }, [apiKey, continuation, props, publishReplacementEvidence, publishReplacementFailure, replacePhase]);
 
   const cancel = React.useCallback(() => {
     if (replaceMode) {

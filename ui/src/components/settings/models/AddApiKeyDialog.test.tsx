@@ -87,6 +87,16 @@ const replacementSettlement = (
   ...overrides,
 });
 
+const neverResolvingSettlement = (
+  overrides: Partial<SourceMutationSettlement> = {},
+): SourceMutationSettlement => ({
+  ...replacementSettlement(),
+  source: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
+  gone: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
+  unread: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
+  ...overrides,
+});
+
 const renderReplacement = (
   current: Source = blockedSource,
   settlement: SourceMutationSettlement = replacementSettlement(),
@@ -637,9 +647,8 @@ describe('AddApiKeyDialog', () => {
       } else {
         replace.mockRejectedValueOnce(new ApiCallError('bad_response', undefined, false));
       }
-      const settled = replacementSettlement({
+      const settled = neverResolvingSettlement({
         readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [current] }),
-        source: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
       });
       const closeTimer = vi.spyOn(window, 'setTimeout');
       renderReplacement(blockedSource, settled);
@@ -681,9 +690,8 @@ describe('AddApiKeyDialog', () => {
     vi.spyOn(modelsApi, 'replaceCredential').mockRejectedValueOnce(
       new ApiCallError('bad_response', undefined, false),
     );
-    const settled = replacementSettlement({
+    const settled = neverResolvingSettlement({
       readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [blockedSource] }),
-      source: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
     });
     const closeTimer = vi.spyOn(window, 'setTimeout');
     renderReplacement(blockedSource, settled);
@@ -701,6 +709,51 @@ describe('AddApiKeyDialog', () => {
     expect(settled.unread).not.toHaveBeenCalled();
     expect(closeTimer.mock.calls.filter(([, delay]) => delay === 1400)).toHaveLength(0);
   });
+
+  it.each([
+    { path: 'response', failureClass: 'authoritative-terminal', retries: false },
+    { path: 'inventory-missing', failureClass: 'authoritative-terminal', retries: false },
+    { path: 'inventory-unread', failureClass: 'inconclusive', retries: true },
+  ] as const)(
+    'publishes the $path terminal failure before any trailing settlement resolves',
+    async ({ path, failureClass, retries }) => {
+      vi.spyOn(modelsApi, 'replaceCredential').mockRejectedValueOnce(new ApiCallError(
+        path === 'response' ? 'source_not_found' : 'bad_response',
+        undefined,
+        path === 'response',
+      ));
+      const inventory = { snapshot: 3, sources: [] as Source[] };
+      const settled = neverResolvingSettlement({
+        readInventory: path === 'inventory-unread'
+          ? vi.fn().mockRejectedValue(new Error('inventory unavailable'))
+          : vi.fn().mockResolvedValue(inventory),
+      });
+      renderReplacement(blockedSource, settled);
+      const user = userEvent.setup();
+
+      await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-failure');
+      await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+
+      const failure = await screen.findByText(/Couldn't replace the key|更换失败/i);
+      expect(failure.closest('[data-failure-class]')?.getAttribute('data-failure-class')).toBe(failureClass);
+      expect(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }))
+        .toSatisfy((buttons: HTMLButtonElement[]) => buttons.every((button) => !button.disabled));
+      expect(screen.queryByRole('button', { name: /^Retry$|^重试$/i }) !== null).toBe(retries);
+      expect(screen.queryByText(i18n.t('settings.models.repair.repaired'))).toBeNull();
+      expect(settled.source).not.toHaveBeenCalled();
+
+      if (path === 'response') {
+        expect(settled.readInventory).not.toHaveBeenCalled();
+        expect(settled.gone).toHaveBeenCalledWith(blockedSource.id);
+      } else if (path === 'inventory-missing') {
+        expect(settled.readInventory).toHaveBeenCalledOnce();
+        expect(settled.gone).toHaveBeenCalledWith(blockedSource.id, inventory);
+      } else {
+        expect(settled.readInventory).toHaveBeenCalledOnce();
+        expect(settled.unread).toHaveBeenCalledOnce();
+      }
+    },
+  );
 
   it.each([
     ['discovery_failed', 'retryable-provider', true],
