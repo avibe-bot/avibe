@@ -340,7 +340,7 @@ const MobileSessionRow: React.FC<{
         </span>
         <SessionPinIndicator pinned={session.pinned} label={t('workbench.sessionPinned')} />
         {unread > 0 ? (
-          <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-background">
+          <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-primary-foreground">
             {unread > 99 ? '99+' : unread}
           </span>
         ) : (

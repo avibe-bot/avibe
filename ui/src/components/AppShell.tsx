@@ -153,7 +153,7 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
           <Icon className="size-4" />
         )}
         {item.badge ? (
-          <span className="absolute -right-2 -top-1.5 min-w-[14px] rounded-full bg-mint px-1 text-center font-mono text-[9px] font-bold leading-[14px] text-background">
+          <span className="absolute -right-2 -top-1.5 min-w-[14px] rounded-full bg-mint px-1 text-center font-mono text-[9px] font-bold leading-[14px] text-primary-foreground">
             {item.badge > 99 ? '99+' : item.badge}
           </span>
         ) : null}

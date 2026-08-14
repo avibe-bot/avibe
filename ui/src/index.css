@@ -122,7 +122,9 @@
   --mint-soft: rgba(91, 255, 160, 0.16);
   --cyan: #3fe0e5;
   --cyan-soft: rgba(63, 224, 229, 0.16);
-  --violet: #7c5bff;
+  /* Lightened just past AA on --card: #7c5bff read at 4.28:1 there, the one dark
+     ink below the floor. Hue and saturation are unchanged. */
+  --violet: #8465ff;
   --violet-soft: rgba(124, 91, 255, 0.16);
   --gold: #ffc857;
   --gold-foreground: #080812;
@@ -176,31 +178,40 @@
     --popover: #ffffff;
     --popover-foreground: #0a0a14;
 
-    --primary: #10b981;
+    /* Light inks are deepened relative to dark. The dark palette's vivid accents
+       read at 2.5-4.2:1 as small text on a light surface, and text-mint /
+       text-gold / text-cyan / text-destructive are used app-wide, so every ink
+       here clears WCAG AA (4.5:1) against --surface-3, the darkest light
+       surface. Deepening the fills lifts white-on-fill for --primary /
+       --accent / --gold / --destructive by the same amount, since contrast is
+       symmetric. --primary / --accent / --ring carry --mint / --cyan by
+       definition. Guarded by ui/scripts/validate-theme.mjs. */
+    --primary: #067a55;
     --primary-foreground: #ffffff;
     --secondary: #eef1f7;
     --secondary-foreground: #0a0a14;
     --muted: #5c6079;
     --muted-soft: #eef1f7;
-    --accent: #0891b2;
+    --accent: #0e7490;
     --accent-foreground: #ffffff;
-    --destructive: #e11d48;
+    --destructive: #ca1a41;
     --destructive-foreground: #ffffff;
 
     --border: rgba(8, 8, 18, 0.08);
     --border-strong: rgba(8, 8, 18, 0.14);
     --input: rgba(8, 8, 18, 0.12);
-    --ring: rgba(16, 185, 129, 0.5);
+    --ring: rgba(6, 122, 85, 0.5);
 
-    --mint: #10b981;
+    /* Accents share the AA floor below - see the --primary group. */
+    --mint: #067a55;
     --mint-soft: rgba(16, 185, 129, 0.14);
-    --cyan: #0891b2;
+    --cyan: #0e7490;
     --cyan-soft: rgba(8, 145, 178, 0.14);
     --violet: #7c3aed;
     --violet-soft: rgba(124, 58, 237, 0.14);
-    --gold: #d97706;
+    --gold: #ae4f08;
     --gold-foreground: #ffffff;
-    --pink: #dc2659;
+    --pink: #c7204f;
     --pink-soft: rgba(220, 38, 89, 0.10);
 
     /* Light-theme page gradients (softer alphas over light base). */
@@ -253,31 +264,32 @@
   --popover: #ffffff;
   --popover-foreground: #0a0a14;
 
-  --primary: #10b981;
+  --primary: #067a55;
   --primary-foreground: #ffffff;
   --secondary: #eef1f7;
   --secondary-foreground: #0a0a14;
   --muted: #5c6079;
   --muted-soft: #eef1f7;
-  --accent: #0891b2;
+  --accent: #0e7490;
   --accent-foreground: #ffffff;
-  --destructive: #e11d48;
+  --destructive: #ca1a41;
   --destructive-foreground: #ffffff;
 
   --border: rgba(8, 8, 18, 0.08);
   --border-strong: rgba(8, 8, 18, 0.14);
   --input: rgba(8, 8, 18, 0.12);
-  --ring: rgba(16, 185, 129, 0.5);
+  --ring: rgba(6, 122, 85, 0.5);
 
-  --mint: #10b981;
+  /* Deepened inks, AA on --surface-3 - see the prefers-color-scheme block above. */
+  --mint: #067a55;
   --mint-soft: rgba(16, 185, 129, 0.14);
-  --cyan: #0891b2;
+  --cyan: #0e7490;
   --cyan-soft: rgba(8, 145, 178, 0.14);
   --violet: #7c3aed;
   --violet-soft: rgba(124, 58, 237, 0.14);
-  --gold: #d97706;
+  --gold: #ae4f08;
   --gold-foreground: #ffffff;
-  --pink: #dc2659;
+  --pink: #c7204f;
   --pink-soft: rgba(220, 38, 89, 0.10);
 
   /* Light-theme page gradients (softer alphas over light base). */

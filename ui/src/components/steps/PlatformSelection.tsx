@@ -418,7 +418,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                         className={clsx(
                           'flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px] font-semibold',
                           index < 2 || currentValidationState === 'success'
-                            ? 'border-mint bg-mint text-background'
+                            ? 'border-mint bg-mint text-primary-foreground'
                             : 'border-border bg-background text-muted'
                         )}
                       >

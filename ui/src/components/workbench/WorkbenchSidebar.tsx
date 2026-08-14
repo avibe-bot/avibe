@@ -336,7 +336,7 @@ const SessionRow: React.FC<{
               {displayName}
             </span>
             {unread > 0 && (
-              <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-[#080812]">
+              <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-primary-foreground">
                 {unread > 99 ? '99+' : unread}
               </span>
             )}
@@ -786,7 +786,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               <Inbox className={clsx('size-4', isActive ? 'text-cyan' : 'text-foreground')} />
               <span className="flex-1">{t('workbench.nav.inbox')}</span>
               {badge && (
-                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-[#080812] shadow-[0_0_10px_-2px_rgba(63,224,229,0.7)]">
+                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-[0_0_10px_-2px_rgba(63,224,229,0.7)]">
                   {badge}
                 </span>
               )}

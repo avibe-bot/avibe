@@ -341,7 +341,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
             className={clsx(
               'inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-bold transition',
               canSubmit
-                ? 'bg-mint text-[#080812] shadow-[0_0_14px_-4px_rgba(91,255,160,0.6)] hover:brightness-110'
+                ? 'bg-mint text-primary-foreground shadow-[0_0_14px_-4px_rgba(91,255,160,0.6)] hover:brightness-110'
                 : 'cursor-not-allowed bg-muted-soft text-muted',
             )}
           >

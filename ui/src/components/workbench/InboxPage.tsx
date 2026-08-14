@@ -287,7 +287,7 @@ export const InboxPage: React.FC = () => {
                     className="inline-flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.06] px-3 py-1.5 text-[11px] font-semibold text-mint transition hover:bg-mint/[0.12]"
                   >
                     {unread > 0 && (
-                      <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-[#080812]">
+                      <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-primary-foreground">
                         {unread > 99 ? '99+' : unread}
                       </span>
                     )}

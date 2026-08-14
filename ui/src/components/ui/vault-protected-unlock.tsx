@@ -128,7 +128,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
 
         {canUsePasskey ? (
           <div className="flex flex-col items-center gap-2.5 rounded-xl border-[1.5px] border-mint bg-mint-soft p-4">
-            <Badge variant="success" className="border-transparent bg-mint uppercase tracking-wide text-background">
+            <Badge variant="success" className="border-transparent bg-mint uppercase tracking-wide text-primary-foreground">
               <Sparkles className="size-3" />
               {t('vaults.protectedUnlock.recommended')}
             </Badge>
