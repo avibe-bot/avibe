@@ -26,6 +26,7 @@ type ValidationCase = {
   normalized?: string;
   reason?: string;
 };
+type BaseUrlValidationCase = ValidationCase & { client_rejects: boolean };
 type EmptyTargetCase = {
   id: string;
   vendor: string;
@@ -38,7 +39,7 @@ const validationFixture = JSON.parse(readFileSync(join(
   '../tests/fixtures/model_hub_source_edit_validation.json',
 ), 'utf8')) as {
   display_names: ValidationCase[];
-  base_urls: ValidationCase[];
+  base_urls: BaseUrlValidationCase[];
   empty_targets: EmptyTargetCase[];
 };
 
@@ -94,7 +95,7 @@ describe('source management capabilities', () => {
     });
   });
 
-  it('holds the same display-name and Base-URL contract fixture as the server', () => {
+  it('holds the same display-name contract fixture as the server', () => {
     for (const item of validationFixture.display_names) {
       const assessment = assessSourceEdit(source(), {
         displayName: item.value,
@@ -103,14 +104,17 @@ describe('source management capabilities', () => {
       expect(assessment.valid, item.id).toBe(item.valid);
       expect(assessment.reason, item.id).toBe(item.reason ?? null);
     }
+  });
+
+  it('rejects an endpoint if and only if the shared row carries credential material', () => {
     for (const item of validationFixture.base_urls) {
       const assessment = assessSourceEdit(source(), {
         displayName: source().display_name,
         baseUrl: item.value,
       });
-      expect(assessment.valid, item.id).toBe(item.valid);
-      expect(assessment.reason, item.id).toBe(item.reason ?? null);
-      if (item.valid) expect(assessment.patch?.base_url, item.id).toBe(item.value.trim());
+      expect(assessment.valid, item.id).toBe(!item.client_rejects);
+      expect(assessment.reason, item.id).toBe(item.client_rejects ? 'baseUrlCredential' : null);
+      if (!item.client_rejects) expect(assessment.patch?.base_url, item.id).toBe(item.value.trim());
     }
   });
 

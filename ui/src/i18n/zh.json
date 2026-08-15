@@ -1302,7 +1302,6 @@
             "displayNameRequired": "请输入显示名称",
             "displayNameTooLong": "最多输入 64 个字符",
             "displayNameCredential": "显示名称不能包含凭据",
-            "baseUrlInvalid": "请输入不含用户信息和片段的有效 HTTP 或 HTTPS Base URL",
             "baseUrlCredential": "请从 Base URL 中移除凭据和疑似凭据的查询参数"
           },
           "impact": {

@@ -29,60 +29,79 @@
       "id": "https_trailing_slash",
       "value": "https://relay.example/v2/",
       "valid": true,
+      "client_rejects": false,
       "normalized": "https://relay.example/v2"
     },
     {
       "id": "uppercase_scheme",
       "value": "HTTPS://relay.example/v2/",
       "valid": true,
+      "client_rejects": false,
       "normalized": "https://relay.example/v2"
     },
     {
       "id": "safe_query",
       "value": "https://relay.example/v2?api-version=2026-08-15",
       "valid": true,
+      "client_rejects": false,
       "normalized": "https://relay.example/v2?api-version=2026-08-15"
     },
     {
       "id": "explicit_default_port",
       "value": "https://relay.example:443/v1",
       "valid": true,
+      "client_rejects": false,
       "normalized": "https://relay.example:443/v1"
     },
     {
       "id": "uppercase_host",
       "value": "https://Relay.Example/v1",
       "valid": true,
+      "client_rejects": false,
       "normalized": "https://Relay.Example/v1"
     },
     {
       "id": "bad_scheme",
       "value": "ftp://relay.example/v2",
       "valid": false,
-      "reason": "baseUrlInvalid"
+      "client_rejects": false
     },
     {
       "id": "userinfo",
       "value": "https://user:password@relay.example/v2",
       "valid": false,
-      "reason": "baseUrlInvalid"
+      "client_rejects": false
     },
     {
       "id": "fragment",
       "value": "https://relay.example/v2#token",
       "valid": false,
-      "reason": "baseUrlInvalid"
+      "client_rejects": false
+    },
+    {
+      "id": "missing_authority",
+      "value": "https:relay.example",
+      "valid": false,
+      "client_rejects": false
+    },
+    {
+      "id": "single_slash_authority",
+      "value": "https:/relay.example",
+      "valid": false,
+      "client_rejects": false
     },
     {
       "id": "credential_query",
       "value": "https://relay.example/v2?access_token=do-not-store",
       "valid": false,
+      "client_rejects": true,
       "reason": "baseUrlCredential"
     },
     {
       "id": "credential_pattern",
       "value": "https://relay.example/sk-test-never-persist-this",
       "valid": false,
+      "client_rejects": true,
       "reason": "baseUrlCredential"
     }
   ],

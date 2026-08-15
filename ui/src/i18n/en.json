@@ -1302,7 +1302,6 @@
             "displayNameRequired": "Enter a display name",
             "displayNameTooLong": "Use 64 characters or fewer",
             "displayNameCredential": "A display name cannot contain a credential",
-            "baseUrlInvalid": "Enter a valid HTTP or HTTPS Base URL without user info or a fragment",
             "baseUrlCredential": "Remove credentials and credential-shaped query parameters from the Base URL"
           },
           "impact": {

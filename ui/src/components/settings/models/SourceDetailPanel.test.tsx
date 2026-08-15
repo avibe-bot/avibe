@@ -249,13 +249,28 @@ describe('SourceDetailPanel', () => {
 
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(endpoint);
-    await userEvent.type(endpoint, 'ftp://relay.example/v2');
-    expect(screen.getByText(/valid HTTP or HTTPS|有效的 HTTP 或 HTTPS/i)).toBeTruthy();
-    expect((screen.getByRole('button', { name: /^Save$|^保存$/i }) as HTMLButtonElement).disabled).toBe(true);
-
-    await userEvent.clear(endpoint);
     await userEvent.type(endpoint, 'https://relay.example/v2?access_token=do-not-store');
     expect(screen.getByText(/Remove credentials|移除凭据/i)).toBeTruthy();
+    expect((screen.getByRole('button', { name: /^Save$|^保存$/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('leaves URL acceptance to the server and renders its named failure in the editor', async () => {
+    const patch = vi.spyOn(modelsApi, 'patchSource')
+      .mockRejectedValueOnce(new ApiCallError('discovery_failed'));
+    renderEchoPanel();
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+
+    const endpoint = screen.getByLabelText(/^Base URL$/i);
+    await userEvent.clear(endpoint);
+    await userEvent.type(endpoint, 'https:relay.example');
+    const save = screen.getByRole('button', { name: /^Save$|^保存$/i }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    await userEvent.click(save);
+
+    await waitFor(() => expect(patch).toHaveBeenCalledWith(source.id, { base_url: 'https:relay.example' }));
+    expect(await screen.findByText(/source was not saved|来源没有保存上/i)).toBeTruthy();
+    expect(screen.getByDisplayValue('https:relay.example')).toBeTruthy();
   });
 
   it('renders the proved protocol through its product-facing locale key', async () => {
@@ -311,7 +326,7 @@ describe('SourceDetailPanel', () => {
       if (url.startsWith(`/api/models/sources/${source.id}`)) {
         requests.push({ url, init });
         if (requests.length === 1) {
-          return Response.json({ error: 'source_last_supplier', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
+          return Response.json({ error: 'source_in_route_chain', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
         }
         return Response.json({ removed_hops: hops, interrupted: gaps });
       }
@@ -462,7 +477,7 @@ describe('SourceDetailPanel', () => {
       if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
       if (url.startsWith(`/api/models/sources/${source.id}`)) {
         requests.push({ url, init });
-        if (requests.length === 1) return Response.json({ error: 'source_last_supplier', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
+        if (requests.length === 1) return Response.json({ error: 'source_in_route_chain', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
         if (requests.length === 2) return Response.json({ error: 'engine_down' }, { status: 503 });
         return Response.json({ removed_hops: [], interrupted: [] });
       }

@@ -104,14 +104,12 @@ export type SourceEditInvalidReason =
   | 'displayNameRequired'
   | 'displayNameTooLong'
   | 'displayNameCredential'
-  | 'baseUrlInvalid'
   | 'baseUrlCredential';
 
 export const SOURCE_EDIT_REASON_KEY: Record<SourceEditInvalidReason, string> = {
   displayNameRequired: 'settings.models.sourceDetail.edit.validation.displayNameRequired',
   displayNameTooLong: 'settings.models.sourceDetail.edit.validation.displayNameTooLong',
   displayNameCredential: 'settings.models.sourceDetail.edit.validation.displayNameCredential',
-  baseUrlInvalid: 'settings.models.sourceDetail.edit.validation.baseUrlInvalid',
   baseUrlCredential: 'settings.models.sourceDetail.edit.validation.baseUrlCredential',
 };
 
@@ -171,15 +169,8 @@ const assessedEditedBaseUrl = (value: string): BaseUrlAssessment => {
   try {
     parsed = new URL(value);
   } catch {
-    return { valid: false, reason: 'baseUrlInvalid' };
+    return { valid: true, value };
   }
-  if (
-    !['http:', 'https:'].includes(parsed.protocol.toLowerCase())
-    || !parsed.hostname
-    || parsed.username
-    || parsed.password
-    || parsed.hash
-  ) return { valid: false, reason: 'baseUrlInvalid' };
 
   for (const key of parsed.searchParams.keys()) {
     const normalized = key.trim().toLowerCase().replace(/[-.]/g, '_');
@@ -189,8 +180,8 @@ const assessedEditedBaseUrl = (value: string): BaseUrlAssessment => {
     ) return { valid: false, reason: 'baseUrlCredential' };
   }
 
-  // This is a user-facing safety pre-filter, not the URL authority. The server
-  // validates and normalizes the value that is sent verbatim from here.
+  // The browser owns only the warning that prevents a user from persisting a
+  // secret. URL acceptance and normalization belong entirely to the server.
   return { valid: true, value };
 };
 

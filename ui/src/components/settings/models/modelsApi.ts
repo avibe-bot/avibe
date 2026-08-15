@@ -499,7 +499,8 @@ const listedModelIdsForPlacement = (agent: AgentSupply): string[] => {
   return [...new Set(values)];
 };
 
-class MockStore {
+/** Exported so tests can assert mock/live contract parity over the seeded store. */
+export class MockStore {
   sources = buildMockSources();
   agents = buildMockAgents(this.sources);
   events = buildMockEvents();
@@ -715,16 +716,53 @@ class MockStore {
 
   deleteSource(id: string, confirmation?: GuardConfirmation) {
     this.syncAgents();
+    const removedHops: RouteHopRef[] = this.agents.flatMap((agent) =>
+      Object.entries(agent.routes ?? {}).flatMap(([menuModel, route]) =>
+        route.hops.flatMap((hop, index) => hop.source_id === id
+          ? [{
+              backend: agent.backend,
+              menu_model: menuModel,
+              source_id: hop.source_id,
+              model_id: hop.model_id,
+              position: index + 1,
+            }]
+          : [])));
     const remaining = this.sources.filter((s) => s.id !== id);
-    // `source_last_supplier` — the code the contract actually sends here.
-    // `mode_switch_blocked` belongs to the mode route, and a client written
-    // against it retried nothing on a real refusal.
     const gaps = this.wouldInterrupt(remaining);
-    if (gaps.length > 0 && !confirmation)
-      throw new ApiCallError('source_last_supplier', undefined, true, gaps);
+    const confirmed = confirmation !== undefined
+      && JSON.stringify(confirmation.would_remove_hops) === JSON.stringify(removedHops)
+      && JSON.stringify(confirmation.would_interrupt) === JSON.stringify(gaps);
+    if ((removedHops.length > 0 || gaps.length > 0) && !confirmed) {
+      // Routed deletion wins over last-supplier: this mirrors delete_source's
+      // `_require_guard_plan(error=...)` choice, not the mode-switch route.
+      throw new ApiCallError(
+        removedHops.length > 0 ? 'source_in_route_chain' : 'source_last_supplier',
+        undefined,
+        true,
+        gaps,
+        [],
+        removedHops,
+      );
+    }
     this.sources = remaining;
-    // Orders and the rollup are recomputed on the next read (syncAgents).
-    return delay({ removed_hops: [], interrupted: gaps });
+    for (const agent of this.agents) {
+      if (agent.sources) {
+        agent.sources = {
+          ...agent.sources,
+          order: agent.sources.order.filter((sourceId) => sourceId !== id),
+        };
+      }
+      if (agent.routes) {
+        agent.routes = Object.fromEntries(
+          Object.entries(agent.routes).map(([menuModel, route]) => [
+            menuModel,
+            { hops: route.hops.filter((hop) => hop.source_id !== id) },
+          ]),
+        );
+      }
+    }
+    this.syncAgents();
+    return delay({ removed_hops: removedHops, interrupted: gaps });
   }
 
   replaceCredential(id: string, body: CredentialReplace) {
