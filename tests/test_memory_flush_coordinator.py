@@ -399,7 +399,7 @@ async def test_stale_processing_probe_cannot_commit_across_generation(
 async def test_blocked_processing_probe_does_not_serialize_other_session(
     tmp_path: Path,
 ) -> None:
-    """MEMORY-IM-ATTACH-001: independent session delivery stays concurrent."""
+    """MEMORY-IM-ATTACH-001: independent failure settlement stays concurrent."""
 
     store = _store(tmp_path)
     fault_row = _enqueue(store, "blocked-probe-session", session="blocked-probe-session")
@@ -414,30 +414,78 @@ async def test_blocked_processing_probe_does_not_serialize_other_session(
         lease_owner="setup",
         now=datetime(2026, 1, 1, tzinfo=UTC),
     ).settled
-    other = _enqueue(store, "independent-session", session="independent-session")
+    _enqueue(store, "independent-session", session="independent-session")
+    independent = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:01.000Z",
+    )
+    assert independent is not None
     health_entered = asyncio.Event()
     release_health = asyncio.Event()
 
     class Provider(FakeMemoryProvider):
+        async def add(self, capture):
+            self.captures.append(capture)
+            raise MemoryProviderFailure("memory_processing_failed", retryable=True)
+
         async def processing_healthy(self) -> bool:
             health_entered.set()
             await release_health.wait()
             return True
 
     provider = Provider()
-    worker = MemoryWorker(
+    coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
         enabled=lambda: True,
     )
-    draining = asyncio.create_task(worker.drain_once())
+    assert await coordinator.run_due() == 0
 
     await asyncio.wait_for(health_entered.wait(), timeout=1)
-    assert await asyncio.wait_for(asyncio.shield(draining), timeout=1) == 1
-    assert [capture.text for capture in provider.captures] == [other.payload_text]
+    assert not await asyncio.wait_for(
+        coordinator.deliver(independent, lease_owner="worker"),
+        timeout=1,
+    )
+    session_lock = coordinator._session_lock(
+        independent.provider_session_ref.serialize()
+    )
+    assert not session_lock.locked()
 
     release_health.set()
-    await _wait_for_processing_actions(worker.coordinator)
+    await _wait_for_processing_actions(coordinator)
+
+
+async def test_quiescence_cancels_and_joins_processing_action(tmp_path: Path) -> None:
+    """MEMORY-IM-ATTACH-003: lifecycle quiescence retires the active probe."""
+
+    store = _store(tmp_path)
+    _open_store_processing_fault(
+        store,
+        "quiesce-processing-probe",
+        at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    health_entered = asyncio.Event()
+    health_finished = asyncio.Event()
+
+    class Provider(FakeMemoryProvider):
+        async def processing_healthy(self) -> bool:
+            health_entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                health_finished.set()
+
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=Provider(),
+        enabled=lambda: True,
+    )
+    assert await coordinator.run_due() == 0
+    await asyncio.wait_for(health_entered.wait(), timeout=1)
+
+    assert await coordinator.pause_and_wait(timeout_seconds=1)
+    assert health_finished.is_set()
+    assert isinstance(store.next_processing_action(), ProcessingHealthProbe)
 
 
 async def test_processing_probe_error_retries_on_tick_after_backoff(

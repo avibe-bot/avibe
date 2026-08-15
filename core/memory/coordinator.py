@@ -280,15 +280,27 @@ class SessionFlushCoordinator:
 
         self.pause()
         tasks = tuple(task for task in self._flush_tasks.values() if not task.done())
+        processing_task = self._processing_task
+        if processing_task is not None and not processing_task.done():
+            processing_task.cancel()
+            tasks = (*tasks, processing_task)
         if not tasks:
             return True
         try:
-            await asyncio.wait_for(
-                asyncio.gather(*(asyncio.shield(task) for task in tasks)),
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(asyncio.shield(task) for task in tasks),
+                    return_exceptions=True,
+                ),
                 timeout=_positive_timeout(timeout_seconds),
             )
         except asyncio.TimeoutError:
             return False
+        for task, result in zip(tasks, results, strict=True):
+            if task is processing_task and isinstance(result, asyncio.CancelledError):
+                continue
+            if isinstance(result, BaseException):
+                raise result
         return True
 
     async def prepare_shutdown(self, *, timeout_seconds: float = 2.0) -> None:
@@ -749,50 +761,50 @@ class SessionFlushCoordinator:
             )
 
     async def _reconcile_processing_events(self) -> None:
-        async with self._processing_fault_lock:
-            await self._reconcile_processing_events_locked()
-
-    async def _reconcile_processing_events_locked(self) -> None:
         if self._processing_retry_at is not None:
             if self._current_time() < self._processing_retry_at:
                 return
             self._processing_retry_at = None
         for _ in range(MAX_PROCESSING_ACTIONS_PER_PASS):
-            action = await self._store_call(self._store.next_processing_action)
-            if action is None:
-                return
-            if isinstance(action, ProcessingHealthProbe):
-                try:
-                    healthy = bool(await self._provider.processing_healthy())
-                except Exception:
-                    self._defer_processing_retry()
+            async with self._processing_fault_lock:
+                action = await self._store_call(self._store.next_processing_action)
+                if action is None:
                     return
+                if isinstance(action, ProcessingNotification):
+                    async with self._processing_notification_lock:
+                        current = await self._store_call(
+                            self._store.next_processing_action
+                        )
+                        if current != action:
+                            return
+                        if not await self._emit_processing_event(
+                            action.event,
+                            action.kind,
+                            action.occurred_at,
+                        ):
+                            self._defer_processing_retry()
+                            return
+                        acknowledged = await self._store_call(
+                            self._store.acknowledge_processing_notification,
+                            action,
+                        )
+                        if not acknowledged:
+                            return
+                    continue
+            if not isinstance(action, ProcessingHealthProbe):
+                return
+            try:
+                healthy = bool(await self._provider.processing_healthy())
+            except Exception:
+                self._defer_processing_retry()
+                return
+            async with self._processing_fault_lock:
                 committed = await self._store_call(
                     self._store.record_processing_health,
                     action,
                     healthy=healthy,
                 )
                 if not committed.committed:
-                    return
-                continue
-            if not isinstance(action, ProcessingNotification):
-                return
-            async with self._processing_notification_lock:
-                current = await self._store_call(self._store.next_processing_action)
-                if current != action:
-                    return
-                if not await self._emit_processing_event(
-                    action.event,
-                    action.kind,
-                    action.occurred_at,
-                ):
-                    self._defer_processing_retry()
-                    return
-                acknowledged = await self._store_call(
-                    self._store.acknowledge_processing_notification,
-                    action,
-                )
-                if not acknowledged:
                     return
 
     def _defer_processing_retry(self) -> None:

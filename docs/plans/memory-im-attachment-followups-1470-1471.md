@@ -65,8 +65,11 @@ boot recovery, and future producers never call the runner. Boot recovery preserv
 the durable action for the next active tick. Failed actions retain the existing
 retry deadline; the worker's one-second tick bounds classification latency, which
 is not a prerequisite for user-path correctness. The coordinator cancels and joins
-an active action task during shutdown. Generation and `occurred_at` compare-and-set
-checks continue to reject stale probe results.
+an active action task before lifecycle quiescence reports success and during
+shutdown; cancellation leaves the durable action for a later active tick. The
+provider health await runs outside the processing-fault lock, with only the local
+action read and generation/`occurred_at` compare-and-set commit inside short lock
+segments. Those compare-and-set checks continue to reject stale probe results.
 
 **Rejected models.** Having every producer call a shared drain entry is a
 coordination rule that a new producer can omit. Commit-triggered scheduling avoids
