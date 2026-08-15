@@ -27,7 +27,7 @@ from core.memory.im_attachments import (
     IM_ATTACHMENT_CAPTURE_PLATFORMS,
     select_memory_attachments,
 )
-from core.memory.telemetry import log_attachment_skip
+from core.memory_telemetry import log_attachment_skip
 from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 
 

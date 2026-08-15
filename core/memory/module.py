@@ -41,7 +41,7 @@ from core.memory.store import (
     MemoryStore,
     is_principal_id,
 )
-from core.memory.telemetry import log_attachment_skip
+from core.memory_telemetry import log_attachment_skip
 from core.memory.types import (
     CaptureAccepted,
     CaptureAttachment,
@@ -769,12 +769,12 @@ class MemoryModule:
                         source_lease=source_lease,
                     )
             except Exception as error:
+                log_attachment_skip(
+                    attachment_platform,
+                    len(request.attachments),
+                    "pin_failed",
+                )
                 if normalized_text.strip():
-                    log_attachment_skip(
-                        attachment_platform,
-                        len(request.attachments),
-                        "pin_failed",
-                    )
                     return await self._capture_under_root(
                         replace(
                             request,

@@ -447,10 +447,18 @@ async def test_capture_pin_failure_preserves_mixed_turn_text(
         source_message_id="attachment-only-pin-failure",
         text="",
     )
+    caplog.clear()
     assert await module.capture(attachment_only) == OperationFailed(
         error="memory_store_unavailable"
     )
     assert len(store.list_queue_rows()) == 1
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("memory_attachment_capture_skipped")
+    ]
+    assert len(records) == 1
+    assert "count=1 reason=pin_failed" in records[0].getMessage()
 
 
 async def test_unexpected_capture_pin_failure_preserves_mixed_turn_text(

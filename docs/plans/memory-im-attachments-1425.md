@@ -319,11 +319,23 @@ all capture work to one late stage.
   `memory_attachment_capture_skipped` record. From successful materialization
   onward, Admission aggregates the eligibility and selection reasons it owns; every
   deterministic drop outside Admission emits the same platform/count/closed-reason
-  shape itself. That finite outside-Admission set is currently lease-retention
-  failure (`lease_retain_failed`), configuration-generation mismatch
-  (`configuration_changed`), and mixed-turn pin fallback (`pin_failed`). A new
-  deterministic drop point after materialization must name its single accounting
-  owner when added; silent loss and duplicate counting are both contract violations.
+  shape itself. The complete post-materialization injection matrix is:
+
+  | Drop point | Closed reason represented in the matrix | Accounting owner |
+  | --- | --- | --- |
+  | Admission selection rejection | `unsupported_type` | Admission aggregate |
+  | Partial materialization failure | `download_failed` | Admission aggregate |
+  | Lease-retention failure | `lease_retain_failed` | Message handler |
+  | Configuration-generation mismatch | `configuration_changed` | Controller |
+  | Pin failure with a caption | `pin_failed` | Memory module |
+  | Pin failure without a caption | `pin_failed` | Memory module |
+
+  This table maps one-to-one to the parameter rows in
+  `tests/test_memory_attachment_drop_accounting.py`. Adding a deterministic drop
+  point requires both a table row naming its single accounting owner and a matrix
+  row; either omission violates the contract. All-shape pin failure, not only mixed
+  turn fallback, is owned before the pin-error result branches. Silent loss and
+  duplicate counting are both contract violations.
 - **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
   admission, the handler performs only an O(1), non-blocking, local registration of
   an exact-session Memory capture ticket. Registration records FIFO order but never

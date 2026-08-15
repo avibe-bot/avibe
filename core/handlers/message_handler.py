@@ -19,7 +19,7 @@ from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_context_thread_id,
 )
-from core.memory.telemetry import log_attachment_skip
+from core.memory_telemetry import log_attachment_skip
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
