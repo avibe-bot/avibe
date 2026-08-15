@@ -3,22 +3,26 @@ export type ChatSessionViewState = 'loading' | 'ready' | 'failed';
 type ChatSessionViewStateInput = {
   routeSessionId: string;
   loadedSessionId: string | null;
-  loading: boolean;
-  error: string | null;
+  hydratedTranscriptSessionId: string | null;
+  failedBootstrapSessionId: string | null;
 };
 
 export function chatSessionViewState({
   routeSessionId,
   loadedSessionId,
-  loading,
-  error,
+  hydratedTranscriptSessionId,
+  failedBootstrapSessionId,
 }: ChatSessionViewStateInput): ChatSessionViewState {
-  if (loadedSessionId === routeSessionId) return 'ready';
+  if (
+    loadedSessionId === routeSessionId
+    && hydratedTranscriptSessionId === routeSessionId
+  ) return 'ready';
 
-  // A row from the previous route and an empty row awaiting a newer refresh are
-  // both pending states. Absence becomes a failure only after a request records
-  // an explicit error; it is never evidence that the session does not exist.
-  if (loadedSessionId !== null || loading || error === null) return 'loading';
+  if (failedBootstrapSessionId === routeSessionId) return 'failed';
 
-  return 'failed';
+  // The lightweight Session-row recovery can beat the transcript bootstrap.
+  // Neither that row nor an empty messages array proves the route is ready: only
+  // the route-scoped hydration marker can distinguish a real empty transcript
+  // from the reset state that exists while bootstrap is still in flight.
+  return 'loading';
 }

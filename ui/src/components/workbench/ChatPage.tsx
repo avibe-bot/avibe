@@ -493,6 +493,12 @@ export const ChatPage: React.FC = () => {
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
   const [messages, setMessages] = useState<WorkbenchMessage[]>([]);
+  // A Session row can arrive from lightweight SSE recovery before the combined
+  // bootstrap installs this route's messages. Keep that row from exposing the
+  // reset empty array as a real empty transcript. The marker survives same-route
+  // reconnect/auth refreshes so an already visible chat stays visible.
+  const [hydratedTranscriptSessionId, setHydratedTranscriptSessionId] = useState<string | null>(null);
+  const [failedBootstrapSessionId, setFailedBootstrapSessionId] = useState<string | null>(null);
   const provisionPlacement = useMemo(
     () => placeVaultProvisionRequests(messages, vaultRequests),
     [messages, vaultRequests],
@@ -779,6 +785,10 @@ export const ChatPage: React.FC = () => {
   // session's rows into the current one (Codex P2).
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+  // Same-route refreshes can overlap (for example, the initial load and an
+  // authorization refresh). Only the latest bootstrap may commit state: a
+  // superseded success or failure describes an older authorization snapshot.
+  const bootstrapRequestGenerationRef = useRef(0);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
@@ -1143,16 +1153,23 @@ export const ChatPage: React.FC = () => {
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
+    const requestGeneration = ++bootstrapRequestGenerationRef.current;
+    const requestIsCurrent = () => (
+      sessionId === sessionIdRef.current
+      && requestGeneration === bootstrapRequestGenerationRef.current
+    );
     setLoading(true);
     setError(null);
+    setFailedBootstrapSessionId((current) => current === sessionId ? null : current);
     try {
       // Initial chat open needs the same recent tail window, queue, draft,
       // route/config state, and current turn state. Fetch them as one bootstrap
       // payload so remote links don't pay a tunnel round-trip per widget.
       const bootstrapIsCurrent = await sessionRowRefreshGateRef.current.begin();
       const bootstrap = await api.getSessionBootstrap(sessionId);
-      // Dropped if the user switched chats while this load was in flight.
-      if (sessionId !== sessionIdRef.current) return;
+      // Drop a response if the user switched chats or a newer bootstrap for
+      // this route began while it was in flight.
+      if (!requestIsCurrent()) return;
       if (bootstrapIsCurrent()) {
         setSession(bootstrap.session);
       } else {
@@ -1186,6 +1203,8 @@ export const ChatPage: React.FC = () => {
       // as a delivered bubble *and* sat in the queue strip, the exact double
       // render the live path already rejects.
       setMessages((prev) => mergeById(bootstrap.messages.filter(isTranscriptMessage), prev));
+      setHydratedTranscriptSessionId(sessionId);
+      setFailedBootstrapSessionId(null);
       setOlderCursor(bootstrap.next_before_id ?? null);
       setHistoricalWindow(false);
       // Chat Activity chips for past turns: resync the per-turn summary (row text
@@ -1206,13 +1225,16 @@ export const ChatPage: React.FC = () => {
       if (bootstrap.turn_state.foreground === 'running') markWorking();
       else if (bootstrap.turn_state.foreground === 'idle') setWorking(false);
     } catch (err) {
-      // Only surface the error if we're still on the session that failed — a
-      // stale failure must not stamp an error onto the chat the user moved to.
-      if (sessionId === sessionIdRef.current) setError(errorMessage(err) ?? String(err));
+      // A superseded failure must not stamp an error onto the newer request's
+      // loading state, even when both requests belong to the same route.
+      if (requestIsCurrent()) {
+        setError(errorMessage(err) ?? String(err));
+        setFailedBootstrapSessionId(sessionId);
+      }
     } finally {
-      // Same guard: a stale load finishing must not flip the new session out of
-      // its own loading state into a premature not-found / error view (Codex P2).
-      if (sessionId === sessionIdRef.current) setLoading(false);
+      // Same guard: a stale load finishing must not flip the latest request out
+      // of its own loading state into a premature not-found / error view.
+      if (requestIsCurrent()) setLoading(false);
     }
   }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow]);
 
@@ -1221,6 +1243,7 @@ export const ChatPage: React.FC = () => {
   // load/subscribe — so the previous conversation / queue / draft never leak in
   // and the merge in ``refresh`` only ever unions same-session rows.
   useEffect(() => {
+    bootstrapRequestGenerationRef.current += 1;
     // The gate is session-scoped. A PATCH for the previous chat may still be
     // pending after navigation, but it must never hold the new chat's bootstrap
     // or recovery reads hostage.
@@ -1233,6 +1256,8 @@ export const ChatPage: React.FC = () => {
     setSession(null);
     setSessionCanChat(false);
     setMessages([]);
+    setHydratedTranscriptSessionId(null);
+    setFailedBootstrapSessionId(null);
     deepLinkWindowHandledRef.current = false;
     setOlderCursor(null);
     setHistoricalWindow(false);
@@ -2298,8 +2323,8 @@ export const ChatPage: React.FC = () => {
   const viewState = chatSessionViewState({
     routeSessionId: sessionId,
     loadedSessionId: session?.id ?? null,
-    loading,
-    error,
+    hydratedTranscriptSessionId,
+    failedBootstrapSessionId,
   });
   if (viewState === 'loading') {
     return (
