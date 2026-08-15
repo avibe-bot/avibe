@@ -3,6 +3,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import postcss from 'postcss';
 
+import { isLength, isZeroLength } from './cssLength.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { withoutNonRenderingText } from './nonRenderingText.mjs';
 
@@ -531,22 +532,10 @@ const layerParts = (layer) => splitTopLevel(layer, (char) => char === '_' || /\s
 // what the message below says.
 //
 // Lengths are still recognised, but only to tell a hand-written glow apart from
-// a token reference so it can be rejected -- never to bless one part of it.
-const LENGTH = /^[+-]?(\d+(\.\d+)?|\.\d+)(px|rem|em|ch|vw|vh)?$/;
-
-// Zero is a number, not a spelling. This used to be a regex matching the literal
-// `0` with an optional unit, which is one of the ways to write zero out of
-// several: `-0px`, `+0px`, `0.0`, `00px` and `0vw` are all the same offset, and
-// each of them was read as a DIRECTIONAL offset -- so `shadow-[-0px_0_93px_red]`
-// took the exemption that exists for light thrown to one side and drew a
-// centred glow with it. The exemption is the dangerous side of that question,
-// which is what makes the narrow spelling expensive rather than untidy. Every
-// caller has already established through LENGTH that the part is a length, so
-// the numeric component is whatever precedes the unit and the question can be
-// asked as arithmetic, where all the spellings converge by construction.
-function isZeroLength(part) {
-  return Number.parseFloat(part) === 0;
-}
+// a token reference so it can be rejected -- never to bless one part of it. The
+// grammar itself lives in cssLength.mjs, with its own tests: it is a rule about
+// CSS rather than about this scan, and the enumeration it replaces was the
+// fourth time this file checked something narrower than its message claimed.
 
 // Every channel a shadow value reaches the page through. The first cut of this
 // scan read only `shadow-[...]`, which repeated one level up the mistake the
@@ -1063,7 +1052,7 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
   // the back and let the offsets line up. This used to exempt a leading `var()`,
   // which quietly reopened the same hole from the other end: `var(--mint) 0 0
   // 93px` kept its colour in the offset slot and drew whatever geometry it liked.
-  if (!LENGTH.test(parts[0])) parts.push(parts.shift());
+  if (!isLength(parts[0])) parts.push(parts.shift());
 
   // A multi-part layer passes only if it can be shown NOT to be a glow. That is
   // the same inversion the single-part branch makes, and this branch was left
@@ -1076,7 +1065,7 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
     return [`${shown} -- a computed length cannot be evaluated here, so this cannot be shown not to be a glow`];
   }
   const [x, y, third] = parts;
-  if (!LENGTH.test(x ?? '') || !LENGTH.test(y ?? '')) {
+  if (!isLength(x ?? '') || !isLength(y ?? '')) {
     return [`${shown} -- the offsets are not plain lengths, so this cannot be shown not to be a glow`];
   }
   // A non-zero offset is directional light whatever the blur does, and that is
@@ -1091,7 +1080,7 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
   // in a bare `return []`, and every spelling that reached it was accepted for
   // no better reason than that the two tests above had not recognised it.
   if (third === undefined) return [];
-  if (LENGTH.test(third)) return isZeroLength(third) ? [] : [shown];
+  if (isLength(third)) return isZeroLength(third) ? [] : [shown];
   if (COLOUR.test(third)) return [];
   if (INDIRECT.test(third)) {
     return [`${shown} -- a name in the blur slot could be any radius, so this cannot be shown not to be a glow`];
