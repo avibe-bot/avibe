@@ -125,11 +125,15 @@ export const sourceMutationLanding = (
   affectedChains: ModelChainRequest[],
   applied: boolean,
 ): SourceMutationLanding => {
-  if (!reads || !applied
-    || regionFailed(reads.sources)
-    || regionFailed(reads.supply)
-    || regionFailed(reads.runtime)
-    || regionFailed(reads.chains)) {
+  const reportProjectionFailed = reads
+    ? (
+        Object.keys(
+          SOURCE_MUTATION_REPORT_PROJECTIONS,
+        ) as (keyof SourceMutationLandingReads)[]
+      ).some((projection) => regionFailed(reads[projection]))
+    : true;
+
+  if (!reads || !applied || reportProjectionFailed) {
     return { verdict: 'degraded', reads, affectedChains };
   }
   const chains = foldRegionRead<ModelChainIndex, ModelChainIndex | null>(reads.chains, {

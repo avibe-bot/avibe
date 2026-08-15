@@ -53,7 +53,6 @@ export const SourceMutationReport: React.FC<{
                   size="icon"
                   className="model-hub-guard-close"
                   disabled={!report?.landingFailed || report.busy}
-                  onClick={onDismiss}
                   aria-label={t(report?.landingFailed ? 'settings.models.sourceDetail.dismissUnverified' : actionKey)}
                   title={t(report?.landingFailed ? 'settings.models.sourceDetail.dismissUnverified' : actionKey)}
                 >

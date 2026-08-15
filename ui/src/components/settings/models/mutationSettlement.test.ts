@@ -14,7 +14,7 @@ import {
   sourceMutationLanding,
   sourceMutationReadScope,
 } from './mutationSettlement';
-import { readyRegion, unreadRegion } from './regionRead';
+import { failRegionRead, readyRegion, unreadRegion } from './regionRead';
 import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
 
 describe('mutation settlement fences', () => {
@@ -77,6 +77,18 @@ describe('mutation settlement fences', () => {
     expect(new Set(calls)).toEqual(new Set(Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS)));
     expect(new Set(Object.keys(reads))).toEqual(new Set(Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS)));
     expect(sourceMutationLanding(reads, affectedChains, true).verdict).toBe('landed');
+
+    for (const projection of Object.keys(
+      SOURCE_MUTATION_REPORT_PROJECTIONS,
+    ) as (keyof typeof SOURCE_MUTATION_REPORT_PROJECTIONS)[]) {
+      expect(
+        sourceMutationLanding({
+          ...reads,
+          [projection]: failRegionRead(reads[projection]),
+        }, affectedChains, true).verdict,
+        projection,
+      ).toBe('degraded');
+    }
 
     for (const request of affectedChains) {
       const key = modelChainKey(request.backend, request.modelId);

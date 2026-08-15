@@ -12,6 +12,11 @@ export type SourceMutationReportState = {
   busy: boolean;
 };
 
+type HeldSourceMutationReport = {
+  state: SourceMutationReportState;
+  resolve: () => void;
+};
+
 const settleCommit = async (
   commit: SourceMutationCommit,
 ): Promise<SourceMutationLanding | null> => {
@@ -25,19 +30,22 @@ const settleCommit = async (
 /** Page-owned post-commit evidence; a Source panel may disappear without releasing it. */
 export const useSourceMutationReport = () => {
   const [report, setReport] = React.useState<SourceMutationReportState | null>(null);
-  const releaseRef = React.useRef<(() => void) | null>(null);
+  const queueRef = React.useRef<HeldSourceMutationReport[]>([]);
   const mountedRef = React.useRef(true);
 
-  const resolveHeldReport = React.useCallback(() => {
-    const resolve = releaseRef.current;
-    releaseRef.current = null;
-    resolve?.();
+  const resolveHeldReports = React.useCallback(() => {
+    const held = queueRef.current;
+    queueRef.current = [];
+    for (const entry of held) entry.resolve();
   }, []);
 
-  const release = React.useCallback(() => {
-    setReport(null);
-    resolveHeldReport();
-  }, [resolveHeldReport]);
+  const releaseCurrent = React.useCallback(() => {
+    const [current, ...remaining] = queueRef.current;
+    if (!current) return;
+    queueRef.current = remaining;
+    current.resolve();
+    setReport(remaining[0]?.state ?? null);
+  }, []);
 
   const hold = React.useCallback((
     commit: SourceMutationCommit,
@@ -45,8 +53,9 @@ export const useSourceMutationReport = () => {
   ): Promise<void> => {
     if (!mountedRef.current) return Promise.resolve();
     return new Promise((resolve) => {
-      releaseRef.current = resolve;
-      setReport({ commit, landingFailed, busy: false });
+      const held = { state: { commit, landingFailed, busy: false }, resolve };
+      queueRef.current.push(held);
+      if (queueRef.current.length === 1) setReport(held.state);
     });
   }, []);
 
@@ -61,24 +70,27 @@ export const useSourceMutationReport = () => {
   }, [hold]);
 
   const complete = React.useCallback(async () => {
-    if (!report || report.busy) return;
-    setReport({ ...report, busy: true });
-    const landing = await settleCommit(report.commit);
-    if (!mountedRef.current) return;
+    const current = queueRef.current[0];
+    if (!current || current.state.busy) return;
+    current.state = { ...current.state, busy: true };
+    setReport(current.state);
+    const landing = await settleCommit(current.state.commit);
+    if (!mountedRef.current || queueRef.current[0] !== current) return;
     if (landing?.verdict === 'landed') {
-      release();
+      releaseCurrent();
       return;
     }
-    setReport({ ...report, landingFailed: true, busy: false });
-  }, [release, report]);
+    current.state = { ...current.state, landingFailed: true, busy: false };
+    setReport(current.state);
+  }, [releaseCurrent]);
 
   React.useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      resolveHeldReport();
+      resolveHeldReports();
     };
-  }, [resolveHeldReport]);
+  }, [resolveHeldReports]);
 
-  return { report, present, complete, dismiss: release };
+  return { report, present, complete, dismiss: releaseCurrent };
 };
