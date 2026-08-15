@@ -7,6 +7,7 @@ import zh from '../../../i18n/zh.json';
 import {
   assessSourceEdit,
   canEditSourceEndpoint,
+  holdsCommittedImpact,
   manageActions,
   MANAGE_DESTINATION,
   MANAGE_LABEL_KEY,
@@ -181,6 +182,7 @@ describe('source management capabilities', () => {
 
     expect(new Set(Object.keys(stages))).toEqual(new Set(MANAGE_STAGE_KINDS));
     for (const stage of Object.values(stages)) {
+      expect(holdsCommittedImpact(stage), `${stage.kind}:holds committed impact`).toBe('complete' in stage);
       if (stage.kind === 'idle') continue;
       expect(
         exitEvents.some((event) => transitionManageStage(stage, event).kind !== stage.kind),

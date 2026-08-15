@@ -58,6 +58,11 @@ export type ManageStage =
   | { kind: 'committed_edit_impact'; plan: ManageGuardPlan; complete: () => Promise<SourceMutationLanding>; landingFailed: boolean }
   | { kind: 'committed_delete_impact'; plan: ManageGuardPlan; complete: () => Promise<SourceMutationLanding>; landingFailed: boolean };
 
+export const holdsCommittedImpact = (
+  stage: ManageStage,
+): stage is Extract<ManageStage, { landingFailed: boolean }> =>
+  stage.kind === 'committed_edit_impact' || stage.kind === 'committed_delete_impact';
+
 export type ManageFailureSurface = 'none' | 'edit_dialog' | 'guard_dialog' | 'delete_inline' | 'committed_dialog';
 
 type ManageStageTransition<Event> = {

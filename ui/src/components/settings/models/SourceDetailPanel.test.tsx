@@ -635,7 +635,7 @@ describe('SourceDetailPanel', () => {
     },
   );
 
-  it('enables labeled impact dismissal only after reconciliation degrades', async () => {
+  it('releases tracked work when degraded impact is explicitly dismissed', async () => {
     const reconcile = vi.fn().mockResolvedValueOnce('degraded');
     const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
     vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
@@ -643,7 +643,17 @@ describe('SourceDetailPanel', () => {
       removed_hops: hops,
       interrupted: [],
     });
-    const trackMutation: TrackSourceMutation = (work) => work(source, settlement({ source: reconcile }));
+    let tracked: Promise<unknown> | undefined;
+    let trackedSettled = false;
+    const trackMutation: TrackSourceMutation = (work) => {
+      const operation = work(source, settlement({ source: reconcile }));
+      tracked = operation;
+      void operation.then(
+        () => { trackedSettled = true; },
+        () => { trackedSettled = true; },
+      );
+      return operation;
+    };
     render(
       <ToastProvider>
         <I18nextProvider i18n={i18n}>
@@ -667,8 +677,57 @@ describe('SourceDetailPanel', () => {
     const dismissClose = dismissButtons.find((button) => button.classList.contains('model-hub-guard-close'));
     expect(dismissClose).toBeTruthy();
     expect((dismissClose as HTMLButtonElement).disabled).toBe(false);
+    expect(trackedSettled).toBe(false);
     await userEvent.click(dismissClose!);
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was updated|来源已更新/i })).toBeNull());
+    expect(tracked).toBeDefined();
+    await tracked;
+    expect(trackedSettled).toBe(true);
+  });
+
+  it('releases tracked work when delete settlement unmounts the impact holder', async () => {
+    vi.spyOn(modelsApi, 'deleteSource').mockResolvedValueOnce({
+      removed_hops: heldHops,
+      interrupted: heldGaps,
+    });
+    let tracked: Promise<unknown> | undefined;
+    let trackedSettled = false;
+    let view: ReturnType<typeof render> | null = null;
+    const gone = vi.fn(async () => {
+      view?.unmount();
+      return 'degraded' as const;
+    });
+    const trackMutation: TrackSourceMutation = (work) => {
+      const operation = work(source, settlement({ gone }));
+      tracked = operation;
+      void operation.then(
+        () => { trackedSettled = true; },
+        () => { trackedSettled = true; },
+      );
+      return operation;
+    };
+    view = render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await submitManagementWrite('delete', false);
+    const impact = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
+    const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    expect(done).toBeTruthy();
+    expect(trackedSettled).toBe(false);
+    await userEvent.click(done!);
+
+    await waitFor(() => expect(gone).toHaveBeenCalledOnce());
+    expect(tracked).toBeDefined();
+    // Completeness comes from the total stage predicate, not from remembering
+    // each UI event that can stop holding the committed-impact stage.
+    await tracked;
+    expect(trackedSettled).toBe(true);
   });
 
   it.each(['edit', 'delete'] as const)(

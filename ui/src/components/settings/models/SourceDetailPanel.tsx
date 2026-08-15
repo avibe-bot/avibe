@@ -16,6 +16,7 @@ import { GuardImpact } from './GuardImpact';
 import {
   assessSourceEdit,
   canEditSourceEndpoint,
+  holdsCommittedImpact,
   manageActions,
   MANAGE_DESTINATION,
   MANAGE_LABEL_KEY,
@@ -293,6 +294,7 @@ export const SourceDetailPanel: React.FC<{
   const [confirmingReauth, setConfirmingReauth] = React.useState(false);
   const [replacingKey, setReplacingKey] = React.useState(false);
   const [manageStage, dispatchManageStage] = React.useReducer(transitionManageStage, { kind: 'idle' });
+  const committedImpactReleaseRef = React.useRef<(() => void) | null>(null);
   const [manualDraft, setManualDraft] = React.useState<{ modelId: string; tiers: string[]; failed: boolean; retryRead: boolean } | null>(null);
   const [guard, setGuard] = React.useState<GuardedAction | null>(null);
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
@@ -303,6 +305,16 @@ export const SourceDetailPanel: React.FC<{
   const editAssessment = editDraft
     ? assessSourceEdit(source, editDraft)
     : { valid: false as const, patch: null, reason: null };
+  const releaseCommittedImpact = React.useCallback(() => {
+    const release = committedImpactReleaseRef.current;
+    committedImpactReleaseRef.current = null;
+    release?.();
+  }, []);
+
+  React.useEffect(() => {
+    if (!holdsCommittedImpact(manageStage)) releaseCommittedImpact();
+  }, [manageStage, releaseCommittedImpact]);
+  React.useEffect(() => () => releaseCommittedImpact(), [releaseCommittedImpact]);
 
   const beginEdit = () => {
     dispatchManageStage({
@@ -482,12 +494,8 @@ export const SourceDetailPanel: React.FC<{
     settle: Extract<ManageStage, { kind: 'committed_edit_impact' }>['complete'],
   ) => new Promise<void>((resolve) => {
     setBusy(false);
-    const complete = async () => {
-      const verdict = await settle();
-      if (verdict === 'landed') resolve();
-      return verdict;
-    };
-    dispatchManageStage({ type: 'commit_impact', action: kind, plan, complete });
+    committedImpactReleaseRef.current = resolve;
+    dispatchManageStage({ type: 'commit_impact', action: kind, plan, complete: settle });
   });
   const reconcileEditWrite = async (
     before: Source,
