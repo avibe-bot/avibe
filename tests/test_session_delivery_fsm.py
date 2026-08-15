@@ -247,6 +247,22 @@ async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> No
     assert lifecycle_entered.is_set()
 
 
+@pytest.mark.anyio
+async def test_session_lifecycle_advances_local_epoch_before_operation(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    pre_epoch = manager.session_lifecycle_epoch("ses_fsm")
+
+    async def lifecycle_operation() -> str:
+        assert manager.session_lifecycle_epoch("ses_fsm") == pre_epoch + 1
+        return "reset"
+
+    assert await manager.run_session_lifecycle(
+        "ses_fsm",
+        lifecycle_operation,
+    ) == "reset"
+    assert manager.session_lifecycle_epoch_matches("ses_fsm", pre_epoch + 1)
+
+
 async def _activate(
     manager: SessionTurnManager,
     *,

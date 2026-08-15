@@ -1161,6 +1161,102 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         await handler.drain_memory_capture_tasks()
         retained_lease.release.assert_called_once_with()
 
+    async def test_session_reset_during_download_drops_stale_attachment_without_waiting(
+        self,
+    ):
+        """Scenario: MEMORY-IM-ATTACH-004."""
+
+        from core.session_turns import SessionTurnManager
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.session_turns = SessionTurnManager(controller)
+        controller.reserve_memory_attachment_capture = Mock(
+            return_value=_capture_reservation()
+        )
+        controller.capture_user_memory = AsyncMock()
+        download_started = asyncio.Event()
+        release_download = asyncio.Event()
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+
+        async def materialize(_context, _working_path):
+            download_started.set()
+            await release_download.wait()
+            return types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                errors=(),
+                lease=lease,
+            )
+
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="review this")
+        handler._materialize_file_attachments = materialize
+
+        async def admit(**kwargs):
+            admitted_lease = kwargs["attachment_lease"]
+            admitted_lease.adopt()
+            admitted_lease.release()
+            return True
+
+        handler._admit_human_delivery = AsyncMock(side_effect=admit)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-reset-during-download",
+            platform="slack",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        turn = asyncio.create_task(
+            handler.handle_user_message(context, "keep this caption")
+        )
+        await asyncio.wait_for(download_started.wait(), timeout=1.0)
+        reset_completed = asyncio.Event()
+
+        async def reset_operation():
+            reset_completed.set()
+            return "reset"
+
+        reset = await asyncio.wait_for(
+            controller.session_turns.run_session_lifecycle(
+                "base-session",
+                reset_operation,
+                deadline_seconds=0.05,
+            ),
+            timeout=0.1,
+        )
+        self.assertEqual(reset, "reset")
+        assert reset_completed.is_set()
+        assert not turn.done()
+
+        with self.assertLogs("core.memory.admission", level="INFO") as logs:
+            release_download.set()
+            await asyncio.wait_for(turn, timeout=1.0)
+            await handler.drain_memory_capture_tasks()
+
+        controller.reserve_memory_attachment_capture.assert_not_called()
+        lease.retain.assert_not_called()
+        controller.capture_user_memory.assert_awaited_once()
+        capture_call = controller.capture_user_memory.await_args
+        self.assertEqual(capture_call.args[1], "keep this caption")
+        self.assertIsNone(capture_call.kwargs["attachment_reservation"])
+        self.assertIsNone(capture_call.kwargs["attachment_config_generation"])
+        self.assertEqual(
+            sum("reason=stale_session" in line for line in logs.output),
+            1,
+        )
+
     async def test_second_same_session_attachment_turn_does_not_wait_for_first_capture(
         self,
     ):

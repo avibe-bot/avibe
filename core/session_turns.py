@@ -628,6 +628,7 @@ class SessionTurnManager:
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
         self._session_lifecycle_locks: dict[str, asyncio.Lock] = {}
+        self._session_lifecycle_epochs: dict[str, int] = {}
         # Interruption reports owed to turns whose platform was not connected yet
         # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
         self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
@@ -682,6 +683,22 @@ class SessionTurnManager:
         await lock.acquire()
         return TurnLifecycleAdmission(lock)
 
+    def session_lifecycle_epoch(self, raw_session_id: str) -> int:
+        """Return the local lifecycle generation for one canonical session."""
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            raise ValueError("session lifecycle epoch requires a session id")
+        return self._session_lifecycle_epochs.get(raw_session_id, 0)
+
+    def session_lifecycle_epoch_matches(
+        self,
+        raw_session_id: str,
+        expected_epoch: int,
+    ) -> bool:
+        """Revalidate a pre-await lifecycle fact inside lifecycle admission."""
+
+        return self.session_lifecycle_epoch(raw_session_id) == expected_epoch
+
     async def run_session_lifecycle(
         self,
         raw_session_id: str,
@@ -701,6 +718,8 @@ class SessionTurnManager:
                 "turn capture admission did not quiesce before the deadline"
             ) from exc
         try:
+            pre_epoch = self.session_lifecycle_epoch(raw_session_id)
+            self._session_lifecycle_epochs[raw_session_id] = pre_epoch + 1
             return await operation()
         finally:
             admission.release()

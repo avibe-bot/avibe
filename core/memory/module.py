@@ -18,6 +18,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 
 from config import paths
+from core.memory.admission import log_attachment_skip
 from core.memory.blocking import run_blocking
 from core.memory.attachments import (
     AttachmentPinError,
@@ -552,6 +553,7 @@ class MemoryModule:
         *,
         source_lease: InboundAttachmentLease | None = None,
         admission: object = None,
+        attachment_platform: str = "avibe",
     ) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
@@ -568,12 +570,14 @@ class MemoryModule:
                 return await self._capture_with_admission(
                     request,
                     source_lease=source_lease,
+                    attachment_platform=attachment_platform,
                 )
         if not self._owns_capture_admission(admission, request, admission_lock):
             return await self._skipped_with_missed("memory_invalid_input")
         return await self._capture_with_admission(
             request,
             source_lease=source_lease,
+            attachment_platform=attachment_platform,
         )
 
     @asynccontextmanager
@@ -685,6 +689,7 @@ class MemoryModule:
         request: CaptureRequest,
         *,
         source_lease: InboundAttachmentLease | None,
+        attachment_platform: str,
     ) -> CaptureReceipt:
         async with self._root_lifecycle_lock():
             if self._retired:
@@ -711,6 +716,7 @@ class MemoryModule:
                 request,
                 normalized_text,
                 source_lease=source_lease,
+                attachment_platform=attachment_platform,
             )
 
     def _capture_lock_for_request(self, request: object) -> asyncio.Lock:
@@ -744,6 +750,7 @@ class MemoryModule:
         normalized_text: str,
         *,
         source_lease: InboundAttachmentLease | None,
+        attachment_platform: str,
     ) -> CaptureReceipt:
         """Pin and enqueue one validated capture under the provider-root fence."""
 
@@ -763,6 +770,11 @@ class MemoryModule:
                     )
             except Exception as error:
                 if normalized_text.strip():
+                    log_attachment_skip(
+                        attachment_platform,
+                        len(request.attachments),
+                        "pin_failed",
+                    )
                     return await self._capture_under_root(
                         replace(
                             request,
@@ -771,6 +783,7 @@ class MemoryModule:
                         ),
                         normalized_text,
                         source_lease=None,
+                        attachment_platform=attachment_platform,
                     )
                 if isinstance(error, AttachmentPinError):
                     return await self._capture_pin_failure(error.error)

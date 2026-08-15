@@ -521,8 +521,11 @@ def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
 
 def test_attachment_capture_fails_closed_when_config_generation_changes(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-003."""
+
+    caplog.set_level("INFO", logger="core.memory.admission")
 
     async def run() -> None:
         controller = _controller()
@@ -572,6 +575,13 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
         assert request.attachment_config_generation is None
 
     asyncio.run(run())
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("memory_attachment_capture_skipped")
+    ]
+    assert len(records) == 1
+    assert "count=1 reason=configuration_changed" in records[0].getMessage()
 
 
 @pytest.mark.parametrize(

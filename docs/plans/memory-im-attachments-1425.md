@@ -286,6 +286,15 @@ all capture work to one late stage.
   after session resolution, before any subagent or routing-agent namespace can
   rewrite the Agent session id. Both the early capture and the delayed lifecycle
   fence/capture request receive that saved canonical value.
+- **Cross-await revalidation invariant.** Any local fact resolved before an
+  indeterminate await is revalidated inside the O(1), no-`await` atomic segment
+  that consumes it; a mismatch fails closed, and no bounded waiter waits for the
+  indeterminate span. Attachment turns snapshot the canonical session lifecycle
+  epoch before materialization, then revalidate it while holding `SessionTurn`
+  immediately before reservation. `/new` advances that local epoch after acquiring
+  `SessionTurn`; therefore a reset never waits for a download, while an attachment
+  that finishes after the reset is dropped as `stale_session` and eligible caption
+  text is still captured independently.
 - **Bounded-wait invariant.** No deadline-bound provider or subprocess read may
   occur in a span that blocks any bounded waiter. The bounded waiters here include
   both the user-visible Agent dispatch path and `/new`'s five-second lifecycle
@@ -305,6 +314,14 @@ all capture work to one late stage.
   implicit compatibility path. Eligible text remains independently best effort, and
   that invariant must hold at every attachment-path failure or early return rather
   than only for failures with an existing closed classification.
+- **Drop-accounting invariant.** Every attachment deterministically dropped in one
+  turn is counted exactly once by one scrub-safe
+  `memory_attachment_capture_skipped` record. Admission aggregates its own drop
+  reasons; every drop after admission emits the same platform/count/closed-reason
+  shape itself. The finite post-admission set is currently configuration-generation
+  mismatch (`configuration_changed`) and mixed-turn pin fallback (`pin_failed`). A
+  new post-admission drop point must name its single accounting owner when added;
+  silent loss and duplicate counting are both contract violations.
 - **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
   admission, the handler performs only an O(1), non-blocking, local registration of
   an exact-session Memory capture ticket. Registration records FIFO order but never

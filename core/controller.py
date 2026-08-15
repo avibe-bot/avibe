@@ -55,6 +55,7 @@ from core.memory.admission import (
     WORKBENCH_PLATFORM,
     CaptureAdmission,
     InboundTurnFacts,
+    log_attachment_skip,
 )
 from core.memory.blocking import run_blocking
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
@@ -2559,6 +2560,11 @@ class Controller:
                         isinstance(current_generation, bool)
                         or current_generation != request.attachment_config_generation
                     ):
+                        log_attachment_skip(
+                            platform,
+                            len(request.attachments),
+                            "configuration_changed",
+                        )
                         request = replace(
                             request,
                             attachments=(),
@@ -2571,7 +2577,11 @@ class Controller:
                     capture_options["admission"] = held_admission
                 if request.attachments and attachment_lease is not None:
                     capture_options["source_lease"] = attachment_lease
-                await runtime.module.capture(request, **capture_options)
+                await runtime.module.capture(
+                    request,
+                    attachment_platform=platform,
+                    **capture_options,
+                )
             logger.info(
                 "Memory capture platform=%s latency_ms=%d",
                 platform,

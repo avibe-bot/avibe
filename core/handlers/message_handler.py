@@ -116,6 +116,25 @@ class MessageHandler(BaseHandler):
             return None
         return await acquire(session_id)
 
+    def _memory_session_lifecycle_epoch(self, session_id: str) -> int:
+        manager = getattr(self.controller, "session_turns", None)
+        read_epoch = getattr(manager, "session_lifecycle_epoch", None)
+        if not callable(read_epoch):
+            return 0
+        epoch = read_epoch(session_id)
+        return epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else 0
+
+    def _memory_session_lifecycle_epoch_matches(
+        self,
+        session_id: str,
+        expected_epoch: int,
+    ) -> bool:
+        manager = getattr(self.controller, "session_turns", None)
+        matches = getattr(manager, "session_lifecycle_epoch_matches", None)
+        if callable(matches):
+            return bool(matches(session_id, expected_epoch))
+        return self._memory_session_lifecycle_epoch(session_id) == expected_epoch
+
     async def drain_memory_capture_tasks(self) -> None:
         """Settle captures accepted before controller shutdown closes Memory."""
 
@@ -319,6 +338,11 @@ class MessageHandler(BaseHandler):
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
             memory_session_id = base_session_id
+            memory_session_pre_epoch = (
+                self._memory_session_lifecycle_epoch(memory_session_id)
+                if is_human and context.files
+                else None
+            )
             payload = dict(context.platform_specific or {})
             payload["turn_source"] = source
             payload["turn_base_session_id"] = base_session_id
@@ -772,6 +796,21 @@ class MessageHandler(BaseHandler):
                         )
                         if not self._memory_capture_registration_open:
                             raise _MemoryCaptureRegistrationClosed
+                        stale_attachment_capture = bool(
+                            memory_session_pre_epoch is not None
+                            and not self._memory_session_lifecycle_epoch_matches(
+                                memory_session_id,
+                                memory_session_pre_epoch,
+                            )
+                        )
+                        if stale_attachment_capture:
+                            from core.memory.admission import log_attachment_skip
+
+                            log_attachment_skip(
+                                str(context.platform or "unknown"),
+                                len(context.files),
+                                "stale_session",
+                            )
                         reserve_attachment = getattr(
                             self.controller,
                             "reserve_memory_attachment_capture",
@@ -780,6 +819,7 @@ class MessageHandler(BaseHandler):
                         memory_capture_reservation = (
                             reserve_attachment(context, memory_session_id)
                             if callable(reserve_attachment)
+                            and not stale_attachment_capture
                             else None
                         )
                         attachment_config_generation = getattr(

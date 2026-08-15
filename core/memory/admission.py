@@ -198,8 +198,15 @@ class CaptureAdmission:
                 if status == "ready" and config_generation is not None:
                     try:
                         selection = select_memory_attachments(facts.attachment_lease)  # type: ignore[arg-type]
-                    except Exception:
-                        _log_attachment_skip(platform, native_files, "unavailable")
+                    except Exception as error:
+                        logger.warning(
+                            "memory_attachment_selection_failed "
+                            "platform=%s count=%d error_type=%s",
+                            platform,
+                            native_files,
+                            type(error).__name__,
+                        )
+                        log_attachment_skip(platform, native_files, "unavailable")
                     else:
                         attachments = selection.attachments
                         skipped = (
@@ -216,14 +223,14 @@ class CaptureAdmission:
                                 if len(reasons) == 1
                                 else "mixed_rejections"
                             )
-                            _log_attachment_skip(
+                            log_attachment_skip(
                                 platform,
                                 len(skipped),
                                 reason,
                             )
                 else:
                     reason = "not_configured" if status == "not_configured" else "unavailable"
-                    _log_attachment_skip(platform, native_files, reason)
+                    log_attachment_skip(platform, native_files, reason)
                 if not facts.text.strip() and not attachments:
                     return CaptureSkipped(reason="memory_invalid_input")
             elif not _asserted_true(facts.is_ordinary_text) or not facts.text.strip():
@@ -290,7 +297,9 @@ def _has_native_files(value: object) -> bool:
     return count is not None and count > 0
 
 
-def _log_attachment_skip(platform: str, count: int, reason: str) -> None:
+def log_attachment_skip(platform: str, count: int, reason: str) -> None:
+    """Record one aggregate attachment drop without native attachment detail."""
+
     logger.info(
         "memory_attachment_capture_skipped platform=%s count=%d reason=%s",
         platform,

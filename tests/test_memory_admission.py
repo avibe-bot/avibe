@@ -486,13 +486,17 @@ def test_all_materialization_failures_keep_text_and_emit_one_skip(
 
 def test_unexpected_attachment_selection_failure_keeps_text(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-004."""
 
     monkeypatch.setattr(
         "core.memory.admission.select_memory_attachments",
-        lambda _lease: (_ for _ in ()).throw(RuntimeError("selector failed")),
+        lambda _lease: (_ for _ in ()).throw(
+            RuntimeError("secret attachment name must not be logged")
+        ),
     )
+    caplog.set_level("INFO", logger="core.memory.admission")
 
     request = _admission().decide(
         _facts(
@@ -509,6 +513,14 @@ def test_unexpected_attachment_selection_failure_keeps_text(
     assert isinstance(request, CaptureRequest)
     assert request.text == "keep this caption"
     assert request.attachments == ()
+    warnings = [
+        record
+        for record in caplog.records
+        if record.message.startswith("memory_attachment_selection_failed")
+    ]
+    assert len(warnings) == 1
+    assert "error_type=RuntimeError" in warnings[0].getMessage()
+    assert "secret attachment name" not in caplog.text
 
 
 def test_disabled_memory_is_answered_before_any_directory_lookup() -> None:

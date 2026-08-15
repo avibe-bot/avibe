@@ -402,6 +402,7 @@ async def test_capture_pins_a_real_attachment_and_forwards_the_private_copy(tmp_
 async def test_capture_pin_failure_preserves_mixed_turn_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-004."""
 
@@ -416,19 +417,30 @@ async def test_capture_pin_failure_preserves_mixed_turn_text(
         )
 
     monkeypatch.setattr(attachment_store, "pin", fail_pin)
+    caplog.set_level("INFO", logger="core.memory.admission")
 
     mixed = replace(
         _request(source="mixed-pin-failure", attachments=(attachment,)),
         text="keep this caption",
         attachment_config_generation=7,
     )
-    assert await module.capture(mixed) == CaptureAccepted()
+    assert await module.capture(
+        mixed,
+        attachment_platform="slack",
+    ) == CaptureAccepted()
 
     rows = store.list_queue_rows()
     assert len(rows) == 1
     assert rows[0].payload_text == "keep this caption"
     assert rows[0].payload_attachments is None
     assert rows[0].attachment_bundle_id is None
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("memory_attachment_capture_skipped")
+    ]
+    assert len(records) == 1
+    assert "count=1 reason=pin_failed" in records[0].getMessage()
 
     attachment_only = replace(
         mixed,
