@@ -16,7 +16,8 @@ import {
   MANAGE_STAGE_RETRY,
   SOURCE_EDIT_REASON_KEY,
 } from './manage';
-import type { Source } from './types';
+import { SOURCE_PROTOCOLS } from './types';
+import type { Source, SourceProtocol } from './types';
 
 type ValidationCase = {
   id: string;
@@ -25,11 +26,21 @@ type ValidationCase = {
   normalized?: string;
   reason?: string;
 };
+type EmptyTargetCase = {
+  id: string;
+  vendor: string;
+  protocol: SourceProtocol;
+  server_valid: boolean;
+};
 
 const validationFixture = JSON.parse(readFileSync(join(
   process.cwd(),
   '../tests/fixtures/model_hub_source_edit_validation.json',
-), 'utf8')) as { display_names: ValidationCase[]; base_urls: ValidationCase[] };
+), 'utf8')) as {
+  display_names: ValidationCase[];
+  base_urls: ValidationCase[];
+  empty_targets: EmptyTargetCase[];
+};
 
 const source = (over: Partial<Source> = {}): Source => ({
   id: 'src_manage',
@@ -72,13 +83,13 @@ describe('source management capabilities', () => {
     }
   });
 
-  it('normalizes changed metadata', () => {
+  it('trims metadata but leaves endpoint normalization to the server', () => {
     expect(assessSourceEdit(source(), {
       displayName: '  Relay key  ',
       baseUrl: 'HTTPS://relay.example/v2/',
     })).toEqual({
       valid: true,
-      patch: { display_name: 'Relay key', base_url: 'https://relay.example/v2' },
+      patch: { display_name: 'Relay key', base_url: 'HTTPS://relay.example/v2/' },
       reason: null,
     });
   });
@@ -99,7 +110,41 @@ describe('source management capabilities', () => {
       });
       expect(assessment.valid, item.id).toBe(item.valid);
       expect(assessment.reason, item.id).toBe(item.reason ?? null);
-      if (item.valid) expect(assessment.patch?.base_url, item.id).toBe(item.normalized);
+      if (item.valid) expect(assessment.patch?.base_url, item.id).toBe(item.value.trim());
+    }
+  });
+
+  it('never adds an endpoint patch to a display-name-only edit', () => {
+    for (const item of validationFixture.base_urls.filter((candidate) => candidate.valid)) {
+      const stored = item.normalized ?? item.value.trim();
+      const assessment = assessSourceEdit(source({ base_url: stored }), {
+        displayName: 'Renamed source',
+        baseUrl: stored,
+      });
+      expect(assessment.valid, item.id).toBe(true);
+      expect(assessment.patch, item.id).toEqual({ display_name: 'Renamed source' });
+      expect(assessment.patch, item.id).not.toHaveProperty('base_url');
+    }
+  });
+
+  it('holds no vendor or protocol policy for an emptied endpoint', () => {
+    const vendors = new Set(validationFixture.empty_targets.map((item) => item.vendor));
+    const pairs = new Set(validationFixture.empty_targets.map((item) => `${item.vendor}:${item.protocol}`));
+    expect(pairs.size).toBe(vendors.size * SOURCE_PROTOCOLS.length);
+    for (const vendor of vendors) {
+      for (const protocol of SOURCE_PROTOCOLS) expect(pairs.has(`${vendor}:${protocol}`)).toBe(true);
+    }
+
+    for (const item of validationFixture.empty_targets) {
+      const assessment = assessSourceEdit(source({ vendor: item.vendor, protocol: item.protocol }), {
+        displayName: source().display_name,
+        baseUrl: '',
+      });
+      expect(assessment, item.id).toEqual({
+        valid: true,
+        patch: { base_url: null },
+        reason: null,
+      });
     }
   });
 

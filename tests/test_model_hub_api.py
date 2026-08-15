@@ -49,6 +49,7 @@ from core.handlers.model_hub.service import (
 from tests.ui_server_test_helpers import csrf_headers, remote_peer, save_config
 from vibe import ui_server
 from vibe.model_hub_client import ModelHubRemoteService, _decode
+from vibe.model_hub_runtime.state import EngineStateError, _validate_source_target
 from vibe.ui_server import app
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
@@ -4528,8 +4529,8 @@ def test_source_patch_rejects_credential_bearing_base_url(tmp_path):
     ("field", "case"),
     [
         (field, case)
-        for field, cases in SOURCE_EDIT_VALIDATION_CASES.items()
-        for case in cases
+        for field in ("display_names", "base_urls")
+        for case in SOURCE_EDIT_VALIDATION_CASES[field]
     ],
     ids=lambda value: value.get("id", value) if isinstance(value, dict) else value,
 )
@@ -4563,6 +4564,20 @@ def test_source_edit_validation_contract_fixture(tmp_path, field, case):
     expected = case.get("normalized", case["value"])
     assert updated["source"][payload_field] == expected
     assert getattr(store.config.sources[0], payload_field) == expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    SOURCE_EDIT_VALIDATION_CASES["empty_targets"],
+    ids=lambda case: case["id"],
+)
+def test_source_empty_target_contract_fixture(case):
+    if case["server_valid"]:
+        _validate_source_target(case["vendor"], case["protocol"], None)
+        return
+
+    with pytest.raises(EngineStateError):
+        _validate_source_target(case["vendor"], case["protocol"], None)
 
 
 def test_source_display_names_reject_credential_material(tmp_path):

@@ -44,10 +44,16 @@
       "normalized": "https://relay.example/v2?api-version=2026-08-15"
     },
     {
-      "id": "empty_explicit_endpoint",
-      "value": "",
-      "valid": false,
-      "reason": "baseUrlRequired"
+      "id": "explicit_default_port",
+      "value": "https://relay.example:443/v1",
+      "valid": true,
+      "normalized": "https://relay.example:443/v1"
+    },
+    {
+      "id": "uppercase_host",
+      "value": "https://Relay.Example/v1",
+      "valid": true,
+      "normalized": "https://Relay.Example/v1"
     },
     {
       "id": "bad_scheme",
@@ -78,6 +84,80 @@
       "value": "https://relay.example/sk-test-never-persist-this",
       "valid": false,
       "reason": "baseUrlCredential"
+    }
+  ],
+  "empty_targets": [
+    {
+      "id": "anthropic_anthropic",
+      "vendor": "anthropic",
+      "protocol": "anthropic",
+      "server_valid": true
+    },
+    {
+      "id": "anthropic_openai_responses",
+      "vendor": "anthropic",
+      "protocol": "openai_responses",
+      "server_valid": false
+    },
+    {
+      "id": "anthropic_openai_chat",
+      "vendor": "anthropic",
+      "protocol": "openai_chat",
+      "server_valid": false
+    },
+    {
+      "id": "openai_anthropic",
+      "vendor": "openai",
+      "protocol": "anthropic",
+      "server_valid": false
+    },
+    {
+      "id": "openai_openai_responses",
+      "vendor": "openai",
+      "protocol": "openai_responses",
+      "server_valid": true
+    },
+    {
+      "id": "openai_openai_chat",
+      "vendor": "openai",
+      "protocol": "openai_chat",
+      "server_valid": true
+    },
+    {
+      "id": "codex_anthropic",
+      "vendor": "codex",
+      "protocol": "anthropic",
+      "server_valid": false
+    },
+    {
+      "id": "codex_openai_responses",
+      "vendor": "codex",
+      "protocol": "openai_responses",
+      "server_valid": true
+    },
+    {
+      "id": "codex_openai_chat",
+      "vendor": "codex",
+      "protocol": "openai_chat",
+      "server_valid": false
+    },
+    {
+      "id": "custom_anthropic",
+      "vendor": "custom",
+      "protocol": "anthropic",
+      "server_valid": false
+    },
+    {
+      "id": "custom_openai_responses",
+      "vendor": "custom",
+      "protocol": "openai_responses",
+      "server_valid": false
+    },
+    {
+      "id": "custom_openai_chat",
+      "vendor": "custom",
+      "protocol": "openai_chat",
+      "server_valid": false
     }
   ]
 }

@@ -1297,11 +1297,11 @@
           "save": "保存",
           "saving": "保存中…",
           "fail": "来源没有保存上",
+          "verifyFail": "无法确认来源是否已保存",
           "validation": {
             "displayNameRequired": "请输入显示名称",
             "displayNameTooLong": "最多输入 64 个字符",
             "displayNameCredential": "显示名称不能包含凭据",
-            "baseUrlRequired": "这个来源必须填写 Base URL",
             "baseUrlInvalid": "请输入不含用户信息和片段的有效 HTTP 或 HTTPS Base URL",
             "baseUrlCredential": "请从 Base URL 中移除凭据和疑似凭据的查询参数"
           },
@@ -1332,7 +1332,8 @@
           "tier": "档位没保存上",
           "addModel": "这个型号没添加上",
           "removeModel": "这个型号没移除掉",
-          "deleteSource": "这个来源没有移除掉"
+          "deleteSource": "这个来源没有移除掉",
+          "verifyDeleteSource": "无法确认这个来源是否已移除"
         },
         "retry": "重试",
         "search": "搜索型号 ID",

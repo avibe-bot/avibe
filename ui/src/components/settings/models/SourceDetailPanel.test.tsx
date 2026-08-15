@@ -11,7 +11,7 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { createPendingWrites } from './asyncLifetime';
 import { MANAGE_DESTINATION, type ManageKind } from './manage';
-import { modelsApi } from './modelsApi';
+import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
@@ -37,6 +37,55 @@ const source: Source = {
   credential_ref: 'cred_detail',
   state: { status: 'active', retry_at: null, detail_key: null },
   models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
+};
+
+const heldHops = [{
+  backend: 'claude' as const,
+  menu_model: 'claude-opus-4-6',
+  position: 1,
+  source_id: source.id,
+  model_id: 'model-a',
+}];
+const heldGaps = [{
+  backend: 'claude' as const,
+  model_id: 'claude-opus-4-6',
+  agents: ['Release bot'],
+}];
+
+const guardRefusal = () => new ApiCallError(
+  'source_last_supplier',
+  undefined,
+  true,
+  heldGaps,
+  [],
+  heldHops,
+  409,
+);
+
+type UnknownWriteAction = 'edit' | 'delete';
+const UNKNOWN_WRITE_CASES = (['edit', 'delete'] as const).flatMap((action) =>
+  ([false, true] as const).flatMap((forced) =>
+    (['committed', 'absent', 'unread'] as const).map((outcome) => ({ action, forced, outcome }))));
+
+const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean) => {
+  await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+  if (action === 'edit') {
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Unknown edit');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    if (forced) {
+      await userEvent.click(await screen.findByRole('button', { name: /^Save anyway$|^仍要保存$/i }));
+    }
+    return;
+  }
+
+  await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+  await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+  if (forced) {
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除来源$/i }));
+  }
 };
 
 const noReauth = () => {
@@ -188,7 +237,7 @@ describe('SourceDetailPanel', () => {
 
     await waitFor(() => expect(patch).toHaveBeenCalledWith(source.id, {
       display_name: 'Relay key',
-      base_url: 'https://relay.example/v2',
+      base_url: 'https://relay.example/v2/',
     }));
     expect(await screen.findByRole('heading', { name: 'Relay key' })).toBeTruthy();
   });
@@ -200,9 +249,11 @@ describe('SourceDetailPanel', () => {
 
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(endpoint);
-    expect(screen.getByText(/requires a Base URL|必须填写 Base URL/i)).toBeTruthy();
+    await userEvent.type(endpoint, 'ftp://relay.example/v2');
+    expect(screen.getByText(/valid HTTP or HTTPS|有效的 HTTP 或 HTTPS/i)).toBeTruthy();
     expect((screen.getByRole('button', { name: /^Save$|^保存$/i }) as HTMLButtonElement).disabled).toBe(true);
 
+    await userEvent.clear(endpoint);
     await userEvent.type(endpoint, 'https://relay.example/v2?access_token=do-not-store');
     expect(screen.getByText(/Remove credentials|移除凭据/i)).toBeTruthy();
   });
@@ -435,6 +486,82 @@ describe('SourceDetailPanel', () => {
     }
     expect(await screen.findByTestId('source-gone')).toBeTruthy();
   });
+
+  it.each(UNKNOWN_WRITE_CASES)(
+    'reconciles an unknown $action write (forced=$forced, outcome=$outcome) from one authoritative read',
+    async ({ action, forced, outcome }) => {
+      const unknownFailure = action === 'edit'
+        ? new ApiCallError('bad_response', undefined, false)
+        : new TypeError('response lost');
+      if (action === 'edit') {
+        const mutation = vi.spyOn(modelsApi, 'patchSource');
+        if (forced) mutation.mockRejectedValueOnce(guardRefusal());
+        mutation.mockRejectedValueOnce(unknownFailure);
+      } else {
+        const mutation = vi.spyOn(modelsApi, 'deleteSource');
+        if (forced) mutation.mockRejectedValueOnce(guardRefusal());
+        mutation.mockRejectedValueOnce(unknownFailure);
+      }
+
+      const updated = { ...source, display_name: 'Unknown edit' };
+      const inventory = vi.spyOn(modelsApi, 'listSources');
+      if (outcome === 'unread') inventory.mockRejectedValueOnce(new Error('inventory unavailable'));
+      else if (outcome === 'committed') inventory.mockResolvedValueOnce(action === 'edit' ? [updated] : []);
+      else inventory.mockResolvedValueOnce([source]);
+
+      renderEchoPanel();
+      await submitManagementWrite(action, forced);
+      await waitFor(() => expect(inventory).toHaveBeenCalledOnce());
+
+      if (outcome === 'committed' && forced) {
+        const impact = await screen.findByRole('dialog', {
+          name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        });
+        expect(impact.textContent).toContain('claude-opus-4-6');
+        const done = within(impact)
+          .getAllByRole('button', { name: /^Done$|^完成$/i })
+          .find((button) => button.classList.contains('model-hub-guard-action'));
+        expect(done).toBeTruthy();
+        await userEvent.click(done!);
+      }
+
+      if (outcome === 'committed') {
+        if (action === 'edit') expect(await screen.findByRole('heading', { name: 'Unknown edit' })).toBeTruthy();
+        else expect(await screen.findByTestId('source-gone')).toBeTruthy();
+        return;
+      }
+
+      const failure = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(`[data-manage-failure="${action}"]`);
+        expect(node).toBeTruthy();
+        return node!;
+      });
+      expect(failure.dataset.manageRetryRead).toBe(String(outcome === 'unread'));
+      if (outcome === 'unread') expect(failure.textContent).toMatch(/Could not verify|无法确认/i);
+      else expect(failure.textContent).toMatch(/was not saved|was not removed|没有保存上|没有移除/i);
+    },
+  );
+
+  it.each(['edit', 'delete'] as const)(
+    'does not reread after a server-named $action failure',
+    async (action) => {
+      const namedFailure = new ApiCallError('engine_down', undefined, true);
+      if (action === 'edit') vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(namedFailure);
+      else vi.spyOn(modelsApi, 'deleteSource').mockRejectedValueOnce(namedFailure);
+      const inventory = vi.spyOn(modelsApi, 'listSources');
+
+      renderEchoPanel();
+      await submitManagementWrite(action, false);
+
+      const failure = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(`[data-manage-failure="${action}"]`);
+        expect(node).toBeTruthy();
+        return node!;
+      });
+      expect(failure.dataset.manageRetryRead).toBe('false');
+      expect(inventory).not.toHaveBeenCalled();
+    },
+  );
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
     render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);

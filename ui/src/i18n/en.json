@@ -1297,11 +1297,11 @@
           "save": "Save",
           "saving": "Saving…",
           "fail": "The source was not saved",
+          "verifyFail": "Could not verify whether the source was saved",
           "validation": {
             "displayNameRequired": "Enter a display name",
             "displayNameTooLong": "Use 64 characters or fewer",
             "displayNameCredential": "A display name cannot contain a credential",
-            "baseUrlRequired": "This source requires a Base URL",
             "baseUrlInvalid": "Enter a valid HTTP or HTTPS Base URL without user info or a fragment",
             "baseUrlCredential": "Remove credentials and credential-shaped query parameters from the Base URL"
           },
@@ -1332,7 +1332,8 @@
           "tier": "The tier was not saved",
           "addModel": "The model was not added",
           "removeModel": "The model was not removed",
-          "deleteSource": "The source was not removed"
+          "deleteSource": "The source was not removed",
+          "verifyDeleteSource": "Could not verify whether the source was removed"
         },
         "retry": "Try again",
         "search": "Search model IDs",

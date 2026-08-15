@@ -50,10 +50,10 @@ export type ManageStage =
   | { kind: 'editing'; draft: SourceEditDraft }
   | { kind: 'submitting_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean; surface: 'edit' | 'guard' }
   | { kind: 'confirming_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan }
-  | { kind: 'edit_failed'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean }
+  | { kind: 'edit_failed'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
   | { kind: 'confirming_delete'; plan: ManageGuardPlan | null }
   | { kind: 'submitting_delete'; plan: ManageGuardPlan | null; forced: boolean }
-  | { kind: 'delete_failed'; plan: ManageGuardPlan | null; forced: boolean }
+  | { kind: 'delete_failed'; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean }
   | { kind: 'committed_edit_impact'; plan: ManageGuardPlan; complete: () => Promise<void> }
   | { kind: 'committed_delete_impact'; plan: ManageGuardPlan; complete: () => Promise<void> };
 
@@ -104,7 +104,6 @@ export type SourceEditInvalidReason =
   | 'displayNameRequired'
   | 'displayNameTooLong'
   | 'displayNameCredential'
-  | 'baseUrlRequired'
   | 'baseUrlInvalid'
   | 'baseUrlCredential';
 
@@ -112,7 +111,6 @@ export const SOURCE_EDIT_REASON_KEY: Record<SourceEditInvalidReason, string> = {
   displayNameRequired: 'settings.models.sourceDetail.edit.validation.displayNameRequired',
   displayNameTooLong: 'settings.models.sourceDetail.edit.validation.displayNameTooLong',
   displayNameCredential: 'settings.models.sourceDetail.edit.validation.displayNameCredential',
-  baseUrlRequired: 'settings.models.sourceDetail.edit.validation.baseUrlRequired',
   baseUrlInvalid: 'settings.models.sourceDetail.edit.validation.baseUrlInvalid',
   baseUrlCredential: 'settings.models.sourceDetail.edit.validation.baseUrlCredential',
 };
@@ -165,13 +163,8 @@ type BaseUrlAssessment =
   | { valid: true; value: string | null }
   | { valid: false; reason: Extract<SourceEditInvalidReason, `baseUrl${string}`> };
 
-const normalizedBaseUrl = (draft: string, required: boolean): BaseUrlAssessment => {
-  const value = draft.trim();
-  if (!value) {
-    return required
-      ? { valid: false, reason: 'baseUrlRequired' }
-      : { valid: true, value: null };
-  }
+const assessedEditedBaseUrl = (value: string): BaseUrlAssessment => {
+  if (!value) return { valid: true, value: null };
   if (containsCredentialMaterial(value)) return { valid: false, reason: 'baseUrlCredential' };
 
   let parsed: URL;
@@ -196,14 +189,12 @@ const normalizedBaseUrl = (draft: string, required: boolean): BaseUrlAssessment 
     ) return { valid: false, reason: 'baseUrlCredential' };
   }
 
-  const path = parsed.pathname.replace(/\/+$/, '');
-  return {
-    valid: true,
-    value: `${parsed.protocol.toLowerCase()}//${parsed.host}${path}${parsed.search}`,
-  };
+  // This is a user-facing safety pre-filter, not the URL authority. The server
+  // validates and normalizes the value that is sent verbatim from here.
+  return { valid: true, value };
 };
 
-/** Validate, explain, normalize and diff without mutating the held Source. */
+/** Pre-filter an actual edit and diff without claiming server target policy. */
 export const assessSourceEdit = (source: Source, draft: SourceEditDraft): SourceEditAssessment => {
   const displayName = draft.displayName.trim();
   if (!displayName) return { valid: false, patch: null, reason: 'displayNameRequired' };
@@ -218,11 +209,12 @@ export const assessSourceEdit = (source: Source, draft: SourceEditDraft): Source
   if (displayName !== source.display_name) patch.display_name = displayName;
 
   if (canEditSourceEndpoint(source)) {
-    // Empty means unchanged only for a source already using its runtime default.
-    // Clearing an explicit endpoint is not an implicit "restore default" command.
-    const endpoint = normalizedBaseUrl(draft.baseUrl, Boolean(source.base_url));
-    if (!endpoint.valid) return { valid: false, patch: null, reason: endpoint.reason };
-    if (endpoint.value !== (source.base_url ?? null)) patch.base_url = endpoint.value;
+    const baseUrl = draft.baseUrl.trim();
+    if (baseUrl !== (source.base_url ?? '')) {
+      const endpoint = assessedEditedBaseUrl(baseUrl);
+      if (!endpoint.valid) return { valid: false, patch: null, reason: endpoint.reason };
+      patch.base_url = endpoint.value;
+    }
   }
 
   return { valid: true, patch: Object.keys(patch).length > 0 ? patch : null, reason: null };
