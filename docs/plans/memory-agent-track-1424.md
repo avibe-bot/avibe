@@ -45,10 +45,11 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    reports them but does not patch EverOS or file an upstream issue. Retrieval
    exposes skill freshness/maturity metadata, and status adds a conservative
    per-Agent skill-count hint; neither mitigation mutates provider state.
-9. Every disabled-to-enabled transition initializes the scan cursor to the
-   current terminal-settlement sequence high water mark. There is no historical
-   or disabled-period backfill in v1; only turns settling after that explicit
-   enable cutover are candidates.
+9. Every disabled-to-enabled transition, Clear, and factory reset initializes
+   the scan cursor to the current terminal-settlement sequence high water mark
+   before scanner admission opens. There is no historical, disabled-period, or
+   post-reset replay in v1; only turns settling after that explicit cutover are
+   candidates.
 
 ## Product Contract
 
@@ -322,11 +323,15 @@ ambiguous agent write cannot fence user capture.
 `memory_agent_scan_state` is a singleton containing the last committed terminal
 sequence, enable epoch, durable missed counters, and scan/update timestamps. On
 every enable cutover the cursor advances to the primary store's current maximum
-before admission opens. The scanner then queries strictly after that sequence in
-bounded pages. It advances through admitted, duplicate, guarded, and closed-skip
-rows only after the corresponding decision is durable. A crash before commit
-re-reads the same row; the digest keeps enqueue idempotent. Adding a binding
-later does not backfill turns already skipped at an earlier cursor.
+before admission opens. Clear and factory-reset recovery apply the same cutover
+after deleting or recreating the Memory store: while the shared maintenance
+fence is held, they create the new scan state at the current committed maximum,
+then rebuild bindings, and only then may an enabled scanner start. The scanner
+queries strictly after that sequence in bounded pages. It advances through
+admitted, duplicate, guarded, and closed-skip rows only after the corresponding
+decision is durable. A crash before commit re-reads the same row; the digest
+keeps enqueue idempotent. Adding a binding later does not backfill turns already
+skipped at an earlier cursor.
 
 `memory_agent_project_bindings` is a replaceable projection of the V2 config. It
 maps only opaque `binding_key` to exact new-style `project_id`, with
@@ -383,6 +388,10 @@ responses, or credentials. Agent recorder failure degrades only the agent role.
   cannot block later rows or the Personal Memory worker.
 - The chat root stays available when the agent root is down, and user capture
   remains governed exclusively by the existing human-input admission.
+- These isolation guarantees cover ordinary scanning, processing, retrieval,
+  and role-reconcile failures. Explicit Clear, factory reset, and
+  embedding-identity rebuild intentionally use the shared maintenance fence and
+  can pause both roles until their idempotent operation converges.
 - Retrieval failure returns a closed Agent Memory error and never falls back to
   Personal Memory or a different Agent/project.
 - Empty case/skill results after successful processing are valid. UI and CLI say
@@ -436,7 +445,7 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every enable starts at the current high water. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every enable or destructive reset starts at the current high water. |
 | `MEMORY-AGENT-002` | Every eligible completed interactive or Harness Turn is represented once by its exact dispatch/result pair. |
 | `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |

@@ -27,14 +27,18 @@ and Harness turns use the same admission rule. Failed, canceled, silent,
 legacy-Agent, oversized, malformed, callback, maintenance, and unbound turns are
 skipped without delaying or changing the Turn result.
 
-Each enable begins at the current completed-Turn high water. Turns completed
-before first enable or during a later disabled interval are not backfilled. The
-owner's workdir/project bindings remain in Memory settings across Clear and
-Reinitialize; the reset runtime derives fresh opaque internal keys from them.
+Each enable, Clear, and Reinitialize begins at the current completed-Turn high
+water. Turns completed before first enable, during a later disabled interval, or
+before a destructive reset are not backfilled. The owner's workdir/project
+bindings remain in Memory settings across Clear and Reinitialize; the reset
+runtime derives fresh opaque internal keys from them.
 
 The existing Personal Memory root remains pinned to chat mode. Agent Memory has
 its own provider root, socket, lifecycle/health slot, scanner, and queue. An
-agent-track failure cannot alter user capture or Personal Memory processing.
+ordinary agent-track scanning, processing, retrieval, or reconcile failure
+cannot alter user capture or Personal Memory processing. Explicit Clear,
+Reinitialize, and embedding-identity rebuild operations intentionally share a
+maintenance fence and can pause both roles until the operation converges.
 The Agent queue independently caps nonterminal work at 500 rows and requires at
 least 512 MiB free before admission; guarded turns are counted without retaining
 their text.
@@ -254,9 +258,12 @@ is accepted. Queue payloads store only bundle-relative metadata. Confirmed
 delivery or deterministic rejection releases the bundle; pending and
 `manual_required` captures retain it for recovery.
 
-This implementation initializes a clean Avibe-owned schema; migration or
-preservation of earlier Memory databases is intentionally unsupported while the
-feature remains unused.
+The Agent track raises the Avibe-owned Memory store from released schema v3 to
+schema v4 through one transactional migration. Existing v3 rows, tables,
+indexes, values, and project-catalog entries remain unchanged, and fixtures
+cover that shipped shape. A malformed optional Agent-track section degrades by
+disabling that track with a sanitized warning; it never makes startup fail or
+resets Personal Memory state.
 
 An incomplete, malformed, overlong-receipt, timed-out, or response-disconnected
 provider add is terminal for automatic delivery: the row is retained and its
