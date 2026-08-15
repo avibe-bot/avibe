@@ -18,11 +18,19 @@ that raises is never an authorization grant.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import time
 from typing import Protocol
 
 from core.memory.attachments import workbench_capture_attachments
+from core.memory.im_attachments import (
+    IM_ATTACHMENT_CAPTURE_PLATFORMS,
+    select_memory_attachments,
+)
 from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
+
+
+logger = logging.getLogger(__name__)
 
 
 WORKBENCH_PLATFORM = "avibe"
@@ -64,6 +72,11 @@ class InboundTurnFacts:
     files: object = None
     is_dm: bool = False
     is_ordinary_text: bool | None = None
+    is_ordinary_attachment: bool | None = None
+    attachment_lease: object = None
+    attachment_capture_status: object = None
+    attachment_config_generation: object = None
+    attachment_selection: object = None
     memory_enabled: bool = False
 
 
@@ -126,6 +139,20 @@ class CaptureAdmission:
             # failure into an implicit authorization grant.
             return False
 
+    def admits_attachment_turn(self, facts: InboundTurnFacts) -> bool:
+        """Authorize retaining an already-materialized IM lease for Memory."""
+
+        platform = self.platform_of(facts)
+        return bool(
+            _asserted_true(facts.memory_enabled)
+            and platform in IM_ATTACHMENT_CAPTURE_PLATFORMS
+            and _nonempty_str(facts.message_id)
+            and _nonempty_str(facts.session_id)
+            and _asserted_true(facts.is_ordinary_attachment)
+            and _has_native_files(facts.files)
+            and self.admits(facts)
+        )
+
     def decide(self, facts: InboundTurnFacts) -> CaptureRequest | CaptureSkipped:
         """Turn one classified turn into the capture it earns, or a skip."""
 
@@ -144,18 +171,51 @@ class CaptureAdmission:
         project_id = self.project_for(facts)
         if project_id is None:
             return CaptureSkipped(reason="memory_invalid_input")
+        if not isinstance(facts.text, str):
+            return CaptureSkipped(reason="memory_invalid_input")
         workbench = platform == WORKBENCH_PLATFORM
+        config_generation: int | None = None
         # Converted before the text check so an attachment-only turn is judged
         # on the uploads Memory can actually carry: a turn whose every upload
         # was filtered out would otherwise be enqueued with no text and no
         # attachment, giving the provider nothing to extract.
-        attachments = workbench_capture_attachments(facts.files) if workbench else ()
-        if not _is_ordinary_human_text(facts, attachments=attachments):
-            return CaptureSkipped(reason="memory_invalid_input")
-        if not workbench and bool(facts.files):
-            # IM attachments are out of scope; no provider-side download
-            # pipeline is exposed for them.
-            return CaptureSkipped(reason="memory_invalid_input")
+        if workbench:
+            attachments = workbench_capture_attachments(facts.files)
+            if not _is_ordinary_human_text(facts, attachments=attachments):
+                return CaptureSkipped(reason="memory_invalid_input")
+        else:
+            native_files = _native_file_count(facts.files)
+            if native_files is None:
+                return CaptureSkipped(reason="memory_invalid_input")
+            attachments: tuple[CaptureAttachment, ...] = ()
+            if native_files:
+                if not self.admits_attachment_turn(facts):
+                    return CaptureSkipped(reason="memory_invalid_input")
+                status = facts.attachment_capture_status
+                config_generation = _attachment_config_generation(
+                    facts.attachment_config_generation
+                )
+                if status == "ready" and config_generation is not None:
+                    try:
+                        selection = facts.attachment_selection
+                        if selection is None:
+                            # Production IM callers precompute selection off the
+                            # event loop. This fallback serves direct callers only.
+                            selection = select_memory_attachments(facts.attachment_lease)  # type: ignore[arg-type]
+                    except Exception as error:
+                        logger.warning(
+                            "memory_attachment_selection_failed "
+                            "platform=%s count=%d error_type=%s",
+                            platform,
+                            native_files,
+                            type(error).__name__,
+                        )
+                    else:
+                        attachments = selection.attachments
+                if not facts.text.strip() and not attachments:
+                    return CaptureSkipped(reason="memory_invalid_input")
+            elif not _asserted_true(facts.is_ordinary_text) or not facts.text.strip():
+                return CaptureSkipped(reason="memory_invalid_input")
 
         source_prefix = "workbench" if workbench else f"im:{platform}"
         return CaptureRequest(
@@ -167,6 +227,7 @@ class CaptureAdmission:
             text=facts.text,
             occurred_at_ms=int(time.time() * 1000),
             attachments=attachments,
+            attachment_config_generation=config_generation,
         )
 
 
@@ -185,6 +246,25 @@ def _asserted_true(value: object) -> bool:
     """
 
     return value is True
+
+
+def _attachment_config_generation(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _native_file_count(value: object) -> int | None:
+    if value is None:
+        return 0
+    if not isinstance(value, (list, tuple)):
+        return None
+    return len(value)
+
+
+def _has_native_files(value: object) -> bool:
+    count = _native_file_count(value)
+    return count is not None and count > 0
 
 
 def _attributed_user_id(facts: InboundTurnFacts) -> str | None:

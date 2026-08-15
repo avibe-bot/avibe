@@ -21,7 +21,7 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
-from .message_facts import is_ordinary_slack_text
+from .message_facts import is_ordinary_slack_attachment, is_ordinary_slack_text
 from .download_target import open_download_target
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
@@ -2098,6 +2098,10 @@ class SlackBot(BaseIMClient):
                 },
                 files=file_attachments,
                 is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not has_shared_content,
+                is_ordinary_attachment=(
+                    is_ordinary_slack_attachment(event, file_attachments)
+                    and not has_shared_content
+                ),
             )
 
             if handled_bot_mention_in_message_event and self.settings_manager and thread_id:
@@ -2198,6 +2202,10 @@ class SlackBot(BaseIMClient):
                 },
                 files=file_attachments,
                 is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not bool(shared_text),
+                is_ordinary_attachment=(
+                    is_ordinary_slack_attachment(event, file_attachments)
+                    and not bool(shared_text)
+                ),
             )
 
             # Mark thread as active only when the mention carries actionable content.

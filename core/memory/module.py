@@ -11,10 +11,11 @@ import unicodedata
 import weakref
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Any, AsyncIterator, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 
 from config import paths
 from core.memory.blocking import run_blocking
@@ -66,6 +67,9 @@ from core.memory.types import (
 )
 from core.memory.worker import MemoryWorker, ProcessingEvent
 
+if TYPE_CHECKING:
+    from core.handlers.inbound_attachments import InboundAttachmentLease
+
 
 MAX_CAPTURE_TEXT_BYTES = 32 * 1024
 MAX_CAPTURE_IDENTIFIER_BYTES = 1024
@@ -82,6 +86,56 @@ MAX_PROVIDER_RESULT_BYTES = 256 * 1024
 MAX_PROVIDER_RESULT_ITEMS = 20
 PROVIDER_READ_TIMEOUT_SECONDS = 20.0
 CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+class _HeldCaptureAdmission:
+    """One active claim on an exact-session capture fence."""
+
+    def __init__(
+        self,
+        module: "MemoryModule",
+        lock: asyncio.Lock,
+        key: tuple[str, str, str],
+    ) -> None:
+        self.module = module
+        self.lock = lock
+        self.key = key
+        self.active = True
+
+
+class _CaptureReservation:
+    """One O(1) FIFO registration for exact-session capture work."""
+
+    def __init__(
+        self,
+        module: "MemoryModule",
+        key: tuple[str, str, str],
+        predecessor: asyncio.Future[None] | None,
+    ) -> None:
+        self.module = module
+        self.key = key
+        self.predecessor = predecessor
+        self.completion = asyncio.get_running_loop().create_future()
+        self.active = True
+
+    async def wait_for_turn(self) -> None:
+        if self.predecessor is not None:
+            await asyncio.shield(self.predecessor)
+
+    def complete(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        if self.predecessor is None or self.predecessor.done():
+            self._resolve_completion()
+            return
+        self.predecessor.add_done_callback(
+            lambda _predecessor: self._resolve_completion()
+        )
+
+    def _resolve_completion(self) -> None:
+        if not self.completion.done():
+            self.completion.set_result(None)
 
 
 logger = logging.getLogger(__name__)
@@ -140,6 +194,9 @@ class MemoryModule:
         self._capture_admission_locks: weakref.WeakValueDictionary[
             tuple[str, str, str], asyncio.Lock
         ] = weakref.WeakValueDictionary()
+        self._capture_reservation_tails: dict[
+            tuple[str, str, str], _CaptureReservation
+        ] = {}
         self._invalid_capture_admission_lock = asyncio.Lock()
         self._clear_active = False
         self._retired = False
@@ -283,6 +340,11 @@ class MemoryModule:
         timeout = _positive_timeout(deadline_seconds)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        barrier = self.reserve_capture_admission(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=raw_session_id,
+        )
         admission_lock = self._capture_admission_lock(
             principal_id=principal_id,
             project_id=project_id,
@@ -290,7 +352,11 @@ class MemoryModule:
         )
         acquired = False
         try:
-            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
+            await self._wait_for_capture_reservation(barrier, deadline)
+            await asyncio.wait_for(
+                admission_lock.acquire(),
+                timeout=max(deadline - loop.time(), 0.001),
+            )
             acquired = True
             return await self._final_flush_under_admission(
                 principal_id=principal_id,
@@ -303,6 +369,7 @@ class MemoryModule:
         finally:
             if acquired:
                 admission_lock.release()
+            self.cancel_capture_reservation(barrier)
 
     async def run_session_lifecycle(
         self,
@@ -320,19 +387,29 @@ class MemoryModule:
         timeout = _positive_timeout(deadline_seconds)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        barrier = self.reserve_capture_admission(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=raw_session_id,
+        )
         admission_lock = self._capture_admission_lock(
             principal_id=principal_id,
             project_id=project_id,
             session_id=raw_session_id,
         )
+        acquired = False
         try:
-            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
-        except asyncio.TimeoutError as error:
-            raise MemorySessionLifecycleBusyError(
-                "memory capture admission did not quiesce before the deadline"
-            ) from error
-
-        try:
+            try:
+                await self._wait_for_capture_reservation(barrier, deadline)
+                await asyncio.wait_for(
+                    admission_lock.acquire(),
+                    timeout=max(deadline - loop.time(), 0.001),
+                )
+                acquired = True
+            except asyncio.TimeoutError as error:
+                raise MemorySessionLifecycleBusyError(
+                    "memory capture admission did not quiesce before the deadline"
+                ) from error
             await self._final_flush_under_admission(
                 principal_id=principal_id,
                 project_id=project_id,
@@ -341,7 +418,9 @@ class MemoryModule:
             )
             return await operation()
         finally:
-            admission_lock.release()
+            if acquired:
+                admission_lock.release()
+            self.cancel_capture_reservation(barrier)
 
     async def run_session_scopes_lifecycle(
         self,
@@ -372,6 +451,14 @@ class MemoryModule:
         timeout = _positive_timeout(deadline_seconds)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        barriers = [
+            self.reserve_capture_admission(
+                principal_id=principal_id,
+                project_id=project_id,
+                session_id=raw_session_id,
+            )
+            for principal_id, project_id in canonical_scopes
+        ]
         locks = [
             self._capture_admission_lock(
                 principal_id=principal_id,
@@ -382,32 +469,27 @@ class MemoryModule:
         ]
         acquired: list[asyncio.Lock] = []
         try:
-            for admission_lock in locks:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError
-                await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
-                acquired.append(admission_lock)
-        except asyncio.TimeoutError as error:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-            raise MemorySessionLifecycleBusyError(
-                "memory capture admission did not quiesce before the deadline"
-            ) from error
-        except asyncio.CancelledError:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-            raise
-
-        try:
+            try:
+                for barrier in barriers:
+                    await self._wait_for_capture_reservation(barrier, deadline)
+                for admission_lock in locks:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
+                    acquired.append(admission_lock)
+            except asyncio.TimeoutError as error:
+                raise MemorySessionLifecycleBusyError(
+                    "memory capture admission did not quiesce before the deadline"
+                ) from error
             flush_succeeded = True
             for principal_id, project_id in canonical_scopes:
                 flush_succeeded = (
                     await self._final_flush_under_admission(
-                    principal_id=principal_id,
-                    project_id=project_id,
-                    raw_session_id=raw_session_id,
-                    deadline=deadline,
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        raw_session_id=raw_session_id,
+                        deadline=deadline,
                     )
                     and flush_succeeded
                 )
@@ -418,6 +500,8 @@ class MemoryModule:
         finally:
             for admission_lock in reversed(acquired):
                 admission_lock.release()
+            for barrier in reversed(barriers):
+                self.cancel_capture_reservation(barrier)
 
     async def _final_flush_under_admission(
         self,
@@ -462,7 +546,13 @@ class MemoryModule:
         self._provider = provider
         self._worker.replace_provider(provider)
 
-    async def capture(self, request: CaptureRequest) -> CaptureReceipt:
+    async def capture(
+        self,
+        request: CaptureRequest,
+        *,
+        source_lease: InboundAttachmentLease | None = None,
+        admission: object = None,
+    ) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
         if self._retired:
@@ -472,53 +562,244 @@ class MemoryModule:
         if self._clear_active or self._is_maintenance_open():
             return CaptureSkipped(reason="memory_clear_failed")
 
-        admission_lock = (
-            self._capture_admission_lock(
-                principal_id=request.principal_id,
-                project_id=request.project_id,
-                session_id=request.session_id,
+        admission_lock = self._capture_lock_for_request(request)
+        if admission is None:
+            key = self._capture_admission_key(
+                principal_id=getattr(request, "principal_id", None),
+                project_id=getattr(request, "project_id", None),
+                session_id=getattr(request, "session_id", None),
             )
-            if isinstance(request, CaptureRequest)
-            else self._invalid_capture_admission_lock
+            if key is not None:
+                reservation = self.reserve_capture_admission(
+                    principal_id=key[0],
+                    project_id=key[1],
+                    session_id=key[2],
+                )
+                async with self.capture_admission(
+                    principal_id=key[0],
+                    project_id=key[1],
+                    session_id=key[2],
+                    reservation=reservation,
+                ):
+                    return await self._capture_with_admission(
+                        request,
+                        source_lease=source_lease,
+                    )
+            async with admission_lock:
+                return await self._capture_with_admission(
+                    request,
+                    source_lease=source_lease,
+                )
+        if not self._owns_capture_admission(admission, request, admission_lock):
+            return await self._skipped_with_missed("memory_invalid_input")
+        return await self._capture_with_admission(
+            request,
+            source_lease=source_lease,
         )
-        async with admission_lock:
-            async with self._root_lifecycle_lock():
-                if self._retired:
-                    return CaptureSkipped(reason="memory_operation_in_progress")
-                if not self._is_enabled():
-                    return CaptureSkipped(reason="memory_disabled")
-                if self._clear_active or self._is_maintenance_open():
-                    return CaptureSkipped(reason="memory_clear_failed")
-                if not isinstance(request, CaptureRequest):
-                    return await self._skipped_with_missed("memory_invalid_input")
 
-                normalized_text = self._normalize_text(request.text)
-                validation_error = self._capture_validation_error(request, normalized_text)
-                if validation_error is not None:
-                    return await self._skipped_with_missed(validation_error)
+    @asynccontextmanager
+    async def capture_admission(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        session_id: str,
+        reservation: object = None,
+    ) -> AsyncIterator[_HeldCaptureAdmission]:
+        """Acquire the exact-session fence before deferred capture work starts."""
 
-                try:
-                    disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
-                except Exception:
-                    return await self._skipped_with_missed("memory_low_disk_space")
-                if disk_free < MIN_FREE_DISK_BYTES:
-                    return await self._skipped_with_missed("memory_low_disk_space")
-                return await self._capture_under_root(request, normalized_text)
+        key = (principal_id, project_id, session_id)
+        lock = self._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        ticket = reservation if isinstance(reservation, _CaptureReservation) else None
+        if reservation is not None and not self._owns_capture_reservation(ticket, key):
+            self.cancel_capture_reservation(reservation)
+            raise ValueError("invalid Memory capture reservation")
+        acquired = False
+        try:
+            if ticket is not None:
+                await ticket.wait_for_turn()
+            await lock.acquire()
+            acquired = True
+            admission = _HeldCaptureAdmission(self, lock, key)
+            yield admission
+        finally:
+            if acquired:
+                admission.active = False
+                lock.release()
+            if ticket is not None:
+                self.cancel_capture_reservation(ticket)
+
+    def reserve_capture_admission(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        session_id: str,
+    ) -> object:
+        """Register exact-session capture order without waiting for earlier work."""
+
+        key = self._capture_admission_key(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        if key is None:
+            raise ValueError("invalid Memory capture reservation scope")
+        tail = self._capture_reservation_tails.get(key)
+        predecessor = tail.completion if tail is not None else None
+        reservation = _CaptureReservation(self, key, predecessor)
+        self._capture_reservation_tails[key] = reservation
+        reservation.completion.add_done_callback(
+            lambda _completion: self._retire_capture_reservation(key, reservation)
+        )
+        return reservation
+
+    def cancel_capture_reservation(self, reservation: object) -> None:
+        """Complete an owned reservation on cancellation or scheduling failure."""
+
+        if isinstance(reservation, _CaptureReservation) and reservation.module is self:
+            reservation.complete()
+
+    async def _wait_for_capture_reservation(
+        self,
+        reservation: object,
+        deadline: float,
+    ) -> None:
+        if not isinstance(reservation, _CaptureReservation):
+            raise ValueError("invalid Memory capture reservation")
+        if reservation.predecessor is None:
+            return
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.wait_for(
+            asyncio.shield(reservation.predecessor),
+            timeout=remaining,
+        )
+
+    def _retire_capture_reservation(
+        self,
+        key: tuple[str, str, str],
+        reservation: _CaptureReservation,
+    ) -> None:
+        if self._capture_reservation_tails.get(key) is reservation:
+            self._capture_reservation_tails.pop(key, None)
+
+    def _owns_capture_reservation(
+        self,
+        reservation: _CaptureReservation | None,
+        key: tuple[str, str, str],
+    ) -> bool:
+        return bool(
+            reservation is not None
+            and reservation.active
+            and reservation.module is self
+            and reservation.key == key
+        )
+
+    async def _capture_with_admission(
+        self,
+        request: CaptureRequest,
+        *,
+        source_lease: InboundAttachmentLease | None,
+    ) -> CaptureReceipt:
+        async with self._root_lifecycle_lock():
+            if self._retired:
+                return CaptureSkipped(reason="memory_operation_in_progress")
+            if not self._is_enabled():
+                return CaptureSkipped(reason="memory_disabled")
+            if self._clear_active or self._is_maintenance_open():
+                return CaptureSkipped(reason="memory_clear_failed")
+            if not isinstance(request, CaptureRequest):
+                return await self._skipped_with_missed("memory_invalid_input")
+
+            normalized_text = self._normalize_text(request.text)
+            validation_error = self._capture_validation_error(request, normalized_text)
+            if validation_error is not None:
+                return await self._skipped_with_missed(validation_error)
+
+            try:
+                disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
+            except Exception:
+                return await self._skipped_with_missed("memory_low_disk_space")
+            if disk_free < MIN_FREE_DISK_BYTES:
+                return await self._skipped_with_missed("memory_low_disk_space")
+            return await self._capture_under_root(
+                request,
+                normalized_text,
+                source_lease=source_lease,
+            )
+
+    def _capture_lock_for_request(self, request: object) -> asyncio.Lock:
+        if not isinstance(request, CaptureRequest):
+            return self._invalid_capture_admission_lock
+        return self._capture_admission_lock(
+            principal_id=request.principal_id,
+            project_id=request.project_id,
+            session_id=request.session_id,
+        )
+
+    def _owns_capture_admission(
+        self,
+        admission: object,
+        request: object,
+        lock: asyncio.Lock,
+    ) -> bool:
+        return bool(
+            isinstance(admission, _HeldCaptureAdmission)
+            and admission.active
+            and admission.module is self
+            and admission.lock is lock
+            and isinstance(request, CaptureRequest)
+            and admission.key
+            == (request.principal_id, request.project_id, request.session_id)
+        )
 
     async def _capture_under_root(
         self,
         request: CaptureRequest,
         normalized_text: str,
+        *,
+        source_lease: InboundAttachmentLease | None,
     ) -> CaptureReceipt:
         """Pin and enqueue one validated capture under the provider-root fence."""
 
         pinned_bundle: PinnedBundle | None = None
+        if request.attachments:
+            try:
+                if source_lease is None:
+                    pinned_bundle = await run_blocking(
+                        self._attachment_store.pin,
+                        request.attachments,
+                    )
+                else:
+                    pinned_bundle = await run_blocking(
+                        self._attachment_store.pin,
+                        request.attachments,
+                        source_lease=source_lease,
+                    )
+            except Exception as error:
+                if normalized_text.strip():
+                    return await self._capture_under_root(
+                        replace(
+                            request,
+                            attachments=(),
+                            attachment_config_generation=None,
+                        ),
+                        normalized_text,
+                        source_lease=None,
+                    )
+                if isinstance(error, AttachmentPinError):
+                    return await self._capture_pin_failure(error.error)
+                if isinstance(error, UnicodeError):
+                    return await self._skipped_with_missed("memory_invalid_input")
+                return OperationFailed(error="memory_store_unavailable")
+
         try:
-            if request.attachments:
-                pinned_bundle = await run_blocking(
-                    self._attachment_store.pin,
-                    request.attachments,
-                )
             attachment_payload = (
                 encode_pinned_bundle(pinned_bundle)
                 if pinned_bundle is not None
@@ -549,8 +830,6 @@ class MemoryModule:
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
                 nonterminal_limit=MAX_NONTERMINAL_QUEUE_ROWS,
             )
-        except AttachmentPinError as error:
-            return await self._capture_pin_failure(error.error)
         except UnicodeError:
             if pinned_bundle is not None:
                 await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
@@ -561,7 +840,13 @@ class MemoryModule:
             return OperationFailed(error="memory_store_unavailable")
 
         if result.outcome == "accepted":
-            return CaptureAccepted()
+            return CaptureAccepted(
+                captured_attachment_count=(
+                    len(pinned_bundle.attachments)
+                    if pinned_bundle is not None
+                    else 0
+                )
+            )
         if pinned_bundle is not None:
             await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
         if result.outcome == "duplicate":
@@ -1270,17 +1555,32 @@ class MemoryModule:
     ) -> asyncio.Lock:
         """Return the exact-session fence covering pin through queue commit."""
 
-        if not all(
-            isinstance(value, str)
-            for value in (principal_id, project_id, session_id)
-        ):
+        key = self._capture_admission_key(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        if key is None:
             return self._invalid_capture_admission_lock
-        key = (principal_id, project_id, session_id)
         lock = self._capture_admission_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
             self._capture_admission_locks[key] = lock
         return lock
+
+    @staticmethod
+    def _capture_admission_key(
+        *,
+        principal_id: object,
+        project_id: object,
+        session_id: object,
+    ) -> tuple[str, str, str] | None:
+        if not all(
+            isinstance(value, str)
+            for value in (principal_id, project_id, session_id)
+        ):
+            return None
+        return principal_id, project_id, session_id
 
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         return await run_blocking(method, *args, **kwargs)

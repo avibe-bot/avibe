@@ -4,6 +4,11 @@ capability:
   name: Bound-DM attachment capture through EverOS multimodal ingest
   canonical_tests:
     - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_catalog.py
+    - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py
+    - tests/test_memory_admission.py
+    - tests/test_memory_im_attachments.py
+    - tests/test_inbound_attachments.py
+    - tests/test_ui_memory_routes.py
 contract:
   admission: bound_enabled_one_to_one_dm_fail_closed
   opt_in: explicit_complete_multimodal_endpoint
@@ -13,29 +18,33 @@ contract:
   preflight: generated_image_without_user_data
   workbench_compatibility: implicit_main_llm_for_one_cycle
 status_legend:
-  planned: scenario id and invariant reserved; behavior evidence lands in a later slice
+  covered: executable evidence exists
 scenarios:
   - id: MEMORY-IM-ATTACH-001
     name: Bound Slack DM attachments traverse one download, pin, add, flush, and search path
-    status: planned
+    status: covered
     kind: happy_path
     layer: scenario
     delivery_slice: 4
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log
   - id: MEMORY-IM-ATTACH-002
     name: Group and unbound events perform no Memory attachment acquisition
-    status: planned
+    status: covered
     kind: authorization
     layer: scenario
     delivery_slice: 4
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_denied_slack_scope_never_reaches_memory_provider
   - id: MEMORY-IM-ATTACH-003
     name: Missing multimodal configuration preserves eligible text without attachment provider activity
-    status: planned
+    status: covered
     kind: degradation
     layer: scenario
     delivery_slice: 4
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_missing_multimodal_config_preserves_text_without_attachment_activity
   - id: MEMORY-IM-ATTACH-004
     name: Invalid attachments preserve valid siblings and leave no temporary or bundle leak
-    status: planned
+    status: covered
     kind: boundary
     layer: scenario
     delivery_slice: 4
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_invalid_sibling_preserves_valid_attachment_and_leaves_no_memory_leak

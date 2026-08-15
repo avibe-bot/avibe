@@ -195,6 +195,7 @@ class CaptureRequest:
     text: str
     occurred_at_ms: int
     attachments: tuple[CaptureAttachment, ...] = ()
+    attachment_config_generation: int | None = None
 
 
 def encode_capture_attachments(attachments: tuple[CaptureAttachment, ...]) -> str | None:
@@ -246,6 +247,7 @@ def decode_capture_attachments(payload: str | None) -> tuple[CaptureAttachment, 
 @dataclass(frozen=True)
 class CaptureAccepted:
     status: Literal["accepted"] = "accepted"
+    captured_attachment_count: int = 0
 
 
 @dataclass(frozen=True)

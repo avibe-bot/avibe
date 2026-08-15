@@ -24,7 +24,9 @@ redaction, and capture behavior.
   toggle.
 - A mixed turn degrades per attachment. Eligible text and every valid attachment
   survive independently; one unsupported, oversized, or failed download never
-  rejects the turn.
+  rejects the turn. If a selected attachment later fails descriptor/hash
+  verification during durable pinning, the same capture is retried once as
+  text-only; an attachment-only turn retains the closed pin failure.
 - The first release keeps the existing Avibe allowlist in
   `core/memory/modality.py`: bitmap images, PDF, supported audio, direct text,
   CSV, VTT, HTML, and EML. Office/iWork/ODF/RTF, SVG, and video remain excluded
@@ -127,8 +129,8 @@ telemetry, or adapter exception text.
 
 Absent multimodal configuration or parser capability skips IM attachments before
 pinning, enqueueing, or calling `/add`. Each rejected item degrades independently.
-Avibe emits one scrub-safe `memory_attachment_capture_skipped` event per turn with
-platform, count, and one closed reason only.
+Avibe emits one scrub-safe `memory_attachment_capture` event per capture attempt
+with platform, total, captured, and dropped counts only.
 
 Configured adds retain the existing retry and ambiguity semantics. Deterministic
 EverOS `UNSUPPORTED_FORMAT` and `CAPABILITY_UNAVAILABLE` attachment outcomes are
@@ -172,8 +174,8 @@ add or call-log row.
 The settings API carries the optional Multimodal endpoint with the same write-only-key
 and clear semantics as rerank. Either optional endpoint can be cleared while Memory
 remains enabled; required LLM and embedding keys retain the enabled-state clear gate.
-The visible card is gated until the Slack closed-loop slice lands. Status continues
-to project EverOS
+The Slack closed-loop slice flips the implementation stage gate and reveals the
+visible card. Status continues to project EverOS
 `multimodal_llm`, `parser`, and `disabled_features` and adds a concise attachment
 capture availability line. Configuration remains UI-only; no CLI config flags are
 added.
@@ -236,6 +238,139 @@ gaps in the probe model rather than independent endpoint bugs.
   health reports `unavailable` even when cached capability values were previously
   healthy.
 
+### Slack activation contract
+
+Delivery slice 4 makes Slack the reference platform. The settings availability
+projection is derived from the intersection of the installation's enabled IM
+platforms and `IM_ATTACHMENT_CAPTURE_PLATFORMS`; that allowlist remains closed to
+Slack until slice 5 adds contract evidence for the other four adapters.
+
+- Slack `message` and `app_mention` events publish a separate literal-true
+  `is_ordinary_attachment` fact only for a native, human `file_share` shape with
+  plain composer blocks. The fact does not reuse or weaken ordinary-text
+  classification, and edited, forwarded, bot, rich, system, and shared shapes
+  still fail closed.
+- The message handler performs the existing shared Agent materialization first.
+  It asks admission whether Memory may retain that materialized batch, then gives
+  Memory an independent lease reference. A retain or scheduling failure is
+  best-effort and cannot reject the Agent turn.
+- The retained reference lives until the asynchronous Memory capture finishes.
+  The Memory module pins through the descriptor-backed lease before enqueueing;
+  the ordinary Agent consumer independently adopts its source files. This keeps
+  one native download while preventing Agent cleanup or durable-delivery failure
+  from racing the Memory pin.
+- Capture reads current attachment readiness only after the closed DM admission
+  gates pass. `not_configured` and `unavailable` retain eligible text but produce
+  no attachment pin, provider attachment, or call-log row. Attachment-only turns
+  with no surviving item are skipped.
+- Per-attachment selection uses the closed format and limit table. A rejected
+  sibling does not remove eligible text or valid siblings. Attachment telemetry
+  reports only the attempt's total, captured, and dropped counts; it does not
+  attribute reasons to individual files.
+- The hermetic Slack scenario drives the shared materializer, admission, durable
+  pin/outbox worker, fake EverOS add/flush, redacted multimodal call log, and
+  `vibe memory search`. It proves a single adapter download and zero temp or
+  Memory-bundle residue after successful processing.
+
+### Capture call-site contract
+
+Memory capture stays best effort and must not become part of user-visible Agent
+dispatch latency. The call site therefore branches by turn shape instead of moving
+all capture work to one late stage.
+
+- Text-only human turns use the original early capture path immediately after the
+  stable base session is resolved and before Agent routing. Attachment turns alone
+  use the delayed path, and the only legal reason for that delay is waiting for the
+  shared materializer to produce its immutable descriptor-backed lease.
+- The canonical Memory session anchor is copied from `base_session_id` immediately
+  after session resolution, before any subagent or routing-agent namespace can
+  rewrite the Agent session id. Both the early capture and the delayed lifecycle
+  fence/capture request receive that saved canonical value.
+- **Cross-await revalidation invariant.** Any local fact resolved before an
+  indeterminate await is revalidated inside the O(1), no-`await` atomic segment
+  that consumes it; a mismatch fails closed, and no bounded waiter waits for the
+  indeterminate span. Attachment turns snapshot the canonical session lifecycle
+  epoch before materialization, then revalidate it while holding `SessionTurn`
+  immediately before reservation. `/new` advances that local epoch only after its
+  destructive operation succeeds and before releasing `SessionTurn`; a failed
+  operation leaves the epoch unchanged. Therefore a reset never waits for a
+  download, while an attachment that finishes after a successful reset is dropped
+  as `stale_session` and eligible caption text is still captured independently.
+- **Bounded-wait invariant.** No deadline-bound provider or subprocess read may
+  occur in a span that blocks any bounded waiter. The bounded waiters here include
+  both the user-visible Agent dispatch path and `/new`'s five-second lifecycle
+  budget. Attachment eligibility must therefore be decided from local facts before
+  any health read: platform and message shape, binding/config completeness, and the
+  explicit multimodal configuration generation. Moving a remote read to a different
+  call site does not satisfy this invariant if either bounded waiter still depends
+  on its completion.
+- Multimodal opt-in is an authoritative, generation-bound fact. The synchronous
+  segment snapshots the stable Runtime configuration generation that proves an
+  explicit endpoint and carries it on the immutable capture request. Immediately
+  before enqueue, the replacement gate compares that generation with the current
+  Runtime generation; absence or mismatch fails closed for attachments, including
+  an opt-out or endpoint replacement that completed while readiness was being read.
+  A missing IM generation projects `not_configured` immediately and retains eligible
+  text without performing a live health read. Workbench alone keeps its one-cycle
+  implicit compatibility path. Eligible text remains independently best effort, and
+  that invariant must hold at every attachment-path failure or early return rather
+  than only for failures with an existing closed classification.
+- **Attachment capture logging (best-effort observability, not a ledger).**
+  When a capture attempt reaches `MemoryModule.capture()` and returns a result,
+  the controller emits one `memory_attachment_capture` record with
+  `platform` / `total` / `captured` / `dropped`, where `captured` comes from
+  `CaptureAccepted.captured_attachment_count` (the bundle actually enqueued;
+  every other result type is zero) and `dropped = total - captured` is computed
+  at that one site. This record set is deliberately **not** a complete census of
+  turns: paths that terminate before a capture attempt is made — admission
+  skips, runtime replacement, retirement, factory reset — emit nothing, by
+  design. Do not add emission points to make it complete; completeness was tried
+  and is what produced the cross-call-site accounting defects this section
+  replaced. No per-attachment reason attribution is retained.
+- **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
+  admission, the handler performs only an O(1), non-blocking, local registration of
+  an exact-session Memory capture ticket. Registration records FIFO order but never
+  waits for an earlier capture and never reads a provider or subprocess. Once the
+  ticket and task ownership are established, the handler releases `SessionTurn`
+  immediately and continues durable Agent admission.
+- **Concurrent captures.** Tickets for the same canonical session execute in
+  registration order. A background task waits for its predecessor only after
+  `SessionTurn` has been released, then performs readiness, attachment selection,
+  bundle pin/copy, and queue commit under the existing exact-session execution
+  fence. Tickets for different canonical sessions have independent tails and remain
+  concurrent. Order is represented by ticket data, never by holding the dispatch
+  lock while slow work runs.
+- **Lifecycle barrier.** `/new` first acquires `SessionTurn`, then registers a
+  lifecycle barrier behind the current exact-session ticket tail and waits for that
+  snapshot with the existing bounded lifecycle deadline. Holding `SessionTurn`
+  prevents later turns from registering while the barrier drains, so every ticket
+  before the reset is included and the wait converges; captures admitted after the
+  reset queue behind the barrier. The reset and final flush therefore cannot pass an
+  older registered capture, while Agent dispatch never waits for capture execution.
+- **Single ownership, in process.** Before task tracking, the handler owns the
+  reservation and any retained materializer lease. Successful scheduling transfers
+  both to the background task; every exception, cancellation, or scheduling failure
+  completes the reservation and releases the retained lease together. Once tracked,
+  the task completes its ticket in `finally` and its done callback releases the
+  lease. At shutdown, Controller closes the loop-owned capture-registration gate and
+  then cancels and joins every tracked capture in the same event-loop coroutine,
+  without the generic five-second cleanup cutoff. The handler rechecks the gate
+  after any `SessionTurn` wait and immediately before the no-`await` reservation,
+  retain, and task-registration segment. Once closed, that atomic segment cannot
+  produce another reservation, lease, or task, so the sweep operates on a closed set
+  and converges independently of every IM client's shutdown order. This
+  process-local cleanup is best effort: no exit path may have two owners, but an
+  abrupt process termination can bypass all callbacks.
+- **Authoritative durable cleanup.** Startup recovery is the final correctness
+  guarantee for every termination path, including crashes and `SIGKILL`.
+  `MemoryCoordinator.recover_after_boot()` takes the database attachment-reference
+  snapshot inside the admission fence and `_reconcile_attachments()` invokes the
+  idempotent `AttachmentStore.reconcile(referenced, releasing)` operation. It removes
+  all staging remnants and every bundle not referenced by the database. Therefore an
+  attachment lease or bundle abandoned before queue adoption is bounded to the
+  process lifetime plus the next Memory startup recovery, rather than permanently
+  retained.
+
 ## Scenario contract
 
 The canonical capability is `memory_im_attachment_capture` under
@@ -258,15 +393,15 @@ running Avibe services, real user paths, or production state.
 1. Contract and scenario catalog, including the stale Workbench-copy and IM
    non-goal corrections in `memory-plugin-system.md`.
 2. Optional multimodal config, child environment, preflight/redaction, UI, and
-   status. IM capture stays gated: `IM_ATTACHMENT_CAPTURE_AVAILABLE` remains false,
-   the settings response hides the card, and configured capture cannot report
-   `ready`; absent configuration retains the locked `not_configured` projection.
+   status. IM capture stays gated: the platform allowlist remains empty, the
+   settings response hides the card, and configured capture cannot report `ready`;
+   absent configuration retains the locked `not_configured` projection.
 3. Shared leased materializer, bounded Telegram/WeChat acquisition, and pin-source
    generalization. IM capture stays gated.
 4. Attachment classification/admission and the Slack closed loop with call-log
-   proof. This slice flips `IM_ATTACHMENT_CAPTURE_AVAILABLE` only after the capture
-   path and its closed-loop evidence land, revealing the endpoint card and enabling
-   health-derived readiness without adding a user-facing toggle.
+   proof. This slice adds Slack to the platform allowlist only after the capture path
+   and its closed-loop evidence land, revealing the endpoint card when Slack is
+   enabled and enabling health-derived readiness without a user-facing toggle.
 5. Discord, Telegram, Feishu/Lark, and WeChat enablement and contract tests, plus
    final user documentation and manual verification matrix.
 
@@ -281,3 +416,14 @@ Hermetic tests prove the product contracts without live platform credentials.
 After all five slices merge, the orchestrator's integration pass should verify one
 eligible image and one rejected file on every configured IM platform in the local
 Incus regression environment, preserving accumulated product state.
+
+The final PR4 invariant audit also found five pre-existing paths outside this
+slice's implementation files. The two bounded-wait spans are tracked by #1470;
+the materializer-wide failure, post-enqueue bundle failure, and deterministic
+provider attachment rejection paths are tracked by #1471. They remain outside
+PR4 so its Slack activation does not expand into coordinator, provider, store, or
+shared materializer changes.
+
+A future observability improvement may add a non-identifying per-turn correlation
+marker so operators can group multiple disjoint skip records from the same turn.
+That marker is an operational convenience, not part of drop-accounting correctness.

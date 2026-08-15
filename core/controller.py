@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional, Dict, Any, TypeVar
 from config import paths
@@ -50,16 +50,40 @@ from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
-from core.memory import CaptureReceipt, CaptureRequest, CaptureSkipped
-from core.memory.admission import CaptureAdmission, InboundTurnFacts
+from core.memory import CaptureAccepted, CaptureReceipt, CaptureRequest, CaptureSkipped
+import core.memory.admission as memory_admission
+from core.memory.admission import (
+    WORKBENCH_PLATFORM,
+    CaptureAdmission,
+    InboundTurnFacts,
+)
 from core.memory.blocking import run_blocking
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
+from core.memory_telemetry import log_attachment_capture
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MemorySessionLifecycleResult = TypeVar("_MemorySessionLifecycleResult")
+
+
+@dataclass
+class _MemoryAttachmentCaptureReservation:
+    """Single-owner bridge from SessionTurn registration to Memory execution."""
+
+    module: object
+    token: object
+    config_generation: int | None
+    active: bool = True
+
+    def release(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        cancel = getattr(self.module, "cancel_capture_reservation", None)
+        if callable(cancel):
+            cancel(self.token)
 
 
 class _SettingsUserBindings:
@@ -1858,6 +1882,9 @@ class Controller:
         *,
         text: object = None,
         session_id: object = None,
+        attachment_lease: object = None,
+        attachment_capture_status: object = None,
+        attachment_config_generation: object = None,
         include_workdir: bool = True,
     ) -> InboundTurnFacts:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
@@ -1877,6 +1904,10 @@ class Controller:
             files=getattr(context, "files", None),
             is_dm=payload.get("is_dm") is True,
             is_ordinary_text=context.is_ordinary_text,
+            is_ordinary_attachment=context.is_ordinary_attachment,
+            attachment_lease=attachment_lease,
+            attachment_capture_status=attachment_capture_status,
+            attachment_config_generation=attachment_config_generation,
             memory_enabled=bool(
                 getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
             ),
@@ -1885,6 +1916,63 @@ class Controller:
     def memory_capture_admitted(self, context: MessageContext) -> bool:
         return self._memory_admission().admits(
             self._memory_turn_facts(context, include_workdir=False)
+        )
+
+    def reserve_memory_attachment_capture(
+        self,
+        context: MessageContext,
+        session_id: str,
+    ) -> object | None:
+        """Register exact-session capture order using local facts only."""
+
+        admission = self._memory_admission()
+        facts = self._memory_turn_facts(
+            context,
+            text="",
+            session_id=session_id,
+            include_workdir=False,
+        )
+        if not admission.admits_attachment_turn(facts):
+            return None
+        runtime = getattr(self, "memory_runtime", None)
+        module = getattr(runtime, "module", None)
+        reserve = getattr(module, "reserve_capture_admission", None)
+        principal_id = admission.principal_for(facts)
+        project_id = admission.project_for(facts)
+        if (
+            not callable(reserve)
+            or not isinstance(principal_id, str)
+            or not isinstance(project_id, str)
+        ):
+            return None
+        read_generation = getattr(
+            runtime,
+            "attachment_capture_config_generation",
+            None,
+        )
+        generation = None
+        try:
+            observed_generation = read_generation() if callable(read_generation) else None
+        except Exception:
+            observed_generation = None
+        if (
+            not isinstance(observed_generation, bool)
+            and isinstance(observed_generation, int)
+            and observed_generation >= 0
+        ):
+            generation = observed_generation
+        try:
+            token = reserve(
+                principal_id=principal_id,
+                project_id=project_id,
+                session_id=session_id,
+            )
+        except Exception:
+            return None
+        return _MemoryAttachmentCaptureReservation(
+            module=module,
+            token=token,
+            config_generation=generation,
         )
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
@@ -2280,6 +2368,12 @@ class Controller:
         context: MessageContext,
         text: str,
         session_id: str,
+        *,
+        attachment_lease: object = None,
+        attachment_reservation: object = None,
+        attachment_config_generation: int | None = None,
+        attachment_text_only: bool = False,
+        admission_ready: asyncio.Event | None = None,
     ) -> Awaitable[None]:
         """Submit one eligible attributed human turn after session resolution.
 
@@ -2292,6 +2386,11 @@ class Controller:
             context,
             text,
             session_id,
+            attachment_lease=attachment_lease,
+            attachment_reservation=attachment_reservation,
+            attachment_config_generation=attachment_config_generation,
+            attachment_text_only=attachment_text_only,
+            admission_ready=admission_ready,
             observed_runtime=getattr(self, "memory_runtime", None),
         )
 
@@ -2301,14 +2400,162 @@ class Controller:
         text: str,
         session_id: str,
         *,
+        attachment_lease: object = None,
+        attachment_reservation: object = None,
+        attachment_config_generation: int | None = None,
+        attachment_text_only: bool = False,
+        admission_ready: asyncio.Event | None = None,
         observed_runtime: object,
     ) -> None:
-        facts = self._memory_turn_facts(context, text=text, session_id=session_id)
-        request = self._memory_admission().decide(facts)
+        reservation = (
+            attachment_reservation
+            if isinstance(
+                attachment_reservation,
+                _MemoryAttachmentCaptureReservation,
+            )
+            else None
+        )
+        if reservation is not None:
+            attachment_config_generation = reservation.config_generation
+        admission = self._memory_admission()
+        facts = self._memory_turn_facts(
+            context,
+            text=text,
+            session_id=session_id,
+            attachment_lease=attachment_lease,
+            attachment_config_generation=attachment_config_generation,
+        )
+        try:
+            if admission.admits_attachment_turn(facts):
+                if reservation is None:
+                    await self._capture_user_memory_decided(
+                        admission,
+                        self._memory_attachment_unavailable(facts),
+                        attachment_lease=None,
+                        observed_runtime=observed_runtime,
+                    )
+                    return
+                principal_id = admission.principal_for(facts)
+                project_id = admission.project_for(facts)
+                module = getattr(observed_runtime, "module", None)
+                acquire_admission = getattr(module, "capture_admission", None)
+                if (
+                    isinstance(principal_id, str)
+                    and isinstance(project_id, str)
+                    and callable(acquire_admission)
+                    and (reservation is None or reservation.module is module)
+                ):
+                    async with acquire_admission(
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        session_id=session_id,
+                        reservation=(
+                            reservation.token if reservation is not None else None
+                        ),
+                    ) as held_admission:
+                        if admission_ready is not None:
+                            admission_ready.set()
+                        await self._capture_user_memory_decided(
+                            admission,
+                            (
+                                self._memory_attachment_unavailable(facts)
+                                if attachment_text_only
+                                else facts
+                            ),
+                            attachment_lease=(
+                                None if attachment_text_only else attachment_lease
+                            ),
+                            observed_runtime=observed_runtime,
+                            held_admission=held_admission,
+                        )
+                    return
+            if admission_ready is not None:
+                admission_ready.set()
+            await self._capture_user_memory_decided(
+                admission,
+                facts,
+                attachment_lease=attachment_lease,
+                observed_runtime=observed_runtime,
+            )
+        finally:
+            if reservation is not None:
+                reservation.release()
+            if admission_ready is not None:
+                admission_ready.set()
+
+    @staticmethod
+    def _memory_attachment_unavailable(
+        facts: InboundTurnFacts,
+    ) -> InboundTurnFacts:
+        """Finalize an unavailable attachment set while preserving its caption."""
+
+        return replace(
+            facts,
+            attachment_lease=None,
+            attachment_capture_status="unavailable",
+            attachment_config_generation=None,
+        )
+
+    async def _capture_user_memory_decided(
+        self,
+        admission: CaptureAdmission,
+        facts: InboundTurnFacts,
+        *,
+        attachment_lease: object,
+        observed_runtime: object,
+        held_admission: object = None,
+    ) -> None:
+        platform = CaptureAdmission.platform_of(facts)
+        if admission.admits_attachment_turn(facts):
+            status = facts.attachment_capture_status
+            attachment_selection = None
+            if status not in {"ready", "not_configured", "unavailable"}:
+                status = "not_configured"
+                if (
+                    platform == WORKBENCH_PLATFORM
+                    or facts.attachment_config_generation is not None
+                ):
+                    status = "unavailable"
+                    read_status = getattr(
+                        observed_runtime,
+                        "attachment_capture_status",
+                        None,
+                    )
+                    if callable(read_status):
+                        try:
+                            observed_status = await read_status()
+                        except Exception:
+                            observed_status = "unavailable"
+                        if observed_status in {
+                            "ready",
+                            "not_configured",
+                            "unavailable",
+                        }:
+                            status = observed_status
+            if status == "ready" and platform != WORKBENCH_PLATFORM:
+                try:
+                    attachment_selection = await run_blocking(
+                        memory_admission.select_memory_attachments,
+                        facts.attachment_lease,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "memory_attachment_selection_failed "
+                        "platform=%s count=%d error_type=%s",
+                        platform,
+                        len(facts.files or ()),
+                        type(error).__name__,
+                    )
+                    status = "unavailable"
+            facts = replace(
+                facts,
+                attachment_capture_status=status,
+                attachment_selection=attachment_selection,
+            )
+        request = admission.decide(facts)
         if not isinstance(request, CaptureRequest):
             return
 
-        platform = CaptureAdmission.platform_of(facts)
         started_at = time.monotonic()
         try:
             if self._memory_factory_reset_pending(observed_runtime) or observed_runtime is None:
@@ -2325,7 +2572,44 @@ class Controller:
                     or not runtime.available
                 ):
                     return
-                await runtime.module.capture(request)
+                if request.attachments and platform != WORKBENCH_PLATFORM:
+                    read_generation = getattr(
+                        runtime,
+                        "attachment_capture_config_generation",
+                        None,
+                    )
+                    current_generation = (
+                        read_generation() if callable(read_generation) else None
+                    )
+                    if (
+                        isinstance(current_generation, bool)
+                        or current_generation != request.attachment_config_generation
+                    ):
+                        request = replace(
+                            request,
+                            attachments=(),
+                            attachment_config_generation=None,
+                        )
+                        if not request.text.strip():
+                            return
+                capture_options = {}
+                if held_admission is not None:
+                    capture_options["admission"] = held_admission
+                if request.attachments and attachment_lease is not None:
+                    capture_options["source_lease"] = attachment_lease
+                result = await runtime.module.capture(
+                    request,
+                    **capture_options,
+                )
+                if platform != WORKBENCH_PLATFORM and isinstance(facts.files, (list, tuple)):
+                    total = len(facts.files)
+                    if total:
+                        captured = (
+                            result.captured_attachment_count
+                            if isinstance(result, CaptureAccepted)
+                            else 0
+                        )
+                        log_attachment_capture(platform, total, captured)
             logger.info(
                 "Memory capture platform=%s latency_ms=%d",
                 platform,
@@ -2940,13 +3224,22 @@ class Controller:
             "Memory factory reset",
             timeout=None,
         )
-        async def _drain_memory_capture_tasks() -> None:
+        async def _cancel_memory_capture_tasks() -> None:
             handler = getattr(self, "message_handler", None)
-            drain = getattr(handler, "drain_memory_capture_tasks", None)
-            if callable(drain):
-                await drain()
+            quiesce = getattr(handler, "quiesce_memory_capture_tasks", None)
+            if callable(quiesce):
+                quiesce()
+            cancel = getattr(handler, "cancel_memory_capture_tasks", None)
+            if callable(cancel):
+                await cancel()
 
-        _stop_loop_coroutine(_drain_memory_capture_tasks(), "Memory capture tasks")
+        # Close registration and sweep the resulting closed task set in one
+        # event-loop turn. This does not depend on platform shutdown ordering.
+        _stop_loop_coroutine(
+            _cancel_memory_capture_tasks(),
+            "Memory capture tasks",
+            timeout=None,
+        )
         memory_runtime = getattr(self, "memory_runtime", None)
         if memory_runtime is not None:
             _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")

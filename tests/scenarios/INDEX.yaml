@@ -69,12 +69,23 @@ capabilities:
       - ui/src/context/ApiContext.memoryList.test.tsx
   - id: memory_im_attachment_capture
     name: Bound-DM attachment capture through EverOS multimodal ingest
-    status: planned
+    status: active
     catalog: tests/scenarios/memory_im_attachment_capture/catalog.yaml
     observations: tests/scenarios/memory_im_attachment_capture/observations.yaml
-    scenario_tests: []
+    scenario_tests:
+      - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py
+    harness:
+      - tests/scenario_harness/memory_im_attachments.py
     unit_or_contract_tests:
       - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_catalog.py
+      - tests/test_memory_admission.py
+      - tests/test_memory_im_attachments.py
+      - tests/test_inbound_attachments.py
+      - tests/test_memory_runtime.py
+      - tests/test_memory_slice3.py
+      - tests/test_message_handler_typing.py
+      - tests/test_slack_dm_mentions.py
+      - tests/test_ui_memory_routes.py
   - id: memory_repair
     name: Live Memory index repair via admitted artifact sync
     status: active

@@ -1,4 +1,4 @@
-"""Mechanical contract for the planned IM attachment capture scenarios."""
+"""Mechanical contract for the active IM attachment capture scenarios."""
 
 from pathlib import Path
 
@@ -35,11 +35,14 @@ def test_memory_im_attachment_catalog_is_indexed_and_locks_the_approved_contract
     )
 
     assert catalog["contract"] == LOCKED_CONTRACT
-    assert entry["status"] == "planned"
+    assert entry["status"] == "active"
     assert entry["catalog"] == (SCENARIO_ROOT / "catalog.yaml").as_posix()
     assert entry["observations"] == (SCENARIO_ROOT / "observations.yaml").as_posix()
-    assert entry["unit_or_contract_tests"] == [
-        (SCENARIO_ROOT / "test_memory_im_attachment_capture_catalog.py").as_posix()
+    assert entry["scenario_tests"] == [
+        (SCENARIO_ROOT / "test_memory_im_attachment_capture_scenarios.py").as_posix()
+    ]
+    assert entry["harness"] == [
+        "tests/scenario_harness/memory_im_attachments.py"
     ]
 
     scenario_ids = [row["id"] for row in catalog["scenarios"]]
@@ -60,12 +63,12 @@ def test_memory_im_attachment_catalog_is_indexed_and_locks_the_approved_contract
         ("MEMORY-IM-ATTACH-004", "boundary", 4),
     ],
 )
-def test_memory_im_attachment_planned_scenario_contract(
+def test_memory_im_attachment_covered_scenario_contract(
     scenario_id: str,
     kind: str,
     delivery_slice: int,
 ) -> None:
-    """The four MEMORY-IM-ATTACH scenario IDs stay stable until behavior evidence replaces this contract."""
+    """The four MEMORY-IM-ATTACH scenario IDs map to executable evidence."""
 
     catalog = _load(SCENARIO_ROOT / "catalog.yaml")
     rows = {row["id"]: row for row in catalog["scenarios"]}
@@ -77,8 +80,10 @@ def test_memory_im_attachment_planned_scenario_contract(
         "MEMORY-IM-ATTACH-003",
         "MEMORY-IM-ATTACH-004",
     }
-    assert rows[scenario_id]["status"] == "planned"
+    assert rows[scenario_id]["status"] == "covered"
     assert rows[scenario_id]["kind"] == kind
     assert rows[scenario_id]["layer"] == "scenario"
     assert rows[scenario_id]["delivery_slice"] == delivery_slice
-    assert "test" not in rows[scenario_id]
+    assert rows[scenario_id]["test"].startswith(
+        "tests/scenarios/memory_im_attachment_capture/"
+    )

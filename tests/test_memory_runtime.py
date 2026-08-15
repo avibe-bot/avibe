@@ -1723,44 +1723,6 @@ async def test_final_flush_fences_capture_before_queue_visibility(
     original_run_blocking = memory_module.run_blocking
     monkeypatch.setattr(memory_module, "run_blocking", gate_attachment_pin)
 
-    class ObservedAdmissionLock:
-        def __init__(self) -> None:
-            self._lock = asyncio.Lock()
-            self._acquisitions = 0
-            self.final_flush_waiting = asyncio.Event()
-            self.later_capture_waiting = asyncio.Event()
-
-        async def acquire(self) -> bool:
-            self._acquisitions += 1
-            if self._acquisitions == 2:
-                self.final_flush_waiting.set()
-            elif self._acquisitions == 3:
-                self.later_capture_waiting.set()
-            return await self._lock.acquire()
-
-        def locked(self) -> bool:
-            return self._lock.locked()
-
-        def release(self) -> None:
-            self._lock.release()
-
-        async def __aenter__(self):
-            await self.acquire()
-            return self
-
-        async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-            del exc_type, exc_value, traceback
-            self.release()
-
-    admission_lock = ObservedAdmissionLock()
-    runtime.module._capture_admission_locks[
-        (
-            old_request.principal_id,
-            old_request.project_id,
-            old_request.session_id,
-        )
-    ] = admission_lock
-
     try:
         old_capture = asyncio.create_task(runtime.module.capture(old_request))
         await asyncio.wait_for(pin_entered.wait(), timeout=handshake_timeout_seconds)
@@ -1773,16 +1735,9 @@ async def test_final_flush_fences_capture_before_queue_visibility(
                 deadline_seconds=2.0,
             )
         )
-        await asyncio.wait_for(
-            admission_lock.final_flush_waiting.wait(),
-            timeout=handshake_timeout_seconds,
-        )
+        await asyncio.sleep(0)
         later_capture = asyncio.create_task(runtime.module.capture(later_request))
-        await asyncio.wait_for(
-            admission_lock.later_capture_waiting.wait(),
-            timeout=handshake_timeout_seconds,
-        )
-        assert admission_lock.locked()
+        await asyncio.sleep(0)
         assert not final_flush.done()
         assert not later_capture.done()
 
@@ -2071,6 +2026,318 @@ async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
         await memory_runtime_factory.close(runtime)
 
 
+async def test_deferred_capture_handoff_keeps_memory_lifecycle_fenced(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    request = CaptureRequest(
+        source_message_id="deferred-source",
+        session_id="canonical-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_id=PROJECT,
+        provenance="user_input",
+        text="remember this",
+        occurred_at_ms=1_725_000_001_234,
+    )
+    lifecycle_ran = asyncio.Event()
+
+    async def reset_session() -> None:
+        lifecycle_ran.set()
+
+    try:
+        async with runtime.module.capture_admission(
+            principal_id=request.principal_id,
+            project_id=request.project_id,
+            session_id=request.session_id,
+        ) as admission:
+            lifecycle = asyncio.create_task(
+                runtime.run_session_lifecycle(
+                    principal_id=request.principal_id,
+                    project_id=request.project_id,
+                    raw_session_id=request.session_id,
+                    operation=reset_session,
+                    deadline_seconds=2.0,
+                )
+            )
+            await asyncio.sleep(0)
+            assert not lifecycle_ran.is_set()
+            assert isinstance(
+                await runtime.module.capture(request, admission=admission),
+                CaptureAccepted,
+            )
+            assert not lifecycle_ran.is_set()
+
+        await asyncio.wait_for(lifecycle, timeout=2.0)
+        assert lifecycle_ran.is_set()
+    finally:
+        await memory_runtime_factory.close(runtime)
+
+
+async def test_capture_reservations_are_fifo_per_session_and_parallel_across_sessions(
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-001."""
+
+    module = memory_module.MemoryModule(
+        MemoryStore(),
+        FakeMemoryProvider(),
+        enabled=True,
+    )
+    scope = {
+        "principal_id": PRINCIPAL,
+        "project_id": PROJECT,
+    }
+    first = module.reserve_capture_admission(**scope, session_id="same-session")
+    second = module.reserve_capture_admission(**scope, session_id="same-session")
+    independent = module.reserve_capture_admission(
+        **scope,
+        session_id="other-session",
+    )
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+    independent_entered = asyncio.Event()
+
+    async def hold_first() -> None:
+        async with module.capture_admission(
+            **scope,
+            session_id="same-session",
+            reservation=first,
+        ):
+            first_entered.set()
+            await release_first.wait()
+
+    async def enter_second() -> None:
+        async with module.capture_admission(
+            **scope,
+            session_id="same-session",
+            reservation=second,
+        ):
+            second_entered.set()
+
+    async def enter_independent() -> None:
+        async with module.capture_admission(
+            **scope,
+            session_id="other-session",
+            reservation=independent,
+        ):
+            independent_entered.set()
+
+    first_task = asyncio.create_task(hold_first())
+    second_task = asyncio.create_task(enter_second())
+    independent_task = asyncio.create_task(enter_independent())
+    await asyncio.wait_for(first_entered.wait(), timeout=1.0)
+    await asyncio.wait_for(independent_entered.wait(), timeout=1.0)
+    assert not second_entered.is_set()
+
+    release_first.set()
+    await asyncio.wait_for(second_entered.wait(), timeout=1.0)
+    await asyncio.gather(first_task, second_task, independent_task)
+
+
+async def test_unreserved_text_capture_queues_behind_existing_session_tickets() -> None:
+    """Scenario: MEMORY-IM-ATTACH-001."""
+
+    store = MemoryStore()
+    module = memory_module.MemoryModule(
+        store,
+        FakeMemoryProvider(),
+        enabled=True,
+    )
+    scope = {
+        "principal_id": PRINCIPAL,
+        "project_id": PROJECT,
+        "session_id": "mixed-capture-session",
+    }
+    first = module.reserve_capture_admission(**scope)
+    second = module.reserve_capture_admission(**scope)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    def request(source: str, text: str) -> CaptureRequest:
+        return CaptureRequest(
+            source_message_id=source,
+            session_id=scope["session_id"],
+            principal_id=scope["principal_id"],
+            project_id=scope["project_id"],
+            provenance="user_input",
+            text=text,
+            occurred_at_ms=1_725_000_001_234,
+        )
+
+    async def capture_reserved(ticket, source: str, text: str, *, hold: bool = False):
+        async with module.capture_admission(**scope, reservation=ticket) as admission:
+            receipt = await module.capture(
+                request(source, text),
+                admission=admission,
+            )
+            if hold:
+                first_entered.set()
+                await release_first.wait()
+            return receipt
+
+    first_task = asyncio.create_task(
+        capture_reserved(first, "reserved-first", "reserved first", hold=True)
+    )
+    second_task = asyncio.create_task(
+        capture_reserved(second, "reserved-second", "reserved second")
+    )
+    await asyncio.wait_for(first_entered.wait(), timeout=1.0)
+    text_task = asyncio.create_task(
+        module.capture(request("later-text", "later text"))
+    )
+    await asyncio.sleep(0)
+
+    release_first.set()
+    assert await asyncio.gather(first_task, second_task, text_task) == [
+        CaptureAccepted(),
+        CaptureAccepted(),
+        CaptureAccepted(),
+    ]
+    assert [row.payload_text for row in store.list_queue_rows()] == [
+        "reserved first",
+        "reserved second",
+        "later text",
+    ]
+
+
+async def test_cancelled_capture_ticket_does_not_let_successor_overtake(
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-004."""
+
+    module = memory_module.MemoryModule(
+        MemoryStore(),
+        FakeMemoryProvider(),
+        enabled=True,
+    )
+    scope = {
+        "principal_id": PRINCIPAL,
+        "project_id": PROJECT,
+        "session_id": "cancelled-ticket-session",
+    }
+    first = module.reserve_capture_admission(**scope)
+    cancelled = module.reserve_capture_admission(**scope)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    successor_entered = asyncio.Event()
+
+    async def hold_first() -> None:
+        async with module.capture_admission(**scope, reservation=first):
+            first_entered.set()
+            await release_first.wait()
+
+    async def wait_cancelled() -> None:
+        async with module.capture_admission(**scope, reservation=cancelled):
+            raise AssertionError("cancelled ticket entered")
+
+    first_task = asyncio.create_task(hold_first())
+    cancelled_task = asyncio.create_task(wait_cancelled())
+    await asyncio.wait_for(first_entered.wait(), timeout=1.0)
+    cancelled_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_task
+
+    successor = module.reserve_capture_admission(**scope)
+
+    async def enter_successor() -> None:
+        async with module.capture_admission(**scope, reservation=successor):
+            successor_entered.set()
+
+    successor_task = asyncio.create_task(enter_successor())
+    await asyncio.sleep(0)
+    assert not successor_entered.is_set()
+
+    release_first.set()
+    await asyncio.wait_for(successor_entered.wait(), timeout=1.0)
+    await asyncio.gather(first_task, successor_task)
+
+
+async def test_session_lifecycle_barrier_waits_for_registered_capture_tickets() -> None:
+    """Scenario: MEMORY-IM-ATTACH-001."""
+
+    module = memory_module.MemoryModule(
+        MemoryStore(),
+        FakeMemoryProvider(),
+        enabled=True,
+    )
+    scope = {
+        "principal_id": PRINCIPAL,
+        "project_id": PROJECT,
+        "session_id": "barrier-session",
+    }
+    first = module.reserve_capture_admission(**scope)
+    second = module.reserve_capture_admission(**scope)
+    release_first = asyncio.Event()
+    release_second = asyncio.Event()
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    lifecycle_ran = asyncio.Event()
+
+    async def capture(ticket, entered: asyncio.Event, release: asyncio.Event) -> None:
+        async with module.capture_admission(**scope, reservation=ticket):
+            entered.set()
+            await release.wait()
+
+    async def reset() -> None:
+        lifecycle_ran.set()
+
+    first_task = asyncio.create_task(capture(first, first_entered, release_first))
+    second_task = asyncio.create_task(capture(second, second_entered, release_second))
+    await asyncio.wait_for(first_entered.wait(), timeout=1.0)
+    lifecycle = asyncio.create_task(
+        module.run_session_lifecycle(
+            principal_id=PRINCIPAL,
+            project_id=PROJECT,
+            raw_session_id="barrier-session",
+            operation=reset,
+            deadline_seconds=1.0,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not lifecycle_ran.is_set()
+
+    release_first.set()
+    await asyncio.wait_for(second_entered.wait(), timeout=1.0)
+    assert not lifecycle_ran.is_set()
+    release_second.set()
+
+    await asyncio.gather(first_task, second_task, lifecycle)
+    assert lifecycle_ran.is_set()
+
+
+async def test_session_lifecycle_ticket_barrier_is_bounded() -> None:
+    """Scenario: MEMORY-IM-ATTACH-003."""
+
+    module = memory_module.MemoryModule(
+        MemoryStore(),
+        FakeMemoryProvider(),
+        enabled=True,
+    )
+    reservation = module.reserve_capture_admission(
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        session_id="stalled-session",
+    )
+
+    with pytest.raises(MemorySessionLifecycleBusyError, match="did not quiesce"):
+        await module.run_session_lifecycle(
+            principal_id=PRINCIPAL,
+            project_id=PROJECT,
+            raw_session_id="stalled-session",
+            operation=lambda: asyncio.sleep(0),
+            deadline_seconds=0.01,
+        )
+
+    module.cancel_capture_reservation(reservation)
+
+
 async def test_retired_close_aborts_when_claim_quiescence_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2322,7 +2589,9 @@ async def test_memory_clear_201_discards_manual_required_evidence_and_allows_new
             ),
         ),
     )
-    assert await runtime.module.capture(first) == CaptureAccepted()
+    assert await runtime.module.capture(first) == CaptureAccepted(
+        captured_attachment_count=1
+    )
     assert await runtime.module.drain() == 1
 
     ambiguous = runtime._store.list_queue_rows()
@@ -3632,7 +3901,6 @@ async def test_status_preserves_everos_disabled_recorder_state(
     memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr(memory_runtime, "IM_ATTACHMENT_CAPTURE_AVAILABLE", True)
     config = MemoryConfig(
         enabled=True,
         processing=replace(
@@ -3688,7 +3956,6 @@ async def test_attachment_capture_status_rejects_stale_runtime_health(
     memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr(memory_runtime, "IM_ATTACHMENT_CAPTURE_AVAILABLE", True)
     config = MemoryConfig(
         enabled=True,
         processing=replace(
@@ -3739,7 +4006,7 @@ async def test_attachment_capture_status_rejects_stale_runtime_health(
     await memory_runtime_factory.close(runtime)
 
 
-def test_attachment_capture_status_stays_unavailable_until_im_capture_lands() -> None:
+def test_attachment_capture_status_becomes_ready_after_slack_capture_lands() -> None:
     config = MemoryConfig(
         enabled=True,
         processing=replace(
@@ -3756,10 +4023,7 @@ def test_attachment_capture_status_stays_unavailable_until_im_capture_lands() ->
         "disabled_features": [],
     }
 
-    assert (
-        memory_runtime._attachment_capture_status(config, "available", health)
-        == "unavailable"
-    )
+    assert memory_runtime._attachment_capture_status(config, "available", health) == "ready"
 
 
 async def test_recorder_reap_hands_call_log_to_host_until_restart(
@@ -5723,6 +5987,32 @@ def _processing_config() -> MemoryProcessingConfig:
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-secret"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embedding-secret"),
     )
+
+
+async def test_attachment_capture_config_generation_is_transition_bound(
+    memory_runtime_factory,
+) -> None:
+    processing = replace(
+        _processing_config(),
+        multimodal=MemoryEndpointConfig(
+            "https://vision.example.test/v1",
+            "vision-model",
+            "vision-secret",
+        ),
+    )
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=processing),
+        artifact_manager=_installed_artifact(),
+    )
+
+    before = runtime.attachment_capture_config_generation()
+    assert isinstance(before, int)
+    async with runtime._reconcile_lock:
+        assert runtime.attachment_capture_config_generation() is None
+    after = runtime.attachment_capture_config_generation()
+
+    assert isinstance(after, int)
+    assert after > before
 
 
 async def test_runtime_restart_replaces_process_without_processing_preflight(

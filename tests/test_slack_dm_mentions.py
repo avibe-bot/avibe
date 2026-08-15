@@ -761,6 +761,70 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(received, {"text": "<@U_BOT> hello"})
 
+    async def test_dm_file_share_sets_the_separate_attachment_classification(self):
+        """Scenario: MEMORY-IM-ATTACH-001."""
+
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+        received = {}
+
+        async def _on_message(context, text):
+            received.update(
+                text=text,
+                ordinary_text=context.is_ordinary_text,
+                ordinary_attachment=context.is_ordinary_attachment,
+                files=[file.name for file in context.files or ()],
+            )
+
+        slack.register_callbacks(on_message=_on_message)
+        payload = {
+            "event_id": "evt-dm-file-share",
+            "team_id": "T1",
+            "authorizations": [{"user_id": "U_BOT"}],
+            "event": {
+                "type": "message",
+                "subtype": "file_share",
+                "channel": "D123",
+                "channel_type": "im",
+                "user": "U123",
+                "text": "remember this receipt",
+                "ts": "1710000000.000201",
+                "files": [
+                    {
+                        "id": "F123",
+                        "name": "receipt.pdf",
+                        "mimetype": "application/pdf",
+                        "size": 128,
+                        "url_private_download": "https://files.slack.test/receipt.pdf",
+                    }
+                ],
+                "blocks": [
+                    {
+                        "type": "rich_text",
+                        "elements": [
+                            {
+                                "type": "rich_text_section",
+                                "elements": [
+                                    {"type": "text", "text": "remember this receipt"}
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+
+        await slack._handle_event(payload)
+
+        self.assertEqual(
+            received,
+            {
+                "text": "remember this receipt",
+                "ordinary_text": False,
+                "ordinary_attachment": True,
+                "files": ["receipt.pdf"],
+            },
+        )
+
     async def test_bound_user_message_from_mismatched_dm_channel_is_ignored(self):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
         received = {"called": False}

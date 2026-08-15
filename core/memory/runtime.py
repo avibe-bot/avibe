@@ -36,7 +36,7 @@ from core.memory.artifact import (
     MemoryRuntimeActivationError,
     get_memory_artifact_manager,
 )
-from core.memory.attachments import IM_ATTACHMENT_CAPTURE_AVAILABLE
+from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.blocking import run_blocking
 from core.memory.clear_intent import ClearSurface
 from core.memory.confined_filesystem import required_no_follow_flag
@@ -318,7 +318,13 @@ class _UnavailableMemoryModule:
     is the whole seam, not a stand-in for the complete ``MemoryModule`` interface.
     """
 
-    async def capture(self, _request: Any) -> OperationFailed:
+    async def capture(
+        self,
+        _request: Any,
+        *,
+        source_lease: Any = None,
+    ) -> OperationFailed:
+        del source_lease
         return OperationFailed(error="memory_store_unavailable")
 
 
@@ -1325,6 +1331,33 @@ class MemoryRuntime:
             ),
         }
         return payload
+
+    async def attachment_capture_status(
+        self,
+    ) -> Literal["ready", "not_configured", "unavailable"]:
+        """Return the same fresh readiness projection used by Memory status."""
+
+        runtime = await self._processing_record.read_status()
+        payload = _runtime_health_payload(runtime)
+        return _attachment_capture_status(
+            self._config,
+            runtime.source.status,
+            payload.get("health"),
+        )
+
+    def attachment_capture_config_generation(self) -> int | None:
+        """Return the stable explicit opt-in generation without probing providers."""
+
+        snapshot = self._processing_runtime_snapshot()
+        multimodal = self._config.processing.multimodal
+        if snapshot.transition_active or not self._config.enabled or multimodal is None:
+            return None
+        try:
+            if not multimodal.complete():
+                return None
+        except Exception:
+            return None
+        return snapshot.generation
 
     async def failure_log_payload(
         self,
@@ -3683,7 +3716,7 @@ def _attachment_capture_status(
 
     if config.processing.multimodal is None:
         return "not_configured"
-    if not IM_ATTACHMENT_CAPTURE_AVAILABLE:
+    if not IM_ATTACHMENT_CAPTURE_PLATFORMS:
         return "unavailable"
     if not config.enabled:
         return "unavailable"

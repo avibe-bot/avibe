@@ -341,6 +341,7 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
         "supervisor": False,
         "runtime": False,
         "capture": False,
+        "capture-registration": False,
     }
     stop_order: list[str] = []
 
@@ -376,7 +377,12 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
             stop_order.append("memory-runtime")
 
     class _MessageHandler:
-        async def drain_memory_capture_tasks(self) -> None:
+        def quiesce_memory_capture_tasks(self) -> None:
+            stopped["capture-registration"] = True
+            stop_order.append("capture-registration")
+
+        async def cancel_memory_capture_tasks(self) -> None:
+            assert stopped["capture-registration"] is True
             stopped["capture"] = True
             stop_order.append("capture")
 
@@ -410,6 +416,7 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert stopped["supervisor"] is True
     assert stopped["runtime"] is True
     assert stopped["capture"] is True
+    assert stopped["capture-registration"] is True
     assert old_memory_runtime.closed is False
     assert fresh_memory_runtime.closed is True
     runtime_work_order = [
@@ -419,7 +426,11 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert set(runtime_work_order[1:3]) == {"tasks", "watch"}
     assert runtime_work_order[3] == "supervisor"
     assert stop_order.index("factory-reset") < stop_order.index("capture")
-    assert stop_order[-2:] == ["capture", "memory-runtime"]
+    assert stop_order[-3:] == [
+        "capture-registration",
+        "capture",
+        "memory-runtime",
+    ]
 
 
 @pytest.mark.asyncio

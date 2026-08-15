@@ -49,6 +49,10 @@ def _target_agent_variant(value: Any, backend: Optional[str], agent_name: Option
     return None if variant in sentinel_values else variant
 
 
+class _MemoryCaptureRegistrationClosed(Exception):
+    """Internal signal that shutdown closed attachment capture registration."""
+
+
 class MessageHandler(BaseHandler):
     """Handles message routing and Claude communication"""
 
@@ -62,6 +66,7 @@ class MessageHandler(BaseHandler):
         self.session_handler = None  # Will be set after creation
         self.receiver_tasks = controller.receiver_tasks
         self._memory_capture_tasks: set[asyncio.Task[Any]] = set()
+        self._memory_capture_registration_open = True
 
     def set_session_handler(self, session_handler):
         """Set reference to session handler"""
@@ -72,6 +77,7 @@ class MessageHandler(BaseHandler):
         task: asyncio.Task[Any],
         *,
         lifecycle_admission: Any = None,
+        attachment_lease: Any = None,
     ) -> None:
         """Retain a best-effort capture until asyncio reports its completion."""
 
@@ -85,6 +91,9 @@ class MessageHandler(BaseHandler):
             except Exception:
                 logger.warning("Memory capture task failed", exc_info=True)
             finally:
+                release_attachment = getattr(attachment_lease, "release", None)
+                if callable(release_attachment):
+                    release_attachment()
                 release = getattr(lifecycle_admission, "release", None)
                 if callable(release):
                     release()
@@ -107,6 +116,25 @@ class MessageHandler(BaseHandler):
             return None
         return await acquire(session_id)
 
+    def _memory_session_lifecycle_epoch(self, session_id: str) -> int:
+        manager = getattr(self.controller, "session_turns", None)
+        read_epoch = getattr(manager, "session_lifecycle_epoch", None)
+        if not callable(read_epoch):
+            return 0
+        epoch = read_epoch(session_id)
+        return epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else 0
+
+    def _memory_session_lifecycle_epoch_matches(
+        self,
+        session_id: str,
+        expected_epoch: int,
+    ) -> bool:
+        manager = getattr(self.controller, "session_turns", None)
+        matches = getattr(manager, "session_lifecycle_epoch_matches", None)
+        if callable(matches):
+            return bool(matches(session_id, expected_epoch))
+        return self._memory_session_lifecycle_epoch(session_id) == expected_epoch
+
     async def drain_memory_capture_tasks(self) -> None:
         """Settle captures accepted before controller shutdown closes Memory."""
 
@@ -114,6 +142,21 @@ class MessageHandler(BaseHandler):
             tasks = tuple(self._memory_capture_tasks)
             await asyncio.gather(*tasks, return_exceptions=True)
             self._memory_capture_tasks.difference_update(tasks)
+
+    async def cancel_memory_capture_tasks(self) -> None:
+        """Cancel and join captures before the controller event loop closes."""
+
+        while self._memory_capture_tasks:
+            tasks = tuple(self._memory_capture_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._memory_capture_tasks.difference_update(tasks)
+
+    def quiesce_memory_capture_tasks(self) -> None:
+        """Close the loop-owned registration gate before shutdown sweeps tasks."""
+
+        self._memory_capture_registration_open = False
 
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
@@ -294,6 +337,12 @@ class MessageHandler(BaseHandler):
                     mirror_harness_inbound(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
+            memory_session_id = base_session_id
+            memory_session_pre_epoch = (
+                self._memory_session_lifecycle_epoch(memory_session_id)
+                if is_human and context.files
+                else None
+            )
             payload = dict(context.platform_specific or {})
             payload["turn_source"] = source
             payload["turn_base_session_id"] = base_session_id
@@ -302,26 +351,29 @@ class MessageHandler(BaseHandler):
             )
             context.platform_specific = payload
 
-            # Memory capture is deliberately outside the agent turn. Native IM
-            # dedup has already claimed this message and the stable base session
-            # is now known, so the controller can make one best-effort capture
-            # decision without delaying dispatch.
-            if is_human:
+            # Text-only turns keep the original early capture path. Attachment
+            # turns defer only until the shared materializer has produced a
+            # descriptor-backed lease.
+            if is_human and not context.files:
                 capture_memory = getattr(self.controller, "capture_user_memory", None)
                 if callable(capture_memory):
                     turn_lifecycle_admission = await self._acquire_memory_capture_admission(
-                        base_session_id,
+                        memory_session_id,
                         turn_lifecycle_admission,
                     )
-                    capture_task = asyncio.create_task(
-                        capture_memory(context, control_message, base_session_id),
-                        name="memory-capture",
-                    )
-                    self._track_memory_capture_task(
-                        capture_task,
-                        lifecycle_admission=turn_lifecycle_admission,
-                    )
-                    turn_lifecycle_admission = None
+                    if self._memory_capture_registration_open:
+                        capture_task = asyncio.create_task(
+                            capture_memory(context, control_message, memory_session_id),
+                            name="memory-capture",
+                        )
+                        self._track_memory_capture_task(
+                            capture_task,
+                            lifecycle_admission=turn_lifecycle_admission,
+                        )
+                        turn_lifecycle_admission = None
+                    elif turn_lifecycle_admission is not None:
+                        turn_lifecycle_admission.release()
+                        turn_lifecycle_admission = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -722,6 +774,123 @@ class MessageHandler(BaseHandler):
                         "Processed %s file attachments for message",
                         len(processed_files),
                     )
+
+            # Memory capture remains best effort and outside the Agent turn, but
+            # file turns start only after the one shared download has produced an
+            # immutable lease. Authorization precedes retaining a Memory consumer.
+            if is_human and context.files:
+                capture_memory = getattr(self.controller, "capture_user_memory", None)
+                if callable(capture_memory):
+                    memory_attachment_lease = None
+                    memory_capture_reservation = None
+                    attachment_text_only = False
+                    capture_task = None
+                    try:
+                        turn_lifecycle_admission = await self._acquire_memory_capture_admission(
+                            memory_session_id,
+                            turn_lifecycle_admission,
+                        )
+                        if not self._memory_capture_registration_open:
+                            raise _MemoryCaptureRegistrationClosed
+                        stale_attachment_capture = bool(
+                            memory_session_pre_epoch is not None
+                            and not self._memory_session_lifecycle_epoch_matches(
+                                memory_session_id,
+                                memory_session_pre_epoch,
+                            )
+                        )
+                        reserve_attachment = getattr(
+                            self.controller,
+                            "reserve_memory_attachment_capture",
+                            None,
+                        )
+                        memory_capture_reservation = (
+                            reserve_attachment(context, memory_session_id)
+                            if callable(reserve_attachment)
+                            and not stale_attachment_capture
+                            else None
+                        )
+                        attachment_config_generation = getattr(
+                            memory_capture_reservation,
+                            "config_generation",
+                            None,
+                        )
+                        if (
+                            not isinstance(attachment_config_generation, bool)
+                            and isinstance(attachment_config_generation, int)
+                            and attachment_config_generation >= 0
+                            and attachment_lease is not None
+                        ):
+                            try:
+                                memory_attachment_lease = attachment_lease.retain()
+                            except Exception as error:
+                                attachment_text_only = True
+                                logger.warning(
+                                    "Memory attachment lease could not be retained; "
+                                    "capturing text only error_type=%s",
+                                    type(error).__name__,
+                                )
+                        capture_options = {
+                            "attachment_reservation": memory_capture_reservation,
+                            "attachment_config_generation": attachment_config_generation,
+                        }
+                        if memory_attachment_lease is not None:
+                            capture_options["attachment_lease"] = memory_attachment_lease
+                        if attachment_text_only:
+                            capture_options["attachment_text_only"] = True
+                        capture = capture_memory(
+                            context,
+                            control_message,
+                            memory_session_id,
+                            **capture_options,
+                        )
+                        capture_task = asyncio.create_task(
+                            capture,
+                            name="memory-capture",
+                        )
+                    except _MemoryCaptureRegistrationClosed:
+                        release_admission = getattr(
+                            turn_lifecycle_admission,
+                            "release",
+                            None,
+                        )
+                        if callable(release_admission):
+                            release_admission()
+                        turn_lifecycle_admission = None
+                    except BaseException as error:
+                        if capture_task is not None:
+                            capture_task.cancel()
+                        if memory_attachment_lease is not None:
+                            memory_attachment_lease.release()
+                        release_reservation = getattr(
+                            memory_capture_reservation,
+                            "release",
+                            None,
+                        )
+                        if callable(release_reservation):
+                            release_reservation()
+                        release_admission = getattr(
+                            turn_lifecycle_admission,
+                            "release",
+                            None,
+                        )
+                        if callable(release_admission):
+                            release_admission()
+                        turn_lifecycle_admission = None
+                        if not isinstance(error, Exception):
+                            raise
+                        logger.warning(
+                            "Memory capture task could not be scheduled",
+                            exc_info=True,
+                        )
+                    else:
+                        self._track_memory_capture_task(
+                            capture_task,
+                            attachment_lease=memory_attachment_lease,
+                        )
+                        if turn_lifecycle_admission is not None:
+                            turn_lifecycle_admission.release()
+                        turn_lifecycle_admission = None
 
             if durable_ingress_enabled and not durable_delivery_owned:
                 assert durable_dispatch_text is not None
