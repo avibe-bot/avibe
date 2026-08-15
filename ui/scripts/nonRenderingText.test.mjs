@@ -31,6 +31,9 @@ const NON_RENDERING = [
   ['a TypeScript block comment', 'probe.ts', `/* box-shadow: ${GLOW} */\nconst a = 1;\n`],
   ['a JSX comment', 'probe.tsx', `const a = <div>{/* box-shadow: ${GLOW} */}</div>;\n`],
   ['JSX text', 'probe.tsx', `const a = <div>box-shadow: ${GLOW}</div>;\n`],
+  // A pattern, not a value. Nothing assigns a regex literal to a style, so it
+  // describes CSS in exactly the sense a comment does.
+  ['a regular expression literal', 'probe.ts', `export const RE = /box-shadow: ${GLOW}/;\n`],
   ['a CSS comment', 'probe.css', `/* box-shadow: ${GLOW} */\n.a { color: red; }\n`],
   ['a CSS string', 'probe.css', `.a { content: "box-shadow: ${GLOW}"; }\n`],
   ['a comment opener inside a CSS string', 'probe.css', `.a { content: "/* box-shadow: ${GLOW} */"; }\n`],
@@ -45,6 +48,10 @@ const RENDERING = [
   ['a declaration after a comment on the same line', 'probe.css', `/* note */ .a { box-shadow: ${GLOW}; }\n`, GLOW],
   ['a declaration after a string on the same line', 'probe.css', `.a { content: "x"; box-shadow: ${GLOW}; }\n`, GLOW],
   ['a URL whose // must not open a comment', 'probe.ts', `const u = 'https://x//y'; const a = { boxShadow: '${GLOW}' };\n`, GLOW],
+  // Blanking regex literals is only safe because the parser decides which
+  // slashes open one. A hand-rolled scanner reads `/ 2; const a = { boxShadow: '`
+  // as a regex and erases the declaration after it.
+  ['a division that is not a regex', 'probe.ts', `const n = 1 / 2; const a = { boxShadow: '${GLOW}' };\n`, GLOW],
 ];
 
 describe('withoutNonRenderingText', () => {

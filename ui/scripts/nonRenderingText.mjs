@@ -110,9 +110,9 @@ function blankCssComments(source) {
 // class -- text in a position that cannot draw light -- and is closed here
 // rather than left for the round that would have found it next.
 // The parse, shared by the two callers that need it. Comments are kept apart
-// from JSX text because one caller wants the boundary and the other wants the
-// prose: `glowScale.test.mjs` reads the design annotations that document a
-// component's frame, which are comments and never page copy.
+// from the other non-rendering spans because one caller wants the boundary and
+// the other wants the prose: `glowScale.test.mjs` reads the design annotations
+// that document a component's frame, which are comments and never page copy.
 // The grammar follows the extension, because TSX is not a superset of TS. In a
 // `.ts` file `<T>(x: T) => …` is a generic arrow; read as TSX it is an unclosed
 // JSX element, everything after it becomes `JsxText`, and the blanking below
@@ -123,10 +123,26 @@ function blankCssComments(source) {
 const scriptKind = (file) =>
   /\.(m|c)?ts$/.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.TSX;
 
+// A regular expression describes a shadow, it never draws one. `/box-shadow:
+// 0 0 8px red/` is a PATTERN: the only thing a browser can do with it is test a
+// string, and no assignment anywhere turns a regex literal into a declaration.
+// So it is prose about CSS by the same argument as a comment, and it joins them
+// here rather than being talked out of the scan one call site at a time.
+//
+// It is also the third node kind in a row that TypeScript already knew about
+// and this file had to be told. The parser draws every one of these boundaries
+// for free; the cost each round is that the scan below reads bytes, so a span
+// the tree has already classified has to be re-classified by hand to keep the
+// regexes off it.
+const NON_RENDERING_KINDS = new Set([
+  ts.SyntaxKind.JsxText,
+  ts.SyntaxKind.RegularExpressionLiteral,
+]);
+
 function nonRenderingRanges(source, file) {
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, scriptKind(file));
   const comments = [];
-  const jsxText = [];
+  const literals = [];
   const collect = (ranges) => {
     for (const range of ranges ?? []) comments.push([range.pos, range.end]);
   };
@@ -134,12 +150,12 @@ function nonRenderingRanges(source, file) {
   const visit = (node) => {
     collect(ts.getLeadingCommentRanges(source, node.getFullStart()));
     collect(ts.getTrailingCommentRanges(source, node.getEnd()));
-    if (node.kind === ts.SyntaxKind.JsxText) jsxText.push([node.getStart(tree), node.getEnd()]);
+    if (NON_RENDERING_KINDS.has(node.kind)) literals.push([node.getStart(tree), node.getEnd()]);
     node.getChildren(tree).forEach(visit);
   };
   visit(tree);
 
-  return { comments, jsxText };
+  return { comments, literals };
 }
 
 // Every comment in a file, as text. A design annotation is a comment by
@@ -152,8 +168,8 @@ function typeScriptComments(source, file) {
 }
 
 function blankTypeScriptComments(source, file) {
-  const { comments, jsxText } = nonRenderingRanges(source, file);
-  const blanks = [...comments, ...jsxText];
+  const { comments, literals } = nonRenderingRanges(source, file);
+  const blanks = [...comments, ...literals];
 
   // `split('')`, not `[...source]`: the spread iterates code POINTS, while every
   // offset TypeScript hands back counts UTF-16 code UNITS. An emoji anywhere

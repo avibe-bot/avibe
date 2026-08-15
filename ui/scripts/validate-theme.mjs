@@ -633,7 +633,37 @@ const CSSOM_SETTER = /\.setProperty\(\s*(?<quote>['"\x60])(?<property>[^'"\x60]*
 // one definition down.
 const SHADOW_PROPERTY = `(?<![\\w-])(?!--)[A-Za-z-]*shadow(?![A-Za-z])`;
 
+// Sharing the pattern closed the divergence by NAME and left it open by FLAG:
+// the CSS channels ran case-sensitively while SHADOW_MENTION ran `gi`, so
+// `BOX-SHADOW: var(--shadow-glow-sm-mint)` -- a valid declaration, CSS property
+// names being ASCII case-insensitive -- was measured as a mention, read by no
+// channel, and reported as an unscanned channel. The same failure as the
+// `text-shadow` one, arriving through the argument that was not shared.
+//
+// Case-insensitivity alone is not safe here, and the reason is worth keeping:
+// this scan runs one set of channels over three languages, so `i` also lets the
+// CSS channels match `boxShadow:` in a `.tsx` file -- where the value is a JS
+// expression, and reading it with CSS's terminators stops at the first quote.
+// `boxShadow: active ? `…` : undefined` then yields `active ?` and the guard
+// fails the tree it is guarding. That is not hypothetical; it is what this
+// change did on its first draft.
+//
+// The hyphen is what separates the two languages. Every CSS shadow property has
+// one -- `box-shadow`, `text-shadow`, `-webkit-box-shadow` -- and no JS style
+// key does, because camelCase is the whole point of the JS spelling. Requiring
+// it here is what makes `i` safe, and it removes an overlap that was previously
+// avoided only by the accident of `boxShadow`'s capital S. Written as a
+// lookahead over the shared definition, so the rule about where the word sits
+// still has exactly one home.
+const CSS_SHADOW_PROPERTY = `(?=[A-Za-z-]*-shadow)${SHADOW_PROPERTY}`;
+const PROPERTY_FLAGS = 'gi';
+
 const cssomArgument = (match) => valueArgument(match.input, match.index + match[0].length) ?? '';
+
+// The expression a style property is given, read from where the match ends. An
+// empty string when it never terminates, which yields no values and excuses
+// nothing, so the site is reported as unreadable rather than passed over.
+const styleExpression = (match) => propertyExpression(match.input, match.index + match[0].length) ?? '';
 
 // A custom property assigned a bare colour contributes no shadow value: it tints
 // geometry that some scanned declaration still has to supply. Both halves of the
@@ -654,7 +684,7 @@ const SHADOW_CHANNELS = [
   { pattern: /shadow-\[([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
   // `[box-shadow:0_0_16px_-4px_var(--x)]` -- Tailwind's arbitrary *property*.
   {
-    pattern: new RegExp(`\\[${SHADOW_PROPERTY}\\s*:([^\\]]*)\\]`, 'g'),
+    pattern: new RegExp(`\\[${CSS_SHADOW_PROPERTY}\\s*:([^\\]]*)\\]`, PROPERTY_FLAGS),
     valuesOf: (match) => [match[1]],
   },
   // `shadow-(--x)` and `drop-shadow-(--x)` -- Tailwind's custom-property
@@ -683,7 +713,7 @@ const SHADOW_CHANNELS = [
   // contains one, so the quotes cost nothing to stop at and stop the closing one
   // from being read as part of the colour.
   {
-    pattern: new RegExp(`(?<!\\[)${SHADOW_PROPERTY}\\s*:([^;}'"\`]*)`, 'g'),
+    pattern: new RegExp(`(?<!\\[)${CSS_SHADOW_PROPERTY}\\s*:([^;}'"\`]*)`, PROPERTY_FLAGS),
     valuesOf: (match) => [match[1]],
   },
   // `filter: drop-shadow(0 0 4px …)`. Matched at the FUNCTION rather than at the
@@ -724,15 +754,14 @@ const SHADOW_CHANNELS = [
     // the TAIL. Application names that merely contain it -- `shadowPreset`,
     // `shadowRoot`, `useShadows` -- put it at the head or pluralise it, and none
     // of them is a property a browser will read a shadow out of.
-    pattern: /(?<![\w-])[A-Za-z]*[Ss]hadow(?![A-Za-z])['"]?\s*\]?\s*[:=]([^;\n]*)/g,
-    valuesOf: (match) => [...match[1].matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`/g)]
-      .map(([, single, double, template]) => single ?? double ?? template),
+    pattern: /(?<![\w-])[A-Za-z]*[Ss]hadow(?![A-Za-z])['"]?\s*\]?\s*[:=]/g,
+    valuesOf: (match) => stringLiterals(styleExpression(match)),
     // A CSS shadow is a string, so a bare non-string literal is provably not
     // one: `scrollbar: { useShadows: false }` is a Monaco flag, not a shadow.
     // This is deliberately narrower than "no string literal here" -- that is the
     // `boxShadow: glow` case, where an identifier could hold anything and the
     // value stays unreadable rather than becoming innocent.
-    provablyNotAShadow: (match) => NON_STRING_LITERAL.test(match[1]),
+    provablyNotAShadow: (match) => NON_STRING_LITERAL.test(styleExpression(match)),
   },
   // `el.style.setProperty('box-shadow', '0 0 93px red')`. Read through the
   // shared CSSOM_SETTER source rather than a pattern of its own, because the
@@ -758,11 +787,16 @@ function stringLiterals(expression) {
 // `priority`, and reading "every string literal after the property name" swept
 // it up as a second layer -- so the entirely valid
 // `setProperty('box-shadow', 'none', 'important')` accepted `none` and then
-// failed on `important`. The argument ends at the first comma that is not
-// nested inside a call or a string, which is the same notion of "top level"
-// that balancedArgument already uses; null when the call never closes, so an
-// unreadable one stays loud instead of quietly yielding nothing.
-function valueArgument(source, start) {
+// failed on `important`. The expression ends at the first terminator that is not
+// nested inside a call, a bracket or a string, which is the same notion of "top
+// level" that balancedArgument already uses; null when it never terminates, so
+// an unreadable one stays loud instead of quietly yielding nothing.
+//
+// Two callers, one scanner, differing only in what ends them. Writing the second
+// one out again as its own loop is how the quote handling in one of them gets a
+// fix the other never hears about -- which is the shape of defect this file has
+// now spent several rounds on.
+function expressionUpTo(source, start, terminators) {
   let depth = 0;
   let quote = null;
   for (let index = start; index < source.length; index += 1) {
@@ -774,11 +808,24 @@ function valueArgument(source, start) {
     }
     if (char === "'" || char === '"' || char === '`') quote = char;
     else if (char === '(' || char === '[' || char === '{') depth += 1;
-    else if ((char === ',' || char === ')') && depth === 0) return source.slice(start, index);
+    else if (depth === 0 && terminators.includes(char)) return source.slice(start, index);
     else if (char === ')' || char === ']' || char === '}') depth -= 1;
   }
   return null;
 }
+
+// A call argument ends at the comma before the next one, or at the paren that
+// closes the call.
+const valueArgument = (source, start) => expressionUpTo(source, start, ',)');
+
+// A style property's own expression ends where the next property begins, or
+// where the object or statement does. Reading `[^;\n]*` instead -- everything up
+// to the end of the line -- was the same mistake the `priority` argument had
+// already taught this file once: `style={{ boxShadow: 'none', color: 'red' }}`
+// swept the NEXT property up as a second shadow layer, accepted `none`, and then
+// failed `validate:theme` on `red`. Valid, glow-free UI code, blocked by the
+// glow guard.
+const propertyExpression = (source, start) => expressionUpTo(source, start, ',;}\n');
 
 // The parenthesis-balanced span starting at `openIndex`, or null when it never
 // closes -- null is not a quiet skip, it lands in the unreadable bucket.
