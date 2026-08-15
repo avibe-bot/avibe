@@ -602,13 +602,13 @@ export const SourceDetailPanel: React.FC<{
         if (failure?.code === 'source_not_found') {
           setManageStage({ kind: 'idle' });
           await settlement.gone(latest.id);
+        } else if (!failure || !failure.serverNamed) {
+          await reconcileEditWrite(latest, draft, patch, plan, settlement);
         } else {
           const refusal = guardedFailure(error);
           if (refusal) {
             setManageStage({ kind: 'confirming_edit', draft, patch, plan: refusal });
             settlement.release();
-          } else if (!failure || !failure.serverNamed) {
-            await reconcileEditWrite(latest, draft, patch, plan, settlement);
           } else {
             setManageStage({
               kind: 'edit_failed',
@@ -647,13 +647,13 @@ export const SourceDetailPanel: React.FC<{
         if (failure?.code === 'source_not_found') {
           setManageStage({ kind: 'idle' });
           await settlement.gone(latest.id);
+        } else if (!failure || !failure.serverNamed) {
+          await reconcileDeleteWrite(latest, plan, settlement);
         } else {
           const refusal = guardedFailure(error);
           if (refusal) {
             setManageStage({ kind: 'confirming_delete', plan: refusal });
             settlement.release();
-          } else if (!failure || !failure.serverNamed) {
-            await reconcileDeleteWrite(latest, plan, settlement);
           } else {
             setManageStage({ kind: 'delete_failed', plan, forced, retryRead: false });
             settlement.release();

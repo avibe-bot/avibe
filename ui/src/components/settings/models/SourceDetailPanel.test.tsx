@@ -491,7 +491,7 @@ describe('SourceDetailPanel', () => {
     'reconciles an unknown $action write (forced=$forced, outcome=$outcome) from one authoritative read',
     async ({ action, forced, outcome }) => {
       const unknownFailure = action === 'edit'
-        ? new ApiCallError('bad_response', undefined, false)
+        ? new ApiCallError('http_502', undefined, false, heldGaps, [], heldHops, 502)
         : new TypeError('response lost');
       if (action === 'edit') {
         const mutation = vi.spyOn(modelsApi, 'patchSource');
