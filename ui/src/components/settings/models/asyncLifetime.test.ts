@@ -330,8 +330,8 @@ describe('Source entity landing through the shared authority', () => {
     expect(detail).toMatch(/trackMutation\(async \(latest, settlement\)[\s\S]*?modelsApi\.refreshSource\(latest\.id, confirmation\)/);
     expect(detail).toMatch(/await settlement\.source\(answer\.source\)/);
     expect(page).toMatch(/sourceWriteRegistry\.track\(sourceId[\s\S]*?sourceEntityAuthority\.current\(sourceId\)[\s\S]*?sourceEntityAuthority\.begin\(sourceId\)[\s\S]*?const settlement: SourceMutationSettlement/);
-    expect(page).toMatch(/source: async \(echoed\)[\s\S]*?sourceEntityAuthority\.settle\(generation/);
-    expect(page).not.toMatch(/const sourceMutation|activeSourceGenerations/);
+    expect(page).toMatch(/source: async \(echoed, scope\)[\s\S]*?sourceEntityAuthority\.settle\(generation/);
+    expect(page).not.toMatch(/const sourceMutation\s*=|activeSourceGenerations/);
     expect(page).toMatch(/await refreshAuthority\.run/);
     expect(sourceRetry).toMatch(/await refresh\(\)/);
     expect(supplyRetry).toMatch(/await refresh\(\)/);

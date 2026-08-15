@@ -48,7 +48,7 @@ describe('convergeMutation', () => {
     expect(page).toMatch(/const sourceAdded = async[\s\S]*?await convergeMutation\(\{[\s\S]*?intent:\s*\{[\s\S]*?reconcile: refresh/);
     expect(page).toMatch(/const trackSourceMutation[\s\S]*?sourceEntityAuthority\.current\(sourceId\)[\s\S]*?const settlement: SourceMutationSettlement/);
     expect(detail).toMatch(/reconcileRemoval[\s\S]*?await applyReconciliation\(sourceId, reconciliation\.value, settlement\)/);
-    expect(detail).toMatch(/kind: 'gone'[\s\S]*?await settlement\.gone\(sourceId, value\)/);
-    expect(detail).not.toMatch(/onSourceEcho|onChanged|onMutation|onGone/);
+    expect(detail).toMatch(/if \(value\.kind === 'gone'\) return settlement\.gone\(sourceId, value, scope\)/);
+    expect(detail).not.toMatch(/onSourceEcho|onChanged|onGone|\bonMutation(?:=|:)/);
   });
 });

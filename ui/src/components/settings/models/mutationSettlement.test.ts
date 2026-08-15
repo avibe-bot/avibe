@@ -4,8 +4,18 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { createContinuationSettlement, createSourceCreatedDelivery } from './mutationSettlement';
+import { modelChainKey } from './modelRows';
 import type { SourceCreated } from './modelsApi';
+import {
+  createContinuationSettlement,
+  createSourceCreatedDelivery,
+  readSurfaceLanding,
+  SOURCE_MUTATION_REPORT_PROJECTIONS,
+  sourceMutationLanding,
+  sourceMutationReadScope,
+} from './mutationSettlement';
+import { failRegionRead, readyRegion, unreadRegion } from './regionRead';
+import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
 
 describe('mutation settlement fences', () => {
   it('atomically rejects every effect belonging to an invalidated attempt', () => {
@@ -44,15 +54,72 @@ describe('mutation settlement fences', () => {
     expect(detail).toContain('settlement.gone');
   });
 
-  it('carries the surface landing verdict through every Source settlement', () => {
+  it('lands only after every projection referenced by the report was read', async () => {
+    const impact = {
+      hops: [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: 'src', model_id: 'model-a' }],
+      gaps: [{ backend: 'codex' as const, model_id: 'gpt-5.6-sol', agents: ['release'] }],
+    };
+    const affectedChains = sourceMutationReadScope(impact).affectedChains;
+    const calls: string[] = [];
+    const reads = await readSurfaceLanding({
+      sources: async () => { calls.push('sources'); return [] as Source[]; },
+      supply: async () => { calls.push('supply'); return [] as AgentSupply[]; },
+      runtime: async () => { calls.push('runtime'); return {} as RuntimeDependency; },
+      chains: async (requests) => {
+        calls.push('chains');
+        return Object.fromEntries(requests.map(({ backend, modelId }) => [
+          modelChainKey(backend, modelId),
+          readyRegion({} as AgentChain),
+        ]));
+      },
+    }, affectedChains);
+
+    expect(new Set(calls)).toEqual(new Set(Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS)));
+    expect(new Set(Object.keys(reads))).toEqual(new Set(Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS)));
+    expect(sourceMutationLanding(reads, affectedChains, true).verdict).toBe('landed');
+
+    for (const projection of Object.keys(
+      SOURCE_MUTATION_REPORT_PROJECTIONS,
+    ) as (keyof typeof SOURCE_MUTATION_REPORT_PROJECTIONS)[]) {
+      expect(
+        sourceMutationLanding({
+          ...reads,
+          [projection]: failRegionRead(reads[projection]),
+        }, affectedChains, true).verdict,
+        projection,
+      ).toBe('degraded');
+    }
+
+    for (const request of affectedChains) {
+      const key = modelChainKey(request.backend, request.modelId);
+      const missing = readyRegion({
+        ...Object.fromEntries(affectedChains.map(({ backend, modelId }) => [
+          modelChainKey(backend, modelId),
+          readyRegion({} as AgentChain),
+        ])),
+        [key]: unreadRegion(),
+      });
+      expect(sourceMutationLanding({ ...reads, chains: missing }, affectedChains, true).verdict, key)
+        .toBe('degraded');
+    }
+  });
+
+  it('routes every management settlement through one post-await announcement', () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const page = readFileSync(resolve(here, 'SettingsModelsPage.tsx'), 'utf8');
+    const detail = readFileSync(resolve(here, 'SourceDetailPanel.tsx'), 'utf8');
     const refresh = page.slice(page.indexOf('const refresh = React.useCallback'), page.indexOf('\n\n  const trackSourceMutation'));
     const settlement = page.slice(page.indexOf('const trackSourceMutation'), page.indexOf('\n\n  React.useEffect', page.indexOf('const trackSourceMutation')));
+    const committed = detail.slice(
+      detail.indexOf('const commitManagementMutation'),
+      detail.indexOf('\n  const reconcileEditWrite'),
+    );
 
     expect(refresh).toMatch(/Promise<SourceMutationLanding>/);
-    expect(refresh).toMatch(/\? 'landed'\s*:\s*'degraded'/);
+    expect(refresh).toContain('sourceMutationLanding(');
     expect(settlement).toMatch(/Promise<SourceMutationLanding>/);
-    expect(settlement).toMatch(/return reconcile \? refresh\(\) : 'landed'/);
+    expect(settlement).toContain('return refresh(affectedChains)');
+    expect((detail.match(/dispatchManageStage\(\{ type: 'settled' \}\)/g) ?? []).length).toBe(1);
+    expect(committed).toMatch(/await onMutationCommitted[\s\S]*dispatchManageStage\(\{ type: 'settled' \}\)/);
   });
 });
