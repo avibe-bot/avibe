@@ -7,10 +7,10 @@
 > update, verify service health before reporting an acceptance result.
 
 This runbook validates the first Memory attachment release across Slack, Discord,
-Telegram, Lark, and WeChat. It is deliberately short: prepare five fixture pairs,
-send ten direct messages, wait for one shared idle-flush window, and inspect the
-ten outcomes. The Agent's reply is not evidence of Memory capture; Memory runs
-independently of Agent delivery.
+Telegram, Lark, and WeChat. Establish five UI-visible principal baselines, send
+five accepted images and three caption-bearing rejected files, then wait for the
+eight observable outcomes. The Agent's reply is not evidence of Memory capture;
+Memory runs independently of Agent delivery.
 
 This owner-facing checklist uses only evidence visible in the product UI. It does
 not require container access, database queries, or log inspection. A property
@@ -19,7 +19,7 @@ observability issue, not in this checklist.
 
 ## Preconditions
 
-Do not start the 20-minute clock until all of these are true:
+Do not send the attachment fixtures until all of these are true:
 
 1. The authorized local Incus `master` target is healthy and still has its prior
    product state. This checklist requires a separately provisioned five-platform
@@ -45,63 +45,81 @@ Do not start the 20-minute clock until all of these are true:
    human baseline and is closed where the platform exposes the required facts.
    WeChat bot/self/system source exclusion remains unverified and is collected
    below; this checklist does not claim those sources are currently excluded.
-6. Record a run tag such as `IMA-20260816-0508`. Put it in every supported
-   caption and in every fixture's pixel/file marker. Lark and WeChat native
-   image/file messages are verified by bound user plus send timestamp rather
-   than by assuming those clients support attachment captions.
+6. Record a run tag such as `IMA-20260816-0508`. Use it in baseline text and every
+   supported caption, but never in an accepted image's pixel-only marker.
+7. From the exact human identity that will send each platform fixture, send one
+   pure-text baseline with a unique value such as `<run-tag> principal slack`.
+   In **Memory > Processing Record**, wait for each tagged baseline, open it, and
+   record its opaque `principal_id` and timestamp. That entry is both the safe
+   product-UI mapping from test identity to principal and the per-principal
+   high-water mark. If any of the five identities cannot establish its tagged
+   baseline, record the run as `BLOCKED` and stop; do not infer the mapping from
+   the HMAC-derived identifier or use an engineering lookup tool.
 
 ### Test fixtures
 
-Prepare one small fixture pair per platform: five PNGs and five SVGs, ten files
-total. Do not reuse a file across platforms, and do not use personal or
-production data.
+Prepare five accepted PNGs (one per platform) and three rejected SVGs (Slack,
+Discord, and Telegram), eight files total. Do not reuse a file across platforms,
+and do not use personal or production data.
 
-- **Accepted image:** a 512 x 512 PNG under 1 MiB. Put a large, high-contrast
-  platform-specific marker in the pixels, for example `IMA-DISCORD-A7Q2`. The
-  caption must contain the run tag but must **not** contain the pixel marker. This
-  separates image understanding from text-only capture.
+- **Accepted image:** a 512 x 512 PNG under 1 MiB. Put a large, high-contrast,
+  platform-specific marker in the pixels, for example `PX-Q7M4-V2K9`. Match the
+  complete marker in the model response, never the run tag or a shared substring.
+  Use a neutral filename such as `accepted-01.png`; the complete marker must not
+  appear in the filename, caption, run tag, title, description, alt text, or any
+  other message metadata.
 - **Rejected file:** an SVG under 100 KiB with a different visible marker, for
-  example `IMA-DISCORD-REJECT-R9M4`. SVG is intentionally excluded from the
+  example `REJECT-R9M4`. SVG is intentionally excluded from the
   pinned Memory modality policy. Where the client supports a caption on that
   attachment message, use a non-empty caption containing the run tag but not the
-  SVG marker. The table explicitly identifies the file-only cases.
+  SVG marker. Use a neutral filename such as `rejected-01.svg`.
 
-Use different markers for every platform. Keep a local table mapping each pair
-and marker to its platform; do not put that table in chat.
+The isolation rule covers every text channel retained by the current path:
 
-## 20-minute acceptance flow
+- `EverOSPort.add()` sends capture text plus attachment `kind`, `name`, `uri`, and
+  `ext`; kind/extension are closed classifier values, while the pinned URI uses an
+  opaque bundle ID and indexed filename rather than the source name;
+- Slack may derive `attachment.name` from file `name` or `title`, so both stay
+  neutral;
+- Discord retains the attachment filename; leave descriptions/alt text absent or
+  neutral as well;
+- Telegram photo names normalize to `telegram-photo.jpg`, while its caption is
+  capture text;
+- Lark image resource keys become the attachment name; do not repeat the pixel
+  marker in surrounding message text; and
+- WeChat item filenames become attachment names, so they stay neutral.
 
-Send the ten fixtures first, then wait once. The worker delivers the capture rows
-serially, and a session's idle-flush clock starts only after its add succeeds.
-The shared wait therefore budgets for both ingestion and the per-session idle
-window without mutating any session-owned state.
+Use a different complete pixel marker for every accepted platform image. Keep a
+local mapping from neutral fixture name and marker to platform; do not put that
+mapping in any message or platform metadata.
 
-1. In **Memory > Processing Record**, record the newest entry timestamp for each
-   bound platform user. This is the per-user high-water mark for the run.
-2. Within about two minutes, send each platform's accepted PNG and rejected SVG
-   as described in the table. The order within a platform does not affect the
-   result; finish all ten sends before waiting.
-3. Do not send another message in any tested session for at least **10 minutes 30
-   seconds after the final fixture**. The first five minutes are the worst-case
-   ingestion budget for ten serial rows: `core/memory/worker.py` drains rows one
-   at a time and `core/memory/coordinator.py` bounds each provider add with
-   `ADD_TIMEOUT_SECONDS = 30`. Only after each successful add does
-   `MemoryStore.settle_add_ack()` set that session's idle deadline. The next five
-   minutes derive from `IDLE_FLUSH_TIMEOUT = 5 minutes`, followed by 30 seconds of
-   scheduling margin. `MAX_UNFLUSHED_AGE = 30 minutes` and
-   `MAX_UNFLUSHED_MESSAGES = 100` are fallback bounds, not the expected trigger
-   for this two-message-per-platform run.
-4. Refresh **Processing Record** and inspect all ten outcomes. Recheck that **Call
-   log** is **Recording normally** before interpreting accepted-image Model calls.
-   Allow the remaining clock time for terminal entries to appear.
+## State-driven acceptance flow
+
+The completion condition is visible state, not elapsed wall time. The long-lived
+`master` target has a shared preserved queue and may receive concurrent traffic,
+so no finite delay proves that a missing fixture is a product failure.
+
+1. Send the eight fixtures as described in the table. Use one fixed order for
+   reproducibility, but no pass condition depends on that order.
+2. Do not send another message in a tested session. Refresh **Memory > Processing
+   Record** until all eight post-baseline outcomes are identifiable under the five
+   recorded principals: five accepted-image terminal outcomes and the Slack,
+   Discord, and Telegram rejected-caption outcomes. A flush may combine outcomes,
+   so do not require eight distinct entries.
+3. Stop waiting 30 minutes after the final fixture. This is an operator stop
+   threshold, chosen at the same scale as `MAX_UNFLUSHED_AGE = 30 minutes`, not a
+   delivery upper bound. If any expected outcome is still absent, mark the whole
+   run `INCONCLUSIVE`, not `FAIL`: a shared preserved queue or concurrent traffic
+   can delay this run without proving a product defect. In an idle environment,
+   `IDLE_FLUSH_TIMEOUT = 5 minutes` explains why results commonly appear sooner.
+4. Once all eight outcomes are present, recheck that **Call log** is **Recording
+   normally**, then evaluate every row against its visible pass/fail condition.
 
 This flow deliberately does **not** use `/new`. That command tears down the Agent
 session and pauses session-bound tasks and watches
 (`core/handlers/command_handlers.py`), which conflicts with the long-lived
-`master` environment's state-preservation boundary. The shared ingestion-plus-idle
-window avoids those mutations and keeps the expected wall time near 20 minutes:
-roughly two minutes to send, 10.5 minutes for serial ingestion plus idle, and the
-remaining time for the bounded flush, inspection, and result recording.
+`master` environment's state-preservation boundary. State-driven completion avoids
+those mutations and returns as soon as the eight observable outcomes are ready.
 
 The processing log is the primary evidence because it covers every user and
 project on the installation; **Memory > Search** is scoped to the current
@@ -114,43 +132,49 @@ attachment-derived model output and therefore are not positive evidence.
 
 For a rejected SVG, use only the post-baseline processing entries visible in the
 UI. A caption-bearing rejected turn must preserve its caption without showing the
-SVG filename as an attachment in the entry preview. The Lark and WeChat file-only
-rows must not produce an entry attributable to the rejected filename, marker,
-user, and send time. The hermetic `MEMORY-IM-ATTACH-010` scenario separately
-proves that a fully rejected attachment does not enter the multimodal provider
-path; the manual run does not try to reconstruct that engineering fact from an
+SVG filename as an attachment in the entry preview. The hermetic
+`MEMORY-IM-ATTACH-010` scenario separately proves that a fully rejected
+caption-bearing attachment does not enter the multimodal provider path; the
+manual run does not try to reconstruct that engineering fact from an
 unobservable UI absence.
 
 | Platform | Scenario | Send | Pass condition in Memory > Processing Record |
 | --- | --- | --- | --- |
-| Slack | `MEMORY-IM-ATTACH-001` | In a bound human DM, send the Slack PNG with caption `<run-tag> slack accepted image`. | One post-baseline terminal entry exists for the Slack user. Its **Model calls** contain an attributed multimodal request with the image and a response that describes or reproduces the PNG-only marker. |
-| Slack | `MEMORY-IM-ATTACH-010` | In the same DM, send the Slack SVG with caption `<run-tag> slack rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Slack SVG filename as an attachment. |
-| Discord | `MEMORY-IM-ATTACH-005` | In a bound human DM, upload the Discord PNG as an ordinary attachment with caption `<run-tag> discord accepted image`. Do not add a link embed, component, sticker, or forward. | One post-baseline terminal entry exists for the Discord user. Its attributed multimodal request contains the image and its response exposes the PNG-only marker. If the raw message has an automatic embed and no entry is created, fail this row and apply the Discord fixture decision below. |
-| Discord | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-005` | Upload the Discord SVG with caption `<run-tag> discord rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Discord SVG filename as an attachment. |
-| Telegram | `MEMORY-IM-ATTACH-006` | In a bound private chat, send the Telegram PNG as one photo message with caption `<run-tag> telegram accepted image`. Do not use an album. | One post-baseline terminal entry exists for the Telegram user. Its attributed multimodal request contains the Telegram image input and its response exposes the PNG-only marker. The request may identify the normalized JPEG photo rather than the original PNG filename/MIME. |
-| Telegram | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-006` | Send the Telegram SVG as one document with caption `<run-tag> telegram rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Telegram SVG filename as an attachment. |
-| Lark | `MEMORY-IM-ATTACH-007` | In a bound one-to-one chat, send the Lark PNG through the native **image** action as one image-only message. The pixel marker includes the run tag. | One post-baseline terminal entry appears for the Lark user. Its attributed multimodal request contains the image input and its response exposes the PNG-only marker. |
-| Lark | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-007` | Send the Lark SVG through the native **file** action as one file-only message. The filename includes the run tag; its visible SVG marker is different from the filename. | No post-baseline entry is attributable to the rejected Lark filename, marker, user, and send time. |
-| WeChat | `MEMORY-IM-ATTACH-008` | In a bound direct chat, send the WeChat PNG as one direct image item with no quoted/reference message. The pixel marker includes the run tag. | One post-baseline terminal entry appears for the WeChat user. Its attributed multimodal request contains the image input and its response exposes the PNG-only marker. |
-| WeChat | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-008` | Send the WeChat SVG as one direct file item, with no quoted/reference message. The filename includes the run tag. | No post-baseline entry is attributable to the rejected WeChat filename, marker, user, and send time. |
+| Slack | `MEMORY-IM-ATTACH-001` | In the baseline Slack DM, send the neutral-named PNG with caption `<run-tag> slack accepted image`; keep the complete pixel marker out of the caption and file title. | One post-baseline terminal outcome exists under the recorded Slack principal. Its **Model calls** contain an attributed multimodal request with the image and a response that exposes the complete pixel-only marker. |
+| Slack | `MEMORY-IM-ATTACH-010` | In the same DM, send the neutral-named SVG with caption `<run-tag> slack rejected file`. | An outcome under the recorded Slack principal preserves the caption, and its preview does not show the neutral Slack SVG filename as an attachment. |
+| Discord | `MEMORY-IM-ATTACH-005` | In the baseline Discord DM, upload the neutral-named PNG as an ordinary attachment with caption `<run-tag> discord accepted image`. Keep the complete pixel marker out of the caption and attachment metadata. Do not add a link embed, component, sticker, or forward. | One post-baseline terminal outcome exists under the recorded Discord principal. Its attributed multimodal request contains the image and its response exposes the complete pixel-only marker. A missing outcome at the stop threshold is `INCONCLUSIVE`; the optional fixture decision below diagnoses automatic embeds. |
+| Discord | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-005` | Upload the neutral-named SVG with caption `<run-tag> discord rejected file`. | An outcome under the recorded Discord principal preserves the caption, and its preview does not show the neutral Discord SVG filename as an attachment. |
+| Telegram | `MEMORY-IM-ATTACH-006` | In the baseline Telegram private chat, send the PNG as one photo with caption `<run-tag> telegram accepted image`. Keep the complete pixel marker out of the caption and do not use an album. | One post-baseline terminal outcome exists under the recorded Telegram principal. Its attributed multimodal request contains the Telegram image input and its response exposes the complete pixel-only marker. The request may identify the normalized JPEG photo rather than the original PNG filename/MIME. |
+| Telegram | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-006` | Send the neutral-named SVG as one document with caption `<run-tag> telegram rejected file`. | An outcome under the recorded Telegram principal preserves the caption, and its preview does not show the neutral Telegram SVG filename as an attachment. |
+| Lark | `MEMORY-IM-ATTACH-007` | In a bound one-to-one chat, send the neutral-named Lark PNG through the native **image** action as one image-only message. Do not repeat its complete pixel marker in surrounding text. | One post-baseline terminal outcome appears under the recorded Lark principal. Its attributed multimodal request contains the image input and its response exposes the complete pixel-only marker. |
+| WeChat | `MEMORY-IM-ATTACH-008` | In a bound direct chat, send the neutral-named WeChat PNG as one direct image item with no quoted/reference message. Do not repeat its complete pixel marker in surrounding text or item metadata. | One post-baseline terminal outcome appears under the recorded WeChat principal. Its attributed multimodal request contains the image input and its response exposes the complete pixel-only marker. |
 
 Record `PASS`, `FAIL`, or `INCONCLUSIVE` for every row. Where a caption is
 supported, a missing caption is a failure. For every platform, an accepted image
-whose pixel-only marker is absent, a rejected SVG shown as an attachment, an
-unexpected entry attributable to a file-only rejected turn, or an entry
-attributed to the wrong platform user is a failure.
+whose complete pixel-only marker is absent from an available terminal response,
+a rejected SVG shown as an attachment, or an outcome under a principal different
+from the identity's tagged baseline is a failure.
 
 An accepted row is `INCONCLUSIVE`, not `PASS` or `FAIL`, whenever **Call log** is
 not **Recording normally**, its Model calls are unavailable/expired, or the
 Request/Response evidence cannot be opened. Any row is `INCONCLUSIVE` when the
 Processing Record section needed by its pass condition is unavailable. Rejected
 rows do not use absence of Model calls as evidence; only the visible
-post-baseline entry conditions in the table decide them.
+post-baseline entry conditions in the table decide them. A terminal outcome that
+is present but violates its row is `FAIL`; the 30-minute stop threshold applies
+only when required evidence never becomes observable.
+
+Before recording `PASS`, state the visible counterfactual: broken accepted-image
+processing yields an available terminal call whose response lacks the complete
+pixel-only marker; broken rejected-file filtering yields a visible attachment
+filename or loses its caption; broken attribution places the outcome under a
+principal other than the tagged baseline. If the UI never exposes the evidence
+needed to distinguish those states, record `INCONCLUSIVE` instead.
 
 ## Fixture collection plan
 
 This is an optional, separately authorized engineering follow-up, not a phase of
-the 20-minute UI acceptance flow. The ten manual messages can inform which
+the state-driven UI acceptance flow. The eight manual messages can inform which
 fixtures are most valuable, but they do not provide the Lark `media` or WeChat
 bot/self/system samples below. Do not block or complete the acceptance result on
 these fixture decisions unless the collector was separately authorized and run.
@@ -248,6 +272,14 @@ Decision:
 - Proving the absence of pre-memcell provider calls through the product UI. The
   `MEMORY-IM-ATTACH-010` automated scenario owns the rejection-to-provider
   boundary; issue #1483 tracks product visibility for calls without memcells.
+- Manually testing captionless, fully filtered Lark or WeChat file-only turns.
+  `CaptureAdmission.decide()` returns `CaptureSkipped(memory_invalid_input)` when
+  both text and selected attachments are empty (`core/memory/admission.py`),
+  before a `CaptureRequest`, queue row, provider call, or memcell can exist. The
+  unit test
+  `test_im_attachment_only_turn_with_every_upload_filtered_is_not_captured`
+  pins that structural boundary; this checklist does not treat an unobservable
+  absence as a manual PASS.
 
 ## Follow-up tracking
 
@@ -263,8 +295,9 @@ Decision:
 
 ## Result record
 
-Record the run tag, source commit, five-platform provisioning check,
-service-health result, Call log baseline and final state, and ten row outcomes
+Record the run tag, source commit, five-platform provisioning check, the five
+tagged principal baselines, service-health result, Call log baseline and final
+state, and eight row outcomes
 (including any `BLOCKED` or `INCONCLUSIVE` reason) in the owning issue or
 acceptance report. If a separately authorized fixture collection was also run,
 append only its scrubbed decisions; otherwise record fixture collection as **not
