@@ -23,9 +23,11 @@ Agent Memory is a separate, off-by-default track for completed Agent Turns. When
 the owner explicitly enables it and binds a source workdir to `default` or a
 named Memory project, Avibe asynchronously sends the exact Agent dispatch text
 and successful final result to a dedicated EverOS agent-mode root. Interactive
-and Harness turns use the same admission rule. Accepted-live-steer, failed,
-canceled, silent, legacy-Agent, oversized, malformed, callback, maintenance, and
-unbound turns are skipped without delaying or changing the Turn result.
+and Harness turns use the same admission rule and snapshot the final executing
+`agents.id` when the Turn starts; later Session routing cannot change its Memory
+partition. Accepted-live-steer, failed, canceled, silent, missing-agent-snapshot,
+oversized, malformed, callback, maintenance, and unbound turns are skipped
+without delaying or changing the Turn result.
 
 Because the input is the exact backend dispatch, it can contain identifiers in
 user/Agent-authored text and Avibe-injected time, source-Session, username, or
@@ -49,11 +51,17 @@ without provider I/O until a later enable, which also skips the completed
 opt-out interval.
 
 Adding, changing, or removing a workdir binding has its own committed terminal
-high-water cutover. Backlogged Turns use the project binding that was effective
-when they settled; a new project never captures pre-cutover work, and removal
-keeps its closed binding epoch until the scanner durably drains through the
-cutover. That already-settled backlog remains eligible for delivery under the
-old project; later-settling Turns do not.
+high-water cutover taken after the desired V2 config is persisted. The setting
+becomes sequence-effective when that high water and a recovery intent commit in
+one primary-state transaction; the Agent scanner pauses until the corresponding
+epoch is published, and the save succeeds only after publication. Backlogged
+Turns use the project binding that was effective when they settled; a new project
+never captures pre-cutover work, and removal keeps its closed binding epoch until
+the scanner durably drains through the cutover. That already-settled backlog
+remains eligible for delivery under the old project; later-settling Turns do not.
+Crash recovery uses a later conservative high water only when config committed
+before any intent; otherwise it reuses the exact recorded cutover. Turn
+settlement never waits for Memory projection work.
 
 The existing Personal Memory root remains pinned to chat mode. Agent Memory has
 its own provider root, socket, lifecycle/health slot, scanner, and queue. An

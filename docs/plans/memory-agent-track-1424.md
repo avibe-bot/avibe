@@ -26,13 +26,14 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    slot. No reconcile or maintenance operation may mode-flip an existing root.
 2. The durable source is `session_turns`, joined to `agent_sessions`, not
    Harness-specific `agent_runs`. Both interactive and Harness turns are
-   eligible under the same rules.
+   eligible under the same rules. Each new Turn snapshots the exact executing
+   `agents.id`; mutable Session routing is not execution identity.
 3. A controller-owned background scanner copies eligible terminal turns into a
    separate schema-v4 queue. Terminal settlement and backend adapters do no
    Memory I/O and await no Memory work.
-4. EverOS `agent_id` is derived from immutable `agents.id` with the install-local
-   Memory scope key. Mutable Agent names and user principals are never agent
-   owners.
+4. EverOS `agent_id` is derived from the Turn's immutable executing `agents.id`
+   snapshot with the install-local Memory scope key. Mutable Session routing,
+   Agent names, and user principals are never agent owners.
 5. Agent/project retrieval is explicit, lazy, inert, and bounded. Agent Memory
    is never injected into a prompt, installed as a Codex/Claude skill, or
    executed.
@@ -113,9 +114,10 @@ restarting the Avibe service.
 ### Admission
 
 One durable `session_turns` row is one candidate trajectory. The scanner reads
-in stable `terminal_sequence` order and joins the owning `agent_sessions` row
-and its referenced `agents` row. Admission is provider-neutral and accepts a
-row only when all of these invariants hold:
+in stable `terminal_sequence` order, joins the owning `agent_sessions` row for
+source workdir/provenance classification, and joins
+`session_turns.executing_agent_id` to the referenced `agents` row. Admission is
+provider-neutral and accepts a row only when all of these invariants hold:
 
 - the turn is terminal with `terminal_outcome="completed"`;
 - `terminal_evidence_kind="terminal_result"` and the versioned evidence contains
@@ -125,9 +127,10 @@ row only when all of these invariants hold:
 - no accepted live-steer Delivery is linked to the Turn; v1 excludes steered
   Turns because their accepted instruction text is not durably available after
   materialization and cannot satisfy the exact two-message contract;
-- the session's `agent_id` resolves to a real `agents.id`; legacy name-only
-  sessions fail closed, while later Agent disable/archive does not rewrite an
-  already completed Turn's identity;
+- the Turn's immutable `executing_agent_id` resolves to a real `agents.id`;
+  legacy/pre-migration or backend-only Turns without that snapshot fail closed,
+  while later Session rerouting or Agent rename/disable/archive does not rewrite
+  an already admitted Turn's identity;
 - the source is an ordinary interactive or Harness-request turn, not a callback,
   system maintenance action, or Agent-to-Agent completion callback; and
 - the session workdir resolves through an explicit opaque binding to exactly one
@@ -171,6 +174,9 @@ The Memory store's install-local `scope_key` derives both opaque identities:
 agent_id    = "a-" + HMAC_SHA256(scope_key, "agent:" + agents.id).hex()[:32]
 binding_key = "b-" + HMAC_SHA256(scope_key, "agent-project:" + normalized_workdir).hex()[:32]
 ```
+
+Here `agents.id` is the Turn's immutable `executing_agent_id` snapshot, never a
+later read of the Session's current route.
 
 The raw Agent id, Agent name, workdir, Session id, Turn id, Run id, platform
 identity, and user principal are never structural Memory columns, owner/filter
@@ -306,16 +312,35 @@ invariants.
 
 ### Commit-ordered terminal source
 
-The infrastructure slice also adds nullable
-`session_turns.terminal_sequence INTEGER` plus a unique partial index in the
-primary Avibe state schema. The transaction that first settles a Turn terminal
-assigns one greater than the maximum non-NULL `terminal_sequence` (or `1` when
-none exists) while holding SQLite's serialized writer lock. The assignment,
-terminal outcome/evidence, and terminal state commit
-together; retries cannot allocate a second value. Consequently sequence order
-is settlement commit order even when wall time moves backward or UUIDs sort in
-another order. `terminal_at` remains display metadata and is never a scanner
-cursor. Pre-migration terminal rows retain `NULL` and are not backfilled.
+The infrastructure slice adds two nullable columns to `session_turns` in the
+primary Avibe state schema:
+
+- `executing_agent_id TEXT NULL REFERENCES agents(id) ON DELETE NO ACTION`, an
+  indexed reference to the stable Agent selected by the final execution route;
+  and
+- `terminal_sequence INTEGER`, with a unique partial index.
+
+The initial Delivery claim/Turn creation transaction snapshots
+`executing_agent_id` from the resolved execution route, including an explicit
+Harness/task override. This is observational for Memory: inability to resolve a
+stable Agent id does not block the Turn, but leaves the field `NULL` and makes
+that Turn ineligible for Agent Memory. Retries preserve the first snapshot, and
+no later Session route update may rewrite it.
+
+The transaction that first settles a Turn terminal assigns one greater than the
+maximum non-NULL `terminal_sequence` (or `1` when none exists) while holding
+SQLite's serialized writer lock. The assignment, terminal outcome/evidence,
+and terminal state commit together; retries cannot allocate a second value.
+Consequently sequence order is settlement commit order even when wall time
+moves backward or UUIDs sort in another order. `terminal_at` remains display
+metadata and is never a scanner cursor. Pre-migration terminal rows retain
+`NULL` for both new fields and are not backfilled.
+
+The primary state schema also adds the singleton
+`memory_agent_binding_cutover` recovery record used below. It contains only a
+desired config digest, terminal high water, state, and timestamps; normalized
+workdirs and project ids remain in V2 config, while opaque epochs remain in the
+Memory store.
 
 ### Agent trajectory outbox
 
@@ -377,17 +402,34 @@ keeps enqueue idempotent.
 the V2 config. Each epoch stores `binding_key`, exact new-style `project_id`, an
 exclusive `effective_after_sequence`, an optional inclusive
 `effective_through_sequence`, and created/closed timestamps. The V2 config
-remains the authoritative current owner setting; historical epochs exist only
-to finish committed scanner work.
+remains the authoritative desired owner setting. The projection also stores its
+`applied_config_digest`; historical epochs exist only to finish committed
+scanner work.
 
-Under the agent-capture lifecycle lock, every add, reassignment, or removal reads
-the current committed terminal high water `H`. Before the V2 config commit, a
-singleton `memory_agent_binding_reconcile` intent durably records `H`, the
-current and desired config digests, and only the opaque epoch changes. After the
-config commit, reconcile applies those epochs and clears the intent. Startup
-compares the authoritative config digest and either completes the desired
-cutover or discards an intent whose config commit never occurred; a crash cannot
-invent a later cutover.
+Under the agent-capture lifecycle lock, every add, reassignment, or removal first
+persists the desired V2 config atomically. It then uses one serialized primary
+state transaction to read the current committed terminal high water `H` and
+insert a singleton `memory_agent_binding_cutover` intent containing the desired
+config digest and `H`. Terminal settlement cannot interleave between that read
+and intent commit, but it performs no Memory/config I/O and never waits for
+projection work.
+
+While an intent exists, Agent scanner admission is fenced. One idempotent Memory
+transaction appends/closes the opaque epochs at the intent's exact `H` and
+advances `applied_config_digest`; only then may recovery clear the primary-state
+intent and reopen the scanner. The binding becomes sequence-effective at the
+intent commit, and the Settings save reports success only after projection
+converges. A Turn settled before that commit is at or below `H` and uses the old
+mapping; a later Turn is above `H` and uses the new mapping when scanning resumes.
+
+If Avibe stops after config commit but before the cutover intent, startup sees
+the digest mismatch and creates the intent with a new recovery-time high water.
+If it stops after the intent, recovery reuses that exact `H`; if projection
+already committed, matching digests make intent cleanup idempotent. Until
+convergence status reports binding reconcile as degraded and only the Agent
+scanner is fenced. If config persistence fails, no intent is created and the
+projection is unchanged. A crash therefore cannot backdate the new binding or
+block the Agent hot path.
 
 An added mapping is effective only for `terminal_sequence > H`. Reassignment
 closes the old epoch through `H` and opens the new project after `H`; removal
@@ -512,8 +554,8 @@ stable ids:
 | `MEMORY-AGENT-002` | Every semantically eligible non-steered completed interactive or Harness Turn not durably declined by a specified resource guard is represented once by its exact dispatch/result pair. |
 | `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant, including accepted live steers. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
-| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; crash-safe sequence-versioned binding cutovers keep backlog in the project effective at settlement. |
-| `MEMORY-AGENT-006` | Malformed config, legacy Agent identity, and missing project binding fail closed. |
+| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; the Turn snapshots its executing Agent, and crash-safe post-config binding cutovers keep backlog in the project effective at settlement. |
+| `MEMORY-AGENT-006` | Malformed config, a missing/pre-migration executing-Agent snapshot, and missing project binding fail closed. |
 | `MEMORY-AGENT-007` | Agent-sidecar outage leaves chat and Personal Memory healthy. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
 | `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths. |

@@ -117,8 +117,9 @@ There is no shared install-wide pool, workspace memory, or group memory.
 This principal model and the capture table above govern Personal Memory only.
 Opt-in Agent Memory reads completed `session_turns` after settlement, admits
 interactive and Harness turns under a separate positive contract, and partitions
-output by an opaque HMAC-derived Agent id plus an explicit new-style Memory
-project binding. It does not create or read a Personal Memory principal.
+output by an opaque HMAC derived from the Turn's immutable executing `agents.id`
+snapshot plus an explicit new-style Memory project binding. It does not infer
+identity from mutable Session routing or create/read a Personal Memory principal.
 
 The local Settings page always reads `avibe:local`. Authenticated remote
 Workbench users and IM users access only their own principal through an eligible
@@ -223,8 +224,10 @@ runtime/memory/                  # downloaded immutable runtimes and active poin
 
 Schema v3 introduced the durable Personal Memory project catalog. Schema v4
 adds separate Agent trajectory, scan-cursor, and sequence-versioned opaque
-project-binding tables; it does not overload `memory_capture_queue` or rewrite
-schema-v3 user rows.
+project-binding tables; the primary state schema also adds nullable immutable
+executing-Agent and commit-order snapshots to `session_turns` plus a bounded
+binding-cutover recovery record. It does not overload `memory_capture_queue` or
+rewrite schema-v3 user rows.
 
 The root sentinel binds a random `provider_root_id`, provider id, root format,
 and artifact fingerprint. Clear treats a fully absent, never-created role as a
