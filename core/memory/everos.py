@@ -56,12 +56,21 @@ _AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
 _SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS = 0.05
 _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
-_PROCESSING_TIMEOUT_SECONDS = 8.0
+PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS = 8.0
+PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS = 2.0
+PROCESSING_PROBE_MAX_ENDPOINTS = 4
+PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
+    PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS * PROCESSING_PROBE_MAX_ENDPOINTS
+    + PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS
+)
+_PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 5.0
 _PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
 _PREFLIGHT_IMAGE_DATA_URI = (
     "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAYElEQVR42u3QAQ0AAAwC"
+    "IPuX1hzfIQLpcxEgQIAAAQIECBAgQIAAAQIECBAgQIAAAQIECBAgQIAAAQIECBAgQIAA"
+    "AQIECBAgQIAAAQIECBAgQIAAAQIECBAgQIAAAQLuG0bQw7Ko2TvAAAAAAElFTkSuQmCC"
 )
 MULTIMODAL_EXPLICIT_ENV = "AVIBE_MEMORY_MULTIMODAL_EXPLICIT"
 _PROFILE_QUERY = "profile"
@@ -114,6 +123,40 @@ class ProviderCapture:
     text: str
     provider_timestamp_ms: int
     attachments: tuple[CaptureAttachment, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ProcessingProbeSpec:
+    base_url: str | None
+    api_key: str | None
+    path: str
+    payload: dict[str, Any]
+    validator: Callable[[Any], bool]
+
+
+def processing_probe_deadline_seconds(
+    *,
+    llm: tuple[str | None, str | None],
+    embedding: tuple[str | None, str | None],
+    rerank: tuple[str | None, str | None] | None = None,
+    multimodal: tuple[str | None, str | None] | None = None,
+) -> float:
+    """Bound a probe child by the largest serialized provider group."""
+
+    group_sizes: dict[tuple[str, str], int] = {}
+    for pair in (llm, embedding, rerank, multimodal):
+        if pair is None:
+            continue
+        group = _processing_provider_group_key(*pair)
+        if group is None:
+            continue
+        group_sizes[group] = group_sizes.get(group, 0) + 1
+    largest_group = max(group_sizes.values(), default=1)
+    deadline = (
+        PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS * largest_group
+        + PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS
+    )
+    return min(deadline, PROCESSING_PROBE_MAX_DEADLINE_SECONDS)
 
 
 class MemoryProviderFailure(RuntimeError):
@@ -543,10 +586,11 @@ class EverOSPort:
         return dict(snapshot.recorder)
 
     async def processing_healthy(self) -> bool:
-        """Probe both configured model endpoints with fixed synthetic requests.
+        """Probe configured model endpoints with fixed synthetic requests.
 
         The worker may call this after ambiguous provider errors.  The lock keeps
         several queued rows from multiplying credential probes during an outage.
+        Matching provider credentials are serialized; independent groups overlap.
         """
 
         async with self._processing_lock:
@@ -558,7 +602,7 @@ class EverOSPort:
             if not self._processing_configured():
                 return False
             probes = [
-                self._probe_processing_endpoint(
+                _ProcessingProbeSpec(
                     base_url=self._llm_base_url,
                     api_key=self._llm_api_key,
                     path="chat/completions",
@@ -570,7 +614,7 @@ class EverOSPort:
                     },
                     validator=_valid_chat_probe_response,
                 ),
-                self._probe_processing_endpoint(
+                _ProcessingProbeSpec(
                     base_url=self._embedding_base_url,
                     api_key=self._embedding_api_key,
                     path="embeddings",
@@ -580,7 +624,7 @@ class EverOSPort:
             ]
             if self._rerank_configured():
                 probes.append(
-                    self._probe_processing_endpoint(
+                    _ProcessingProbeSpec(
                         base_url=self._rerank_base_url,
                         api_key=self._rerank_api_key,
                         path=self._rerank_model or "",
@@ -590,7 +634,7 @@ class EverOSPort:
                 )
             if self._multimodal_configured():
                 probes.append(
-                    self._probe_processing_endpoint(
+                    _ProcessingProbeSpec(
                         base_url=self._multimodal_base_url,
                         api_key=self._multimodal_api_key,
                         path="chat/completions",
@@ -598,7 +642,16 @@ class EverOSPort:
                         validator=_valid_chat_probe_response,
                     )
                 )
-            results = await asyncio.gather(*probes, return_exceptions=True)
+            groups: dict[tuple[str, str], list[_ProcessingProbeSpec]] = {}
+            for probe in probes:
+                group = _processing_provider_group_key(probe.base_url, probe.api_key)
+                if group is None:
+                    return False
+                groups.setdefault(group, []).append(probe)
+            results = await asyncio.gather(
+                *(self._run_processing_probe_group(group) for group in groups.values()),
+                return_exceptions=True,
+            )
             return all(result is True for result in results)
 
     async def preflight(self) -> MemoryPreflightResult:
@@ -890,6 +943,25 @@ class EverOSPort:
             logger.info("Memory processing probe unavailable endpoint=%s", path)
             return False
         return bool(validator(value))
+
+    async def _run_processing_probe_group(
+        self,
+        probes: list[_ProcessingProbeSpec],
+    ) -> bool:
+        healthy = True
+        for probe in probes:
+            try:
+                result = await self._probe_processing_endpoint(
+                    base_url=probe.base_url,
+                    api_key=probe.api_key,
+                    path=probe.path,
+                    payload=probe.payload,
+                    validator=probe.validator,
+                )
+            except Exception:
+                result = False
+            healthy = healthy and result is True
+        return healthy
 
     async def _preflight_endpoint(
         self,
@@ -1538,6 +1610,17 @@ def _multimodal_preflight_payload(model: str | None) -> dict[str, Any]:
         "max_tokens": 1,
         "temperature": 0,
     }
+
+
+def _processing_provider_group_key(
+    base_url: str | None,
+    api_key: str | None,
+) -> tuple[str, str] | None:
+    normalized_url = _normalized_endpoint_url(base_url)
+    credential_identity = _optional_string(api_key)
+    if normalized_url is None or credential_identity is None:
+        return None
+    return normalized_url, credential_identity
 
 
 def _preflight_error_name(

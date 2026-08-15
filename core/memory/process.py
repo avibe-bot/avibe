@@ -39,7 +39,11 @@ from core.memory.confined_filesystem import (
     remove_anchored_entry,
     required_no_follow_flag,
 )
-from core.memory.everos import EverOSPort, MULTIMODAL_EXPLICIT_ENV
+from core.memory.everos import (
+    EverOSPort,
+    MULTIMODAL_EXPLICIT_ENV,
+    processing_probe_deadline_seconds,
+)
 from core.memory.secret_scrubber import scrub_text
 from core.memory.types import MemoryErrorCode
 
@@ -103,7 +107,6 @@ _STOP_TIMEOUT_SECONDS = 10.0
 _HEALTHY_RESET_SECONDS = 5 * 60.0
 _RESTART_DELAYS_SECONDS = (1.0, 5.0, 30.0, 120.0)
 _MAX_CONSECUTIVE_FAILURES = 5
-_PROCESSING_PROBE_TIMEOUT_SECONDS = 20.0
 _PROCESSING_PROBE_STDERR_BYTES = 2048
 _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700
@@ -701,7 +704,10 @@ class EverOSProcess:
         stderr = getattr(probe, "stderr", None)
         stderr_task = asyncio.create_task(_drain_probe_stderr(stderr)) if stderr is not None else None
         try:
-            await asyncio.wait_for(probe.wait(), timeout=_PROCESSING_PROBE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                probe.wait(),
+                timeout=_processing_probe_timeout_seconds(self._settings),
+            )
         except asyncio.TimeoutError:
             try:
                 await self._terminate_owned_tree(
@@ -2315,6 +2321,33 @@ def _settings_complete(settings: EverOSProcessSettings) -> bool:
             settings.embedding_api_key,
         )
     )
+
+
+def _processing_probe_timeout_seconds(settings: EverOSProcessSettings) -> float:
+    rerank = None
+    if _endpoint_settings_complete(
+        settings.rerank_base_url,
+        settings.rerank_model,
+        settings.rerank_api_key,
+    ):
+        rerank = (settings.rerank_base_url, settings.rerank_api_key)
+    multimodal = None
+    if _endpoint_settings_complete(
+        settings.multimodal_base_url,
+        settings.multimodal_model,
+        settings.multimodal_api_key,
+    ):
+        multimodal = (settings.multimodal_base_url, settings.multimodal_api_key)
+    return processing_probe_deadline_seconds(
+        llm=(settings.llm_base_url, settings.llm_api_key),
+        embedding=(settings.embedding_base_url, settings.embedding_api_key),
+        rerank=rerank,
+        multimodal=multimodal,
+    )
+
+
+def _endpoint_settings_complete(*values: str | None) -> bool:
+    return all(isinstance(value, str) and bool(value.strip()) for value in values)
 
 
 def _rebuild_settings_complete(settings: EverOSProcessSettings) -> bool:

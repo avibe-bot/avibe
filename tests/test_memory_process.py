@@ -214,6 +214,71 @@ def _settings() -> EverOSProcessSettings:
     )
 
 
+def test_processing_probe_timeout_is_derived_from_largest_provider_group() -> None:
+    independent = replace(
+        _settings(),
+        rerank_base_url="https://rerank.example.test/v1/inference",
+        rerank_model="rerank",
+        rerank_api_key="shared-secret",
+        multimodal_base_url="https://llm.example.test/v1",
+        multimodal_model="vision",
+        multimodal_api_key="vision-secret",
+    )
+    one_group = replace(
+        independent,
+        embedding_base_url="https://llm.example.test/v1",
+        embedding_api_key="shared-secret",
+        llm_api_key="shared-secret",
+        rerank_base_url="https://llm.example.test/v1",
+        multimodal_api_key="shared-secret",
+    )
+
+    assert memory_process._processing_probe_timeout_seconds(independent) == 10.0
+    assert memory_process._processing_probe_timeout_seconds(one_group) == 34.0
+
+
+async def test_processing_probe_applies_derived_parent_deadline(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _Probe:
+        pid = 999_999
+        returncode = 0
+        stderr = None
+
+        async def wait(self) -> None:
+            return None
+
+    settings = replace(
+        _settings(),
+        llm_api_key="shared-secret",
+        embedding_base_url="https://llm.example.test/v1",
+        embedding_api_key="shared-secret",
+        rerank_base_url="https://llm.example.test/v1",
+        rerank_model="rerank",
+        rerank_api_key="shared-secret",
+        multimodal_base_url="https://llm.example.test/v1",
+        multimodal_model="vision",
+        multimodal_api_key="shared-secret",
+    )
+    timeouts: list[float] = []
+
+    async def capture_timeout(awaitable, *, timeout):
+        timeouts.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(memory_process.asyncio, "wait_for", capture_timeout)
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=settings,
+        _host=_FakeProcessHost(spawns=deque([_Probe()])),
+    )
+
+    assert await process.processing_healthy() is True
+    assert timeouts == [34.0]
+
+
 def _pid_exists(pid: int) -> bool:
     try:
         process = psutil.Process(pid)

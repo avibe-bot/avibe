@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
+import struct
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1266,49 +1269,65 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
     assert all(request.headers["authorization"].startswith("Bearer ") for request in requests)
 
 
-def test_processing_health_runs_all_configured_checks_concurrently(monkeypatch) -> None:
+def test_processing_health_serializes_identical_provider_credentials(monkeypatch) -> None:
     provider = EverOSPort(
         Path("/tmp/everos.sock"),
-        llm_base_url="https://llm.example.test/v1",
+        llm_base_url="https://shared.example.test/v1",
         llm_model="chat-model",
-        llm_api_key="llm-secret",
-        embedding_base_url="https://embed.example.test/v1",
+        llm_api_key="shared-secret",
+        embedding_base_url="https://shared.example.test/v1",
         embedding_model="embedding-model",
         embedding_api_key="embedding-secret",
         rerank_base_url="https://rerank.example.test/v1/inference",
         rerank_model="rerank-model",
-        rerank_api_key="rerank-secret",
-        multimodal_base_url="https://vision.example.test/v1",
+        rerank_api_key="shared-secret",
+        multimodal_base_url="https://shared.example.test/v1",
         multimodal_model="vision-model",
-        multimodal_api_key="vision-secret",
+        multimodal_api_key="shared-secret",
     )
-    all_started = asyncio.Event()
+    first_wave_started = asyncio.Event()
     release = asyncio.Event()
-    started = 0
+    started: list[tuple[tuple[str, str], str]] = []
+    active_by_group: dict[tuple[str, str], int] = {}
+    max_active_by_group: dict[tuple[str, str], int] = {}
+    max_total_active = 0
 
-    async def probe(**_kwargs) -> bool:
-        nonlocal started
-        started += 1
-        if started == 4:
-            all_started.set()
-        await release.wait()
-        return True
+    async def probe(*, base_url, api_key, path, payload, **_kwargs) -> bool:
+        nonlocal max_total_active
+        group = (base_url, api_key)
+        name = payload.get("model") or path
+        active_by_group[group] = active_by_group.get(group, 0) + 1
+        max_active_by_group[group] = max(
+            max_active_by_group.get(group, 0),
+            active_by_group[group],
+        )
+        max_total_active = max(max_total_active, sum(active_by_group.values()))
+        started.append((group, name))
+        if len(started) == 3:
+            first_wave_started.set()
+        try:
+            await release.wait()
+            return True
+        finally:
+            active_by_group[group] -= 1
 
     monkeypatch.setattr(provider, "_probe_processing_endpoint", probe)
 
-    async def run() -> tuple[bool, bool]:
+    async def run() -> bool:
         task = asyncio.create_task(provider.processing_healthy())
-        entered_together = True
-        try:
-            await asyncio.wait_for(all_started.wait(), timeout=1.0)
-        except asyncio.TimeoutError:
-            entered_together = False
+        await asyncio.wait_for(first_wave_started.wait(), timeout=1.0)
+        assert {name for _group, name in started} == {
+            "chat-model",
+            "embedding-model",
+            "rerank-model",
+        }
         release.set()
-        return entered_together, await task
+        return await task
 
-    entered_together, healthy = asyncio.run(run())
-    assert entered_together is True
-    assert healthy is True
+    assert asyncio.run(run()) is True
+    assert [name for _group, name in started].count("vision-model") == 1
+    assert max_total_active == 3
+    assert all(active == 1 for active in max_active_by_group.values())
 
 
 def test_processing_preflight_projects_sanitized_provider_error() -> None:
@@ -1435,8 +1454,16 @@ def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
         "text": "Reply with OK.",
     }
     image_url = payload["messages"][0]["content"][1]["image_url"]["url"]
-    assert image_url.startswith("data:image/png;base64,")
+    prefix, encoded_image = image_url.split(",", 1)
+    assert prefix == "data:image/png;base64"
     assert len(image_url) < 256
+    image_bytes = base64.b64decode(encoded_image, validate=True)
+    assert len(image_bytes) == 153
+    assert image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert struct.unpack(">II", image_bytes[16:24]) == (64, 64)
+    assert hashlib.sha256(image_bytes).hexdigest() == (
+        "da1cbcc0076a2b589fd4d5b79d7fd171d6dff91f4d708d8dec041f4a6e60734f"
+    )
     assert requests[-1].headers["authorization"] == "Bearer vision-secret"
     assert recorded[-1]["side"] == "multimodal"
     assert recorded[-1]["model"] == "vision-model"

@@ -139,8 +139,8 @@ runs bounded preflight and rolling sidecar reconciliation; it does not rebuild
 embeddings or restart Avibe.
 
 `MemoryPreflightDiagnostic.side` adds `multimodal`. Its real compatibility probe is
-a tiny generated image request with no user data. Missing optional configuration
-does not block Memory enablement. Insight-reader and preflight redaction include the
+a generated 64x64 PNG request with no user data. Missing optional configuration does
+not block Memory enablement. Insight-reader and preflight redaction include the
 independent multimodal URL and key; a configured parse may produce a bounded,
 redacted `multimodal_llm` record, while an unconfigured skip produces no provider
 add or call-log row.
@@ -161,14 +161,53 @@ either an explicit IM opt-in or the one-cycle Workbench compatibility fallback.
 - An Avibe-private marker is present only for a complete explicit multimodal
   triple. The probe child checks multimodal only when that marker is present;
   the normal sidecar keeps the fallback variables for Workbench compatibility.
-- Fixed synthetic provider health checks run concurrently, so every request keeps
-  its 8-second bound while the complete check remains inside the existing
-  20-second child deadline.
+- Fixed synthetic provider health checks initially ran fully concurrently under a
+  fixed 20-second child deadline. The complete model below supersedes that boundary:
+  endpoints sharing provider credentials must not overlap, so the child deadline is
+  derived from the largest serialized group instead of assuming one concurrent wave.
 - Attachment capture reports ready only from a current available runtime health
   observation. Cached stale health and unavailable health report unavailable;
   absent explicit configuration still reports not configured.
 
 This closure adds no persistent field, sidecar route, or provider payload shape.
+
+### Processing health probe model
+
+This is the complete contract for settings compatibility checks, child processing
+health, and attachment readiness. It closes root-cause classes A-E, which were all
+gaps in the probe model rather than independent endpoint bugs.
+
+- **Endpoints and gating.** Saving processing settings runs the existing bounded
+  compatibility preflight for LLM and embedding plus each complete optional rerank
+  or multimodal endpoint. Runtime processing health runs fixed authenticated probes
+  for LLM and embedding, complete rerank, and multimodal only when the private
+  `AVIBE_MEMORY_MULTIMODAL_EXPLICIT=1` marker proves the persisted multimodal triple
+  was explicit. The normal sidecar may still receive inherited
+  `EVEROS_MULTIMODAL__*` values for the one-cycle Workbench fallback, but those values
+  alone never admit a multimodal health probe.
+- **Grouping and concurrency.** Runtime health groups endpoints by the exact resolved
+  `(base_url, credential identity)` pair. Requests within one group run serially so a
+  shared provider or key is not subjected to overlapping health traffic. Different
+  groups run concurrently. The credential identity is compared only in private
+  process memory and is never logged or projected.
+- **Deadlines.** Each runtime provider request remains bounded at 8 seconds. The
+  parent child deadline is `8 seconds * largest provider group size + 2 seconds`,
+  structurally capped by the four endpoint model at 34 seconds. Independent groups
+  therefore receive 10 seconds; the worst case with all four endpoints in one group
+  receives 34 seconds. This bounded derived deadline supersedes the earlier fixed
+  20-second composition because serialization is now required to avoid provider
+  concurrency and rate-limit failures. Settings compatibility preflight remains a
+  separate sequential flow with its existing 5-second per-endpoint bound.
+- **Synthetic payload.** Text, embedding, and rerank probes use fixed literals only.
+  Multimodal checks use the same generated opaque 64x64 RGBA PNG (153 bytes, no user
+  data) in a PNG data URI plus the fixed `Reply with OK.` prompt. Tests pin its PNG
+  dimensions and exact byte digest.
+- **Readiness and freshness.** Attachment capture can report `ready` only when an
+  explicit multimodal config exists, the current runtime source status is
+  `available`, and the projected `multimodal_llm` and parser capabilities are
+  enabled. An absent config reports `not_configured`; stale or unavailable runtime
+  health reports `unavailable` even when cached capability values were previously
+  healthy.
 
 ## Scenario contract
 
