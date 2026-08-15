@@ -624,6 +624,8 @@ describe('SourceDetailPanel', () => {
       await userEvent.click(done!);
       expect(await within(impact).findByText(/could not be refreshed|暂时无法刷新/i)).toBeTruthy();
       expect(committedEvidence()).toEqual(evidenceBeforeRetry);
+      expect(within(impact).getAllByRole('button', { name: /Dismiss unverified result|放弃未验证结果/i })
+        .some((button) => button.classList.contains('model-hub-guard-action'))).toBe(true);
 
       await userEvent.click(within(impact).getByRole('button', { name: /^Try again$|^重试$/i }));
       await waitFor(() => expect(screen.queryByRole('dialog', {
@@ -632,6 +634,42 @@ describe('SourceDetailPanel', () => {
       expect(reconcile).toHaveBeenCalledTimes(2);
     },
   );
+
+  it('enables labeled impact dismissal only after reconciliation degrades', async () => {
+    const reconcile = vi.fn().mockResolvedValueOnce('degraded');
+    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
+    vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
+      source: { ...source, display_name: 'Dismissible impact' },
+      removed_hops: hops,
+      interrupted: [],
+    });
+    const trackMutation: TrackSourceMutation = (work) => work(source, settlement({ source: reconcile }));
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await submitManagementWrite('edit', false);
+    const impact = await screen.findByRole('dialog', { name: /source was updated|来源已更新/i });
+    const closeBeforeLanding = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-close'));
+    expect(closeBeforeLanding).toBeTruthy();
+    expect((closeBeforeLanding as HTMLButtonElement).disabled).toBe(true);
+    const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    await userEvent.click(done!);
+
+    const dismissButtons = await within(impact).findAllByRole('button', { name: /Dismiss unverified result|放弃未验证结果/i });
+    expect(dismissButtons.some((button) => button.classList.contains('model-hub-guard-action'))).toBe(true);
+    const dismissClose = dismissButtons.find((button) => button.classList.contains('model-hub-guard-close'));
+    expect(dismissClose).toBeTruthy();
+    expect((dismissClose as HTMLButtonElement).disabled).toBe(false);
+    await userEvent.click(dismissClose!);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was updated|来源已更新/i })).toBeNull());
+  });
 
   it.each(['edit', 'delete'] as const)(
     'does not reread after a server-named $action failure',

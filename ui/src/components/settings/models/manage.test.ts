@@ -148,7 +148,44 @@ describe('source management capabilities', () => {
       expect(degraded.kind).toBe(stage.kind);
       expect('plan' in degraded && degraded.plan).toBe(plan);
       expect('landingFailed' in degraded && degraded.landingFailed).toBe(true);
+      expect(transitionManageStage(stage, { type: 'dismiss_unresolved' })).toBe(stage);
+      expect(transitionManageStage(degraded, { type: 'dismiss_unresolved' })).toEqual({ kind: 'idle' });
       expect(transitionManageStage(degraded, { type: 'land', verdict: 'landed' })).toEqual({ kind: 'idle' });
+    }
+  });
+
+  it('keeps at least one enabled exit reachable from every active stage', () => {
+    const before = source();
+    const draft = { displayName: before.display_name, baseUrl: before.base_url ?? '' };
+    const patch = { display_name: before.display_name };
+    const plan = { hops: [], gaps: [] };
+    const complete = async () => 'landed' as const;
+    const stages = {
+      idle: { kind: 'idle' },
+      editing: { kind: 'editing', draft },
+      submitting_edit: { kind: 'submitting_edit', draft, patch, plan: null, forced: false, surface: 'edit' },
+      confirming_edit: { kind: 'confirming_edit', draft, patch, plan },
+      edit_failed: { kind: 'edit_failed', draft, patch, plan, forced: true, retryRead: true, before },
+      confirming_delete: { kind: 'confirming_delete', plan },
+      submitting_delete: { kind: 'submitting_delete', plan, forced: true },
+      delete_failed: { kind: 'delete_failed', plan, forced: true, retryRead: true, before },
+      committed_edit_impact: { kind: 'committed_edit_impact', plan, complete, landingFailed: true },
+      committed_delete_impact: { kind: 'committed_delete_impact', plan, complete, landingFailed: true },
+    } satisfies { [Kind in ManageStage['kind']]: Extract<ManageStage, { kind: Kind }> };
+    const exitEvents = [
+      { type: 'cancel' },
+      { type: 'dismiss_unresolved' },
+      { type: 'settled' },
+      { type: 'land', verdict: 'landed' },
+    ] as const;
+
+    expect(new Set(Object.keys(stages))).toEqual(new Set(MANAGE_STAGE_KINDS));
+    for (const stage of Object.values(stages)) {
+      if (stage.kind === 'idle') continue;
+      expect(
+        exitEvents.some((event) => transitionManageStage(stage, event).kind !== stage.kind),
+        stage.kind,
+      ).toBe(true);
     }
   });
 

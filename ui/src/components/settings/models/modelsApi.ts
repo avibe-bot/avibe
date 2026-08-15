@@ -718,17 +718,23 @@ export class MockStore {
    * Reporting per (backend, model) with the Agents that run it is also what makes
    * the confirm copy nameable — 「删除后 pm 将没有可用来源」.
    */
-  private wouldInterrupt(candidate: Source[]): SupplyGap[] {
+  private wouldInterrupt(candidate: Source[], removedHops: RouteHopRef[] = []): SupplyGap[] {
     const byId = new Map(candidate.map((s) => [s.id, s]));
+    const removed = new Set(removedHops.map((hop) =>
+      `${hop.backend}\u0000${hop.menu_model}\u0000${hop.source_id}\u0000${hop.model_id}`));
     const gaps: SupplyGap[] = [];
     for (const a of this.agents) {
       if (a.mode !== 'hub') continue;
       const model = a.selected_model_id;
       if (!model) continue;
       const hops = a.routes?.[model]?.hops ?? [];
-      const survives = hops
-        .map((hop) => byId.get(hop.source_id))
-        .some((s) => s !== undefined && isRunnable(s));
+      const survives = hops.some((hop) => {
+        if (removed.has(`${a.backend}\u0000${model}\u0000${hop.source_id}\u0000${hop.model_id}`)) return false;
+        const source = byId.get(hop.source_id);
+        return source !== undefined
+          && source.models.some((entry) => entry.id === hop.model_id && entry.retired !== true)
+          && isRunnable(source);
+      });
       if (survives) continue;
       gaps.push({
         backend: a.backend,
@@ -1363,11 +1369,91 @@ export class MockStore {
   }
 
   patchSource(id: string, patch: SourcePatch) {
-    const source = this.sources.find((s) => s.id === id);
+    this.syncAgents();
+    const sourceIndex = this.sources.findIndex((s) => s.id === id);
+    const source = this.sources[sourceIndex];
     if (!source) throw new ApiCallError('source_not_found');
-    if (typeof patch.display_name === 'string') source.display_name = patch.display_name;
-    if ('base_url' in patch && source.kind === 'api_key') source.base_url = patch.base_url ?? null;
-    return delay({ source: structuredClone(source), removed_hops: [], interrupted: [] }, 300);
+    const candidate = structuredClone(source);
+    if (typeof patch.display_name === 'string') candidate.display_name = patch.display_name;
+    const nextBaseUrl = patch.base_url ?? null;
+    const endpointChanged = 'base_url' in patch && (source.base_url ?? null) !== nextBaseUrl;
+    if (!endpointChanged) {
+      this.sources[sourceIndex] = candidate;
+      return delay({ source: structuredClone(candidate), removed_hops: [], interrupted: [] }, 300);
+    }
+    if (source.kind !== 'api_key' || source.supply_channel !== 'hub' || !source.credential_ref) {
+      throw new ApiCallError('discovery_failed');
+    }
+
+    // A target from the visual fixture rediscovers that target's known inventory;
+    // any other endpoint gets the fake server's deterministic vendor inventory.
+    const seededInventory = buildMockSources().find((item) =>
+      item.kind === 'api_key'
+      && item.vendor === source.vendor
+      && item.protocol === source.protocol
+      && (item.base_url ?? null) === nextBaseUrl);
+    const discoveredIds = seededInventory
+      ? seededInventory.models.filter((model) => model.origin === 'discovered').map((model) => model.id)
+      : Array.from({ length: mockDiscoveredCount(source.vendor) }, (_, index) => `${source.vendor}-model-${index + 1}`);
+    const previousById = new Map(source.models.map((model) => [model.id, model]));
+    const manualModels = candidate.models.filter((model) => model.origin === 'manual');
+    const manualIds = new Set(manualModels.map((model) => model.id));
+    const discoveredAt = new Date().toISOString();
+    candidate.base_url = nextBaseUrl;
+    candidate.credential_ref = rid('cred');
+    candidate.models = [
+      ...discoveredIds.filter((modelId) => !manualIds.has(modelId)).map((modelId) => {
+        const previous = previousById.get(modelId);
+        return {
+          id: modelId,
+          display_name: previous?.display_name ?? null,
+          origin: 'discovered' as const,
+          reasoning_efforts: [...(previous?.reasoning_efforts ?? [])],
+          discovered_at: discoveredAt,
+        };
+      }),
+      ...manualModels,
+    ];
+    candidate.last_discovered_at = discoveredAt;
+    candidate.state = { status: 'standby', retry_at: null, detail_key: null };
+    const candidateModelIds = new Set(candidate.models.filter((model) => model.retired !== true).map((model) => model.id));
+    const removedHops: RouteHopRef[] = this.agents.flatMap((agent) =>
+      Object.entries(agent.routes ?? {}).flatMap(([menuModel, route]) =>
+        route.hops.flatMap((hop, index) => hop.source_id === id && !candidateModelIds.has(hop.model_id)
+          ? [{ backend: agent.backend, menu_model: menuModel, ...hop, position: index + 1 }]
+          : [])));
+    const candidateSources = this.sources.map((item, index) => index === sourceIndex ? candidate : item);
+    const gaps = this.wouldInterrupt(candidateSources, removedHops);
+    const confirmed = patch.force === true
+      && JSON.stringify(patch.would_remove_hops) === JSON.stringify(removedHops)
+      && JSON.stringify(patch.would_interrupt) === JSON.stringify(gaps);
+    if ((removedHops.length > 0 || gaps.length > 0) && !confirmed) {
+      throw new ApiCallError(
+        removedHops.length > 0 ? 'source_model_in_route_chain' : 'source_last_supplier',
+        undefined,
+        true,
+        gaps,
+        [],
+        removedHops,
+      );
+    }
+
+    this.sources[sourceIndex] = candidate;
+    const removed = new Set(removedHops.map((hop) =>
+      `${hop.backend}\u0000${hop.menu_model}\u0000${hop.source_id}\u0000${hop.model_id}`));
+    for (const agent of this.agents) {
+      agent.routes = Object.fromEntries(
+        Object.entries(agent.routes ?? {}).map(([menuModel, route]) => [
+          menuModel,
+          {
+            hops: route.hops.filter((hop) =>
+              !removed.has(`${agent.backend}\u0000${menuModel}\u0000${hop.source_id}\u0000${hop.model_id}`)),
+          },
+        ]),
+      );
+    }
+    this.syncAgents();
+    return delay({ source: structuredClone(candidate), removed_hops: removedHops, interrupted: gaps }, 300);
   }
 
   refreshSource(id: string, _confirmation?: GuardConfirmation) {

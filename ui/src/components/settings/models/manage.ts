@@ -147,8 +147,8 @@ export const MANAGE_STAGE_DISMISS_UNRESOLVED = {
   confirming_delete: keepManageStage,
   submitting_delete: keepManageStage,
   delete_failed: (stage) => stage.retryRead ? idleManageStage() : stage,
-  committed_edit_impact: keepManageStage,
-  committed_delete_impact: keepManageStage,
+  committed_edit_impact: (stage) => stage.landingFailed ? idleManageStage() : stage,
+  committed_delete_impact: (stage) => stage.landingFailed ? idleManageStage() : stage,
 } satisfies ManageStageTransition<DismissUnresolvedManageStage>;
 
 export const MANAGE_STAGE_LANDING = {
