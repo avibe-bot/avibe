@@ -89,6 +89,62 @@ def test_codex_no_base_url_when_neither_section_has_one(tmp_path: Path) -> None:
     assert state["base_url"] is None
 
 
+def test_codex_recovers_orphaned_relay_section_after_oauth_pointer_clear(
+    tmp_path: Path,
+) -> None:
+    """The OAuth flows clear ``model_provider`` and drop our managed
+    section, leaving the user's relay section unpointed on disk. The
+    Settings state must still surface that lone relay ``base_url`` so the
+    form pre-populates and the next API-key save restores it — otherwise
+    the save sends ``base_url: null`` and silently reroutes the relay key
+    to ``api.openai.com`` (401s after every OAuth round trip)."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "auth.json").write_text(
+        json.dumps({"tokens": {"id_token": "x"}, "auth_mode": "chatgpt"}),
+        encoding="utf-8",
+    )
+    # No top-level model_provider: cleared by the OAuth pass. The relay
+    # section survives, orphaned.
+    (codex_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[model_providers.OpenAI]",
+                'name = "OpenAI"',
+                'base_url = "https://ai-relay.chainbot.io/v1"',
+                'wire_api = "responses"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = read_codex_auth_state(home=tmp_path)
+    assert state["base_url"] == "https://ai-relay.chainbot.io/v1"
+
+
+def test_codex_leaves_base_url_none_when_orphaned_sections_are_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """Two provider sections carrying different relays are ambiguous —
+    recovery must stay conservative rather than pick a winner the user
+    never chose."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[model_providers.OpenAI]",
+                'base_url = "https://relay-one.example/v1"',
+                "[model_providers.backup]",
+                'base_url = "https://relay-two.example/v1"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = read_codex_auth_state(home=tmp_path)
+    assert state["base_url"] is None
+
+
 def _write_claude_settings(home: Path, env: dict) -> None:
     claude_dir = home / ".claude"
     claude_dir.mkdir()

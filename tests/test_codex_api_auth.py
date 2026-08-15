@@ -124,7 +124,12 @@ def test_save_codex_auth_rescues_disk_base_url_when_cache_empty(
     A later api_key save without ``base_url`` in the payload must keep
     using the disk relay URL — dropping it sends the relay key to
     ``api.openai.com`` and every turn 401s until the user repairs
-    ``config.toml`` by hand. Disk must win over an empty cache."""
+    ``config.toml`` by hand. Disk must win over an empty cache.
+
+    The orphaned variant (OAuth flow cleared the ``model_provider``
+    pointer too, so the relay section is unpointed) is recovered by the
+    same read path — see the sibling tests in
+    ``test_settings_disk_fallback.py``."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
     codex_home = tmp_path / ".codex"
     codex_home.mkdir(parents=True, exist_ok=True)

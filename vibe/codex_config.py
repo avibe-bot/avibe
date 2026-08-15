@@ -574,6 +574,29 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
             if isinstance(raw_wire_api, str) and raw_wire_api.strip():
                 wire_api = raw_wire_api.strip()
 
+        if base_url is None:
+            # Orphaned-relay recovery. The OAuth flows clear the
+            # ``model_provider`` pointer (and drop our managed section)
+            # because ChatGPT tokens must hit OpenAI's official endpoint —
+            # but the user-owned relay section stays on disk, unpointed.
+            # With the pointer gone, the lookup above can't see it, so a
+            # relay user who signs in via OAuth and later switches back
+            # to API key would find the Base URL form empty and every
+            # save silently drops the relay (key → api.openai.com → 401).
+            # When exactly one distinct ``base_url`` survives across all
+            # provider sections, that is unambiguously the user's relay:
+            # surface it so both the Settings form and saves can restore
+            # it. Multiple distinct URLs are ambiguous — leave None.
+            distinct_relay_urls = {
+                raw.strip()
+                for section in providers.values()
+                if isinstance(section, dict)
+                and isinstance((raw := section.get("base_url")), str)
+                and raw.strip()
+            }
+            if len(distinct_relay_urls) == 1:
+                base_url = next(iter(distinct_relay_urls))
+
     store_raw = toml_data.get(CREDENTIALS_STORE_KEY)
     credentials_store = store_raw if isinstance(store_raw, str) else None
     # Codex's default when the key is absent is ``auto`` (keyring-preferred);
