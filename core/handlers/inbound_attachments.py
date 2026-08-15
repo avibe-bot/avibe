@@ -31,6 +31,8 @@ class _LeasedAttachmentRecord:
     declared_size: int | None
     size: int
     path: Path
+    device: int
+    inode: int
 
 
 class _LeaseState:
@@ -304,6 +306,7 @@ class InboundAttachmentMaterializer:
             )
             published_names.add(final_name)
             os.fchmod(partial_fd, 0o600)
+            published_info = os.fstat(partial_fd)
             final_path = lease_dir / final_name
             snapshot = FileAttachment(
                 name=name,
@@ -317,6 +320,8 @@ class InboundAttachmentMaterializer:
                 declared_size=attachment.size,
                 size=size,
                 path=final_path,
+                device=published_info.st_dev,
+                inode=published_info.st_ino,
             )
             materialized = True
             return outcome
@@ -338,8 +343,8 @@ class InboundAttachmentMaterializer:
 
 def leased_attachment_records(
     lease: InboundAttachmentLease,
-) -> tuple[Path, tuple[_LeasedAttachmentRecord, ...]]:
-    """Resolve an active exact-type lease for the Memory boundary."""
+) -> tuple[Path, int, tuple[_LeasedAttachmentRecord, ...]]:
+    """Snapshot an active lease and duplicate its anchored directory descriptor."""
 
     if type(lease) is not InboundAttachmentLease:
         raise ValueError("invalid attachment lease")
@@ -349,7 +354,44 @@ def leased_attachment_records(
         if released or state.references <= 0 or _LEASE_ID.fullmatch(state.directory.name) is None:
             raise ValueError("attachment lease is no longer active")
         records = state.records
-    return state.root, records
+        try:
+            directory_fd = os.dup(state.directory_fd)
+        except OSError as error:
+            raise ValueError("attachment lease is no longer active") from error
+    return state.root, directory_fd, records
+
+
+def open_leased_attachment_record(
+    directory_fd: int,
+    record: _LeasedAttachmentRecord,
+) -> tuple[int, os.stat_result]:
+    """Open the exact materialized inode relative to its retained lease directory."""
+
+    if type(record) is not _LeasedAttachmentRecord:
+        raise ValueError("invalid leased attachment record")
+    filename = record.path.name
+    if not filename or Path(filename).name != filename:
+        raise ValueError("invalid leased attachment record")
+    try:
+        descriptor = os.open(filename, _file_read_flags(), dir_fd=directory_fd)
+    except OSError as error:
+        raise ValueError("leased attachment is unavailable") from error
+    try:
+        info = os.fstat(descriptor)
+        getuid = getattr(os, "getuid", None)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or (callable(getuid) and info.st_uid != getuid())
+            or info.st_dev != record.device
+            or info.st_ino != record.inode
+            or info.st_size != record.size
+        ):
+            raise ValueError("leased attachment no longer matches its materialized inode")
+        return descriptor, info
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _download_info(context: MessageContext, attachment: FileAttachment) -> dict[str, Any]:
@@ -431,6 +473,18 @@ def _file_create_flags() -> int:
         | os.O_CREAT
         | os.O_EXCL
         | int(no_follow)
+        | int(getattr(os, "O_CLOEXEC", 0))
+    )
+
+
+def _file_read_flags() -> int:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise RuntimeError("attachment leases require no-follow filesystem support")
+    return (
+        os.O_RDONLY
+        | int(no_follow)
+        | int(getattr(os, "O_NONBLOCK", 0))
         | int(getattr(os, "O_CLOEXEC", 0))
     )
 

@@ -30,7 +30,10 @@ from core.memory.types import (
 )
 
 if TYPE_CHECKING:
-    from core.handlers.inbound_attachments import InboundAttachmentLease
+    from core.handlers.inbound_attachments import (
+        InboundAttachmentLease,
+        _LeasedAttachmentRecord,
+    )
 
 
 MAX_PINNED_ATTACHMENTS = 8
@@ -255,7 +258,7 @@ class AttachmentPinStore:
         except TypeError as error:
             raise AttachmentPinError("memory_invalid_input", "attachments are invalid") from error
         self._validate_sources(source_items)
-        source_root, allowed_paths = self._pin_source(source_lease)
+        source_root, allowed_records = self._pin_source(source_lease)
         with self._lock:
             self._verify_private_layout()
             staging_fd = _open_private_directory(self._staging, "attachment staging root")
@@ -280,7 +283,8 @@ class AttachmentPinStore:
                         source_fd, source_info = self._open_source(
                             source,
                             source_root=source_root,
-                            allowed_paths=allowed_paths,
+                            allowed_records=allowed_records,
+                            source_lease=source_lease,
                         )
                         try:
                             filename = _bundle_filename(index, source.ext)
@@ -552,7 +556,7 @@ class AttachmentPinStore:
     def _pin_source(
         self,
         source_lease: InboundAttachmentLease | None,
-    ) -> tuple[Path, frozenset[Path] | None]:
+    ) -> tuple[Path, dict[Path, _LeasedAttachmentRecord] | None]:
         if source_lease is None:
             return self._source_root, None
         from core.handlers.inbound_attachments import (
@@ -565,13 +569,17 @@ class AttachmentPinStore:
                 "memory_invalid_input",
                 "attachment source lease is invalid",
             )
+        directory_fd: int | None = None
         try:
-            root, records = leased_attachment_records(source_lease)
+            root, directory_fd, records = leased_attachment_records(source_lease)
         except (TypeError, ValueError) as error:
             raise AttachmentPinError(
                 "memory_invalid_input",
                 "attachment source lease is invalid",
             ) from error
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
         expected_root = self._effective_home / "attachments" / "im"
         if _absolute_lexical(root) != expected_root:
             raise AttachmentPinError(
@@ -584,17 +592,18 @@ class AttachmentPinStore:
                 "memory_store_unavailable",
                 "attachment source and storage roots must be disjoint",
             )
-        return root, frozenset(record.path for record in records)
+        return root, {record.path: record for record in records}
 
     def _open_source(
         self,
         source: CaptureAttachment,
         *,
         source_root: Path,
-        allowed_paths: frozenset[Path] | None,
+        allowed_records: dict[Path, _LeasedAttachmentRecord] | None,
+        source_lease: InboundAttachmentLease | None,
     ) -> tuple[int, os.stat_result]:
         source_path = _path_from_file_uri(source.uri)
-        if allowed_paths is not None and source_path not in allowed_paths:
+        if allowed_records is not None and source_path not in allowed_records:
             raise AttachmentPinError(
                 "memory_invalid_input",
                 "attachment is not part of the source lease",
@@ -610,6 +619,28 @@ class AttachmentPinStore:
             raise AttachmentPinError("memory_invalid_input", "attachment source path is invalid")
         if source_path.suffix.lstrip(".").lower() != source.ext:
             raise AttachmentPinError("memory_invalid_input", "attachment extension is inconsistent")
+
+        if source_lease is not None:
+            from core.handlers.inbound_attachments import (
+                leased_attachment_records,
+                open_leased_attachment_record,
+            )
+
+            directory_fd: int | None = None
+            try:
+                current_root, directory_fd, current_records = leased_attachment_records(source_lease)
+                current = {record.path: record for record in current_records}.get(source_path)
+                if current_root != source_root or current != allowed_records[source_path]:
+                    raise ValueError("attachment source lease changed")
+                return open_leased_attachment_record(directory_fd, current)
+            except (TypeError, ValueError) as error:
+                raise AttachmentPinError(
+                    "memory_invalid_input",
+                    "attachment is not part of the source lease",
+                ) from error
+            finally:
+                if directory_fd is not None:
+                    os.close(directory_fd)
 
         current_fd = _open_source_directory_path(source_root)
         try:

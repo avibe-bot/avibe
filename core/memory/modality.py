@@ -20,6 +20,7 @@ runtime child process, which runs with a minimal environment.
 from __future__ import annotations
 
 import codecs
+import os
 from pathlib import Path
 
 from core.memory.types import MemoryContentKind
@@ -90,6 +91,8 @@ def classify_pinned_attachment(
     name: str,
     mimetype: object,
     path: Path,
+    *,
+    file_fd: int | None = None,
 ) -> tuple[MemoryContentKind, str] | None:
     """Classify one acquired file only when extension, MIME, and bytes agree."""
 
@@ -104,7 +107,8 @@ def classify_pinned_attachment(
         else "application/octet-stream"
     )
     try:
-        with path.open("rb") as file_obj:
+        with _open_attachment_file(path, file_fd) as file_obj:
+            file_obj.seek(0)
             sample = file_obj.read(4096)
     except OSError:
         return None
@@ -130,7 +134,7 @@ def classify_pinned_attachment(
         }:
             return None
         return "pdf", extension
-    if not _valid_utf8_text_file(path):
+    if not _valid_utf8_text_file(path, file_fd):
         return None
     if normalized_mime != "application/octet-stream" and not (
         normalized_mime.startswith("text/")
@@ -146,10 +150,17 @@ def classify_pinned_attachment(
     return None
 
 
-def _valid_utf8_text_file(path: Path) -> bool:
+def _open_attachment_file(path: Path, file_fd: int | None):
+    if file_fd is None:
+        return path.open("rb")
+    return os.fdopen(os.dup(file_fd), "rb")
+
+
+def _valid_utf8_text_file(path: Path, file_fd: int | None) -> bool:
     decoder = codecs.getincrementaldecoder("utf-8")()
     try:
-        with path.open("rb") as file_obj:
+        with _open_attachment_file(path, file_fd) as file_obj:
+            file_obj.seek(0)
             while chunk := file_obj.read(64 * 1024):
                 if b"\x00" in chunk:
                     return False
@@ -189,8 +200,14 @@ def _audio_extension(data: bytes) -> str | None:
     if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WAVE":
         return "wav"
     if len(data) >= 12 and data[4:8] == b"ftyp":
-        brands = data[8:64]
-        if data[8:12] in {b"M4A ", b"M4B "} or b"M4A " in brands or b"M4B " in brands:
+        box_size = int.from_bytes(data[:4], "big")
+        if box_size < 16 or box_size > len(data) or box_size % 4:
+            return None
+        brands = (
+            data[8:12],
+            *(data[offset : offset + 4] for offset in range(16, box_size, 4)),
+        )
+        if any(brand in {b"M4A ", b"M4B "} for brand in brands):
             return "m4a"
         return None
     if data.startswith(b"#!AMR"):

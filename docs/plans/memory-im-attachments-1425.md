@@ -74,6 +74,10 @@ lifetime. It pre-creates each partial file with descriptor-relative
 writers, and performs normalization, publication, and cleanup relative to the
 verified lease descriptor. Replacing the directory entry during materialization
 fails closed and cannot redirect writes outside the private lease.
+Each published record binds its original device/inode. Memory selection and
+durable pinning reopen that record relative to a duplicated retained lease
+descriptor and reject inode mismatches, so replacing the public lease pathname
+cannot substitute bytes after materialization.
 
 The message handler materializes before scheduling Memory capture. Agent delivery
 and Memory retain independent lease references, so Agent cleanup, retry, or
@@ -94,7 +98,9 @@ produces immutable `CaptureAttachment` values for surviving files. Missing or
 non-string native MIME metadata normalizes to `application/octet-stream` at this
 shared boundary. Text-like formats stream their complete bounded file through
 incremental UTF-8 and NUL validation; checking only the leading magic sample is
-insufficient.
+insufficient. M4A admission parses brands only from the declared,
+four-byte-aligned `ftyp` brand table; brand-like bytes in later ISO-BMFF boxes do
+not admit excluded video.
 
 `core/memory/attachments.py` accepts either the fixed Workbench upload root or a
 fixed leased-IM source handle. Both paths keep no-follow opens, owner and mode

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -208,3 +209,36 @@ async def test_pin_rejects_released_or_mismatched_im_lease(tmp_path: Path) -> No
             source_lease=batch.lease,
         )
     assert getattr(released.value, "error", None) == "memory_invalid_input"
+
+
+@pytest.mark.asyncio
+async def test_pin_reads_original_inode_after_lease_entry_is_replaced(tmp_path: Path) -> None:
+    home = tmp_path / "avibe-home"
+    batch = await _materialize(
+        home,
+        [("notes.txt", "text/plain", b"original", 8)],
+    )
+    selected = select_memory_attachments(batch.lease)
+    source = Path(selected.attachments[0].uri.removeprefix("file://"))
+    lease_dir = source.parent
+    moved = lease_dir.with_name(f"{lease_dir.name}.moved")
+    lease_dir.rename(moved)
+    lease_dir.mkdir(mode=0o700)
+    replacement = lease_dir / source.name
+    replacement.write_bytes(b"replacement")
+    replacement.chmod(0o600)
+
+    selected_after_replacement = select_memory_attachments(batch.lease)
+    assert [item.name for item in selected_after_replacement.attachments] == ["notes.txt"]
+
+    store = AttachmentPinStore(effective_home=home)
+    bundle = store.pin(selected_after_replacement.attachments, source_lease=batch.lease)
+    pinned = home / "memory" / "attachments" / bundle.attachments[0].storage_key
+
+    assert pinned.read_bytes() == b"original"
+
+    store.release(bundle.bundle_id)
+    os.unlink(replacement)
+    os.rmdir(lease_dir)
+    moved.rename(lease_dir)
+    batch.lease.release()

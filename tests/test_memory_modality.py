@@ -29,8 +29,14 @@ def test_classifier_accepts_mpeg_2_5_mp3_frame_sync(tmp_path: Path) -> None:
 
 
 def test_classifier_requires_an_audio_brand_for_m4a(tmp_path: Path) -> None:
-    video = _write_private(tmp_path / "clip.m4a", b"\x00\x00\x00\x18ftypisomvideo")
-    audio = _write_private(tmp_path / "voice.m4a", b"\x00\x00\x00\x18ftypM4A audio")
+    video = _write_private(
+        tmp_path / "clip.m4a",
+        b"\x00\x00\x00\x10ftypisom\x00\x00\x00\x0cfreeM4A ",
+    )
+    audio = _write_private(
+        tmp_path / "voice.m4a",
+        b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00M4A mp42",
+    )
 
     assert classify_pinned_attachment("clip.m4a", "audio/mp4", video) is None
     assert classify_pinned_attachment("voice.m4a", "audio/mp4", audio) == (
