@@ -15,6 +15,7 @@ import tempfile
 import threading
 import urllib.parse
 import urllib.request
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
@@ -36,6 +37,33 @@ logger = logging.getLogger(__name__)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _INSTALL_LOCKS: dict[str, threading.Lock] = {}
 _INSTALL_LOCKS_GUARD = threading.Lock()
+_ENSURE_FAILURE_SUFFIXES = frozenset(
+    {
+        "archive_checksum_mismatch",
+        "archive_download_failed",
+        "archive_size_mismatch",
+        "archive_unavailable",
+        "archive_unavailable_offline",
+        "archive_url_unsupported",
+        "binary_checksum_mismatch",
+        "binary_not_runnable",
+        "binary_prepare_failed",
+        "install_already_running",
+        "install_claim_failed",
+        "install_failed",
+        "install_lock_failed",
+        "install_missing_binary",
+        "install_target_changed",
+        "manifest_download_failed",
+        "manifest_invalid",
+        "manifest_missing",
+        "manifest_unavailable",
+        "manifest_unavailable_offline",
+        "manifest_url_unsupported",
+        "platform_unsupported",
+        "pointer_write_failed",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -99,7 +127,13 @@ class ManagedRuntimeManager:
         self._install_lock = install_lock_for(spec.runtime_id)
         self._install_file_lock_path = self.runtime_dir / ".install.lock"
 
-    def ensure(self, *, force: bool = False) -> dict[str, Any]:
+    def ensure(
+        self,
+        *,
+        force: bool = False,
+        expected_target: Mapping[str, str] | None = None,
+        on_resolved: Callable[[dict[str, str]], None] | None = None,
+    ) -> dict[str, Any]:
         try:
             file_lock = self._acquire_mutation_lock()
         except Exception as exc:  # noqa: BLE001
@@ -123,6 +157,27 @@ class ManagedRuntimeManager:
                     self._install_reason or self._reason("platform_unsupported"),
                     manifest=manifest,
                 )
+            target = self._install_target_identity(manifest, archive)
+            if expected_target is not None and dict(expected_target) != target:
+                return self._failure(
+                    self._reason("install_target_changed"),
+                    manifest=manifest,
+                    archive=archive,
+                )
+            if on_resolved is not None:
+                try:
+                    on_resolved(target)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to persist managed %s runtime install claim",
+                        self.spec.runtime_id,
+                    )
+                    return self._failure(
+                        self._reason("install_claim_failed"),
+                        manifest=manifest,
+                        archive=archive,
+                        message=str(exc),
+                    )
 
             install_dir = self._manifest_install_dir(manifest, archive)
             existing = self._verified_manifest_binary(install_dir, manifest, archive)
@@ -563,6 +618,19 @@ class ManagedRuntimeManager:
             / fingerprint
         )
 
+    @staticmethod
+    def _install_target_identity(
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> dict[str, str]:
+        return {
+            "manifest_sha256": manifest.digest,
+            "runtime_version": manifest.runtime_version,
+            "platform": archive.platform,
+            "archive_sha256": archive.sha256,
+            "binary_sha256": archive.binary_sha256,
+        }
+
     def _verified_manifest_binary(
         self,
         install_dir: Path,
@@ -720,6 +788,7 @@ class ManagedRuntimeManager:
             "version": manifest.runtime_version,
             "platform": archive.platform,
             "install_dir": str(install_dir),
+            "target": self._install_target_identity(manifest, archive),
         }
 
     def _failure(
@@ -752,6 +821,11 @@ class ManagedRuntimeManager:
 
     def _reason(self, suffix: str) -> str:
         return f"{self.spec.runtime_id}_{suffix}"
+
+    def _base_install_failure_reasons(self) -> frozenset[str]:
+        """Return failures produced by the shared ``ensure`` implementation."""
+
+        return frozenset(self._reason(suffix) for suffix in _ENSURE_FAILURE_SUFFIXES)
 
     def _acquire_mutation_lock(self) -> MigrationFileLock | None:
         if not self._install_lock.acquire(blocking=False):

@@ -4,9 +4,9 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,17 @@ _ENGINE_PLATFORM_MAP = {
 _ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
 _INSTALL_STATE_SCHEMA_VERSION = 1
 _INSTALL_FAILURE_KEY = "settings.models.install.fail.detail"
+_INSTALL_CLAIM_INVALID_REASON = "model_hub_engine_install_claim_invalid"
+_INSTALL_TARGET_FIELDS = frozenset(
+    {
+        "manifest_sha256",
+        "runtime_version",
+        "platform",
+        "archive_sha256",
+        "binary_sha256",
+    }
+)
+_INSTALL_STATE_UNSET = object()
 _ENGINE_SPEC = ManagedRuntimeSpec(
     runtime_id="model_hub_engine",
     manifest_resource="model_hub_runtime/cliproxyapi_manifest.json",
@@ -69,6 +80,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         )
         self._verified_binary_cache: tuple[tuple[object, ...], Path] | None = None
         self._install_state_lock = threading.RLock()
+        self._install_state_override: object | dict[str, Any] | None = _INSTALL_STATE_UNSET
 
     @property
     def install_state_path(self) -> Path:
@@ -78,8 +90,16 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         platform_tag = managed_runtime.runtime_platform_tag()
         return _ENGINE_PLATFORM_MAP.get(platform_tag, platform_tag)
 
+    def install_failure_reasons(self) -> frozenset[str]:
+        """Return every admission failure emitted by the shared installer."""
+
+        return self._base_install_failure_reasons()
+
     def install_state(self) -> dict[str, Any] | None:
         with self._install_state_lock:
+            if self._install_state_override is not _INSTALL_STATE_UNSET:
+                override = self._install_state_override
+                return dict(override) if isinstance(override, dict) else None
             try:
                 payload = json.loads(self.install_state_path.read_text(encoding="utf-8"))
             except FileNotFoundError:
@@ -101,80 +121,87 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             if state == "installing" and error_key is not None:
                 logger.warning("Ignoring contradictory Model Hub runtime install state")
                 return None
+            target = self._validated_install_target(payload.get("target"))
+            if state == "installing" and target is None:
+                logger.warning("Rejecting Model Hub runtime install state without a valid target")
+                return self._failed_install_state(
+                    target=None,
+                    reason=_INSTALL_CLAIM_INVALID_REASON,
+                )
+            payload["target"] = target
             return payload
 
-    def mark_installing(self) -> bool:
-        # Status reads stay offline, but install admission may fetch an explicit
-        # remote manifest that has not been cached on this host yet.
-        target = self._install_target(allow_network=not self.offline)
-        if target is None:
-            return False
+    def mark_installing(self, target: Mapping[str, Any]) -> None:
+        resolved_target = self._validated_install_target(target)
+        if resolved_target is None:
+            raise ValueError("invalid Model Hub runtime install target")
+        payload = {
+            "schema_version": _INSTALL_STATE_SCHEMA_VERSION,
+            "state": "installing",
+            "error_key": None,
+            "target": resolved_target,
+        }
         with self._install_state_lock:
-            managed_runtime.write_json_atomic(
-                self.install_state_path,
-                {
-                    "schema_version": _INSTALL_STATE_SCHEMA_VERSION,
-                    "state": "installing",
-                    "error_key": None,
-                    "target": target,
-                },
-            )
-        return True
+            managed_runtime.write_json_atomic(self.install_state_path, payload)
+            self._install_state_override = payload
 
-    def mark_install_failed(self) -> None:
+    def mark_install_failed(
+        self,
+        *,
+        target: Mapping[str, Any] | None,
+        reason: str,
+    ) -> None:
+        payload = self._failed_install_state(
+            target=self._validated_install_target(target),
+            reason=reason,
+        )
         with self._install_state_lock:
-            current = self.install_state() or {}
-            target = current.get("target") or self._install_target(
-                allow_network=False,
-            )
-            managed_runtime.write_json_atomic(
-                self.install_state_path,
-                {
-                    "schema_version": _INSTALL_STATE_SCHEMA_VERSION,
-                    "state": "not_installed",
-                    "error_key": _INSTALL_FAILURE_KEY,
-                    "target": target,
-                },
-            )
+            # Live projection settles before best-effort durable settlement so a
+            # failed write cannot leave this process reporting a stale claim.
+            self._install_state_override = payload
+            try:
+                managed_runtime.write_json_atomic(self.install_state_path, payload)
+            except Exception:
+                # If replacement is unavailable, removing the obsolete claim is
+                # still preferable to replaying a terminal failure on restart.
+                try:
+                    self.install_state_path.unlink()
+                except OSError:
+                    pass
+                raise
 
     def clear_install_state(self) -> None:
         with self._install_state_lock:
+            self._install_state_override = None
             try:
                 self.install_state_path.unlink()
             except FileNotFoundError:
                 return
 
-    def discard_install_staging(self) -> bool:
-        """Remove only uncommitted staging left by an interrupted install."""
-
-        try:
-            file_lock = self._acquire_mutation_lock()
-        except Exception:  # noqa: BLE001
-            logger.exception("Failed to claim Model Hub runtime install recovery")
-            return False
-        if file_lock is None:
-            return False
-        try:
-            for staging_dir in self.runtime_dir.glob("install-*"):
-                if staging_dir.is_dir():
-                    shutil.rmtree(staging_dir, ignore_errors=True)
-            return True
-        finally:
-            self._release_mutation_lock(file_lock)
-
-    def _install_target(self, *, allow_network: bool) -> dict[str, Any] | None:
-        manifest = self._load_manifest(allow_network=allow_network)
-        if manifest is None or not self._manifest_installable(manifest):
+    @staticmethod
+    def _validated_install_target(value: object) -> dict[str, str] | None:
+        if not isinstance(value, Mapping) or set(value) != _INSTALL_TARGET_FIELDS:
             return None
-        archive = self._manifest_archive_for_platform(manifest)
-        if archive is None or archive.platform != self.host_platform():
-            return None
+        target: dict[str, str] = {}
+        for field in _INSTALL_TARGET_FIELDS:
+            item = value.get(field)
+            if not isinstance(item, str) or not item:
+                return None
+            target[field] = item
+        return target
+
+    @staticmethod
+    def _failed_install_state(
+        *,
+        target: dict[str, str] | None,
+        reason: str,
+    ) -> dict[str, Any]:
         return {
-            "manifest_sha256": manifest.digest,
-            "runtime_version": manifest.runtime_version,
-            "platform": archive.platform,
-            "archive_sha256": archive.sha256,
-            "binary_sha256": archive.binary_sha256,
+            "schema_version": _INSTALL_STATE_SCHEMA_VERSION,
+            "state": "not_installed",
+            "error_key": _INSTALL_FAILURE_KEY,
+            "target": target,
+            "reason": reason,
         }
 
     def resolve_engine_path(self) -> Path | None:

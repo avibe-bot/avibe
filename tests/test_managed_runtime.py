@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 
 from core import managed_runtime
+from core.git_runtime import GitRuntimeManager
 from core.managed_runtime import ManagedRuntimeManager, ManagedRuntimeSpec
+from core.memory.artifact import MemoryArtifactManager
+from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
 
 class FixtureRuntimeManager(ManagedRuntimeManager):
@@ -75,11 +78,100 @@ def test_list_asset_manifest_prefers_direct_platform_then_falls_back_to_alias(
         manifest_path=manifest,
     )
 
-    result = manager.ensure()
+    resolved_targets: list[dict[str, str]] = []
+    result = manager.ensure(on_resolved=resolved_targets.append)
 
     assert result["ok"] is True
     assert result["changed"] is True
     assert result["platform"] == expected_platform
+    assert resolved_targets == [result["target"]]
     assert Path(result["path"]).read_bytes() == binary_payload
     assert manager.ensure()["changed"] is False
     assert manager.status()["installed"] is True
+
+
+def test_ensure_rejects_a_changed_resolved_target_before_archive_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "fixture.tar.gz"
+    binary_payload = b"v1\n"
+    with tarfile.open(archive, "w:gz") as tar:
+        member = tarfile.TarInfo("fixture")
+        member.mode = 0o755
+        member.size = len(binary_payload)
+        tar.addfile(member, io.BytesIO(binary_payload))
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "version": "v1",
+                "source": "example/fixture",
+                "archives": {
+                    "linux-x64": {
+                        "url": archive.as_uri(),
+                        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                        "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
+                        "bin_path": "fixture",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-x64")
+    manager = FixtureRuntimeManager(
+        spec=ManagedRuntimeSpec(
+            runtime_id="fixture",
+            manifest_resource="unused.json",
+            version_field="version",
+            default_bin_path="fixture",
+        ),
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest,
+    )
+    expected_target = {
+        "manifest_sha256": "0" * 64,
+        "runtime_version": "v1",
+        "platform": "linux-x64",
+        "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "binary_sha256": hashlib.sha256(binary_payload).hexdigest(),
+    }
+    monkeypatch.setattr(
+        manager,
+        "_resolve_manifest_archive",
+        lambda _archive: (_ for _ in ()).throw(AssertionError("archive accessed")),
+    )
+
+    result = manager.ensure(expected_target=expected_target)
+
+    assert result["ok"] is False
+    assert result["reason"] == "fixture_install_target_changed"
+
+
+@pytest.mark.parametrize(
+    ("manager_type", "expected_reason"),
+    [
+        (GitRuntimeManager, "git_manifest_missing"),
+        (MemoryArtifactManager, "memory-runtime_manifest_missing"),
+        (EngineRuntimeManager, "model_hub_engine_manifest_missing"),
+    ],
+)
+def test_optional_ensure_hooks_leave_each_existing_subclass_default_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manager_type,
+    expected_reason: str,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    manager = manager_type(
+        runtime_dir=tmp_path / manager_type.__name__,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+
+    result = manager.ensure()
+
+    assert result["ok"] is False
+    assert result["reason"] == expected_reason

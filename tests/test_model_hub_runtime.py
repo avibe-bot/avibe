@@ -25,6 +25,7 @@ from core.handlers.model_hub.adapter import (
     OriginNotAllowedError,
     RawOutcomeKind,
     RetainedMaterialDisposition,
+    RuntimePlatformUnsupportedError,
     SourceBinding,
 )
 from core.handlers.model_hub.classification import (
@@ -52,6 +53,13 @@ STREAM_TRANSPORT_BOUNDARIES = json.loads(
     (MODEL_HUB_FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8")
 )["cases"]
 DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
+RUNTIME_INSTALL_TARGET = {
+    "manifest_sha256": "1" * 64,
+    "runtime_version": "v7.2.95",
+    "platform": "fixture-platform",
+    "archive_sha256": "2" * 64,
+    "binary_sha256": "3" * 64,
+}
 
 
 def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() -> None:
@@ -482,13 +490,59 @@ def test_install_admission_fetches_an_uncached_remote_manifest(tmp_path: Path) -
     )
 
     assert manager.contract_manifest()["assets"] == []
-    assert manager.mark_installing() is True
+    installed = manager.ensure(on_resolved=manager.mark_installing)
 
     persisted = manager.install_state()
+    assert installed["ok"] is True
     assert persisted is not None
     assert persisted["state"] == "installing"
+    assert persisted["target"] == installed["target"]
     assert persisted["target"]["platform"] == manager.host_platform()
     assert manager.contract_manifest()["assets"]
+
+
+def test_every_runtime_install_failure_reason_has_a_non_collapsing_mapping(
+    tmp_path: Path,
+) -> None:
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    for reason in manager.install_failure_reasons():
+        error = CLIProxyEngineAdapter._install_failure(reason)
+        if reason == "model_hub_engine_platform_unsupported":
+            assert isinstance(error, RuntimePlatformUnsupportedError)
+        else:
+            assert isinstance(error, EngineUnavailableError)
+            assert error.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("live_owner", "resumable_claim"),
+    [(False, False), (False, True), (True, False), (True, True)],
+)
+def test_installing_projection_matches_live_owner_or_resumable_claim(
+    tmp_path: Path,
+    live_owner: bool,
+    resumable_claim: bool,
+) -> None:
+    async def run() -> None:
+        installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+        if resumable_claim:
+            installer.mark_installing(RUNTIME_INSTALL_TARGET)
+        adapter = CLIProxyEngineAdapter(
+            supervisor=EngineSupervisor(
+                installer=installer,
+                state_store=EngineStateStore(tmp_path / "state"),
+            )
+        )
+        adapter._install_owner_active = live_owner
+
+        status = await adapter.status()
+
+        assert (status.health is EngineHealth.INSTALLING) is (
+            live_owner or resumable_claim
+        )
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -1608,9 +1662,18 @@ def test_runtime_install_state_survives_adapter_reload_and_settles_once(
             self.ensure_calls = 0
             self.binary = runtime_dir / "installed-engine"
 
-        def ensure(self, *, force: bool = False):
+        def ensure(
+            self,
+            *,
+            force: bool = False,
+            expected_target=None,
+            on_resolved=None,
+        ):
             del force
+            assert expected_target is None
             self.ensure_calls += 1
+            assert on_resolved is not None
+            on_resolved(RUNTIME_INSTALL_TARGET)
             self.started.set()
             assert self.release.wait(timeout=2)
             self.binary.parent.mkdir(parents=True, exist_ok=True)
@@ -1692,14 +1755,23 @@ def test_cancelled_install_admission_keeps_owned_worker_and_shutdown_joins_it(
             self.ensure_calls = 0
             self.binary = runtime_dir / "installed-engine"
 
-        def mark_installing(self) -> bool:
+        def mark_installing(self, target) -> None:
             self.claim_entered.set()
             assert self.release_claim.wait(timeout=2)
-            return super().mark_installing()
+            super().mark_installing(target)
 
-        def ensure(self, *, force: bool = False):
+        def ensure(
+            self,
+            *,
+            force: bool = False,
+            expected_target=None,
+            on_resolved=None,
+        ):
             del force
+            assert expected_target is None
             self.ensure_calls += 1
+            assert on_resolved is not None
+            on_resolved(RUNTIME_INSTALL_TARGET)
             self.worker_started.set()
             assert self.release_worker.wait(timeout=2)
             self.binary.parent.mkdir(parents=True, exist_ok=True)
@@ -1769,8 +1841,17 @@ def test_install_finalization_never_projects_a_verified_installing_state(
             self.release_clear = threading.Event()
             self.binary = runtime_dir / "installed-engine"
 
-        def ensure(self, *, force: bool = False):
+        def ensure(
+            self,
+            *,
+            force: bool = False,
+            expected_target=None,
+            on_resolved=None,
+        ):
             del force
+            assert expected_target is None
+            assert on_resolved is not None
+            on_resolved(RUNTIME_INSTALL_TARGET)
             self.binary.parent.mkdir(parents=True, exist_ok=True)
             self.binary.write_bytes(b"verified fixture")
             return {
@@ -1833,11 +1914,22 @@ def test_orphaned_install_state_is_reclaimed_before_runtime_status(
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.ensure_calls = 0
+            self.expected_target = None
             self.binary = runtime_dir / "installed-engine"
 
-        def ensure(self, *, force: bool = False):
+        def ensure(
+            self,
+            *,
+            force: bool = False,
+            expected_target=None,
+            on_resolved=None,
+        ):
             del force
             self.ensure_calls += 1
+            self.expected_target = expected_target
+            assert expected_target == RUNTIME_INSTALL_TARGET
+            assert on_resolved is not None
+            on_resolved(RUNTIME_INSTALL_TARGET)
             self.binary.parent.mkdir(parents=True, exist_ok=True)
             self.binary.write_bytes(b"verified fixture")
             return {
@@ -1863,8 +1955,7 @@ def test_orphaned_install_state_is_reclaimed_before_runtime_status(
 
     async def run() -> None:
         installer = RecoveringInstaller(tmp_path / "runtime")
-        assert installer.mark_installing() is True
-        (installer.runtime_dir / "install-orphan").mkdir(parents=True)
+        installer.mark_installing(RUNTIME_INSTALL_TARGET)
         adapter = CLIProxyEngineAdapter(
             supervisor=EngineSupervisor(
                 installer=installer,
@@ -1887,7 +1978,7 @@ def test_orphaned_install_state_is_reclaimed_before_runtime_status(
             raise AssertionError("orphaned installation did not recover")
 
         assert installer.ensure_calls == 1
-        assert not (installer.runtime_dir / "install-orphan").exists()
+        assert installer.expected_target == RUNTIME_INSTALL_TARGET
         assert installer.install_state() is None
 
     asyncio.run(run())
@@ -1899,9 +1990,18 @@ def test_runtime_install_failure_persists_closed_error_key(tmp_path: Path) -> No
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.ensure_calls = 0
 
-        def ensure(self, *, force: bool = False):
+        def ensure(
+            self,
+            *,
+            force: bool = False,
+            expected_target=None,
+            on_resolved=None,
+        ):
             del force
+            assert expected_target is None
             self.ensure_calls += 1
+            assert on_resolved is not None
+            on_resolved(RUNTIME_INSTALL_TARGET)
             return {"ok": False, "changed": False, "reason": "fixture-secret"}
 
     async def run() -> None:
@@ -1934,19 +2034,48 @@ def test_runtime_install_failure_persists_closed_error_key(tmp_path: Path) -> No
     asyncio.run(run())
 
 
-def test_orphaned_install_claim_failure_settles_closed_error(
+def test_runtime_install_failure_projects_terminal_when_settlement_write_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    installer.mark_installing(RUNTIME_INSTALL_TARGET)
+    original_write = managed_runtime.write_json_atomic
+
+    def fail_terminal_write(path: Path, payload: dict) -> None:
+        if payload.get("state") == "not_installed":
+            raise OSError("fixture settlement failure")
+        original_write(path, payload)
+
+    monkeypatch.setattr(managed_runtime, "write_json_atomic", fail_terminal_write)
+
+    with pytest.raises(OSError, match="fixture settlement failure"):
+        installer.mark_install_failed(
+            target=RUNTIME_INSTALL_TARGET,
+            reason="model_hub_engine_archive_download_failed",
+        )
+
+    projected = EngineSupervisor(
+        installer=installer,
+        state_store=EngineStateStore(tmp_path / "state"),
+    ).status()["status"]
+    assert projected["health"] == "not_installed"
+    assert projected["error_key"] == "settings.models.install.fail.detail"
+    assert not installer.install_state_path.exists()
+
+
+def test_invalid_persisted_install_claim_fails_closed(tmp_path: Path) -> None:
     async def run() -> None:
         installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
-        assert installer.mark_installing() is True
-        monkeypatch.setattr(installer, "discard_install_staging", lambda: False)
-
-        def unexpected_ensure(**_kwargs):
-            raise AssertionError("unclaimed recovery must not start installation")
-
-        monkeypatch.setattr(installer, "ensure", unexpected_ensure)
+        managed_runtime.write_json_atomic(
+            installer.install_state_path,
+            {
+                "schema_version": 1,
+                "state": "installing",
+                "error_key": None,
+                "target": {"runtime_version": "v7.2.95"},
+            },
+        )
         adapter = CLIProxyEngineAdapter(
             supervisor=EngineSupervisor(
                 installer=installer,
@@ -1962,6 +2091,7 @@ def test_orphaned_install_claim_failure_settles_closed_error(
         assert persisted is not None
         assert persisted["state"] == "not_installed"
         assert persisted["error_key"] == "settings.models.install.fail.detail"
+        assert persisted["reason"] == "model_hub_engine_install_claim_invalid"
 
     asyncio.run(run())
 

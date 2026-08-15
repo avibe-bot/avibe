@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import aiohttp
 
@@ -541,8 +541,9 @@ class CLIProxyEngineAdapter:
         self.state_store = state_store or self.supervisor.state_store
         self._routing_lock = asyncio.Lock()
         self._installation_lock = asyncio.Lock()
-        self._install_transition_task: asyncio.Task[EngineStatus] | None = None
         self._install_task: asyncio.Task[None] | None = None
+        self._install_admission: asyncio.Future[EngineStatus] | None = None
+        self._install_owner_active = False
         self._installation_stopping = False
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
@@ -551,8 +552,12 @@ class CLIProxyEngineAdapter:
     async def install(self) -> EngineStatus:
         await self.recover_installation()
         async with self._installation_lock:
-            transition = self._install_transition_task
-            if transition is None or transition.done():
+            task = self._install_task
+            admission = self._install_admission
+            if task is not None and not task.done():
+                if admission is None:
+                    return await self.status()
+            else:
                 status = await self.status()
                 if status.health is not EngineHealth.NOT_INSTALLED:
                     return status
@@ -561,77 +566,55 @@ class CLIProxyEngineAdapter:
                         "models.engine.install_failed",
                         reason="engine_stopping",
                     )
-                transition = asyncio.create_task(
-                    self._claim_and_start_installation(status),
-                    name="model-hub-runtime-install-admission",
+                admission = asyncio.get_running_loop().create_future()
+                self._install_admission = admission
+                self._start_install_task_locked(
+                    expected_target=None,
+                    not_installed=status,
+                    admission=admission,
                 )
-                self._install_transition_task = transition
-                transition.add_done_callback(self._installation_transition_done)
-        return await asyncio.shield(transition)
-
-    async def _claim_and_start_installation(
-        self,
-        not_installed: EngineStatus,
-    ) -> EngineStatus:
-        claimed = await asyncio.to_thread(self.supervisor.installer.mark_installing)
-        if not claimed:
-            raise RuntimePlatformUnsupportedError
-        async with self._installation_lock:
-            self._start_install_task_locked()
-        return replace(
-            not_installed,
-            health=EngineHealth.INSTALLING,
-            installed_version=None,
-            verified=False,
-            listen_port=None,
-            error_key=None,
-        )
-
-    def _installation_transition_done(
-        self,
-        task: asyncio.Task[EngineStatus],
-    ) -> None:
-        if self._install_transition_task is task:
-            self._install_transition_task = None
-        try:
-            task.result()
-        except (asyncio.CancelledError, RuntimePlatformUnsupportedError):
-            return
-        except Exception:  # noqa: BLE001
-            logger.exception("Model Hub runtime install admission failed")
+        assert admission is not None
+        return await asyncio.shield(admission)
 
     async def recover_installation(self) -> EngineStatus:
         async with self._installation_lock:
-            transition = self._install_transition_task
-            if transition is not None and not transition.done():
+            install_task = self._install_task
+            if install_task is not None and not install_task.done():
                 return await self.status()
             install_state = await asyncio.to_thread(self.supervisor.installer.install_state)
             if not install_state or install_state.get("state") != "installing":
                 return await self.status()
-            if self._install_task is not None and not self._install_task.done():
-                return await self.status()
-            installed = await asyncio.to_thread(self.supervisor.installer.resolve_engine_path)
-            if installed is not None:
-                await asyncio.to_thread(self.supervisor.installer.clear_install_state)
-                return await self.status()
-            claimed = await asyncio.to_thread(self.supervisor.installer.discard_install_staging)
-            if not claimed:
-                await asyncio.to_thread(self.supervisor.installer.mark_install_failed)
-                return await self.status()
-            self._start_install_task_locked()
+            self._start_install_task_locked(
+                expected_target=install_state["target"],
+                not_installed=None,
+                admission=None,
+            )
             return await self.status()
 
-    def _start_install_task_locked(self) -> None:
+    def _start_install_task_locked(
+        self,
+        *,
+        expected_target: Mapping[str, str] | None,
+        not_installed: EngineStatus | None,
+        admission: asyncio.Future[EngineStatus] | None,
+    ) -> None:
         task = asyncio.create_task(
-            self._run_installation(),
+            self._run_installation(
+                expected_target=expected_target,
+                not_installed=not_installed,
+                admission=admission,
+            ),
             name="model-hub-runtime-install",
         )
         self._install_task = task
+        self._install_owner_active = True
         task.add_done_callback(self._installation_done)
 
     def _installation_done(self, task: asyncio.Task[None]) -> None:
         if self._install_task is task:
             self._install_task = None
+            self._install_admission = None
+            self._install_owner_active = False
         try:
             task.result()
         except asyncio.CancelledError:
@@ -639,27 +622,117 @@ class CLIProxyEngineAdapter:
         except Exception:  # noqa: BLE001
             logger.exception("Model Hub runtime install task failed")
 
-    async def _run_installation(self) -> None:
+    async def _run_installation(
+        self,
+        *,
+        expected_target: Mapping[str, str] | None,
+        not_installed: EngineStatus | None,
+        admission: asyncio.Future[EngineStatus] | None,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        claimed_target: dict[str, str] | None = (
+            dict(expected_target) if expected_target is not None else None
+        )
+
+        def persist_claim(target: dict[str, str]) -> None:
+            nonlocal claimed_target
+            claimed_target = dict(target)
+            if expected_target is not None:
+                return
+            self.supervisor.installer.mark_installing(target)
+            assert not_installed is not None
+            assert admission is not None
+            installing = replace(
+                not_installed,
+                health=EngineHealth.INSTALLING,
+                installed_version=None,
+                verified=False,
+                listen_port=None,
+                error_key=None,
+            )
+            loop.call_soon_threadsafe(self._resolve_install_admission, admission, installing)
+
         try:
-            await self.ensure_installed()
+            await self.ensure_installed(
+                expected_target=expected_target,
+                on_resolved=persist_claim,
+            )
             installed = await asyncio.to_thread(
                 self.supervisor.installer.resolve_engine_path,
             )
             if installed is None:
                 raise EngineUnavailableError("models.engine.install_failed")
             await asyncio.to_thread(self.supervisor.note_installation_settled)
-            await asyncio.to_thread(self.supervisor.installer.clear_install_state)
+            self._install_owner_active = False
+            try:
+                await asyncio.to_thread(self.supervisor.installer.clear_install_state)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to clear settled Model Hub runtime install claim")
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
-            await asyncio.to_thread(self.supervisor.installer.mark_install_failed)
+        except Exception as exc:  # noqa: BLE001
+            self._install_owner_active = False
+            reason = self._install_failure_reason(exc)
+            if reason != "model_hub_engine_install_already_running":
+                try:
+                    await asyncio.to_thread(
+                        self.supervisor.installer.mark_install_failed,
+                        target=claimed_target,
+                        reason=reason,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to persist Model Hub runtime install failure")
+            if admission is not None:
+                self._reject_install_admission(admission, exc)
 
-    async def ensure_installed(self) -> EngineStatus:
+    @staticmethod
+    def _resolve_install_admission(
+        admission: asyncio.Future[EngineStatus],
+        status: EngineStatus,
+    ) -> None:
+        if not admission.done():
+            admission.set_result(status)
+
+    @staticmethod
+    def _reject_install_admission(
+        admission: asyncio.Future[EngineStatus],
+        error: Exception,
+    ) -> None:
+        if not admission.done():
+            admission.set_exception(error)
+
+    @staticmethod
+    def _install_failure_reason(error: Exception) -> str:
+        if isinstance(error, RuntimePlatformUnsupportedError):
+            return "model_hub_engine_platform_unsupported"
+        if isinstance(error, EngineUnavailableError) and error.reason:
+            return error.reason
+        return "model_hub_engine_install_failed"
+
+    @staticmethod
+    def _install_failure(reason: str) -> Exception:
+        if reason == "model_hub_engine_platform_unsupported":
+            return RuntimePlatformUnsupportedError()
+        return EngineUnavailableError("models.engine.install_failed", reason=reason)
+
+    async def ensure_installed(
+        self,
+        *,
+        expected_target: Mapping[str, str] | None = None,
+        on_resolved: Callable[[dict[str, str]], None] | None = None,
+    ) -> EngineStatus:
         async with self._routing_lock:
-            install = await asyncio.to_thread(self.supervisor.installer.ensure)
+            if expected_target is None and on_resolved is None:
+                install = await asyncio.to_thread(self.supervisor.installer.ensure)
+            else:
+                install = await asyncio.to_thread(
+                    self.supervisor.installer.ensure,
+                    expected_target=expected_target,
+                    on_resolved=on_resolved,
+                )
             if not install.get("ok"):
                 reason = str(install.get("reason") or "engine_install_failed")
-                raise EngineUnavailableError("models.engine.install_failed", reason=reason)
+                raise self._install_failure(reason)
             if install.get("changed"):
                 await asyncio.to_thread(self.supervisor.restart_if_running)
             return await self.status()
@@ -671,16 +744,6 @@ class CLIProxyEngineAdapter:
     async def stop(self) -> None:
         async with self._installation_lock:
             self._installation_stopping = True
-            transition = self._install_transition_task
-        if transition is not None:
-            try:
-                await asyncio.shield(transition)
-            except asyncio.CancelledError:
-                if not transition.cancelled():
-                    raise
-            except Exception:  # noqa: BLE001
-                pass
-        async with self._installation_lock:
             install_task = self._install_task
         if install_task is not None:
             try:
@@ -696,7 +759,7 @@ class CLIProxyEngineAdapter:
         raw = await asyncio.to_thread(self.supervisor.status)
         status = raw["status"]
         listening = status.get("listening") or {}
-        return EngineStatus(
+        projected = EngineStatus(
             health=EngineHealth(status["health"]),
             installed_version=status.get("installed_version"),
             verified=bool(status.get("verified")),
@@ -706,6 +769,16 @@ class CLIProxyEngineAdapter:
             host_platform=raw.get("host_platform"),
             error_key=status.get("error_key"),
         )
+        if self._install_owner_active:
+            return replace(
+                projected,
+                health=EngineHealth.INSTALLING,
+                installed_version=None,
+                verified=False,
+                listen_port=None,
+                error_key=None,
+            )
+        return projected
 
     async def gateway_token(self) -> str:
         connection = await asyncio.to_thread(self.supervisor.ensure_running)
