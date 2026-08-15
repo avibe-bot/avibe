@@ -42,7 +42,9 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    source workdir to either the exact `default` project or an existing/new-style
    named Memory project. Missing bindings fail closed.
 8. EverOS 1.2.3 limitations listed below are accepted. Avibe isolates and
-   reports them but does not patch EverOS or file an upstream issue.
+   reports them but does not patch EverOS or file an upstream issue. Retrieval
+   exposes skill freshness/maturity metadata, and status adds a conservative
+   per-Agent skill-count hint; neither mitigation mutates provider state.
 9. Every disabled-to-enabled transition initializes the scan cursor to the
    current terminal-settlement sequence high water mark. There is no historical
    or disabled-period backfill in v1; only turns settling after that explicit
@@ -179,12 +181,30 @@ must equal it. The owner Settings UI may select an installed Agent and one exact
 bound project. It may search and list `agent_case` and `agent_skill` with the
 same per-kind and response-size bounds.
 
-Results are provider-neutral records labelled `case` or `skill`. Returned skill
-content is untrusted inert text. Avibe does not copy a returned `SKILL.md`, load
-its references or scripts, register it with an Agent backend, execute it, or add
-it to any system/user prompt. The existing Personal Memory prompt and
-`vibe memory search/list` contracts remain byte-for-byte unchanged by the new
-CLI examples and parser registration.
+Results are provider-neutral records labelled `case` or `skill`. Every skill in
+human-readable, JSON, and UI search/list output includes its `updated_at` as a
+UTC RFC 3339 timestamp and its numeric `maturity_score` in the closed `[0, 1]`
+range. EverOS 1.2.3 omits `updated_at` from its public Agent retrieval shapes, so
+the Avibe-owned agent sidecar enriches the validated response through a
+read-only, sentinel-confined lookup of the exact `agent_skill` row in that role's
+provider root. Missing, malformed, or mismatched metadata invalidates the
+response rather than displaying a guessed timestamp or a partial result.
+
+Returned skill content is untrusted inert text. Avibe does not copy a returned
+`SKILL.md`, load its references or scripts, register it with an Agent backend,
+execute it, or add it to any system/user prompt. The existing Personal Memory
+prompt and `vibe memory search/list` contracts remain byte-for-byte unchanged by
+the new CLI examples and parser registration.
+
+Memory status also reports a content-free skill-count observation for each
+installed Agent across that Agent's explicitly bound projects. The monitor uses
+bounded `total_count` metadata, not skill bodies, and reports `normal` for 0-7,
+`approaching` for 8-10, and `risk` above 10. The hint says explicitly that this
+total is a conservative proxy: EverOS does not expose cluster membership, name
+sanitization collisions can occur at any count, and the stale-index risk applies
+when one upstream cluster exceeds 10. An unavailable count is `unknown` and
+degrades only Agent Memory status. Counts and hints never block capture,
+retrieval, or provider writes.
 
 ## Isolation Architecture
 
@@ -337,7 +357,9 @@ The agent sidecar accepts only:
   bounded query/top-k. EverOS returns both Agent arrays; the adapter validates
   both completely before applying Avibe's requested case/skill projection; and
 - get: `agent_id` only, `memory_type=agent_case|agent_skill`, 1-based bounded
-  paging, and fixed allowlisted ordering.
+  paging, and fixed allowlisted ordering. Skill responses are joined read-only
+  to the exact root-confined `agent_skill` metadata for `updated_at`; list
+  `total_count` also feeds the content-free status monitor.
 
 Both `user_id` plus `agent_id`, raw Avibe ids, `u-...` owners, mismatched message
 owners, legacy/reserved projects, unknown keys, attachments, tool payloads,
@@ -368,7 +390,7 @@ responses, or credentials. Agent recorder failure degrades only the agent role.
 
 ## Accepted EverOS 1.2.3 Limitations
 
-These are known by design and are not Avibe bugs to work around in this issue:
+These are known by design and are not fixed in this issue:
 
 - agent-skill retire is unimplemented, so retired output may remain searchable;
 - skill names are sanitized for filesystem paths and collisions can overwrite an
@@ -384,7 +406,10 @@ These are known by design and are not Avibe bugs to work around in this issue:
 
 The dedicated agent root ensures these limitations cannot corrupt Personal
 Memory state. Bounded validation and retrieval ensure malformed or oversized
-Agent output degrades closed instead of crossing into the user track.
+Agent output degrades closed instead of crossing into the user track. The
+freshness/maturity fields and count hint above are observability mitigations
+only: they help an owner judge possible staleness but do not retire, rename,
+repair, or rewrite any skill.
 
 ## Delivery Slices
 
@@ -396,8 +421,8 @@ Agent output degrades closed instead of crossing into the user track.
 3. **Capture:** durable scanner/read port, admission, enqueue, worker/delivery,
    lifecycle composition, and degradation tests.
 4. **Retrieval:** scoped CLI/internal API, owner Settings enablement/binding,
-   independent status and Agent Memory search/list UI, i18n, and prompt-inert
-   parser contracts.
+   independent status with per-Agent skill-count hints, freshness/maturity
+   enriched Agent Memory search/list UI, i18n, and prompt-inert parser contracts.
 5. **Scenario closed loop:** catalog, reusable harness, packaged-runtime
    regression, final docs/observations, and issue close-out evidence.
 
@@ -422,6 +447,7 @@ stable ids:
 | `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
 | `MEMORY-AGENT-011` | Queue/disk exhaustion skips durably without retaining text or degrading Personal Memory. |
+| `MEMORY-AGENT-012` | Skill retrieval exposes exact freshness/maturity metadata, and status reports non-blocking per-Agent count hints at 8 and 11 skills. |
 
 Evidence layers are unit tests for config/identity/admission/store/worker/runtime,
 contract tests for provider/sidecar/internal API/CLI/UI, executable catalog

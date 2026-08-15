@@ -42,14 +42,19 @@ their text.
 Agent cases and skills are available only through explicit, scoped Agent Memory
 search/list operations in the CLI or owner Settings UI. Returned skill content
 is untrusted text: Avibe does not install or execute it and never injects it into
-an Agent prompt. A successful add/flush means the trajectory was processed, not
-that EverOS necessarily produced a case or skill.
+an Agent prompt. Each displayed skill includes its last-updated timestamp and
+maturity score. Memory status reports a non-blocking per-Agent skill-count hint:
+8-10 is approaching the upstream prompt limit and more than 10 is the risk zone.
+A successful add/flush means the trajectory was processed, not that EverOS
+necessarily produced a case or skill.
 
 EverOS 1.2.3 may produce zero output through quality gates. Skill retirement is
 not implemented; sanitized skill-name collisions can overwrite a prior file;
 and clusters above ten indexed skills retain an upstream stale-index clobber
 risk. The track is isolated so these accepted limitations cannot corrupt
-Personal Memory. See
+Personal Memory. Freshness/maturity metadata and the count hint help the owner
+judge possible staleness but do not repair, rename, retire, or rewrite skills.
+See
 [`memory-agent-track-1424.md`](plans/memory-agent-track-1424.md) for the complete
 contract.
 
