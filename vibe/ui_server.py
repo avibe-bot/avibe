@@ -13803,10 +13803,6 @@ async def _show_events_stream(
                     if not events:
                         break
                     for event_payload in events:
-                        state = await _authorization_state()
-                        if state != "current":
-                            yield _remote_authorization_sse_frame(state)
-                            return
                         if isinstance(event_payload.get("id"), str):
                             replayed_ids.add(event_payload["id"])
                         yield _sse_frame(

@@ -11,8 +11,8 @@ Implementation snapshot (2026-08-15):
   Organization refresh, transport enforcement, frontend recovery, logout
   isolation, and `AUTH-SETUP-402` / `AUTH-SETUP-403` coverage are implemented
   on `fix-issue-1433-seamless-authorization`.
-- The branch is rebased onto `origin/master` at `5822a49e`, including upstream
-  PR #1441 as unchanged base behavior. Current evidence is 834 related Python
+- The branch was rebased onto `master` commit `5822a49e`, including upstream
+  PR #1441 as unchanged base behavior. Current evidence is 836 related Python
   tests and all 2,759 frontend tests passing, plus Ruff and the production UI
   build.
 - Upstream `master` independently merged PR #1441 for #1434 while this work was
@@ -43,6 +43,23 @@ Review circuit-breaker decision (2026-08-15):
   origin and generic policy rejections retain their existing handshake behavior.
 - This review decision does not expand #1434 Push delivery, persistence, or
   backend contracts.
+
+Review follow-up decision (2026-08-15):
+
+- A new cookie's opaque authorization reference is deliberately not a signed
+  scope hint. If that referenced row is missing, the resolver must not guess an
+  Instance scope and call the backchannel: it fails closed as
+  `invalid_identity` with `authorization_record_missing`, so normal login can
+  create a fresh correctly scoped row. Legacy inline-claims cookies without a
+  reference keep their compatibility migration path. A storage read failure is
+  `unavailable`, not a fake logout.
+- Private Show event replay revalidates current authorization once before each
+  persisted batch, not before every event. A batch is bounded at 500 events;
+  subsequent batches and the live loop retain their existing checks, preserving
+  revocation while keeping replay work proportional to batch count.
+- These corrections stay inside #1433's identity/current-authorization and
+  long-lived transport boundaries. They do not add cookie fields, persistence
+  types, retry machinery, or any of #1434's remaining Push behavior.
 
 - [#1433](https://github.com/avibe-bot/avibe/issues/1433): restore the Personal
   session experience and separate Personal/Organization authorization policy.

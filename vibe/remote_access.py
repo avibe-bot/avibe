@@ -5076,7 +5076,18 @@ def resolve_current_authorization(
         record = _load_authorization_record(config, identity, now=current)
     except Exception:
         logger.warning("remote authorization record load failed", exc_info=True)
-        record = None
+        return AuthorizationResolution(
+            "unavailable",
+            reason="authorization_record_unavailable",
+        )
+    if (
+        record is None
+        and isinstance(identity.get(_SESSION_AUTHORIZATION_REFERENCE_KEY), str)
+    ):
+        return AuthorizationResolution(
+            "invalid_identity",
+            reason="authorization_record_missing",
+        )
     if record is not None and record.get("authorization_state") == "revoked":
         claims = record.get("claims")
         record_revision = (

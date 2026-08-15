@@ -3303,15 +3303,32 @@ def test_public_show_page_clears_show_event_write_cookie(monkeypatch, tmp_path):
     assert "permissions-policy" not in response.headers
 
 
-def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch, tmp_path):
+def test_show_events_stream_replays_persisted_pages_with_batch_authorization_checks(
+    monkeypatch,
+    tmp_path,
+):
     from core.show_session_events import ShowSessionEventStore
     from vibe.authorization import instance_owner_context
     from vibe.ui_server import _show_events_stream
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    config = _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
+    cookie = _active_org_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    authorization_checks = []
+
+    async def _authorization_state(*args, **kwargs):
+        authorization_checks.append((args, kwargs))
+        return "current"
+
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_stream_authorization_state",
+        _authorization_state,
+    )
     store = ShowSessionEventStore()
     try:
         for index in range(501):
@@ -3334,6 +3351,11 @@ def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch,
         response = await _show_events_stream(
             "ses123",
             authorization_context=instance_owner_context(),
+            remote_session_identity=identity,
+            remote_session_payload=identity,
+            remote_session_cookie=cookie,
+            remote_request_host="alex.avibe.bot",
+            remote_config=config,
         )
         iterator = response.body_iterator.__aiter__()
         chunks = []
@@ -3353,6 +3375,7 @@ def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch,
     assert "id: show_evt_500" in body
     assert '"id": "show_evt_000"' in body
     assert '"id": "show_evt_500"' in body
+    assert len(authorization_checks) == 3
 
 
 def test_show_events_stream_forwards_live_dispatch_events(monkeypatch, tmp_path):

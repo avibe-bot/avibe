@@ -388,6 +388,64 @@ def test_scoped_authorization_promotes_legacy_rows_and_isolates_show_pages(tmp_p
     assert show_page is not None and show_page["claims"] == {"scope": "show_page"}
 
 
+def test_referenced_identity_does_not_guess_scope_when_record_is_missing(
+    monkeypatch,
+    tmp_path,
+):
+    config = _paired_config(tmp_path)
+    cookie = remote_access.make_session_cookie(
+        config,
+        "viewer@example.com",
+        "viewer-1",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "show_page_email",
+            "vibe_show_page_id": "show-1",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    assert isinstance(identity.get("authorization_ref"), str)
+    assert remote_access_authorization_service.delete_for_instance("inst_123") == 1
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing referenced records must not guess a refresh scope")
+        ),
+    )
+
+    result = remote_access.resolve_current_authorization(config, identity)
+
+    assert result.state == "invalid_identity"
+    assert result.reason == "authorization_record_missing"
+
+
+def test_authorization_record_read_failure_is_unavailable(monkeypatch, tmp_path):
+    config = _paired_config(tmp_path)
+    identity = remote_access.parse_session_identity(config, _organization_cookie(config))
+    assert identity is not None
+    monkeypatch.setattr(
+        remote_access_authorization_service,
+        "load_reference_record",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("database unavailable")),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("storage failure must not trigger an unscoped refresh")
+        ),
+    )
+
+    result = remote_access.resolve_current_authorization(config, identity)
+
+    assert result.state == "unavailable"
+    assert result.reason == "authorization_record_unavailable"
+
+
 def test_revision_poll_touches_every_matching_current_context_only(tmp_path):
     now = int(time.time())
     rows = (
