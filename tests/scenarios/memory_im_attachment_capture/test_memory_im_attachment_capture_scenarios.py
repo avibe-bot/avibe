@@ -219,7 +219,7 @@ def test_rejected_attachment_preserves_caption_without_multimodal_provider_call(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """Scenario: MEMORY-IM-ATTACH-004."""
+    """Scenario: MEMORY-IM-ATTACH-010."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
     harness = MemoryIMAttachmentScenarioHarness(tmp_path)

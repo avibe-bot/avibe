@@ -22,7 +22,11 @@ observability issue, not in this checklist.
 Do not start the 15-minute clock until all of these are true:
 
 1. The authorized local Incus `master` target is healthy and still has its prior
-   product state.
+   product state. This checklist requires a separately provisioned five-platform
+   target: the standard regression seed covers Slack, Discord, Lark, and WeChat
+   but does not provision Telegram credentials. If Telegram is not already
+   configured and bound, record the run as `BLOCKED` and stop. Do not add or
+   change credentials as part of this checklist.
 2. Memory is enabled. In the Web UI, open **Memory > Processing Record** and verify
    **Engine status** is **Healthy**.
 3. In **Memory > Processing Record**, verify **Call log** is **Recording
@@ -107,7 +111,7 @@ For a rejected SVG, use only the post-baseline processing entries visible in the
 UI. A caption-bearing rejected turn must preserve its caption without showing the
 SVG filename as an attachment in the entry preview. The Lark and WeChat file-only
 rows must not produce an entry attributable to the rejected filename, marker,
-user, and send time. The hermetic `MEMORY-IM-ATTACH-004` scenario separately
+user, and send time. The hermetic `MEMORY-IM-ATTACH-010` scenario separately
 proves that a fully rejected attachment does not enter the multimodal provider
 path; the manual run does not try to reconstruct that engineering fact from an
 unobservable UI absence.
@@ -115,15 +119,15 @@ unobservable UI absence.
 | Platform | Scenario | Send | Pass condition in Memory > Processing Record |
 | --- | --- | --- | --- |
 | Slack | `MEMORY-IM-ATTACH-001` | In a bound human DM, send the Slack PNG with caption `<run-tag> slack accepted image`. | One post-baseline terminal entry exists for the Slack user. Its **Model calls** contain an attributed multimodal request with the image and a response that describes or reproduces the PNG-only marker. |
-| Slack | `MEMORY-IM-ATTACH-004` | In the same DM, send the Slack SVG with caption `<run-tag> slack rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Slack SVG filename as an attachment. |
+| Slack | `MEMORY-IM-ATTACH-010` | In the same DM, send the Slack SVG with caption `<run-tag> slack rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Slack SVG filename as an attachment. |
 | Discord | `MEMORY-IM-ATTACH-005` | In a bound human DM, upload the Discord PNG as an ordinary attachment with caption `<run-tag> discord accepted image`. Do not add a link embed, component, sticker, or forward. | One post-baseline terminal entry exists for the Discord user. Its attributed multimodal request contains the image and its response exposes the PNG-only marker. If the raw message has an automatic embed and no entry is created, fail this row and apply the Discord fixture decision below. |
-| Discord | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-005` | Upload the Discord SVG with caption `<run-tag> discord rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Discord SVG filename as an attachment. |
+| Discord | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-005` | Upload the Discord SVG with caption `<run-tag> discord rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Discord SVG filename as an attachment. |
 | Telegram | `MEMORY-IM-ATTACH-006` | In a bound private chat, send the Telegram PNG as one photo message with caption `<run-tag> telegram accepted image`. Do not use an album. | One post-baseline terminal entry exists for the Telegram user. Its attributed multimodal request contains the Telegram image input and its response exposes the PNG-only marker. The request may identify the normalized JPEG photo rather than the original PNG filename/MIME. |
-| Telegram | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-006` | Send the Telegram SVG as one document with caption `<run-tag> telegram rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Telegram SVG filename as an attachment. |
+| Telegram | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-006` | Send the Telegram SVG as one document with caption `<run-tag> telegram rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Telegram SVG filename as an attachment. |
 | Lark | `MEMORY-IM-ATTACH-007` | In a bound one-to-one chat, send the Lark PNG through the native **image** action as one image-only message. The pixel marker includes the run tag. | One post-baseline terminal entry appears for the Lark user. Its attributed multimodal request contains the image input and its response exposes the PNG-only marker. |
-| Lark | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-007` | Send the Lark SVG through the native **file** action as one file-only message. The filename includes the run tag; its visible SVG marker is different from the filename. | No post-baseline entry is attributable to the rejected Lark filename, marker, user, and send time. |
+| Lark | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-007` | Send the Lark SVG through the native **file** action as one file-only message. The filename includes the run tag; its visible SVG marker is different from the filename. | No post-baseline entry is attributable to the rejected Lark filename, marker, user, and send time. |
 | WeChat | `MEMORY-IM-ATTACH-008` | In a bound direct chat, send the WeChat PNG as one direct image item with no quoted/reference message. The pixel marker includes the run tag. | One post-baseline terminal entry appears for the WeChat user. Its attributed multimodal request contains the image input and its response exposes the PNG-only marker. |
-| WeChat | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-008` | Send the WeChat SVG as one direct file item, with no quoted/reference message. The filename includes the run tag. | No post-baseline entry is attributable to the rejected WeChat filename, marker, user, and send time. |
+| WeChat | `MEMORY-IM-ATTACH-010`, `MEMORY-IM-ATTACH-008` | Send the WeChat SVG as one direct file item, with no quoted/reference message. The filename includes the run tag. | No post-baseline entry is attributable to the rejected WeChat filename, marker, user, and send time. |
 
 Record `PASS`, `FAIL`, or `INCONCLUSIVE` for every row. Where a caption is
 supported, a missing caption is a failure. For every platform, an accepted image
@@ -139,6 +143,12 @@ rows do not use absence of Model calls as evidence; only the visible
 post-baseline entry conditions in the table decide them.
 
 ## Fixture collection plan
+
+This is an optional, separately authorized engineering follow-up, not a phase of
+the 15-minute UI acceptance flow. The ten manual messages can inform which
+fixtures are most valuable, but they do not provide the Lark `media` or WeChat
+bot/self/system samples below. Do not block or complete the acceptance result on
+these fixture decisions unless the collector was separately authorized and run.
 
 Raw platform payloads may contain message IDs, user IDs, signed download URLs,
 tokens, filenames, captions, and other user content. Never commit a raw capture.
@@ -228,8 +238,10 @@ Decision:
   facts. WeChat source exclusion remains the explicit fixture decision above.
 - Resetting regression state, changing credentials, testing remote Incus, or
   validating Agent attachment behavior. This run covers Memory capture only.
+- Provisioning Telegram or any other platform credentials. A separately
+  provisioned five-platform target is a precondition, not an acceptance step.
 - Proving the absence of pre-memcell provider calls through the product UI. The
-  `MEMORY-IM-ATTACH-004` automated scenario owns the rejection-to-provider
+  `MEMORY-IM-ATTACH-010` automated scenario owns the rejection-to-provider
   boundary; issue #1483 tracks product visibility for calls without memcells.
 
 ## Follow-up tracking
@@ -246,7 +258,10 @@ Decision:
 
 ## Result record
 
-Record the run tag, source commit, service-health result, Call log baseline and
-final state, ten row outcomes (including any `INCONCLUSIVE` reason), and the three
-fixture decisions in the owning issue or acceptance report. Do not paste raw
-payloads, signed URLs, credentials, or unsanitized logs into that report.
+Record the run tag, source commit, five-platform provisioning check,
+service-health result, Call log baseline and final state, and ten row outcomes
+(including any `BLOCKED` or `INCONCLUSIVE` reason) in the owning issue or
+acceptance report. If a separately authorized fixture collection was also run,
+append only its scrubbed decisions; otherwise record fixture collection as **not
+run (optional follow-up)**. Do not paste raw payloads, signed URLs, credentials,
+or unsanitized logs into that report.

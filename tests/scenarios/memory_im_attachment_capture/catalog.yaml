@@ -83,3 +83,10 @@ scenarios:
     layer: scenario
     delivery_slice: 6
     test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_claimed_attachment_preflight_failure_retries_caption_as_text_only
+  - id: MEMORY-IM-ATTACH-010
+    name: Fully rejected attachments preserve the caption without a multimodal provider call
+    status: covered
+    kind: boundary
+    layer: scenario
+    delivery_slice: 4
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_rejected_attachment_preserves_caption_without_multimodal_provider_call
