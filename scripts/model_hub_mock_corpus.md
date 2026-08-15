@@ -18,9 +18,9 @@ python3 scripts/generate_model_hub_mock_corpus.py --check
 ```
 
 An unrecorded mock mutation throws `uncontracted_mock_transition`. When the
-operation has an authoritative service dispatch, the error contains an exact
-`--record-miss` command. Run that command from the repository root; it finds the
-recorded path to the missing pre-state, appends the action to
+exact state and request have an executed recovery proof, the error contains an
+exact `--record-miss` command. Run that command from the repository root; it
+finds the recorded path to the missing pre-state, appends the action to
 `model_hub_mock_sequences.json`, and regenerates the corpus. Review both files.
 The transition id is a SHA-256 digest. A separate request token carries only the
 canonical request: sensitive fields are replaced by `<sensitive>` and volatile
