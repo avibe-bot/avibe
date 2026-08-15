@@ -57,13 +57,16 @@ eligibility. Scenarios: `MEMORY-IM-ATTACH-001`, `MEMORY-IM-ATTACH-003`.
 
 **Selected model.** Producers atomically persist the existing durable processing
 action and do nothing else. The existing `MemoryWorker` pass is the single driver:
-each active pass drains processing actions as an independent, unconditional step,
-before any session-due lookup or early return based on session work. Deliver,
-session flush, boot recovery, and future producers never call the runner. Failed
-actions retain the existing retry deadline; the worker's one-second tick bounds
-classification latency, which is not a prerequisite for user-path correctness.
-Generation and `occurred_at` compare-and-set checks continue to reject stale probe
-results.
+each active pass asks the coordinator to schedule exactly one background processing
+action task before any session-due lookup or early return based on session work.
+The pass never awaits that task, so a deadline-bound probe cannot hold the
+exact-session delivery lock or serialize another session. Deliver, session flush,
+boot recovery, and future producers never call the runner. Boot recovery preserves
+the durable action for the next active tick. Failed actions retain the existing
+retry deadline; the worker's one-second tick bounds classification latency, which
+is not a prerequisite for user-path correctness. The coordinator cancels and joins
+an active action task during shutdown. Generation and `occurred_at` compare-and-set
+checks continue to reject stale probe results.
 
 **Rejected models.** Having every producer call a shared drain entry is a
 coordination rule that a new producer can omit. Commit-triggered scheduling avoids
@@ -71,14 +74,16 @@ that omission but introduces task/lifecycle wake-up machinery when the existing
 single periodic owner already supplies a one-second bound. Leaving the probe inside
 the exact-session delivery lock violates the bounded-wait invariant.
 
-**Blast radius.** `core/memory/worker.py`, `core/memory/coordinator.py`, and focused
-tests. It reuses the existing durable action representation and does not add a
-table, component, or migration.
+**Blast radius.** `core/memory/coordinator.py` and focused tests. It reuses the
+existing worker tick and durable action representation and does not add a table,
+component, migration, or worker call-site rule.
 
 **Tests.** With zero due sessions and one durable processing action, one worker
 tick executes the action. A blocked probe never holds an exact-session delivery
-lock or delays `/new`; retry deadlines suppress only retry attempts, never the
-initial durable action; stale probe completion remains fail-closed.
+lock, delays `/new`, or serializes another session. Recovery after a crash between
+settlement and probing leaves the action for the next tick. Retry deadlines
+suppress only retry attempts, never the initial durable action; a stale probe
+completion cannot commit across a newer fault generation.
 
 ## PR-A: materializer-wide failure preserves caption (#1471 item 1)
 
