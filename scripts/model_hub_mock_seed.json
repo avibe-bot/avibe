@@ -195,9 +195,25 @@
       "discoveries": [],
       "synced_bindings": [],
       "revoked": [],
+      "provisioned": [],
+      "oauth_started": [],
+      "oauth_cursor": 0,
       "discovery_script": {
         "anthropic|anthropic|https://retarget-src_anthkey01.example/v1": ["anthropic-model-1"]
+      },
+      "observation_script": {
+        "custom|https://missing.example/v1": ["fixture-model-1"]
       }
+    },
+    "oauth_registry": {"bindings": {}, "pending_nonces": []},
+    "migration": {
+      "claude_settings_env": {},
+      "claude_oauth_signed_in": false,
+      "codex_auth": null,
+      "codex_state": {},
+      "opencode_config": null,
+      "opencode_auth": {},
+      "opencode_catalog": {}
     },
     "revocations": [],
     "service": {
@@ -207,6 +223,6 @@
       "engine_synced": false,
       "engine_preparation_failed": false
     },
-    "unregistered": ["events", "oauth", "migration", "runtime", "provenance"]
+    "unregistered": ["events", "oauth_adapters", "provenance"]
   }
 }

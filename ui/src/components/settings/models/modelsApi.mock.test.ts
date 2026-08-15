@@ -1,10 +1,22 @@
+import { execSync } from 'node:child_process';
+import {
+  copyFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
+import mockCorpusJson from './modelHubMockCorpus.json';
 import {
   ApiCallError,
   MockStore,
   UncontractedMockTransitionError,
 } from './modelsApi';
+import type { MockCorpus } from './modelsApi';
 import type { RouteHopRef } from './types';
 
 const referencesTo = (store: MockStore, sourceId: string): RouteHopRef[] =>
@@ -160,32 +172,8 @@ describe('Model Hub mock replay boundary', () => {
       .toEqual(['src_anthkey01', 'src_relay9c1x']);
   });
 
-  it('hard-fails every unrecorded policy-bearing entry point with a record command', async () => {
-    const calls: Array<[string, (store: MockStore) => Promise<unknown>]> = [
-      ['observeApiKeySource', (store) => store.observeApiKeySource({ vendor: 'custom', base_url: 'https://missing.example/v1', key: 'test-only', protocol_order: ['openai_chat', 'openai_responses', 'anthropic'] })],
-      ['createApiKeySource', (store) => store.createApiKeySource({ kind: 'api_key', vendor: 'custom', display_name: 'Missing', base_url: 'https://missing.example/v1', supply_channel: 'hub', key: 'test-only', protocol_order: ['openai_chat', 'openai_responses', 'anthropic'] })],
-      ['patchSource', (store) => store.patchSource('src_missing0001', { display_name: 'Missing' })],
-      ['refreshSource', (store) => store.refreshSource('src_missing0001')],
-      ['deleteSource', (store) => store.deleteSource('src_missing0001')],
-      ['replaceCredential', (store) => store.replaceCredential('src_missing0001', { key: 'test-only' })],
-      ['reauthSource', (store) => store.reauthSource('src_missing0001')],
-      ['putAgentSources', (store) => store.putAgentSources('claude', { order: [] })],
-      ['putAgentChain', (store) => store.putAgentChain('claude', 'claude-opus-4-6', { hops: [] })],
-      ['probeAgent', (store) => store.probeAgent('claude', 'claude-opus-4-6')],
-      ['setAgentMode', (store) => store.setAgentMode('claude', 'direct')],
-      ['putMenu', (store) => store.putMenu({ view: 'full', checked: [] })],
-      ['addCustomModel', (store) => store.addCustomModel('src_missing0001', { id: 'missing-model', display_name: null })],
-      ['updateModelReasoningEfforts', (store) => store.updateModelReasoningEfforts('src_missing0001', 'missing-model', ['high'])],
-      ['deleteCustomModel', (store) => store.deleteCustomModel('src_missing0001', 'missing-model')],
-      ['scanMigration', (store) => store.scanMigration()],
-      ['applyMigration', (store) => store.applyMigration(['missing'])],
-      ['installRuntime', (store) => store.installRuntime()],
-      ['startRuntime', (store) => store.startRuntime()],
-      ['startOAuth', (store) => store.startOAuth('anthropic', 'hub')],
-      ['getOAuthStatus', (store) => store.getOAuthStatus('flow_missing')],
-      ['submitOAuth', (store) => store.submitOAuth('flow_missing', 'test-only')],
-      ['cancelOAuth', (store) => store.cancelOAuth('flow_missing')],
-    ];
+  it('runs every advertised recovery command and replays the recorded transition', async () => {
+    const corpus = mockCorpusJson as unknown as MockCorpus;
     const nonMutationMembers = new Set([
       'constructor',
       'sources',
@@ -194,31 +182,80 @@ describe('Model Hub mock replay boundary', () => {
       'replay',
       'listSources',
       'listAgents',
-      'getAgentSources',
-      'getAgentChain',
       'listEvents',
       'getRuntimeStatus',
     ]);
     const reachableMutations = Object.getOwnPropertyNames(MockStore.prototype)
       .filter((name) => !nonMutationMembers.has(name))
       .sort();
-    expect(reachableMutations).toEqual(calls.map(([operation]) => operation).sort());
+    const advertised = corpus.recording_operations
+      .map(({ operation }) => operation)
+      .sort();
+    expect(reachableMutations).toEqual([...advertised, 'installRuntime'].sort());
 
-    for (const [operation, call] of calls) {
-      let failure: unknown;
-      try {
-        await call(new MockStore());
-      } catch (error) {
-        failure = error;
+    const repoRoot = resolve(import.meta.dirname, '../../../../..');
+    const tempRoot = mkdtempSync(join(tmpdir(), 'model-hub-record-miss-'));
+    const seedPath = join(tempRoot, 'seed.json');
+    const sequencesPath = join(tempRoot, 'sequences.json');
+    const outputPath = join(tempRoot, 'corpus.json');
+    copyFileSync(join(repoRoot, 'scripts/model_hub_mock_seed.json'), seedPath);
+    copyFileSync(
+      join(repoRoot, 'scripts/model_hub_mock_sequences.json'),
+      sequencesPath,
+    );
+
+    try {
+      for (const { operation, request } of corpus.recording_operations) {
+        const store = new MockStore();
+        const replay = (
+          store as unknown as {
+            replay<T>(candidate: typeof request): Promise<T>;
+          }
+        ).replay.bind(store);
+        let failure: unknown;
+        try {
+          await replay(request);
+        } catch (error) {
+          failure = error;
+        }
+        expect(failure, operation).toBeInstanceOf(UncontractedMockTransitionError);
+        const error = failure as UncontractedMockTransitionError;
+        expect(error.operation, operation).toBe(operation);
+        expect(error.generatorCommand, operation).toBe(
+          `python3 scripts/generate_model_hub_mock_corpus.py --record-miss ${error.missingKey}`,
+        );
+
+        execSync(error.generatorCommand ?? '', {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            MODEL_HUB_MOCK_SEED_PATH: seedPath,
+            MODEL_HUB_MOCK_SEQUENCES_PATH: sequencesPath,
+            MODEL_HUB_MOCK_OUTPUT_PATH: outputPath,
+          },
+          stdio: 'pipe',
+        });
+        const recorded = JSON.parse(
+          readFileSync(outputPath, 'utf8'),
+        ) as MockCorpus;
+        const recordedStore = new MockStore(recorded);
+        const recordedReplay = (
+          recordedStore as unknown as {
+            replay<T>(candidate: typeof request): Promise<T>;
+          }
+        ).replay.bind(recordedStore);
+        let replayFailure: unknown;
+        try {
+          await recordedReplay(request);
+        } catch (error) {
+          replayFailure = error;
+        }
+        expect(replayFailure, operation).not.toBeInstanceOf(
+          UncontractedMockTransitionError,
+        );
       }
-      expect(failure, operation).toBeInstanceOf(UncontractedMockTransitionError);
-      const error = failure as UncontractedMockTransitionError;
-      expect(error.operation, operation).toBe(operation);
-      expect(error.missingKey, operation).toBeTruthy();
-      expect(error.generatorCommand, operation).toBe(
-        `python3 scripts/generate_model_hub_mock_corpus.py --record-miss ${error.missingKey}`,
-      );
-      expect(error.message, operation).toContain(error.generatorCommand);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 });

@@ -522,8 +522,12 @@ type RecordedTransition = {
     reads: RecordedReads;
   };
 };
-type MockCorpus = {
+export type MockCorpus = {
   generator: string;
+  recording_operations: Array<{
+    operation: string;
+    request: RecordedRequest;
+  }>;
   seed: {
     model_hub_config_sha256: string;
     fixture_world_sha256: string;
@@ -569,16 +573,27 @@ export class UncontractedMockTransitionError extends Error {
   readonly code = 'uncontracted_mock_transition';
   readonly missingKey: string;
   readonly operation: string;
-  readonly generatorCommand: string;
+  readonly generatorCommand: string | null;
 
-  constructor(missingKey: string, operation: string, generatorCommand: string) {
+  constructor(
+    missingKey: string,
+    operation: string,
+    generatorCommand: string | null,
+  ) {
     super(
-      [
-        'uncontracted_mock_transition',
-        `Missing key: ${missingKey}`,
-        `Operation: ${operation}`,
-        `Record it: ${generatorCommand}`,
-      ].join('\n'),
+      generatorCommand
+        ? [
+            'uncontracted_mock_transition',
+            `Missing key: ${missingKey}`,
+            `Operation: ${operation}`,
+            `Record it: ${generatorCommand}`,
+          ].join('\n')
+        : [
+            'uncontracted_mock_transition',
+            `Missing key: ${missingKey}`,
+            `Operation: ${operation}`,
+            'No authoritative server dispatch exists for this operation; add or restore that server operation before recording mock evidence.',
+          ].join('\n'),
     );
     this.name = 'UncontractedMockTransitionError';
     this.missingKey = missingKey;
@@ -594,14 +609,23 @@ export class UncontractedMockTransitionError extends Error {
  * service. Reads are the server projections recorded at that exact post-state.
  */
 export class MockStore {
-  private reads = clone(mockCorpus.seed.reads);
-  private configHash = mockCorpus.seed.model_hub_config_sha256;
-  private fixtureWorldHash = mockCorpus.seed.fixture_world_sha256;
-  private readonly transitions = new Map(
-    mockCorpus.transitions.map((transition) => [transition.key.id, transition]),
-  );
+  private reads: RecordedReads;
+  private configHash: string;
+  private fixtureWorldHash: string;
+  private readonly corpus: MockCorpus;
+  private readonly transitions: Map<string, RecordedTransition>;
   private readonly events = buildMockEvents();
   private readonly runtime = buildMockRuntime();
+
+  constructor(corpus: MockCorpus = mockCorpus) {
+    this.corpus = corpus;
+    this.reads = clone(corpus.seed.reads);
+    this.configHash = corpus.seed.model_hub_config_sha256;
+    this.fixtureWorldHash = corpus.seed.fixture_world_sha256;
+    this.transitions = new Map(
+      corpus.transitions.map((transition) => [transition.key.id, transition]),
+    );
+  }
 
   get sources(): Source[] {
     return clone(this.reads.sources);
@@ -627,8 +651,11 @@ export class MockStore {
     const missingKey = this.transitionKey(request);
     const transition = this.transitions.get(missingKey);
     if (!transition) {
-      const generatorCommand =
-        `${mockCorpus.generator} --record-miss ${missingKey}`;
+      const generatorCommand = this.corpus.recording_operations.some(
+        ({ operation }) => operation === request.operation,
+      )
+        ? `${this.corpus.generator} --record-miss ${missingKey}`
+        : null;
       throw new UncontractedMockTransitionError(
         missingKey,
         request.operation,

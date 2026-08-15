@@ -17,10 +17,18 @@ Verify that the checked-in corpus matches the current server:
 python3 scripts/generate_model_hub_mock_corpus.py --check
 ```
 
-An unrecorded mock mutation throws `uncontracted_mock_transition`. The error
-contains an exact `--record-miss` command. Run that command from the repository
-root; it finds the recorded path to the missing pre-state, appends the action to
+An unrecorded mock mutation throws `uncontracted_mock_transition`. When the
+operation has an authoritative service dispatch, the error contains an exact
+`--record-miss` command. Run that command from the repository root; it finds the
+recorded path to the missing pre-state, appends the action to
 `model_hub_mock_sequences.json`, and regenerates the corpus. Review both files.
+If the server has no dispatch for an operation, the error names that boundary
+instead of advertising a command that cannot produce server evidence.
+The generator's operation registry owns both the service dispatch and its
+recording probe; the mock's advertised set is generated from that registry.
+The contract test runs every advertised command in an isolated corpus and then
+replays the recorded transition, so adding an operation cannot silently leave
+the recovery workflow unwired.
 
 Only the five currently exercised sequences are recorded. There is deliberately
 no speculative walkthrough corpus. Fixture-world content grows when a sequence
@@ -31,4 +39,5 @@ The local dynamic event feed and static runtime-status card remain display
 fixtures. They do not classify observations, choose targets, validate writes,
 compute guards, prune routes, or derive supply. Every such policy-bearing entry
 point goes through the transition corpus, including entry points with no record
-yet; those fail with the recording command instead of falling back to TypeScript.
+yet; those fail with a recording command or an explicit missing-server-dispatch
+error instead of falling back to TypeScript.
