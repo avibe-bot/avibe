@@ -554,6 +554,32 @@ def test_api_response_registry_exactly_covers_contract_and_server_routes():
     )
 
 
+def test_api_response_conformance_diagnostic_names_the_offending_field(tmp_path):
+    service, _store, _adapter = _service(tmp_path)
+    body = {
+        "ok": True,
+        "contract_version": CONTRACT_VERSION,
+        "agents": service.list_agents(),
+    }
+    body["agents"][0]["model_supply"][0].pop("has_runnable_hop")
+    validator = Draft7Validator(
+        {
+            "$ref": (
+                "model-hub/api-response.schema.json#/definitions/"
+                "AgentListResponse"
+            )
+        },
+        registry=_api_response_registry(),
+        format_checker=FormatChecker(),
+    )
+
+    error = _response_validation_error(list(validator.iter_errors(body)))
+
+    assert _response_error_path(error) == (
+        "$.agents[0].model_supply[0].has_runnable_hop"
+    )
+
+
 @pytest.mark.parametrize(
     "route_contract",
     API_RESPONSE_ROUTES,
