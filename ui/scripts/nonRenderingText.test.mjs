@@ -64,6 +64,10 @@ const RENDERING = [
   // children to the CSS parser, so blanking them removed a declaration that
   // really does draw light.
   ['CSS inside a JSX style element', 'probe.tsx', `const a = <style>{'.a'} {'{'} box-shadow: ${GLOW} {'}'}</style>;\n`, GLOW],
+  // `@` is an ordinary character in a declaration value, and `@2x` is how a
+  // retina asset is named. Reading it as an at-rule opener blanked the rest of
+  // the declaration and took the glow beside it along.
+  ['a glow beside an @ inside url()', 'probe.css', `.a { filter: url(logo@2x.png) drop-shadow(${GLOW}); }\n`, GLOW],
 ];
 
 describe('withoutNonRenderingText', () => {
@@ -119,6 +123,19 @@ describe('withoutNonRenderingText', () => {
 
     expect(withoutNonRenderingText(prelude, 'probe.css')).toContain('93px');
     expect(withoutNonRenderingText(declaration, 'probe.css')).not.toContain('93px');
+  });
+
+  // Which `@` opens an at-rule is a question about CSS structure, and the two
+  // spellings are indistinguishable byte by byte. Asking the parser is what
+  // separates them; the alternative is one more hand-rolled rule about where an
+  // `@` is allowed to mean something, which is the shape every finding on this
+  // scan has taken.
+  it('treats @ as an at-rule opener only where an at-rule actually begins', () => {
+    const atRule = '@supports (box-shadow: 0 0 93px red) {\n  .a { color: red; }\n}\n';
+    const inValue = '.a { filter: url(logo@2x.png) drop-shadow(0 0 93px red); }\n';
+
+    expect(withoutNonRenderingText(atRule, 'probe.css')).not.toContain('93px');
+    expect(withoutNonRenderingText(inValue, 'probe.css')).toContain('93px');
   });
 
   // An at-rule prelude either generates CSS or tests it, and the two want

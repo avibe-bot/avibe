@@ -6,6 +6,7 @@ import postcss from 'postcss';
 import { isLength, isZeroLength } from './cssLength.mjs';
 import { SHADOW_KEY, STYLE_ASSIGNMENT, propertyExpression, valueArgument } from './styleWrite.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
+import { customPropertiesIn } from './customProperties.mjs';
 import { rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
 
 const html = fs.readFileSync('index.html', 'utf8');
@@ -864,14 +865,12 @@ const SHADOW_MENTION = new RegExp(
 // rather than last-write-wins, because a property is routinely declared several
 // times -- dark, `prefers-color-scheme: light`, `[data-theme="light"]` -- and a
 // glow smuggled into just one of those blocks is still a glow that ships.
+// What counts as a declaration of a name lives in `customProperties.mjs`, where
+// it can be called from a test; this is only the fold across stylesheets.
 function collectCustomProperties(root) {
   const values = new Map();
   for (const relative of intendedFiles(root, { extensions: ['.css'] })) {
-    postcss.parse(fs.readFileSync(path.join(root, relative), 'utf8')).walkDecls((decl) => {
-      if (!decl.prop.startsWith('--')) return;
-      if (!values.has(decl.prop)) values.set(decl.prop, new Set());
-      values.get(decl.prop).add(decl.value);
-    });
+    customPropertiesIn(fs.readFileSync(path.join(root, relative), 'utf8'), values);
   }
   return values;
 }

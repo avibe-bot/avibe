@@ -18,6 +18,7 @@
 // spaces rather than deleting them, so offsets and line numbers computed by the
 // caller still point where they did.
 
+import postcss from 'postcss';
 import ts from 'typescript';
 
 // A comment renders nothing, so a shadow spelled inside one is prose ABOUT a
@@ -65,7 +66,36 @@ const GENERATOR_AT_RULES = ['source'];
 const atRuleGenerates = (source, at) =>
   GENERATOR_AT_RULES.some((name) => source.startsWith(name, at + 1));
 
+// Which `@` characters actually open an at-rule -- asked of a CSS parser rather
+// than of the bytes, for the same reason the TypeScript branch below asks the
+// compiler. `@` is not a reserved character in a declaration value, so
+// `filter: url(logo@2x.png) drop-shadow(0 0 93px red)` carries one that opens
+// nothing; reading it as an at-rule blanked the rest of the declaration and took
+// a rendered glow with it. `@2x` in a retina asset name is the ordinary way to
+// write that, so this was a hole waiting on a filename.
+//
+// The decomposition is deliberate: PostCSS answers the STRUCTURAL question --
+// where an at-rule begins and therefore where a prelude runs -- and the scanner
+// below keeps the LEXICAL one, which spans are comments and strings. That
+// boundary is where CSS is genuinely simple: `/*` and a quote mean one thing
+// each, with none of the ambiguity that makes `/` un-scannable in JavaScript.
+//
+// PostCSS is not a new dependency, and this is not a new argument. It is a
+// direct devDependency, `validate-theme.mjs` already parses every one of these
+// files with it to collect custom properties, and this scan therefore read each
+// stylesheet twice -- once through a real tree, once through a hand-rolled
+// approximation of one. The findings all came from the second. Parse errors are
+// deliberately not caught: the same file is parsed unguarded by
+// `collectCustomProperties` before this runs, so an unreadable stylesheet
+// already fails the scan loudly rather than degrading into a silent miss here.
+function atRuleOffsets(source) {
+  const offsets = new Set();
+  postcss.parse(source).walkAtRules((rule) => offsets.add(rule.source.start.offset));
+  return offsets;
+}
+
 function blankCssComments(source) {
+  const opens = atRuleOffsets(source);
   let out = '';
   let quote = null;
   let index = 0;
@@ -102,7 +132,7 @@ function blankCssComments(source) {
       out += source.slice(index, stop).replace(/[^\n]/g, ' ');
       index = stop;
     } else {
-      if (char === '@') {
+      if (char === '@' && opens.has(index)) {
         prelude = atRuleGenerates(source, index);
         condition = !prelude;
       } else if (char === '{' || char === ';') {
