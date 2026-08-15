@@ -113,16 +113,36 @@ describe('the shadow channels and the completeness matcher', () => {
   // A style property's value is its own expression. Capturing `[^;\n]*` -- the
   // rest of the line -- swept the NEXT property up as a second shadow layer, so
   // `style={{ boxShadow: 'none', color: 'red' }}` failed on `red`.
+  //
+  // What that expression actually reads is asserted in `styleWrite.test.mjs`,
+  // where `propertyExpression` can be called; this is the half that has to stay
+  // here, because "which reader this channel uses" is a fact about the channel.
   it('reads a style property\'s own expression rather than the rest of the line', () => {
-    // Selected by how its pattern STARTS, not by mentioning `[Ss]hadow`: the
+    // Selected by how its pattern STARTS, not by mentioning the key: the
     // preceding channel's trailing comment quotes that spelling in prose, and a
     // substring search happily returns the wrong channel.
     const inline = eachChannel().find((channel) =>
-      channel.trimStart().startsWith('/(?<![\\w-])[A-Za-z]*[Ss]hadow')
+      channel.trimStart().startsWith('new RegExp(SHADOW_KEY')
     );
 
     expect(inline, 'the inline-style channel is no longer spelled this way').toBeDefined();
     expect(inline).not.toContain('[^;\\n]');
     expect(inline).toContain('styleExpression');
+  });
+
+  // The third thing the two readers have to agree on, after the property name
+  // and the flags: which assignments are style writes at all. `const cardShadow
+  // = 'compact'` was read as one by both, and narrowing only the channel would
+  // have left the mention counting a span nothing claims -- the "unscanned
+  // channel" failure this file was written about, arriving from the other side.
+  // One constant, both readers, asserted rather than intended.
+  it('agrees with the mention matcher on what makes an assignment a style write', () => {
+    expect(SCAN).toContain("import { SHADOW_KEY, STYLE_ASSIGNMENT,");
+    expect(mention()).toContain('${STYLE_ASSIGNMENT}');
+
+    const inline = eachChannel().find((channel) =>
+      channel.trimStart().startsWith('new RegExp(SHADOW_KEY')
+    );
+    expect(inline, 'the inline-style channel is no longer spelled this way').toBeDefined();
   });
 });

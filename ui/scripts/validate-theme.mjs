@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import postcss from 'postcss';
 
 import { isLength, isZeroLength } from './cssLength.mjs';
+import { SHADOW_KEY, STYLE_ASSIGNMENT, propertyExpression, valueArgument } from './styleWrite.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
 
@@ -731,19 +732,15 @@ const SHADOW_CHANNELS = [
     // without the other is how a spelling becomes scanned-but-unreported or
     // reported-but-unscannable, and both of those are silence.
     //
-    // The identifier ENDS at the word. Reading `[Ss]hadow[A-Za-z]*` matched any
-    // name merely containing it, so `const shadowPreset = 'compact'` was scanned
-    // as a style property and `compact` was reported as an unreadable shadow
-    // layer -- a false failure, which is the one failure mode this guard cannot
-    // afford: a missed glow leaves the tree where it already was, while a false
-    // positive fails an unrelated PR's CI for naming a variable. Ending at the
-    // word is not the property enumeration that cost the earlier rounds either;
-    // it is a fact about CSS naming. Shadow properties are `box-shadow`,
-    // `text-shadow`, `-webkit-box-shadow`, `drop-shadow` -- the word is always
-    // the TAIL. Application names that merely contain it -- `shadowPreset`,
-    // `shadowRoot`, `useShadows` -- put it at the head or pluralise it, and none
-    // of them is a property a browser will read a shadow out of.
-    pattern: /(?<![\w-])[A-Za-z]*[Ss]hadow(?![A-Za-z])['"]?\s*\]?\s*[:=]/g,
+    // The identifier ENDS at the word -- and, for an assignment, the target is
+    // `element.style`. Both halves are the same finding arriving twice:
+    // `[Ss]hadow[A-Za-z]*` matched any name merely containing the word, so
+    // `const shadowPreset = 'compact'` was read as a style property; ending at
+    // the word fixed that spelling and left `const cardShadow = 'compact'`
+    // reading as one, because a name cannot answer the question. STYLE_ASSIGNMENT
+    // answers it where the answer lives, at the assignment target, and is shared
+    // with SHADOW_MENTION so the two cannot drift apart.
+    pattern: new RegExp(SHADOW_KEY, 'g'),
     valuesOf: (match) => stringLiterals(styleExpression(match)),
     // A CSS shadow is a string, so a bare non-string literal is provably not
     // one: `scrollbar: { useShadows: false }` is a Monaco flag, not a shadow.
@@ -772,49 +769,6 @@ function stringLiterals(expression) {
     .map(([, single, double, template]) => single ?? double ?? template);
 }
 
-// The VALUE argument of a call, and only it. `setProperty` takes a third,
-// `priority`, and reading "every string literal after the property name" swept
-// it up as a second layer -- so the entirely valid
-// `setProperty('box-shadow', 'none', 'important')` accepted `none` and then
-// failed on `important`. The expression ends at the first terminator that is not
-// nested inside a call, a bracket or a string, which is the same notion of "top
-// level" that balancedArgument already uses; null when it never terminates, so
-// an unreadable one stays loud instead of quietly yielding nothing.
-//
-// Two callers, one scanner, differing only in what ends them. Writing the second
-// one out again as its own loop is how the quote handling in one of them gets a
-// fix the other never hears about -- which is the shape of defect this file has
-// now spent several rounds on.
-function expressionUpTo(source, start, terminators) {
-  let depth = 0;
-  let quote = null;
-  for (let index = start; index < source.length; index += 1) {
-    const char = source[index];
-    if (quote) {
-      if (char === '\\') index += 1;
-      else if (char === quote) quote = null;
-      continue;
-    }
-    if (char === "'" || char === '"' || char === '`') quote = char;
-    else if (char === '(' || char === '[' || char === '{') depth += 1;
-    else if (depth === 0 && terminators.includes(char)) return source.slice(start, index);
-    else if (char === ')' || char === ']' || char === '}') depth -= 1;
-  }
-  return null;
-}
-
-// A call argument ends at the comma before the next one, or at the paren that
-// closes the call.
-const valueArgument = (source, start) => expressionUpTo(source, start, ',)');
-
-// A style property's own expression ends where the next property begins, or
-// where the object or statement does. Reading `[^;\n]*` instead -- everything up
-// to the end of the line -- was the same mistake the `priority` argument had
-// already taught this file once: `style={{ boxShadow: 'none', color: 'red' }}`
-// swept the NEXT property up as a second shadow layer, accepted `none`, and then
-// failed `validate:theme` on `red`. Valid, glow-free UI code, blocked by the
-// glow guard.
-const propertyExpression = (source, start) => expressionUpTo(source, start, ',;}\n');
 
 // The parenthesis-balanced span starting at `openIndex`, or null when it never
 // closes -- null is not a quiet skip, it lands in the unreadable bucket.
@@ -890,8 +844,18 @@ const NON_STRING_LITERAL =/^\s*(true|false|null|undefined|[+-]?\d+(\.\d+)?)\s*($
 // properties at all. The two must narrow together -- a mention this stopped
 // counting while the channel still read it would be scanned-but-unreported,
 // which is the silence these two exist to make impossible.
+//
+// The equals sign carries STYLE_ASSIGNMENT for the same reason the channel does,
+// and from the same constant. This is the one narrowing the error message below
+// warns against making by hand -- "do NOT narrow SHADOW_MENTION to make this
+// pass" -- and it is not that: the span it stops counting is one no channel
+// should ever have claimed, because `const cardShadow = 'compact'` is a variable
+// and never reached a page. Narrowing only one of the two would be the silence
+// that warning is about, which is why both read this from one definition.
 const SHADOW_MENTION = new RegExp(
-  `${SHADOW_PROPERTY}(?:['"]?\\s*\\]?\\s*[:=]|-?[([])|${CSSOM_SETTER.source}`,
+  `${SHADOW_PROPERTY}(?:['"]?\\s*\\]?\\s*:|-?[([])`
+  + `|${STYLE_ASSIGNMENT}${SHADOW_PROPERTY}['"]?\\s*\\]?\\s*=`
+  + `|${CSSOM_SETTER.source}`,
   'gi',
 );
 

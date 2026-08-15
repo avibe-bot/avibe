@@ -168,6 +168,16 @@ const NON_RENDERING_KINDS = new Set([
   ts.SyntaxKind.RegularExpressionLiteral,
 ]);
 
+// Except in the one element where JSX text is not copy. `<style>` hands its
+// children to the CSS parser, so `.probe { box-shadow: 0 0 93px red }` written
+// there is a declaration that renders -- and blanking it removed a real glow
+// before any channel could see it. The parent decides, not the text: this is the
+// same question the surrounding module answers everywhere else, asked one node
+// up, and the tree already knows the answer.
+const isStyleElementText = (node, tree) =>
+  node.kind === ts.SyntaxKind.JsxText
+  && node.parent?.openingElement?.tagName?.getText(tree) === 'style';
+
 function nonRenderingRanges(source, file) {
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, scriptKind(file));
   const comments = [];
@@ -179,7 +189,9 @@ function nonRenderingRanges(source, file) {
   const visit = (node) => {
     collect(ts.getLeadingCommentRanges(source, node.getFullStart()));
     collect(ts.getTrailingCommentRanges(source, node.getEnd()));
-    if (NON_RENDERING_KINDS.has(node.kind)) literals.push([node.getStart(tree), node.getEnd()]);
+    if (NON_RENDERING_KINDS.has(node.kind) && !isStyleElementText(node, tree)) {
+      literals.push([node.getStart(tree), node.getEnd()]);
+    }
     node.getChildren(tree).forEach(visit);
   };
   visit(tree);

@@ -60,6 +60,10 @@ const RENDERING = [
   // Blanking a condition must stop at the brace. The rule inside an @supports
   // block renders exactly like any other rule.
   ['a rule inside an @supports block', 'probe.css', `@supports (display: grid) {\n  .a { box-shadow: ${GLOW}; }\n}\n`, GLOW],
+  // The one element where JSX text is not page copy. `<style>` hands its
+  // children to the CSS parser, so blanking them removed a declaration that
+  // really does draw light.
+  ['CSS inside a JSX style element', 'probe.tsx', `const a = <style>{'.a'} {'{'} box-shadow: ${GLOW} {'}'}</style>;\n`, GLOW],
 ];
 
 describe('withoutNonRenderingText', () => {
