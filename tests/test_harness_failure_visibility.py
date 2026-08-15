@@ -12326,11 +12326,10 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
 
 def test_watch_cycle_outcome_pair_is_published_atomically(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    """A reader sees one completed-cycle snapshot, never half of the next one."""
+    """A held reader cannot straddle publication of the next cycle outcome."""
 
-    from core.watches import ManagedWatch, ManagedWatchStore
+    from core.watches import ManagedWatchStore
 
     store = ManagedWatchStore(tmp_path / "watches.json")
     watch = store.add_watch(
@@ -12349,34 +12348,35 @@ def test_watch_cycle_outcome_pair_is_published_atomically(
         deliver_key=None,
     )
     assert store.mark_cycle_result(watch.id, exit_code=0, error=None)
-    visible_before = store.get_watch(watch.id)
-    assert visible_before is not None
     previous_outcome = (0, None)
     next_outcome = (75, "watch command exited with status 75")
 
-    writer_reached_publish_boundary = threading.Event()
-    release_writer = threading.Event()
+    reader_has_old_exit_code = threading.Event()
+    writer_finished = threading.Event()
+    observed_outcomes: list[tuple[int | None, str | None]] = []
+    reader_errors: list[BaseException] = []
     writer_errors: list[BaseException] = []
-    original_setattr = ManagedWatch.__setattr__
-    original_write = store._write_watch
 
-    def _block_legacy_field_write(self, name, value):
-        original_setattr(self, name, value)
-        if self is visible_before and (
-            (name == "last_exit_code" and value != previous_outcome[0])
-            or (name == "last_error" and value != previous_outcome[1])
-        ):
-            writer_reached_publish_boundary.set()
-            release_writer.wait(timeout=5)
+    class _BlockingNamespace(dict):
+        def __getitem__(self, key):
+            value = super().__getitem__(key)
+            if key == "last_exit_code":
+                reader_has_old_exit_code.set()
+                if not writer_finished.wait(timeout=5):
+                    raise AssertionError("writer did not publish while the reader was paused")
+            return value
 
-    def _block_snapshot_before_publish(candidate, expect, **kwargs):
-        if candidate is not visible_before:
-            writer_reached_publish_boundary.set()
-            release_writer.wait(timeout=5)
-        return original_write(candidate, expect, **kwargs)
+    # ``watch`` is the mutation result retained by its caller and therefore the cached
+    # object whose namespace publication updates. Pause its outcome reader after the
+    # first old value has been fetched, then let the writer publish the complete next
+    # namespace before the reader fetches the second value.
+    watch.__dict__ = _BlockingNamespace(watch.__dict__)
 
-    monkeypatch.setattr(ManagedWatch, "__setattr__", _block_legacy_field_write)
-    monkeypatch.setattr(store, "_write_watch", _block_snapshot_before_publish)
+    def _read_result() -> None:
+        try:
+            observed_outcomes.append(watch.last_cycle_outcome)
+        except BaseException as exc:
+            reader_errors.append(exc)
 
     def _write_result() -> None:
         try:
@@ -12387,40 +12387,30 @@ def test_watch_cycle_outcome_pair_is_published_atomically(
             )
         except BaseException as exc:
             writer_errors.append(exc)
+        finally:
+            writer_finished.set()
 
+    reader = threading.Thread(target=_read_result)
+    reader.start()
+    assert reader_has_old_exit_code.wait(timeout=5)
     writer = threading.Thread(target=_write_result)
     writer.start()
-    try:
-        assert writer_reached_publish_boundary.wait(timeout=5)
-        visible_during_write = store.get_watch(watch.id)
-        assert visible_during_write is not None
-        visible_outcome = (
-            visible_during_write.last_exit_code,
-            visible_during_write.last_error,
-        )
-        assert visible_outcome in {previous_outcome, next_outcome}
-        persisted_during_write = ManagedWatchStore(tmp_path / "watches.json").get_watch(
-            watch.id
-        )
-        assert persisted_during_write is not None
-        persisted_outcome = (
-            persisted_during_write.last_exit_code,
-            persisted_during_write.last_error,
-        )
-        assert persisted_outcome in {previous_outcome, next_outcome}
-    finally:
-        release_writer.set()
-        writer.join(timeout=5)
+    writer.join(timeout=5)
+    reader.join(timeout=5)
 
     assert not writer.is_alive()
+    assert not reader.is_alive()
     assert not writer_errors
+    assert not reader_errors
+    assert observed_outcomes == [previous_outcome]
+
     visible_after = store.get_watch(watch.id)
     assert visible_after is not None
-    assert visible_after is visible_before
-    assert (visible_after.last_exit_code, visible_after.last_error) == next_outcome
+    assert visible_after is watch
+    assert visible_after.last_cycle_outcome == next_outcome
     persisted_after = ManagedWatchStore(tmp_path / "watches.json").get_watch(watch.id)
     assert persisted_after is not None
-    assert (persisted_after.last_exit_code, persisted_after.last_error) == next_outcome
+    assert persisted_after.last_cycle_outcome == next_outcome
 
 
 def test_a_forever_watch_repeating_the_field_failure_notifies_once(
@@ -12548,7 +12538,7 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
 
     def _last_completed_cycle_is_retry() -> bool:
         row = watch_store.get_watch(watch.id)
-        return row is not None and (row.last_exit_code, row.last_error) == (75, sentinel)
+        return row is not None and row.last_cycle_outcome == (75, sentinel)
 
     service = ManagedWatchService(
         controller=SimpleNamespace(),

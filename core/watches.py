@@ -241,8 +241,17 @@ class ManagedWatch:
     last_exit_code: Optional[int] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def last_cycle_outcome(self) -> tuple[Optional[int], Optional[str]]:
+        """Return the last completed cycle's exit code and error as one snapshot."""
+
+        namespace = self.__dict__
+        return namespace["last_exit_code"], namespace["last_error"]
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["last_exit_code"], payload["last_error"] = self.last_cycle_outcome
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ManagedWatch":
@@ -504,9 +513,10 @@ class ManagedWatchStore:
 
         EVERY way this write can fail to land reloads the mirror (HFR-271). Callers may
         pass either the cached object or a detached candidate; a landed detached write
-        replaces the cached object's complete namespace in one assignment. That keeps
-        existing references current without exposing a field-by-field transition. If
-        the write does not stick, its mutation must not either. Reloading on the
+        replaces the cached object's complete namespace in one assignment. Existing
+        references stay current, while readers capture the immutable
+        ``last_cycle_outcome`` from one published namespace. If the write does not
+        stick, its mutation must not either. Reloading on the
         ``False`` return alone was half the job -- a raised exception rolls the
         transaction back just as completely, and left the process serving edits the
         database never accepted. ``reconcile_watches`` chooses which watches keep
@@ -520,8 +530,8 @@ class ManagedWatchStore:
             if cached is None:
                 self._watches[watch.id] = watch
             elif cached is not watch:
-                # One namespace swap preserves object identity and makes every field
-                # in the persisted snapshot visible at the same publication point.
+                # Preserve mutation-result identity; outcome readers capture this
+                # namespace once rather than reading across its publication point.
                 cached.__dict__ = watch.__dict__
 
         try:
