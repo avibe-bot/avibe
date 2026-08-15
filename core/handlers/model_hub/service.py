@@ -1469,12 +1469,14 @@ class ModelHubService:
         config: ModelHubConfig | None = None,
     ) -> list[dict]:
         config = config or self.store.load()
-        return [
+        result = [
             {"backend": backend, "menu_model": menu_model}
             for backend in MODEL_HUB_BACKENDS
             for menu_model, route in config.agents[backend].routes.items()
             if any(hop.source_id == source_id for hop in route.hops)
         ]
+        result.sort(key=lambda item: (item["backend"], item["menu_model"]))
+        return result
 
     def _source_payload(
         self,
@@ -3293,6 +3295,7 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
+            bindings_changed = False
             if agent.mode == "direct" and mode == "hub":
                 native_items = await asyncio.to_thread(
                     scan_native_configs,
@@ -3319,8 +3322,12 @@ class ModelHubService:
                     )
                     config.sources.append(source)
                     self._apply_source_placement(config, source)
+                    bindings_changed = True
             agent.mode = mode
-            await self._commit_synced(previous, config)
+            if bindings_changed:
+                await self._commit_synced(previous, config)
+            else:
+                self._save_config(config)
             committed = self.store.load()
             return self._agent_payload(committed, self._agent(committed, backend))
 

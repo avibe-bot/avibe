@@ -270,7 +270,16 @@
       "properties": {
         "ok": {"const": true},
         "contract_version": {"const": 5},
-        "flow": {"$ref": "model-hub/oauth-flow.schema.json"}
+        "flow": {
+          "allOf": [
+            {"$ref": "model-hub/oauth-flow.schema.json"},
+            {
+              "properties": {
+                "state": {"enum": ["starting", "awaiting_action", "verifying", "failed", "cancelled"]}
+              }
+            }
+          ]
+        }
       }
     },
     "OAuthResultResponse": {
@@ -283,7 +292,17 @@
           "properties": {
             "ok": {"const": true},
             "contract_version": {"const": 5},
-            "flow": {"$ref": "model-hub/oauth-flow.schema.json"},
+            "flow": {
+              "allOf": [
+                {"$ref": "model-hub/oauth-flow.schema.json"},
+                {
+                  "properties": {
+                    "state": {"const": "success"},
+                    "intent": {"const": "create"}
+                  }
+                }
+              ]
+            },
             "source": {"$ref": "#/definitions/SourceApi"},
             "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}},
             "adopted_by": {"type": "array", "items": {"$ref": "#/definitions/AdoptedBy"}, "uniqueItems": true}
@@ -296,7 +315,17 @@
           "properties": {
             "ok": {"const": true},
             "contract_version": {"const": 5},
-            "flow": {"$ref": "model-hub/oauth-flow.schema.json"},
+            "flow": {
+              "allOf": [
+                {"$ref": "model-hub/oauth-flow.schema.json"},
+                {
+                  "properties": {
+                    "state": {"const": "success"},
+                    "intent": {"const": "reauth"}
+                  }
+                }
+              ]
+            },
             "source": {"$ref": "#/definitions/SourceApi"},
             "recovered": {"type": "boolean"},
             "interrupted_pairs": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}

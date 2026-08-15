@@ -580,6 +580,60 @@ def test_api_response_conformance_diagnostic_names_the_offending_field(tmp_path)
     )
 
 
+def test_oauth_result_response_discriminates_terminal_intent_and_tail():
+    validator = Draft7Validator(
+        {
+            "$ref": (
+                "model-hub/api-response.schema.json#/definitions/"
+                "OAuthResultResponse"
+            )
+        },
+        registry=_api_response_registry(),
+        format_checker=FormatChecker(),
+    )
+    flow = copy.deepcopy(_schema("oauth-flow.schema.json")["examples"][0])
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    for model in source["models"]:
+        model["retired"] = False
+    source["adopted_by"] = [
+        {"backend": "claude", "menu_model": "claude-opus-4-6"}
+    ]
+    envelope = {"ok": True, "contract_version": CONTRACT_VERSION}
+
+    assert not list(validator.iter_errors({**envelope, "flow": flow}))
+
+    success_flow = {**flow, "state": "success"}
+    assert list(validator.iter_errors({**envelope, "flow": success_flow}))
+
+    create_result = {
+        **envelope,
+        "flow": success_flow,
+        "source": source,
+        "added_to": [],
+        "adopted_by": source["adopted_by"],
+    }
+    assert not list(validator.iter_errors(create_result))
+
+    reauth_result = {
+        **envelope,
+        "flow": {**success_flow, "intent": "reauth"},
+        "source": source,
+        "recovered": True,
+        "interrupted_pairs": [],
+    }
+    assert not list(validator.iter_errors(reauth_result))
+    assert list(
+        validator.iter_errors(
+            {**create_result, "flow": {**success_flow, "intent": "reauth"}}
+        )
+    )
+    assert list(
+        validator.iter_errors(
+            {**reauth_result, "flow": {**success_flow, "intent": "create"}}
+        )
+    )
+
+
 @pytest.mark.parametrize(
     "route_contract",
     API_RESPONSE_ROUTES,
@@ -1626,7 +1680,7 @@ def test_direct_to_hub_atomically_adopts_recognized_native_login(tmp_path):
 
 
 def test_direct_to_hub_without_recognized_login_changes_only_mode(tmp_path):
-    service, store, _adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path)
     service.migration_home = tmp_path / "native-home"
     service.migration_claude_oauth_probe = lambda: False
     store.config.agents["claude"].mode = "direct"
@@ -1635,6 +1689,55 @@ def test_direct_to_hub_without_recognized_login_changes_only_mode(tmp_path):
 
     assert switched["mode"] == "hub"
     assert store.config.sources == []
+    assert adapter.synced == []
+
+
+def test_hub_to_direct_fallback_does_not_require_engine_sync(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    _set_claude_route_fixture(
+        store,
+        ("src_fallback001",),
+        "claude-opus-4-6",
+    )
+    adapter.fail_sync = True
+
+    switched = asyncio.run(service.set_agent_mode("claude", "direct"))
+
+    assert switched["mode"] == "direct"
+    assert store.config.agents["claude"].mode == "direct"
+    assert adapter.synced == []
+
+
+def test_source_adoption_projection_is_sorted_by_backend_and_menu_model(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_adopted001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Adopted source",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")
+        ],
+        credential_ref="cred_adopted001",
+    )
+    store.config.sources = [source]
+    store.config.agents["claude"].routes = {
+        model_id: ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
+        )
+        for model_id in ("z-model", "a-model")
+    }
+
+    adopted_by = service.list_sources()[0]["adopted_by"]
+
+    assert adopted_by == [
+        {"backend": "claude", "menu_model": "a-model"},
+        {"backend": "claude", "menu_model": "z-model"},
+    ]
 
 
 def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_path):
