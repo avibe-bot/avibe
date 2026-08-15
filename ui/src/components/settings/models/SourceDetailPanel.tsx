@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
+import { classifyModelHubFailure } from './asyncLifetime';
 import { Field } from './dialogFields';
 import { GuardImpact } from './GuardImpact';
 import {
@@ -606,7 +607,7 @@ export const SourceDetailPanel: React.FC<{
         if (failure?.code === 'source_not_found') {
           dispatchManageStage({ type: 'settled' });
           await settlement.gone(latest.id);
-        } else if (!failure || !failure.serverNamed) {
+        } else if (classifyModelHubFailure(failure) === 'inconclusive') {
           await reconcileEditWrite(latest, draft, patch, plan, settlement);
         } else {
           const refusal = guardedFailure(error);
@@ -651,7 +652,7 @@ export const SourceDetailPanel: React.FC<{
         if (failure?.code === 'source_not_found') {
           dispatchManageStage({ type: 'settled' });
           await settlement.gone(latest.id);
-        } else if (!failure || !failure.serverNamed) {
+        } else if (classifyModelHubFailure(failure) === 'inconclusive') {
           await reconcileDeleteWrite(latest, plan, settlement);
         } else {
           const refusal = guardedFailure(error);

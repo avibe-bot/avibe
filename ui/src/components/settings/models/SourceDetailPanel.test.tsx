@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
-import { createPendingWrites } from './asyncLifetime';
+import { classifyModelHubFailure, createPendingWrites } from './asyncLifetime';
 import { MANAGE_DESTINATION, type ManageKind } from './manage';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
@@ -388,7 +388,7 @@ describe('SourceDetailPanel', () => {
       if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
       if (url === `/api/models/sources/${source.id}`) {
         requests += 1;
-        return Response.json({ error: 'engine_down' }, { status: 503 });
+        return Response.json({ error: 'discovery_failed' }, { status: 503 });
       }
       throw new Error(`unexpected request: ${url}`);
     }));
@@ -450,7 +450,7 @@ describe('SourceDetailPanel', () => {
             would_interrupt: [],
           }, { status: 409 });
         }
-        return Response.json({ error: 'engine_down' }, { status: 503 });
+        return Response.json({ error: 'discovery_failed' }, { status: 503 });
       }
       throw new Error(`unexpected request: ${url}`);
     }));
@@ -478,7 +478,7 @@ describe('SourceDetailPanel', () => {
       if (url.startsWith(`/api/models/sources/${source.id}`)) {
         requests.push({ url, init });
         if (requests.length === 1) return Response.json({ error: 'source_in_route_chain', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
-        if (requests.length === 2) return Response.json({ error: 'engine_down' }, { status: 503 });
+        if (requests.length === 2) return Response.json({ error: 'discovery_failed' }, { status: 503 });
         return Response.json({ removed_hops: [], interrupted: [] });
       }
       throw new Error(`unexpected request: ${url}`);
@@ -730,24 +730,30 @@ describe('SourceDetailPanel', () => {
     expect(trackedSettled).toBe(true);
   });
 
-  it.each(['edit', 'delete'] as const)(
-    'does not reread after a server-named $action failure',
-    async (action) => {
-      const namedFailure = new ApiCallError('engine_down', undefined, true);
-      if (action === 'edit') vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(namedFailure);
-      else vi.spyOn(modelsApi, 'deleteSource').mockRejectedValueOnce(namedFailure);
+  it.each((['edit', 'delete'] as const).flatMap((action) => [
+    { action, code: 'engine_down', serverNamed: true },
+    { action, code: 'bad_response', serverNamed: false },
+    { action, code: 'discovery_failed', serverNamed: true },
+  ]))(
+    'rereads after $action exactly when the shared classifier marks $code inconclusive',
+    async ({ action, code, serverNamed }) => {
+      const failure = new ApiCallError(code, undefined, serverNamed);
+      if (action === 'edit') vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(failure);
+      else vi.spyOn(modelsApi, 'deleteSource').mockRejectedValueOnce(failure);
       const inventory = vi.spyOn(modelsApi, 'listSources');
+      const inconclusive = classifyModelHubFailure(failure) === 'inconclusive';
+      if (inconclusive) inventory.mockResolvedValueOnce([source]);
 
       renderEchoPanel();
       await submitManagementWrite(action, false);
 
-      const failure = await waitFor(() => {
+      const failureSurface = await waitFor(() => {
         const node = document.querySelector<HTMLElement>(`[data-manage-failure="${action}"]`);
         expect(node).toBeTruthy();
         return node!;
       });
-      expect(failure.dataset.manageRetryRead).toBe('false');
-      expect(inventory).not.toHaveBeenCalled();
+      expect(failureSurface.dataset.manageRetryRead).toBe('false');
+      expect(inventory).toHaveBeenCalledTimes(inconclusive ? 1 : 0);
     },
   );
 
