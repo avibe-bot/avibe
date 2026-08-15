@@ -11,6 +11,7 @@ import {
   apiFetch,
   isApiFetchDeadlineAbort,
   recoverRemoteAuthFromSessionProbe,
+  withApiDeadline,
 } from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
@@ -247,7 +248,11 @@ describe('apiFetch remote auth recovery', () => {
         })),
     );
 
-    const request = apiFetch('/api/models/sources', {}, { deadlineMs: 1_000 });
+    const request = withApiDeadline(
+      1_000,
+      undefined,
+      (signal) => apiFetch('/api/models/sources', { signal }),
+    );
     const failure = request.catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(999);
     expect(issuedSignal?.aborted).toBe(false);
@@ -272,7 +277,11 @@ describe('apiFetch remote auth recovery', () => {
     const controller = new AbortController();
     const callerReason = new DOMException('caller stopped waiting', 'TimeoutError');
 
-    const request = apiFetch('/api/models/sources', { signal: controller.signal }, { deadlineMs: 1_000 });
+    const request = withApiDeadline(
+      1_000,
+      controller.signal,
+      (signal) => apiFetch('/api/models/sources', { signal }),
+    );
     const rejected = expect(request).rejects.toBe(callerReason);
     controller.abort(callerReason);
 
@@ -290,7 +299,11 @@ describe('apiFetch remote auth recovery', () => {
       .mockResolvedValueOnce(Response.json({ ok: true }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const stalled = apiFetch('/api/models/sources', { method: 'POST' }, { deadlineMs: 1_000 });
+    const stalled = withApiDeadline(
+      1_000,
+      undefined,
+      (signal) => apiFetch('/api/models/sources', { method: 'POST', signal }),
+    );
     const rejected = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -323,10 +336,10 @@ describe('apiFetch remote auth recovery', () => {
       ? vi.spyOn(controller.signal, 'removeEventListener')
       : null;
 
-    const request = apiFetch(
-      '/api/models/sources',
-      { signal: controller?.signal },
-      { deadlineMs: 1_000 },
+    const request = withApiDeadline(
+      1_000,
+      controller?.signal,
+      (signal) => apiFetch('/api/models/sources', { signal }),
     );
     if (shouldThrow) {
       await expect(request).rejects.toBe(fetchError);
