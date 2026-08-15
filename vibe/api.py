@@ -9696,24 +9696,22 @@ def get_codex_auth() -> dict:
         config = load_config()
         cfg = getattr(getattr(config, "agents", None), "codex", None)
         configured_mode = getattr(cfg, "auth_mode", None)
-        configured_base_url = getattr(cfg, "base_url", None)
+        raw_relay_marker = getattr(cfg, "oauth_relay_marker", None)
     except Exception:
         configured_mode = None
-        configured_base_url = None
-    from vibe.codex_config import verify_codex_relay_marker
+        raw_relay_marker = None
+    from vibe.codex_config import read_codex_relay_marker
 
-    # Disk-first with a verified V2Config capture as fallback. The disk
-    # chain (active provider → managed → legacy) is what a live Codex
-    # launch would use. After an OAuth transition clears the provider
-    # pointer, the user's relay section is orphaned and unreadable on
-    # disk — the V2Config value captured at that transition
-    # (``AgentAuthService._persist_backend_auth_mode``) is the persisted
-    # recovery marker. The marker is only honored when the disk still
-    # carries a provider section with the same URL, so a URL the user
-    # removed from ``config.toml`` is not resurrected from a stale cache.
-    configured_relay = verify_codex_relay_marker(configured_base_url)
-    if configured_relay:
-        effective_base_url: str | None = disk_state.get("base_url") or configured_relay
+    # Disk-first with the explicit OAuth-transition marker as fallback.
+    # The disk chain (active provider → managed → legacy) is what a live
+    # Codex launch would use. The marker (captured by
+    # ``AgentAuthService._persist_backend_auth_mode`` before the OAuth
+    # cleanup destroys the on-disk evidence) is the only recovery
+    # source: it is consumed verbatim, with no ambient-state inference —
+    # dormant sections and stale caches surface nothing.
+    relay_marker = read_codex_relay_marker(raw_relay_marker)
+    if relay_marker:
+        effective_base_url: str | None = disk_state.get("base_url") or relay_marker["base_url"]
     else:
         effective_base_url = disk_state.get("base_url")
 
@@ -9868,26 +9866,27 @@ def save_codex_auth(payload: dict) -> dict:
         except Exception:
             logger.debug("Codex disk base_url read failed", exc_info=True)
         if not effective_base_url:
-            with CONFIG_LOCK:
-                try:
-                    existing_cfg = load_config()
-                    stored_codex = getattr(getattr(existing_cfg, "agents", None), "codex", None)
-                    effective_base_url = getattr(stored_codex, "base_url", None) or None
-                except Exception:
-                    effective_base_url = None
-            if effective_base_url:
-                # Cache values are only honored when the disk still
-                # carries a matching provider section (the orphaned
-                # OAuth shape). A URL the user deleted from
-                # ``config.toml`` must not come back from the cache —
-                # saving through that path also clears the stale cache.
-                try:
-                    from vibe.codex_config import verify_codex_relay_marker
+            # Explicit OAuth-transition marker fallback: the relay
+            # identity recorded when the OAuth cleanup destroyed the
+            # on-disk evidence. Consumed verbatim — a plain cached
+            # ``base_url`` is NOT a recovery source (it is only the
+            # user's last saved preference and may be stale).
+            try:
+                from vibe.codex_config import read_codex_relay_marker
 
-                    effective_base_url = verify_codex_relay_marker(effective_base_url)
-                except Exception:
-                    logger.debug("Codex cached base_url verification failed", exc_info=True)
-                    effective_base_url = None
+                with CONFIG_LOCK:
+                    try:
+                        existing_cfg = load_config()
+                        stored_codex = getattr(getattr(existing_cfg, "agents", None), "codex", None)
+                        raw_marker = getattr(stored_codex, "oauth_relay_marker", None)
+                    except Exception:
+                        raw_marker = None
+                marker = read_codex_relay_marker(raw_marker)
+                if marker:
+                    effective_base_url = marker["base_url"]
+            except Exception:
+                logger.debug("Codex relay marker read failed", exc_info=True)
+                effective_base_url = None
 
     from vibe.codex_config import apply_codex_auth
 
@@ -9914,6 +9913,12 @@ def save_codex_auth(payload: dict) -> dict:
         config.agents.codex.auth_mode = auth_mode
         config.agents.codex.api_key = api_key if auth_mode == "api_key" else None
         config.agents.codex.base_url = effective_base_url
+        # An explicit API-key save consumes the OAuth-transition marker:
+        # the user just chose their endpoint (restored from the marker or
+        # typed fresh), so the one-shot recovery record is spent. OAuth
+        # saves keep it — a later switch-back still needs the recovery.
+        if auth_mode == "api_key":
+            config.agents.codex.oauth_relay_marker = None
         config.save()
 
     restart_result = restart_backend(

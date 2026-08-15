@@ -1754,6 +1754,18 @@ class CodexConfig:
     auth_mode: Literal["oauth", "api_key"] = "oauth"
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    # Relay recovery marker captured at an OAuth transition:
+    # ``{"provider_id": str, "base_url": str}`` recorded from the live
+    # ``config.toml`` immediately BEFORE the OAuth cleanup clears the
+    # provider pointer and drops the managed section (the only moment
+    # the relay's identity is observable — Settings-created managed
+    # relays and hand-rolled sections are both visible then). Consumed
+    # verbatim, with no ambient-state inference, by the Settings read
+    # and the next API-key save; cleared only by an explicit API-key
+    # save or sign-out. Repeated OAuth transitions retain it. Older
+    # configs load with ``None`` (unknown JSON keys are filtered), so
+    # the field degrades safely across releases.
+    oauth_relay_marker: Optional[dict] = None
 
 
 @dataclass

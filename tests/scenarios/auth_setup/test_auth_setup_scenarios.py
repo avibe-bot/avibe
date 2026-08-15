@@ -2273,25 +2273,16 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
     ``base_url`` from the reloaded state), and the on-disk launch config
     the next ``codex app-server`` reads must point back at the relay —
     not at ``api.openai.com`` with a relay key (the 401 trap).
+
+    Runs against BOTH relay shapes a real install can be in: a
+    hand-rolled ``[model_providers.OpenAI]`` section, and the
+    ``openai-managed`` provider the Settings API-key save itself creates
+    (the OAuth cleanup deletes the managed section outright, which is
+    why recovery rides the explicit ``oauth_relay_marker``).
     """
 
-    def setUp(self) -> None:
-        state_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(state_dir.cleanup)
-        self.home = Path(state_dir.name)
-        codex_home = self.home / ".codex"
-        codex_home.mkdir(parents=True)
-        self._codex_home_env = patch.dict(os.environ, {"CODEX_HOME": str(codex_home)})
-        self._codex_home_env.start()
-        self.addCleanup(self._codex_home_env.stop)
-
-        # Seed the pre-OAuth state: API-key auth through a hand-rolled
-        # relay provider, the way relay users configure it.
-        (codex_home / "auth.json").write_text(
-            json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-relay"}),
-            encoding="utf-8",
-        )
-        (codex_home / "config.toml").write_text(
+    def _seed_hand_rolled_relay(self) -> None:
+        (self.home / ".codex" / "config.toml").write_text(
             "\n".join(
                 [
                     'model_provider = "OpenAI"',
@@ -2305,11 +2296,50 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8",
         )
 
+    def _seed_managed_relay(self) -> None:
+        # The shape ``apply_codex_auth(api_key, base_url=...)`` writes:
+        # pointer at our managed section. The OAuth pass later deletes
+        # the whole section, leaving no on-disk relay evidence at all.
+        (self.home / ".codex" / "config.toml").write_text(
+            "\n".join(
+                [
+                    'model_provider = "openai-managed"',
+                    'cli_auth_credentials_store = "file"',
+                    "",
+                    "[model_providers.openai-managed]",
+                    'name = "OpenAI"',
+                    'wire_api = "responses"',
+                    'requires_openai_auth = true',
+                    'base_url = "https://relay.example/v1"',
+                    "supports_websockets = false",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    def setUp(self) -> None:
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        self.home = Path(state_dir.name)
+        codex_home = self.home / ".codex"
+        codex_home.mkdir(parents=True)
+        self._codex_home_env = patch.dict(os.environ, {"CODEX_HOME": str(codex_home)})
+        self._codex_home_env.start()
+        self.addCleanup(self._codex_home_env.stop)
+
+        # Seed the pre-OAuth state: API-key auth against a relay.
+        (codex_home / "auth.json").write_text(
+            json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-relay"}),
+            encoding="utf-8",
+        )
+        self._seed_hand_rolled_relay()
+
         self.harness = AuthSetupScenarioHarness()
         self.codex_cfg = SimpleNamespace(
             auth_mode="api_key",
             api_key="sk-relay",
             base_url=None,
+            oauth_relay_marker=None,
         )
         self.harness.controller.config.agents.codex = self.codex_cfg
         self.harness.controller.config.save = lambda: None
@@ -2336,13 +2366,11 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-    async def test_codex_oauth_api_key_relay_round_trip_scenario(self) -> None:
-        runner = ScenarioRunner(self.harness)
-        api = self._api_module()
-
+    async def _run_round_trip(self, runner, api) -> None:
         # Step 1 — OAuth transition: the web flow's success hook runs the
-        # real persistence path (relay capture → pointer clear → V2Config
-        # write), exactly as after a Settings "Sign in" completes.
+        # real persistence path (relay identity capture → pointer clear /
+        # managed-section drop → V2Config marker write), exactly as after
+        # a Settings "Sign in" completes.
         await runner.run(
             ScenarioStep(
                 "oauth_transition",
@@ -2356,10 +2384,14 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(top_level_pointer, [])
         self.assertEqual(self.codex_cfg.auth_mode, "oauth")
-        self.assertEqual(self.codex_cfg.base_url, "https://relay.example/v1")
+        self.assertEqual(
+            self.codex_cfg.oauth_relay_marker,
+            {"provider_id": self._expected_provider_id, "base_url": "https://relay.example/v1"},
+        )
 
         # Step 2 — Settings reload: the Settings page refetches auth
-        # state to pre-populate the form.
+        # state to pre-populate the form (marker-backed while the disk
+        # chain is empty).
         await runner.run(
             ScenarioStep(
                 "settings_reload",
@@ -2381,7 +2413,8 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
 
         # Step 4 — launch config: the next ``codex app-server`` process
-        # reads these files; the managed provider must carry the relay.
+        # reads these files; the managed provider must carry the relay,
+        # and the one-shot marker is consumed.
         toml = (self.home / ".codex" / "config.toml").read_text(encoding="utf-8")
         self.assertIn('model_provider = "openai-managed"', toml)
         self.assertIn('base_url = "https://relay.example/v1"', toml)
@@ -2389,10 +2422,28 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         auth = json.loads((self.home / ".codex" / "auth.json").read_text(encoding="utf-8"))
         self.assertEqual(auth["OPENAI_API_KEY"], "sk-relay-2")
         self.assertEqual(auth["auth_mode"], "apikey")
+        self.assertIsNone(self.codex_cfg.oauth_relay_marker)
 
         ScenarioExpect.step_history(
             runner, ["oauth_transition", "settings_reload", "api_key_save"]
         )
+
+    _expected_provider_id = "OpenAI"
+
+    async def test_codex_oauth_api_key_relay_round_trip_scenario(self) -> None:
+        runner = ScenarioRunner(self.harness)
+        api = self._api_module()
+        await self._run_round_trip(runner, api)
+
+    async def test_codex_oauth_api_key_round_trip_managed_provider_shape(self) -> None:
+        """Same loop starting from the Settings-created managed relay —
+        the shape whose on-disk evidence the OAuth cleanup deletes."""
+        self._seed_managed_relay()
+        self._expected_provider_id = "openai-managed"
+        self.codex_cfg.base_url = "https://relay.example/v1"
+        runner = ScenarioRunner(self.harness)
+        api = self._api_module()
+        await self._run_round_trip(runner, api)
 
 
 if __name__ == "__main__":

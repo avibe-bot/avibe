@@ -2197,6 +2197,32 @@ def test_config_reload_recovers_invalid_codex_agent_with_disabled_default(monkey
     assert config_path.read_text(encoding="utf-8") == original
 
 
+def test_config_load_degrades_codex_relay_marker_shapes(monkeypatch, tmp_path):
+    """Persisted-shape rule for the new ``oauth_relay_marker`` field:
+    a config written before the field existed loads with ``None``
+    (released-shape compatibility), a well-formed marker round-trips,
+    and a corrupt value is filtered out at consumption
+    (``read_codex_relay_marker``) rather than breaking startup."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["agents"]["codex"].pop("oauth_relay_marker", None)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    legacy = V2Config.load(config_path=config_path)
+    assert legacy.agents.codex.oauth_relay_marker is None
+
+    legacy.agents.codex.oauth_relay_marker = {"provider_id": "OpenAI", "base_url": "https://relay.example/v1"}
+    legacy.save()
+    # ``save()`` persists to the canonical AVIBE_HOME config; reload from
+    # the same place to prove the marker round-trips through JSON.
+    reloaded = V2Config.load()
+    assert reloaded.agents.codex.oauth_relay_marker == {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
+
+
 def test_config_reload_recovers_invalid_agents_with_canonical_defaults(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)

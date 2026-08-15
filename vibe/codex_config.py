@@ -441,35 +441,29 @@ def apply_codex_auth(
     return {"notices": notices}
 
 
-def verify_codex_relay_marker(
-    configured_base_url: Optional[str], home: Path | None = None
-) -> Optional[str]:
-    """Return ``configured_base_url`` only when the disk still corroborates it.
+def read_codex_relay_marker(marker: object) -> Optional[Dict[str, str]]:
+    """Normalize a persisted ``oauth_relay_marker`` value for consumption.
 
-    The V2Config ``agents.codex.base_url`` doubles as the OAuth-transition
-    relay marker, but a cache value alone is not proof the relay still
-    exists: the user may have removed the URL from ``config.toml`` while
-    the cache still holds it. Recovery (Settings pre-population, the
-    omitted-``base_url`` save fallback) must only honor the marker when
-    some provider section on disk still carries the exact same URL —
-    which is precisely the orphaned-section shape the OAuth pointer-clear
-    leaves behind. Anything else reads as "the user removed it" and
-    returns ``None`` so callers fall through to no relay.
+    The marker is the explicit OAuth-transition record
+    (``{"provider_id": str, "base_url": str}``) captured by
+    ``AgentAuthService._persist_backend_auth_mode`` immediately before
+    the OAuth cleanup clears the provider pointer / managed section.
+    Because the marker *is* the provenance, it is consumed verbatim —
+    no ambient-state inference. This helper only validates the shape:
+    anything that is not a dict with non-empty string ``base_url``
+    (``provider_id`` optional for defensive loads) reads as ``None`` so
+    corrupt values degrade to "no marker" instead of breaking callers.
     """
-    if not isinstance(configured_base_url, str) or not configured_base_url.strip():
+    if not isinstance(marker, dict):
         return None
-    target = configured_base_url.strip()
-    config_path, _ = get_codex_config_paths(home)
-    providers = _load_toml(config_path).get("model_providers")
-    if not isinstance(providers, dict):
+    base_url = marker.get("base_url")
+    if not isinstance(base_url, str) or not base_url.strip():
         return None
-    for section in providers.values():
-        if not isinstance(section, dict):
-            continue
-        raw = section.get("base_url")
-        if isinstance(raw, str) and raw.strip() == target:
-            return target
-    return None
+    provider_id = marker.get("provider_id")
+    return {
+        "base_url": base_url.strip(),
+        "provider_id": provider_id.strip() if isinstance(provider_id, str) and provider_id.strip() else "",
+    }
 
 
 def read_codex_api_key(home: Path | None = None) -> Optional[str]:
@@ -573,6 +567,7 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
     providers = toml_data.get("model_providers")
     base_url: Optional[str] = None
     wire_api: Optional[str] = None
+    active_provider_id: Optional[str] = None
     if isinstance(providers, dict):
         # Codex's runtime selects the provider named by top-level
         # ``model_provider``. When that's a user-defined section (e.g.
@@ -585,8 +580,10 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
         active_section: Optional[dict] = None
         if isinstance(active_provider, str) and isinstance(providers.get(active_provider), dict):
             active_section = providers[active_provider]
+            active_provider_id = active_provider
         elif isinstance(providers.get(MANAGED_PROVIDER_ID), dict):
             active_section = providers[MANAGED_PROVIDER_ID]
+            active_provider_id = MANAGED_PROVIDER_ID
         else:
             # Legacy fallback: older releases wrote our managed shape
             # under ``[model_providers.openai]``. New Codex rejects that
@@ -596,6 +593,7 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
                 legacy_section = providers.get(legacy_id)
                 if isinstance(legacy_section, dict):
                     active_section = legacy_section
+                    active_provider_id = legacy_id
                     break
         if isinstance(active_section, dict):
             raw = active_section.get("base_url")
@@ -607,13 +605,14 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
 
         # NOTE: no orphaned-section recovery here. After the OAuth flows
         # clear ``model_provider``, a surviving user relay section is
-        # unpointed — but "exactly one section with a base_url" is not
-        # proof it was the active relay (a never-used dormant provider
-        # would be picked up and silently reroute a freshly saved API key
-        # to an unintended endpoint). The persisted recovery marker is
-        # V2Config ``agents.codex.base_url``, captured at the OAuth
-        # transition by ``AgentAuthService._persist_backend_auth_mode``;
-        # the Settings read merges it in (``vibe.api.get_codex_auth``).
+        # unpointed — but its mere presence is not proof it was the
+        # active relay (a never-used dormant provider would be picked up
+        # and silently reroute a freshly saved API key to an unintended
+        # endpoint). Recovery is driven exclusively by the explicit
+        # ``oauth_relay_marker`` captured at the OAuth transition
+        # (``AgentAuthService._persist_backend_auth_mode`` → V2Config
+        # ``agents.codex.oauth_relay_marker``); the Settings read merges
+        # that in (``vibe.api.get_codex_auth``).
 
     store_raw = toml_data.get(CREDENTIALS_STORE_KEY)
     credentials_store = store_raw if isinstance(store_raw, str) else None
@@ -643,6 +642,12 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
         "api_key_raw": api_key if isinstance(api_key, str) and api_key else None,
         "base_url": base_url,
         "wire_api": wire_api,
+        # Provider id the chain above resolved to (``model_provider``
+        # pointer, our managed id, or a legacy managed id). ``None`` when
+        # no provider section matched. Consumed by the OAuth-transition
+        # capture so the recovery marker records *which* section carried
+        # the relay, not just its URL.
+        "active_provider_id": active_provider_id,
         "has_chatgpt_tokens": has_chatgpt_tokens,
         # ``chatgpt_account``: best-effort identity from the OAuth JWT in
         # ``auth.json`` so the Settings page can show "Signed in as

@@ -338,6 +338,7 @@ def test_codex_oauth_success_clears_api_key_state(
         auth_mode="api_key",
         api_key="sk-old",
         base_url="https://relay.example/v1",
+        oauth_relay_marker=None,
     )
     service.controller.config = SimpleNamespace(
         language="en",
@@ -354,19 +355,27 @@ def test_codex_oauth_success_clears_api_key_state(
     # The provider pointer is cleared for OAuth runtime…
     toml = (codex_home / "config.toml").read_text(encoding="utf-8")
     assert not [line for line in toml.splitlines() if line.startswith("model_provider")]
-    # …but the relay URL is captured into V2Config as the recovery
-    # marker so the Settings form and the next API-key save can restore
-    # it instead of silently rerouting the key to api.openai.com.
+    # …but the relay identity is captured into the explicit
+    # ``oauth_relay_marker`` so the Settings form and the next API-key
+    # save can restore it instead of silently rerouting the key to
+    # api.openai.com.
     assert codex_cfg.auth_mode == "oauth"
     assert codex_cfg.api_key is None
-    assert codex_cfg.base_url == "https://relay.example/v1"
+    assert codex_cfg.base_url is None
+    assert codex_cfg.oauth_relay_marker == {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
     assert saves == ["saved"]
 
     # A repeated OAuth transition captures nothing (the pointer is
     # already gone) and must RETAIN the marker rather than erase it —
     # erasing would lose the relay for the eventual switch-back.
     _run(service._invoke_post_web_success_hook("codex"))
-    assert codex_cfg.base_url == "https://relay.example/v1"
+    assert codex_cfg.oauth_relay_marker == {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
 
 
 def test_post_web_success_hook_swallows_exceptions(

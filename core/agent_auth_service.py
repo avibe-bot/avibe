@@ -2423,6 +2423,12 @@ class AgentAuthService:
                         # override, sending OAuth requests to a relay
                         # that only accepts API keys (401).
                         target.base_url = None
+                        # Sign-out is a full reset of saved codex auth
+                        # state — the OAuth-transition relay marker goes
+                        # with it (Codex-only field; setattr no-ops on
+                        # backends without it via the getattr guard).
+                        if backend == "codex":
+                            target.oauth_relay_marker = None
                         # Sign out is an explicit user choice — flip
                         # the marker so ``build_claude_subprocess_env``
                         # honors ``auth_mode == "oauth"`` strictly
@@ -2436,6 +2442,8 @@ class AgentAuthService:
                     target.auth_mode = "oauth"
                     target.api_key = None
                     target.base_url = None
+                    if backend == "codex":
+                        target.oauth_relay_marker = None
                     if backend == "claude":
                         target.auth_mode_set = True
                     saver()
@@ -3494,23 +3502,33 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("post_web_success_hook failed for %s: %s", backend, err)
 
-    def _capture_codex_relay_for_oauth(self) -> str | None:
-        """Read the relay URL Codex would launch with, before OAuth cleanup.
+    def _capture_codex_relay_for_oauth(self) -> dict | None:
+        """Record the live relay identity before OAuth cleanup.
 
         Called immediately before ``_clear_codex_api_key_for_oauth``
-        clears the provider pointer; after that clear the user-owned
-        relay section is orphaned and unreadable through the normal
-        active/managed lookup, so this is the last moment the live relay
-        URL is observable. Failures degrade to ``None`` — a capture miss
+        clears the provider pointer and drops the managed section; after
+        that cleanup the relay is invisible on disk (Settings-created
+        managed relays are deleted outright), so this is the only moment
+        its identity is observable. Returns the explicit marker dict
+        ``{"provider_id": str, "base_url": str}`` (chain resolution
+        covers both the ``model_provider`` pointer and our managed /
+        legacy sections). Failures degrade to ``None`` — a capture miss
         only costs relay recovery on switch-back, never the OAuth flow.
         """
         try:
             from vibe.codex_config import read_codex_auth_state
 
-            relay = read_codex_auth_state().get("base_url")
+            state = read_codex_auth_state()
+            base_url = state.get("base_url")
+            if not isinstance(base_url, str) or not base_url.strip():
+                return None
+            provider_id = state.get("active_provider_id")
+            return {
+                "base_url": base_url.strip(),
+                "provider_id": provider_id if isinstance(provider_id, str) else "",
+            }
         except Exception:  # noqa: BLE001
             return None
-        return relay if isinstance(relay, str) and relay.strip() else None
 
     async def _clear_claude_settings_env_for_oauth(self) -> None:
         try:
@@ -3815,18 +3833,19 @@ class AgentAuthService:
 
     async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
-        captured_codex_relay: str | None = None
+        captured_codex_relay: dict | None = None
         if backend == "claude" and auth_mode == "oauth":
             await self._clear_claude_settings_env_for_oauth()
         if backend == "codex" and auth_mode == "oauth":
-            # Capture the live relay URL before the OAuth pass clears its
-            # provider pointer: that pointer clear is correct for OAuth
-            # runtime (ChatGPT tokens must hit OpenAI's official endpoint)
-            # but it also orphans the user's relay section, leaving
-            # ``config.toml`` reads unable to see it. Keeping the URL in
-            # V2Config is the persisted marker that lets the Settings
-            # form and the next API-key save restore the relay instead of
-            # silently rerouting the key to ``api.openai.com`` (401s).
+            # Capture the live relay identity BEFORE the OAuth pass runs
+            # its cleanup: the pointer clear / managed-section drop is
+            # correct for OAuth runtime (ChatGPT tokens must hit OpenAI's
+            # official endpoint) but it also destroys the only on-disk
+            # evidence of the relay the user had. The explicit
+            # ``oauth_relay_marker`` recorded here is what lets the
+            # Settings form and the next API-key save restore the relay
+            # instead of silently rerouting the key to
+            # ``api.openai.com`` (401s).
             captured_codex_relay = self._capture_codex_relay_for_oauth()
             await self._clear_codex_api_key_for_oauth()
         try:
@@ -3859,6 +3878,7 @@ class AgentAuthService:
                 and (
                     bool(getattr(target, "api_key", None))
                     or bool(getattr(target, "base_url", None))
+                    or getattr(target, "oauth_relay_marker", None) is not None
                     or captured_codex_relay is not None
                 )
             )
@@ -3874,29 +3894,31 @@ class AgentAuthService:
                         target.auth_mode_set = True
                     if needs_codex_oauth_cleanup:
                         target.api_key = None
-                        # Retain (or capture) the relay URL as the OAuth
-                        # transition's recovery marker — Codex's OAuth
-                        # runtime never reads V2Config.base_url; only the
-                        # Settings UI and the next API-key save do. A
-                        # repeated OAuth transition captures nothing (the
-                        # pointer is already gone), so never overwrite an
-                        # existing marker with an empty capture; only an
-                        # explicit API-key save or sign-out clears it.
-                        target.base_url = captured_codex_relay or getattr(
-                            target, "base_url", None
+                        # ``base_url`` returns to plain "last saved
+                        # preference" semantics (the live relay is gone
+                        # for OAuth); the explicit ``oauth_relay_marker``
+                        # carries the recovery record instead. A repeated
+                        # OAuth transition captures nothing (the pointer
+                        # is already gone), so retain any existing marker
+                        # — only an explicit API-key save or sign-out
+                        # clears it.
+                        target.base_url = None
+                        target.oauth_relay_marker = captured_codex_relay or getattr(
+                            target, "oauth_relay_marker", None
                         )
                     saver()
             except ImportError:
-                    if needs_mode_write:
-                        target.auth_mode = auth_mode
-                    if needs_marker_write:
-                        target.auth_mode_set = True
-                    if needs_codex_oauth_cleanup:
-                        target.api_key = None
-                        target.base_url = captured_codex_relay or getattr(
-                            target, "base_url", None
-                        )
-                    saver()
+                if needs_mode_write:
+                    target.auth_mode = auth_mode
+                if needs_marker_write:
+                    target.auth_mode_set = True
+                if needs_codex_oauth_cleanup:
+                    target.api_key = None
+                    target.base_url = None
+                    target.oauth_relay_marker = captured_codex_relay or getattr(
+                        target, "oauth_relay_marker", None
+                    )
+                saver()
             if loaded_config is not None and config is not None:
                 compat_target = getattr(config, backend, None)
                 if compat_target is not None:
@@ -3906,10 +3928,12 @@ class AgentAuthService:
                         setattr(compat_target, "auth_mode_set", True)
                     if needs_codex_oauth_cleanup:
                         setattr(compat_target, "api_key", None)
+                        setattr(compat_target, "base_url", None)
                         setattr(
                             compat_target,
-                            "base_url",
-                            captured_codex_relay or getattr(compat_target, "base_url", None),
+                            "oauth_relay_marker",
+                            captured_codex_relay
+                            or getattr(compat_target, "oauth_relay_marker", None),
                         )
         except Exception as err:  # noqa: BLE001
             logger.warning(
