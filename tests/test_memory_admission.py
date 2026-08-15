@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +13,8 @@ import pytest
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from core.memory.attachments import workbench_capture_attachments
 from core.memory.types import CaptureRequest, CaptureSkipped
+from core.handlers.inbound_attachments import InboundAttachmentMaterializer
+from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
 from modules.im.message_facts import is_ordinary_workbench_text
 
 
@@ -67,6 +72,42 @@ def _facts(**overrides) -> InboundTurnFacts:
         "memory_enabled": True,
     }
     return InboundTurnFacts(**{**defaults, **overrides})
+
+
+class _PdfDownloader:
+    async def download_file_to_path(
+        self,
+        _file_info,
+        _target_path,
+        *,
+        target_fd=None,
+        **_kwargs,
+    ) -> FileDownloadResult:
+        assert target_fd is not None
+        os.write(target_fd, b"%PDF-1.7\nslack attachment")
+        return FileDownloadResult(True)
+
+
+def _slack_pdf_lease(tmp_path: Path):
+    context = MessageContext(
+        user_id="user-1",
+        channel_id="dm-1",
+        platform="slack",
+        files=[
+            FileAttachment(
+                name="receipt.pdf",
+                mimetype="application/pdf",
+                url="https://files.slack.test/private",
+                size=24,
+            )
+        ],
+    )
+    return asyncio.run(
+        InboundAttachmentMaterializer(
+            effective_home=tmp_path,
+            attachments_root=tmp_path / "downloads",
+        ).materialize(context, _PdfDownloader())
+    )
 
 
 @pytest.mark.parametrize("platform", ["slack", "discord", "telegram", "feishu", "lark", "wechat"])
@@ -212,6 +253,153 @@ def test_a_literal_true_still_admits_after_strict_normalization() -> None:
     """The strict reading must not reject the well-behaved surfaces."""
 
     assert isinstance(_admission().decide(_facts(is_dm=True, memory_enabled=True)), CaptureRequest)
+
+
+def test_bound_slack_attachment_turn_selects_only_the_materialized_lease(
+    tmp_path: Path,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-001."""
+
+    batch = _slack_pdf_lease(tmp_path)
+    try:
+        request = _admission().decide(
+            _facts(
+                text="remember this receipt",
+                files=[object()],
+                is_ordinary_text=False,
+                is_ordinary_attachment=True,
+                attachment_lease=batch.lease,
+                attachment_capture_status="ready",
+            )
+        )
+    finally:
+        batch.lease.release()
+
+    assert isinstance(request, CaptureRequest)
+    assert request.text == "remember this receipt"
+    assert [(item.name, item.kind, item.ext) for item in request.attachments] == [
+        ("receipt.pdf", "pdf", "pdf")
+    ]
+
+
+def test_missing_multimodal_keeps_mixed_text_without_an_attachment() -> None:
+    """Scenario: MEMORY-IM-ATTACH-003."""
+
+    request = _admission().decide(
+        _facts(
+            text="remember the caption",
+            files=[object()],
+            is_ordinary_text=False,
+            is_ordinary_attachment=True,
+            attachment_capture_status="not_configured",
+        )
+    )
+
+    assert isinstance(request, CaptureRequest)
+    assert request.text == "remember the caption"
+    assert request.attachments == ()
+
+
+def test_missing_multimodal_skips_attachment_only_turn() -> None:
+    """Scenario: MEMORY-IM-ATTACH-003."""
+
+    assert _admission().decide(
+        _facts(
+            text="",
+            files=[object()],
+            is_ordinary_text=False,
+            is_ordinary_attachment=True,
+            attachment_capture_status="not_configured",
+        )
+    ) == CaptureSkipped(reason="memory_invalid_input")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"is_dm": False},
+        {"is_ordinary_attachment": False},
+        {"is_ordinary_attachment": None},
+        {"platform": "discord", "is_ordinary_attachment": True},
+    ],
+)
+def test_denied_attachment_turn_never_reads_the_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, object],
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-002."""
+
+    monkeypatch.setattr(
+        "core.memory.admission.select_memory_attachments",
+        lambda _lease: pytest.fail("denied turn reached Memory attachment selection"),
+    )
+    facts = _facts(
+        **{
+            "files": [object()],
+            "is_ordinary_text": False,
+            "is_ordinary_attachment": True,
+            "attachment_capture_status": "ready",
+            **overrides,
+        }
+    )
+
+    assert isinstance(_admission().decide(facts), CaptureSkipped)
+
+
+def test_attachment_skip_log_contains_only_closed_metadata(caplog: pytest.LogCaptureFixture) -> None:
+    secret_name = "quarterly-secret.pdf"
+    secret_url = "https://files.slack.test/token-bearing-url"
+    native_file = SimpleNamespace(name=secret_name, url=secret_url)
+
+    with caplog.at_level(logging.INFO, logger="core.memory.admission"):
+        request = _admission().decide(
+            _facts(
+                text="safe caption",
+                files=[native_file],
+                is_ordinary_text=False,
+                is_ordinary_attachment=True,
+                attachment_capture_status="not_configured",
+            )
+        )
+
+    assert isinstance(request, CaptureRequest)
+    assert "memory_attachment_capture_skipped platform=slack count=1 reason=not_configured" in caplog.text
+    assert secret_name not in caplog.text
+    assert secret_url not in caplog.text
+
+
+def test_mixed_attachment_rejections_emit_one_aggregate_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        "core.memory.admission.select_memory_attachments",
+        lambda _lease: SimpleNamespace(
+            attachments=(),
+            skipped=("file_too_large", "unsupported_type"),
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.memory.admission"):
+        request = _admission().decide(
+            _facts(
+                text="safe caption",
+                files=[object(), object()],
+                is_ordinary_text=False,
+                is_ordinary_attachment=True,
+                attachment_lease=object(),
+                attachment_capture_status="ready",
+            )
+        )
+
+    assert isinstance(request, CaptureRequest)
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("memory_attachment_capture_skipped")
+    ]
+    assert len(records) == 1
+    assert "count=2 reason=mixed_rejections" in records[0].getMessage()
 
 
 def test_disabled_memory_is_answered_before_any_directory_lookup() -> None:

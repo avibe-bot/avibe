@@ -47,6 +47,9 @@ class MessageContext:
     # Inbound adapters set this only after classifying their native event.
     # None is intentionally fail-closed for Memory capture and commands.
     is_ordinary_text: Optional[bool] = None
+    # Attachment turns use a separate native-event classification so adding
+    # files never widens the existing ordinary-text contract.
+    is_ordinary_attachment: Optional[bool] = None
 
 
 @dataclass

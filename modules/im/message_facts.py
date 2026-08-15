@@ -102,6 +102,34 @@ def is_ordinary_slack_text(event: dict[str, Any], files: Optional[list[FileAttac
     )
 
 
+def is_ordinary_slack_attachment(
+    event: dict[str, Any],
+    files: Optional[list[FileAttachment]],
+) -> bool:
+    """Classify a direct human Slack upload without weakening text admission."""
+
+    native_files = event.get("files")
+    return (
+        bool(files)
+        and isinstance(native_files, list)
+        and bool(native_files)
+        and event.get("subtype") in {None, "file_share"}
+        and is_plain_slack_composer_blocks(event.get("blocks"))
+        and not any(
+            (
+                event.get("attachments"),
+                event.get("edited"),
+                event.get("bot_id"),
+                event.get("rich_text"),
+                event.get("forwarded"),
+                event.get("is_system"),
+                event.get("system"),
+                event.get("type") in {"system", "system_message"},
+            )
+        )
+    )
+
+
 def is_ordinary_discord_text(message: Any, files: Optional[list[FileAttachment]]) -> bool:
     try:
         is_system = message.is_system() if callable(getattr(message, "is_system", None)) else False

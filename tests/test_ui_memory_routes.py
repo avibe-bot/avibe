@@ -209,7 +209,7 @@ def test_enabled_memory_can_clear_optional_endpoint_and_reconcile(
 
     assert response.status_code == 200
     assert response.get_json()["enabled"] is True
-    assert response.get_json()["im_attachment_capture_available"] is False
+    assert response.get_json()["im_attachment_capture_available"] is True
     assert endpoint not in response.get_json()["processing"]
     saved = V2Config.load().memory
     assert saved.enabled is True
@@ -598,7 +598,7 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert response.get_json()["processing"]["llm"]["has_api_key"] is False
     assert response.get_json()["rebuild_required"] is False
     assert response.get_json()["repair_available"] is False
-    assert response.get_json()["im_attachment_capture_available"] is False
+    assert response.get_json()["im_attachment_capture_available"] is True
     assert "recovery_intent" not in response.get_json()
     assert "embedding_change_pending" not in response.get_json()
     assert "diagnostics" not in response.get_json()

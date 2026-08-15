@@ -3739,7 +3739,7 @@ async def test_attachment_capture_status_rejects_stale_runtime_health(
     await memory_runtime_factory.close(runtime)
 
 
-def test_attachment_capture_status_stays_unavailable_until_im_capture_lands() -> None:
+def test_attachment_capture_status_becomes_ready_after_slack_capture_lands() -> None:
     config = MemoryConfig(
         enabled=True,
         processing=replace(
@@ -3756,10 +3756,7 @@ def test_attachment_capture_status_stays_unavailable_until_im_capture_lands() ->
         "disabled_features": [],
     }
 
-    assert (
-        memory_runtime._attachment_capture_status(config, "available", health)
-        == "unavailable"
-    )
+    assert memory_runtime._attachment_capture_status(config, "available", health) == "ready"
 
 
 async def test_recorder_reap_hands_call_log_to_host_until_restart(

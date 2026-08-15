@@ -1846,6 +1846,8 @@ class Controller:
         *,
         text: object = None,
         session_id: object = None,
+        attachment_lease: object = None,
+        attachment_capture_status: object = None,
         include_workdir: bool = True,
     ) -> InboundTurnFacts:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
@@ -1865,6 +1867,9 @@ class Controller:
             files=getattr(context, "files", None),
             is_dm=payload.get("is_dm") is True,
             is_ordinary_text=context.is_ordinary_text,
+            is_ordinary_attachment=context.is_ordinary_attachment,
+            attachment_lease=attachment_lease,
+            attachment_capture_status=attachment_capture_status,
             memory_enabled=bool(
                 getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
             ),
@@ -1874,6 +1879,31 @@ class Controller:
         return self._memory_admission().admits(
             self._memory_turn_facts(context, include_workdir=False)
         )
+
+    async def memory_attachment_capture_admitted(
+        self,
+        context: MessageContext,
+        session_id: str,
+    ) -> bool:
+        """Fail closed before MessageHandler retains a lease for Memory."""
+
+        admission = self._memory_admission()
+        facts = self._memory_turn_facts(
+            context,
+            text="",
+            session_id=session_id,
+            include_workdir=False,
+        )
+        if not admission.admits_attachment_turn(facts):
+            return False
+        runtime = getattr(self, "memory_runtime", None)
+        read_status = getattr(runtime, "attachment_capture_status", None)
+        if not callable(read_status):
+            return False
+        try:
+            return await read_status() == "ready"
+        except Exception:
+            return False
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
         return self._memory_admission().principal_for(
@@ -2268,6 +2298,8 @@ class Controller:
         context: MessageContext,
         text: str,
         session_id: str,
+        *,
+        attachment_lease: object = None,
     ) -> Awaitable[None]:
         """Submit one eligible attributed human turn after session resolution.
 
@@ -2280,6 +2312,7 @@ class Controller:
             context,
             text,
             session_id,
+            attachment_lease=attachment_lease,
             observed_runtime=getattr(self, "memory_runtime", None),
         )
 
@@ -2289,10 +2322,28 @@ class Controller:
         text: str,
         session_id: str,
         *,
+        attachment_lease: object = None,
         observed_runtime: object,
     ) -> None:
-        facts = self._memory_turn_facts(context, text=text, session_id=session_id)
-        request = self._memory_admission().decide(facts)
+        admission = self._memory_admission()
+        facts = self._memory_turn_facts(
+            context,
+            text=text,
+            session_id=session_id,
+            attachment_lease=attachment_lease,
+        )
+        if admission.admits_attachment_turn(facts):
+            status = "unavailable"
+            read_status = getattr(observed_runtime, "attachment_capture_status", None)
+            if callable(read_status):
+                try:
+                    observed_status = await read_status()
+                except Exception:
+                    observed_status = "unavailable"
+                if observed_status in {"ready", "not_configured", "unavailable"}:
+                    status = observed_status
+            facts = replace(facts, attachment_capture_status=status)
+        request = admission.decide(facts)
         if not isinstance(request, CaptureRequest):
             return
 
@@ -2313,7 +2364,13 @@ class Controller:
                     or not runtime.available
                 ):
                     return
-                await runtime.module.capture(request)
+                if request.attachments and attachment_lease is not None:
+                    await runtime.module.capture(
+                        request,
+                        source_lease=attachment_lease,
+                    )
+                else:
+                    await runtime.module.capture(request)
             logger.info(
                 "Memory capture platform=%s latency_ms=%d",
                 platform,

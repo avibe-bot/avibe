@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Any, AsyncIterator, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 
 from config import paths
 from core.memory.blocking import run_blocking
@@ -65,6 +65,9 @@ from core.memory.types import (
     is_memory_error_code,
 )
 from core.memory.worker import MemoryWorker, ProcessingEvent
+
+if TYPE_CHECKING:
+    from core.handlers.inbound_attachments import InboundAttachmentLease
 
 
 MAX_CAPTURE_TEXT_BYTES = 32 * 1024
@@ -462,7 +465,12 @@ class MemoryModule:
         self._provider = provider
         self._worker.replace_provider(provider)
 
-    async def capture(self, request: CaptureRequest) -> CaptureReceipt:
+    async def capture(
+        self,
+        request: CaptureRequest,
+        *,
+        source_lease: InboundAttachmentLease | None = None,
+    ) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
         if self._retired:
@@ -503,22 +511,35 @@ class MemoryModule:
                     return await self._skipped_with_missed("memory_low_disk_space")
                 if disk_free < MIN_FREE_DISK_BYTES:
                     return await self._skipped_with_missed("memory_low_disk_space")
-                return await self._capture_under_root(request, normalized_text)
+                return await self._capture_under_root(
+                    request,
+                    normalized_text,
+                    source_lease=source_lease,
+                )
 
     async def _capture_under_root(
         self,
         request: CaptureRequest,
         normalized_text: str,
+        *,
+        source_lease: InboundAttachmentLease | None,
     ) -> CaptureReceipt:
         """Pin and enqueue one validated capture under the provider-root fence."""
 
         pinned_bundle: PinnedBundle | None = None
         try:
             if request.attachments:
-                pinned_bundle = await run_blocking(
-                    self._attachment_store.pin,
-                    request.attachments,
-                )
+                if source_lease is None:
+                    pinned_bundle = await run_blocking(
+                        self._attachment_store.pin,
+                        request.attachments,
+                    )
+                else:
+                    pinned_bundle = await run_blocking(
+                        self._attachment_store.pin,
+                        request.attachments,
+                        source_lease=source_lease,
+                    )
             attachment_payload = (
                 encode_pinned_bundle(pinned_bundle)
                 if pinned_bundle is not None

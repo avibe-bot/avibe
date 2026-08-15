@@ -318,7 +318,13 @@ class _UnavailableMemoryModule:
     is the whole seam, not a stand-in for the complete ``MemoryModule`` interface.
     """
 
-    async def capture(self, _request: Any) -> OperationFailed:
+    async def capture(
+        self,
+        _request: Any,
+        *,
+        source_lease: Any = None,
+    ) -> OperationFailed:
+        del source_lease
         return OperationFailed(error="memory_store_unavailable")
 
 
@@ -1325,6 +1331,19 @@ class MemoryRuntime:
             ),
         }
         return payload
+
+    async def attachment_capture_status(
+        self,
+    ) -> Literal["ready", "not_configured", "unavailable"]:
+        """Return the same fresh readiness projection used by Memory status."""
+
+        runtime = await self._processing_record.read_status()
+        payload = _runtime_health_payload(runtime)
+        return _attachment_capture_status(
+            self._config,
+            runtime.source.status,
+            payload.get("health"),
+        )
 
     async def failure_log_payload(
         self,

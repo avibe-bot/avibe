@@ -25,6 +25,7 @@ from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
     is_ordinary_discord_text,
     is_ordinary_feishu_text,
+    is_ordinary_slack_attachment,
     is_ordinary_slack_text,
     is_ordinary_telegram_text,
     is_ordinary_wechat_text,
@@ -61,6 +62,7 @@ class _Runtime:
         self.module = module
         self.available = True
         self.retired = False
+        self.attachment_status = "ready"
         self.final_flush_calls: list[dict[str, object]] = []
         self.final_flush_result = True
         self.final_flush_error: Exception | None = None
@@ -78,6 +80,9 @@ class _Runtime:
     def project_for_workdir(self, workdir: str) -> str:
         assert workdir == "/tmp/project"
         return PROJECT
+
+    async def attachment_capture_status(self) -> str:
+        return self.attachment_status
 
     async def resolve_current_session_scope(self, raw_session_id: str) -> tuple[str, str] | None:
         self.scope_recovery_calls.append(raw_session_id)
@@ -207,6 +212,39 @@ def test_capture_admits_every_enabled_bound_dm_user(platform: str) -> None:
 
     assert controller.memory_capture_admitted(_context(platform)) is True
     assert controller.memory_capture_admitted(_context(platform, is_dm=False)) is False
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("ready", True), ("not_configured", False), ("unavailable", False)],
+)
+def test_slack_memory_lease_retention_requires_current_attachment_readiness(
+    status: str,
+    expected: bool,
+) -> None:
+    """Scenarios: MEMORY-IM-ATTACH-001, MEMORY-IM-ATTACH-003."""
+
+    controller = _controller()
+    controller.memory_runtime.attachment_status = status
+    context = _context("slack", ordinary=False)
+    context.files = [
+        FileAttachment(
+            name="receipt.pdf",
+            mimetype="application/pdf",
+            url="https://files.slack.test/private",
+        )
+    ]
+    context.is_ordinary_attachment = True
+
+    assert (
+        asyncio.run(
+            controller.memory_attachment_capture_admitted(
+                context,
+                "stable-session",
+            )
+        )
+        is expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -1021,6 +1059,14 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
         ],
     )
     assert is_ordinary_slack_text(upload, None) is False
+    extracted_upload = [
+        FileAttachment(
+            name="screenshot.png",
+            mimetype="image/png",
+            url="https://files.slack.com/files-pri/T04-F04/screenshot.png",
+        )
+    ]
+    assert is_ordinary_slack_attachment(upload, extracted_upload) is True
 
     # Forwarded / shared message: composer rich text PLUS a share attachment.
     forwarded = _slack_dm_event(
@@ -1037,6 +1083,7 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
         ],
     )
     assert is_ordinary_slack_text(forwarded, None) is False
+    assert is_ordinary_slack_attachment(forwarded, extracted_upload) is False
 
     # App-authored layout blocks are not composer output, even without ``bot_id``.
     app_blocks = _slack_dm_event(
@@ -1047,6 +1094,7 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
         ],
     )
     assert is_ordinary_slack_text(app_blocks, None) is False
+    assert is_ordinary_slack_attachment(app_blocks, extracted_upload) is False
 
     # An unrecognized node inside rich text fails closed.
     unknown_element = _slack_dm_event(

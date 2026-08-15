@@ -27,6 +27,8 @@ AttachmentSkipReason = Literal[
     "unsupported_type",
 ]
 
+IM_ATTACHMENT_CAPTURE_PLATFORMS = frozenset({"slack"})
+
 
 @dataclass(frozen=True, slots=True)
 class MemoryAttachmentSelection:

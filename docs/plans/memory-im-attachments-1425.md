@@ -172,8 +172,8 @@ add or call-log row.
 The settings API carries the optional Multimodal endpoint with the same write-only-key
 and clear semantics as rerank. Either optional endpoint can be cleared while Memory
 remains enabled; required LLM and embedding keys retain the enabled-state clear gate.
-The visible card is gated until the Slack closed-loop slice lands. Status continues
-to project EverOS
+The Slack closed-loop slice flips the implementation stage gate and reveals the
+visible card. Status continues to project EverOS
 `multimodal_llm`, `parser`, and `disabled_features` and adds a concise attachment
 capture availability line. Configuration remains UI-only; no CLI config flags are
 added.
@@ -235,6 +235,40 @@ gaps in the probe model rather than independent endpoint bugs.
   enabled. An absent config reports `not_configured`; stale or unavailable runtime
   health reports `unavailable` even when cached capability values were previously
   healthy.
+
+### Slack activation contract
+
+Delivery slice 4 makes Slack the reference platform and flips
+`IM_ATTACHMENT_CAPTURE_AVAILABLE`. The platform allowlist remains closed to Slack
+until slice 5 adds contract evidence for the other four adapters.
+
+- Slack `message` and `app_mention` events publish a separate literal-true
+  `is_ordinary_attachment` fact only for a native, human `file_share` shape with
+  plain composer blocks. The fact does not reuse or weaken ordinary-text
+  classification, and edited, forwarded, bot, rich, system, and shared shapes
+  still fail closed.
+- The message handler performs the existing shared Agent materialization first.
+  It asks admission whether Memory may retain that materialized batch, then gives
+  Memory an independent lease reference. A retain or scheduling failure is
+  best-effort and cannot reject the Agent turn.
+- The retained reference lives until the asynchronous Memory capture finishes.
+  The Memory module pins through the descriptor-backed lease before enqueueing;
+  the ordinary Agent consumer independently adopts its source files. This keeps
+  one native download while preventing Agent cleanup or durable-delivery failure
+  from racing the Memory pin.
+- Capture reads current attachment readiness only after the closed DM admission
+  gates pass. `not_configured` and `unavailable` retain eligible text but produce
+  no attachment pin, provider attachment, or call-log row. Attachment-only turns
+  with no surviving item are skipped.
+- Per-attachment selection uses the closed format and limit table. A rejected
+  sibling does not remove eligible text or valid siblings. Skip telemetry is one
+  structured event containing only platform, total rejected count, and a closed
+  reason. When one turn has different rejection classes, the reason is the fixed
+  `mixed_rejections` value rather than attachment-specific detail.
+- The hermetic Slack scenario drives the shared materializer, admission, durable
+  pin/outbox worker, fake EverOS add/flush, redacted multimodal call log, and
+  `vibe memory search`. It proves a single adapter download and zero temp or
+  Memory-bundle residue after successful processing.
 
 ## Scenario contract
 
