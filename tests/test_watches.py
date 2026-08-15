@@ -650,6 +650,41 @@ def test_hfr_479_late_cycle_cannot_replace_committed_watch_terminal_outcome(
     assert sqlite.get_run(late_run.id) is not None
 
 
+def test_cycle_start_preserves_last_completed_outcome_pair(tmp_path: Path) -> None:
+    """Starting a cycle must not tear the last completed cycle's outcome pair."""
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="retrying watch",
+        session_key="",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+
+    assert store.mark_cycle_result(
+        watch.id,
+        exit_code=75,
+        error="watch command exited with status 75",
+    )
+    assert store.mark_cycle_start(watch.id)
+
+    started = store.get_watch(watch.id)
+    assert started is not None and started.last_started_at is not None
+    assert (started.last_exit_code, started.last_error) == (
+        75,
+        "watch command exited with status 75",
+    )
+
+
 def test_sqlite_remove_watch_soft_deletes_watch_but_keeps_runtime(tmp_path: Path) -> None:
     sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
     store = ManagedWatchStore(tmp_path / "watches.json")
