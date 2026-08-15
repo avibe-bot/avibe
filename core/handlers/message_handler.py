@@ -49,6 +49,10 @@ def _target_agent_variant(value: Any, backend: Optional[str], agent_name: Option
     return None if variant in sentinel_values else variant
 
 
+class _MemoryCaptureRegistrationClosed(Exception):
+    """Internal signal that shutdown closed attachment capture registration."""
+
+
 class MessageHandler(BaseHandler):
     """Handles message routing and Claude communication"""
 
@@ -62,6 +66,7 @@ class MessageHandler(BaseHandler):
         self.session_handler = None  # Will be set after creation
         self.receiver_tasks = controller.receiver_tasks
         self._memory_capture_tasks: set[asyncio.Task[Any]] = set()
+        self._memory_capture_registration_open = True
 
     def set_session_handler(self, session_handler):
         """Set reference to session handler"""
@@ -128,6 +133,11 @@ class MessageHandler(BaseHandler):
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             self._memory_capture_tasks.difference_update(tasks)
+
+    def quiesce_memory_capture_tasks(self) -> None:
+        """Close the loop-owned registration gate before shutdown sweeps tasks."""
+
+        self._memory_capture_registration_open = False
 
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
@@ -327,15 +337,19 @@ class MessageHandler(BaseHandler):
                         memory_session_id,
                         turn_lifecycle_admission,
                     )
-                    capture_task = asyncio.create_task(
-                        capture_memory(context, control_message, memory_session_id),
-                        name="memory-capture",
-                    )
-                    self._track_memory_capture_task(
-                        capture_task,
-                        lifecycle_admission=turn_lifecycle_admission,
-                    )
-                    turn_lifecycle_admission = None
+                    if self._memory_capture_registration_open:
+                        capture_task = asyncio.create_task(
+                            capture_memory(context, control_message, memory_session_id),
+                            name="memory-capture",
+                        )
+                        self._track_memory_capture_task(
+                            capture_task,
+                            lifecycle_admission=turn_lifecycle_admission,
+                        )
+                        turn_lifecycle_admission = None
+                    elif turn_lifecycle_admission is not None:
+                        turn_lifecycle_admission.release()
+                        turn_lifecycle_admission = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -755,6 +769,8 @@ class MessageHandler(BaseHandler):
                             memory_session_id,
                             turn_lifecycle_admission,
                         )
+                        if not self._memory_capture_registration_open:
+                            raise _MemoryCaptureRegistrationClosed
                         reserve_attachment = getattr(
                             self.controller,
                             "reserve_memory_attachment_capture",
@@ -797,6 +813,15 @@ class MessageHandler(BaseHandler):
                             capture,
                             name="memory-capture",
                         )
+                    except _MemoryCaptureRegistrationClosed:
+                        release_admission = getattr(
+                            turn_lifecycle_admission,
+                            "release",
+                            None,
+                        )
+                        if callable(release_admission):
+                            release_admission()
+                        turn_lifecycle_admission = None
                     except BaseException as error:
                         if capture_task is not None:
                             capture_task.cancel()

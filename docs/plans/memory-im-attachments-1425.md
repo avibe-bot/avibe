@@ -284,18 +284,23 @@ all capture work to one late stage.
   after session resolution, before any subagent or routing-agent namespace can
   rewrite the Agent session id. Both the early capture and the delayed lifecycle
   fence/capture request receive that saved canonical value.
-- The synchronous attachment segment may evaluate only local facts: platform and
-  message-shape admission, binding/config completeness, lease retention, and fence
-  handoff. It must never await a provider, subprocess, or any other deadline-bound
-  health read. Current multimodal readiness is read only inside the background
-  capture task.
+- **Bounded-wait invariant.** No deadline-bound provider or subprocess read may
+  occur in a span that blocks any bounded waiter. The bounded waiters here include
+  both the user-visible Agent dispatch path and `/new`'s five-second lifecycle
+  budget. Attachment eligibility must therefore be decided from local facts before
+  any health read: platform and message shape, binding/config completeness, and the
+  explicit multimodal configuration generation. Moving a remote read to a different
+  call site does not satisfy this invariant if either bounded waiter still depends
+  on its completion.
 - Multimodal opt-in is an authoritative, generation-bound fact. The synchronous
   segment snapshots the stable Runtime configuration generation that proves an
   explicit endpoint and carries it on the immutable capture request. Immediately
   before enqueue, the replacement gate compares that generation with the current
   Runtime generation; absence or mismatch fails closed for attachments, including
   an opt-out or endpoint replacement that completed while readiness was being read.
-  Eligible text remains independently best effort.
+  A missing IM generation projects `not_configured` immediately and retains eligible
+  text without performing a live health read. Workbench alone keeps its one-cycle
+  implicit compatibility path. Eligible text remains independently best effort.
 - **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
   admission, the handler performs only an O(1), non-blocking, local registration of
   an exact-session Memory capture ticket. Registration records FIFO order but never
@@ -321,10 +326,15 @@ all capture work to one late stage.
   both to the background task; every exception, cancellation, or scheduling failure
   completes the reservation and releases the retained lease together. Once tracked,
   the task completes its ticket in `finally` and its done callback releases the
-  lease. Controller shutdown cancels and joins every tracked capture without the
-  generic five-second cleanup cutoff while the event loop is still alive, ensuring
-  those callbacks run. This process-local cleanup is best effort: no exit path may
-  have two owners, but an abrupt process termination can bypass all callbacks.
+  lease. At shutdown, Controller closes the loop-owned capture-registration gate and
+  then cancels and joins every tracked capture in the same event-loop coroutine,
+  without the generic five-second cleanup cutoff. The handler rechecks the gate
+  after any `SessionTurn` wait and immediately before the no-`await` reservation,
+  retain, and task-registration segment. Once closed, that atomic segment cannot
+  produce another reservation, lease, or task, so the sweep operates on a closed set
+  and converges independently of every IM client's shutdown order. This
+  process-local cleanup is best effort: no exit path may have two owners, but an
+  abrupt process termination can bypass all callbacks.
 - **Authoritative durable cleanup.** Startup recovery is the final correctness
   guarantee for every termination path, including crashes and `SIGKILL`.
   `MemoryCoordinator.recover_after_boot()` takes the database attachment-reference

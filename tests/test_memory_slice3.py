@@ -24,6 +24,7 @@ from core.memory import (
     CaptureDuplicate,
     CaptureRequest,
     CaptureSkipped,
+    MemoryModule,
 )
 from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.everos import FakeMemoryProvider
@@ -324,6 +325,78 @@ def test_slack_memory_reservation_survives_without_multimodal_opt_in() -> None:
 
     assert reservation is not None
     assert reservation.config_generation is None
+
+
+def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
+    """Scenario: MEMORY-IM-ATTACH-003."""
+
+    async def run() -> None:
+        controller = _controller()
+        store = MemoryStore()
+        module = MemoryModule(store, FakeMemoryProvider(), enabled=True)
+        controller.memory_module = module
+        controller.memory_runtime = _Runtime(module)
+        controller.memory_runtime.attachment_generation = None
+        health_reads = 0
+
+        async def attachment_capture_status() -> str:
+            nonlocal health_reads
+            health_reads += 1
+            await asyncio.Event().wait()
+            return "ready"
+
+        controller.memory_runtime.attachment_capture_status = attachment_capture_status
+        context = _context("slack", ordinary=False)
+        context.files = [
+            FileAttachment(
+                name="receipt.pdf",
+                mimetype="application/pdf",
+                url="https://files.slack.test/private",
+            )
+        ]
+        context.is_ordinary_attachment = True
+        reservation = controller.reserve_memory_attachment_capture(
+            context,
+            "stable-session",
+        )
+        assert reservation is not None
+        assert reservation.config_generation is None
+
+        await asyncio.wait_for(
+            controller.capture_user_memory(
+                context,
+                "keep the caption",
+                "stable-session",
+                attachment_reservation=reservation,
+            ),
+            timeout=1.0,
+        )
+
+        assert health_reads == 0
+        rows = store.list_queue_rows()
+        assert len(rows) == 1
+        assert rows[0].payload_text == "keep the caption"
+        assert rows[0].payload_attachments is None
+
+        reset_ran = False
+
+        async def reset() -> None:
+            nonlocal reset_ran
+            reset_ran = True
+
+        await asyncio.wait_for(
+            module.run_session_lifecycle(
+                principal_id="u-" + ("1" * 32),
+                project_id=PROJECT,
+                raw_session_id="stable-session",
+                operation=reset,
+                deadline_seconds=1.0,
+            ),
+            timeout=1.5,
+        )
+        assert reset_ran is True
+
+    asyncio.run(run())
 
 
 def test_attachment_capture_hands_off_before_runtime_health_read() -> None:

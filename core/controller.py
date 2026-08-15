@@ -2469,22 +2469,35 @@ class Controller:
         observed_runtime: object,
         held_admission: object = None,
     ) -> None:
+        platform = CaptureAdmission.platform_of(facts)
         if admission.admits_attachment_turn(facts):
-            status = "unavailable"
-            read_status = getattr(observed_runtime, "attachment_capture_status", None)
-            if callable(read_status):
-                try:
-                    observed_status = await read_status()
-                except Exception:
-                    observed_status = "unavailable"
-                if observed_status in {"ready", "not_configured", "unavailable"}:
-                    status = observed_status
+            status = "not_configured"
+            if (
+                platform == WORKBENCH_PLATFORM
+                or facts.attachment_config_generation is not None
+            ):
+                status = "unavailable"
+                read_status = getattr(
+                    observed_runtime,
+                    "attachment_capture_status",
+                    None,
+                )
+                if callable(read_status):
+                    try:
+                        observed_status = await read_status()
+                    except Exception:
+                        observed_status = "unavailable"
+                    if observed_status in {
+                        "ready",
+                        "not_configured",
+                        "unavailable",
+                    }:
+                        status = observed_status
             facts = replace(facts, attachment_capture_status=status)
         request = admission.decide(facts)
         if not isinstance(request, CaptureRequest):
             return
 
-        platform = CaptureAdmission.platform_of(facts)
         started_at = time.monotonic()
         try:
             if self._memory_factory_reset_pending(observed_runtime) or observed_runtime is None:
@@ -3139,13 +3152,15 @@ class Controller:
         )
         async def _cancel_memory_capture_tasks() -> None:
             handler = getattr(self, "message_handler", None)
+            quiesce = getattr(handler, "quiesce_memory_capture_tasks", None)
+            if callable(quiesce):
+                quiesce()
             cancel = getattr(handler, "cancel_memory_capture_tasks", None)
             if callable(cancel):
                 await cancel()
 
-        # Tracked captures own retained attachment leases. Cancel and join them
-        # without the generic five-second cutoff while the event loop can still
-        # run their done callbacks.
+        # Close registration and sweep the resulting closed task set in one
+        # event-loop turn. This does not depend on platform shutdown ordering.
         _stop_loop_coroutine(
             _cancel_memory_capture_tasks(),
             "Memory capture tasks",

@@ -895,6 +895,31 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         assert captured.is_set()
 
+    async def test_shutdown_quiesce_prevents_late_text_capture_registration(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        lifecycle_admission = Mock()
+        controller.session_turns = types.SimpleNamespace(
+            acquire_lifecycle_admission=AsyncMock(
+                return_value=lifecycle_admission
+            ),
+        )
+        controller.capture_user_memory = AsyncMock()
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler.quiesce_memory_capture_tasks()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-quiesced-text-memory",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "remember this")
+
+        controller.capture_user_memory.assert_not_called()
+        lifecycle_admission.release.assert_called_once_with()
+        assert handler._memory_capture_tasks == set()
+
     async def test_attachment_capture_uses_anchor_before_agent_variant_namespace(self):
         from modules.im.base import FileAttachment
 
@@ -1236,6 +1261,83 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         lease.retain.assert_not_called()
         lease.release.assert_called_once_with()
         controller.capture_user_memory.assert_not_called()
+
+    async def test_shutdown_quiesce_closes_capture_registration_before_sweep(
+        self,
+    ):
+        """Scenario: MEMORY-IM-ATTACH-004."""
+
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        acquisition_started = asyncio.Event()
+        release_acquisition = asyncio.Event()
+        lifecycle_admission = Mock()
+
+        async def acquire_lifecycle_admission(session_id):
+            self.assertEqual(session_id, "base-session")
+            acquisition_started.set()
+            await release_acquisition.wait()
+            return lifecycle_admission
+
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            acquire_lifecycle_admission=acquire_lifecycle_admission,
+        )
+        controller.reserve_memory_attachment_capture = Mock(
+            return_value=_capture_reservation()
+        )
+        controller.capture_user_memory = AsyncMock()
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="review this")
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                lease=lease,
+            )
+        )
+
+        async def admit(**kwargs):
+            admitted_lease = kwargs["attachment_lease"]
+            admitted_lease.adopt()
+            admitted_lease.release()
+            return True
+
+        handler._admit_human_delivery = AsyncMock(side_effect=admit)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-shutdown-registration",
+            platform="slack",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        turn = asyncio.create_task(
+            handler.handle_user_message(context, "remember this")
+        )
+        await asyncio.wait_for(acquisition_started.wait(), timeout=1.0)
+        handler.quiesce_memory_capture_tasks()
+        await handler.cancel_memory_capture_tasks()
+        release_acquisition.set()
+        await asyncio.wait_for(turn, timeout=1.0)
+
+        controller.reserve_memory_attachment_capture.assert_not_called()
+        controller.capture_user_memory.assert_not_called()
+        lease.retain.assert_not_called()
+        lifecycle_admission.release.assert_called_once_with()
+        assert handler._memory_capture_tasks == set()
 
     async def test_cancelled_attachment_registration_removes_real_lease_directory(
         self,
