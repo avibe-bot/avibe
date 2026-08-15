@@ -40,10 +40,13 @@ Do not send the attachment fixtures until all of these are true:
    a complete base URL, model, and API key. This is the explicit opt-in required by
    `MEMORY-IM-ATTACH-003`.
 5. The human test account on each platform is enabled and bound to this Avibe
-   installation. Use a one-to-one direct message only. Group, channel, unbound,
-   forwarded, edited, quoted, webhook, and system traffic stays outside this
-   human baseline and is closed where the platform exposes the required facts.
-   WeChat bot/self/system source exclusion remains unverified and is collected
+   installation. Use an ordinary, unquoted one-to-one direct message only.
+   Group, channel, unbound, forwarded, edited, webhook, system, quoted, and
+   replied-to traffic stays outside this human baseline. Quoted/replied-to
+   exclusion is not verified across platforms: Slack accepts ordinary
+   `rich_text_quote` content, while Discord and Telegram expose reference facts
+   that their Memory attachment classifiers do not currently enforce. WeChat
+   bot/self/system source exclusion also remains unverified and is collected
    below; this checklist does not claim those sources are currently excluded.
 6. Record a run tag such as `IMA-20260816-0508`. Use it in baseline text and every
    supported caption, but never in an accepted image's pixel-only marker.
@@ -262,9 +265,10 @@ Decision:
 - Capturing SVG, Office/iWork/ODF/RTF documents, or other extensions excluded by
   the pinned modality policy. WeChat video may reach shared admission, but video
   processing is not enabled by this acceptance.
-- Group/channel, unbound, edited, forwarded, quoted/reference, or system-message
-  Memory capture, and bot-authored capture on platforms with verified source
-  facts. WeChat source exclusion remains the explicit fixture decision above.
+- Group/channel, unbound, edited, forwarded, webhook, or system-message Memory
+  capture, and bot-authored capture on platforms with verified source facts.
+  Quoted/replied-to traffic is unverified and out of scope rather than claimed
+  closed; WeChat source exclusion remains the explicit fixture decision above.
 - Resetting regression state, changing credentials, testing remote Incus, or
   validating Agent attachment behavior. This run covers Memory capture only.
 - Provisioning Telegram or any other platform credentials. A separately
