@@ -89,6 +89,33 @@ def test_codex_no_base_url_when_neither_section_has_one(tmp_path: Path) -> None:
     assert state["base_url"] is None
 
 
+def test_codex_ignores_dormant_relay_section_without_oauth_capture_marker(
+    tmp_path: Path,
+) -> None:
+    """A provider section the user never activated is not proof of a
+    prior relay. After the OAuth flows clear ``model_provider``, any
+    surviving section is unpointed; treating the unique one as "the
+    relay" would silently reroute a freshly saved API key to an
+    unrelated endpoint. Disk reads must stay chain-only (active →
+    managed → legacy); recovery lives in the V2Config capture written at
+    the OAuth transition, merged in by ``get_codex_auth``."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[model_providers.OpenAI]",
+                'name = "OpenAI"',
+                'base_url = "https://never-activated.example/v1"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = read_codex_auth_state(home=tmp_path)
+    assert state["base_url"] is None
+
+
 def _write_claude_settings(home: Path, env: dict) -> None:
     claude_dir = home / ".claude"
     claude_dir.mkdir()

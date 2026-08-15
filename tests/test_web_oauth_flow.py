@@ -338,6 +338,7 @@ def test_codex_oauth_success_clears_api_key_state(
         auth_mode="api_key",
         api_key="sk-old",
         base_url="https://relay.example/v1",
+        oauth_relay_marker=None,
     )
     service.controller.config = SimpleNamespace(
         language="en",
@@ -351,10 +352,68 @@ def test_codex_oauth_success_clears_api_key_state(
     assert auth["auth_mode"] == "chatgpt"
     assert auth["tokens"] == {"id_token": "abc"}
     assert "OPENAI_API_KEY" not in auth
+    # The provider pointer is cleared for OAuth runtime…
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert not [line for line in toml.splitlines() if line.startswith("model_provider")]
+    # …but the relay identity is captured into the explicit
+    # ``oauth_relay_marker`` so the Settings form and the next API-key
+    # save can restore it instead of silently rerouting the key to
+    # api.openai.com.
     assert codex_cfg.auth_mode == "oauth"
     assert codex_cfg.api_key is None
     assert codex_cfg.base_url is None
+    assert codex_cfg.oauth_relay_marker == {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
     assert saves == ["saved"]
+
+    # A repeated OAuth transition captures nothing (the pointer is
+    # already gone) and must RETAIN the marker rather than erase it —
+    # erasing would lose the relay for the eventual switch-back.
+    _run(service._invoke_post_web_success_hook("codex"))
+    assert codex_cfg.oauth_relay_marker == {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
+
+
+def test_codex_oauth_after_official_key_transition_clears_stale_marker(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Official-key transition: the user ran ``codex login
+    --with-api-key`` against the default endpoint (active key, no relay)
+    and then signed in via OAuth. The pre-OAuth capture observes the
+    key-without-relay state, so the stale relay marker must be CLEARED —
+    retaining it would resurface the abandoned relay after OAuth removes
+    the key and reroute a future API-key save to it."""
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    # External official-key shape: API key, no relay anywhere.
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-official"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text('model = "gpt-5.4"\n', encoding="utf-8")
+
+    codex_cfg = SimpleNamespace(
+        auth_mode="api_key",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+    service.controller.config = SimpleNamespace(
+        language="en",
+        agents=SimpleNamespace(codex=codex_cfg),
+        save=lambda: None,
+    )
+
+    _run(service._invoke_post_web_success_hook("codex"))
+
+    assert codex_cfg.oauth_relay_marker is None
 
 
 def test_post_web_success_hook_swallows_exceptions(

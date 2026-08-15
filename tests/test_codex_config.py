@@ -489,3 +489,70 @@ def test_apply_oauth_leaves_user_owned_pointer_when_no_base_url(tmp_path: Path) 
     parsed = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
     assert parsed["model_provider"] == "CustomLabel"
     assert result["notices"] == []
+
+
+def test_read_codex_relay_marker_requires_provider_identity() -> None:
+    """A truncated/corrupted marker (URL without provider identity) is
+    not a valid recovery record — it degrades to "no marker" instead of
+    steering credentials at an unverifiable URL."""
+    from vibe.codex_config import read_codex_relay_marker
+
+    assert read_codex_relay_marker(None) is None
+    assert read_codex_relay_marker("https://relay.example/v1") is None
+    assert read_codex_relay_marker({"base_url": "https://relay.example/v1"}) is None
+    assert read_codex_relay_marker({"base_url": "https://relay.example/v1", "provider_id": ""}) is None
+    assert read_codex_relay_marker({"base_url": "https://relay.example/v1", "provider_id": 7}) is None
+    assert read_codex_relay_marker({"provider_id": "OpenAI"}) is None
+    assert read_codex_relay_marker(
+        {"base_url": "https://relay.example/v1", "provider_id": "OpenAI"}
+    ) == {"base_url": "https://relay.example/v1", "provider_id": "OpenAI"}
+
+
+def test_apply_api_key_restores_captured_user_provider(tmp_path: Path) -> None:
+    """The OAuth-transition round trip restores the captured user-owned
+    provider (pointer + its own wire_api), not a rebuilt managed one."""
+    codex_config.apply_codex_auth(
+        auth_mode="api_key",
+        api_key="sk-relay",
+        base_url=None,
+        home=tmp_path,
+    )
+    # Seed the post-OAuth shape: pointer cleared, relay orphaned.
+    config_path = tmp_path / ".codex" / "config.toml"
+    config_path.write_text(
+        "[model_providers.OpenAI]\n"
+        'name = "OpenAI"\n'
+        'base_url = "https://relay.example/v1"\n'
+        'wire_api = "responses"\n',
+        encoding="utf-8",
+    )
+    codex_config.apply_codex_auth(
+        auth_mode="api_key",
+        api_key="sk-relay-2",
+        base_url="https://relay.example/v1",
+        restore_provider_id="OpenAI",
+        home=tmp_path,
+    )
+    toml = config_path.read_text(encoding="utf-8")
+    pointer = [line for line in toml.splitlines() if line.startswith("model_provider")]
+    assert pointer == ['model_provider = "OpenAI"']
+    assert 'wire_api = "responses"' in toml
+    assert "openai-managed" not in toml
+    state = codex_config.read_codex_auth_state(home=tmp_path)
+    assert state["base_url"] == "https://relay.example/v1"
+
+
+def test_apply_api_key_restore_falls_back_when_provider_gone(tmp_path: Path) -> None:
+    """Restore is only honored while the captured section still exists
+    with the same URL; otherwise the managed rebuild applies."""
+    codex_config.apply_codex_auth(
+        auth_mode="api_key",
+        api_key="sk-relay",
+        base_url="https://relay.example/v1",
+        restore_provider_id="OpenAI",
+        home=tmp_path,
+    )
+    config_path = tmp_path / ".codex" / "config.toml"
+    toml = config_path.read_text(encoding="utf-8")
+    assert 'model_provider = "openai-managed"' in toml
+    assert 'base_url = "https://relay.example/v1"' in toml

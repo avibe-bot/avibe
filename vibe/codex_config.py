@@ -275,6 +275,7 @@ def apply_codex_auth(
     auth_mode: str,
     api_key: Optional[str],
     base_url: Optional[str],
+    restore_provider_id: Optional[str] = None,
     home: Path | None = None,
 ) -> Dict[str, Any]:
     """Persist the requested auth mode into Codex's on-disk config files.
@@ -283,14 +284,19 @@ def apply_codex_auth(
       optionally set ``[model_providers.openai-managed].base_url`` if a
       non-default URL was supplied, and pin top-level ``model_provider``
       to the managed entry so Codex actually uses the keyed provider.
+      When ``restore_provider_id`` names a still-existing user-owned
+      provider section carrying the same ``base_url``, the pointer is
+      restored to that section instead — the OAuth-transition round
+      trip then preserves the user's own ``wire_api`` / provider
+      settings rather than rebuilding a managed provider.
     - ``oauth`` mode: drop ``OPENAI_API_KEY`` from ``auth.json``, leave any
       ``tokens`` blob in place, and clear our managed ``base_url`` so the
       next launch goes back to OpenAI's default endpoint.
 
     Returns ``{"notices": [{code, ...}, ...]}`` — non-fatal warnings the
     caller may want to surface in the UI (e.g. "we cleared a custom
-    relay pointer that won't accept OAuth tokens"). An empty list means
-    the save was a no-op transformation.
+      relay pointer that won't accept OAuth tokens"). An empty list means
+      the save was a no-op transformation.
     """
     if auth_mode not in {"oauth", "api_key"}:
         raise ValueError(f"Unsupported codex auth_mode: {auth_mode!r}")
@@ -304,6 +310,31 @@ def apply_codex_auth(
     if not isinstance(providers, dict):
         providers = {}
         toml_data["model_providers"] = providers
+
+    restored_user_provider = False
+    if (
+        auth_mode == "api_key"
+        and isinstance(restore_provider_id, str)
+        and restore_provider_id.strip()
+        and restore_provider_id not in {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS}
+    ):
+        section = providers.get(restore_provider_id)
+        section_url = section.get("base_url") if isinstance(section, dict) else None
+        if (
+            isinstance(section, dict)
+            and isinstance(section_url, str)
+            and base_url
+            and section_url.strip() == base_url.strip()
+        ):
+            # The captured user-owned relay section survived the OAuth
+            # window and still points at the same relay: restore the
+            # pointer instead of rebuilding a managed provider, so the
+            # user's own provider settings (wire_api etc.) survive the
+            # auth-mode round trip. Managed/legacy ids never take this
+            # path — they are ours to rewrite.
+            toml_data["model_provider"] = restore_provider_id
+            restored_user_provider = True
+
     managed = providers.setdefault(MANAGED_PROVIDER_ID, {})
     if not isinstance(managed, dict):
         managed = {}
@@ -332,10 +363,14 @@ def apply_codex_auth(
         # managed names. If the user has aimed it at a hand-rolled
         # provider (e.g. their ``[model_providers.OpenAI]`` relay
         # section), keep their pointer — overriding it would silently
-        # bypass their custom base_url + wire_api config.
+        # bypass their custom base_url + wire_api config. A restored
+        # user-owned provider (``restored_user_provider``) already has
+        # the pointer set above and must not be steered away.
         current_mp = toml_data.get("model_provider")
         managed_known = {MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS, ""}
-        if not isinstance(current_mp, str) or current_mp in managed_known:
+        if not restored_user_provider and (
+            not isinstance(current_mp, str) or current_mp in managed_known
+        ):
             toml_data["model_provider"] = MANAGED_PROVIDER_ID
         # Pin Codex to file-based credentials so it actually reads the
         # ``OPENAI_API_KEY`` we just wrote. Without this, the documented
@@ -343,39 +378,47 @@ def apply_codex_auth(
         # behave as if no key was configured even though ``auth.json``
         # has one. See CREDENTIALS_STORE_KEY for the rationale.
         toml_data[CREDENTIALS_STORE_KEY] = CREDENTIALS_STORE_FILE
-        managed.setdefault("name", "OpenAI")
-        # Match the wire_api the modern Codex CLI uses internally for
-        # api_key requests. Without explicitly setting this, the CLI
-        # may fall back to the legacy ``chat`` shape — fine against
-        # ``api.openai.com`` (which serves both endpoints) but the
-        # common custom relays (e.g. ai-relay.chainbot.io) only speak
-        # the Responses API and return 404 / wire-shape errors.
-        managed.setdefault("wire_api", "responses")
-        # Ensure the Bearer header is sent when the request travels
-        # through the user's relay. The default is reasonable but
-        # being explicit avoids a class of failures where Codex omits
-        # auth on custom providers (silent 401 on the relay).
-        managed.setdefault("requires_openai_auth", True)
-        if base_url:
-            managed["base_url"] = base_url
-            # Custom relays almost never speak Codex's bespoke responses-
-            # over-WebSocket protocol — they reverse-proxy HTTPS to OpenAI
-            # but don't accept the WSS upgrade Codex expects on
-            # ``/responses``. Codex 0.130+ gates that transport on this
-            # field (``codex-rs/core/src/client.rs::responses_websocket_enabled``);
-            # pinning it to false routes turns through the HTTP responses
-            # path, which honors our ``base_url``. Leaving it absent lets
-            # newer Codex versions dispatch WSS via the built-in OpenAI
-            # provider's default (``wss://api.openai.com/v1/responses``),
-            # silently bypassing the user's relay and producing 401s on
-            # whatever account-bound key the relay handed out.
-            managed["supports_websockets"] = False
+        if restored_user_provider:
+            # The user's own section carries the provider settings; drop
+            # any stale managed section we wrote in an earlier api_key
+            # era so only one candidate shape remains in the file.
+            providers.pop(MANAGED_PROVIDER_ID, None)
+            if not providers:
+                toml_data.pop("model_providers", None)
         else:
-            managed.pop("base_url", None)
-            # No custom base_url → user is on the built-in OpenAI endpoint
-            # where WSS works the way Codex expects. Drop our override so
-            # Codex's own default-on behavior applies.
-            managed.pop("supports_websockets", None)
+            managed.setdefault("name", "OpenAI")
+            # Match the wire_api the modern Codex CLI uses internally for
+            # api_key requests. Without explicitly setting this, the CLI
+            # may fall back to the legacy ``chat`` shape — fine against
+            # ``api.openai.com`` (which serves both endpoints) but the
+            # common custom relays (e.g. ai-relay.chainbot.io) only speak
+            # the Responses API and return 404 / wire-shape errors.
+            managed.setdefault("wire_api", "responses")
+            # Ensure the Bearer header is sent when the request travels
+            # through the user's relay. The default is reasonable but
+            # being explicit avoids a class of failures where Codex omits
+            # auth on custom providers (silent 401 on the relay).
+            managed.setdefault("requires_openai_auth", True)
+            if base_url:
+                managed["base_url"] = base_url
+                # Custom relays almost never speak Codex's bespoke responses-
+                # over-WebSocket protocol — they reverse-proxy HTTPS to OpenAI
+                # but don't accept the WSS upgrade Codex expects on
+                # ``/responses``. Codex 0.130+ gates that transport on this
+                # field (``codex-rs/core/src/client.rs::responses_websocket_enabled``);
+                # pinning it to false routes turns through the HTTP responses
+                # path, which honors our ``base_url``. Leaving it absent lets
+                # newer Codex versions dispatch WSS via the built-in OpenAI
+                # provider's default (``wss://api.openai.com/v1/responses``),
+                # silently bypassing the user's relay and producing 401s on
+                # whatever account-bound key the relay handed out.
+                managed["supports_websockets"] = False
+            else:
+                managed.pop("base_url", None)
+                # No custom base_url → user is on the built-in OpenAI endpoint
+                # where WSS works the way Codex expects. Drop our override so
+                # Codex's own default-on behavior applies.
+                managed.pop("supports_websockets", None)
     else:  # oauth
         auth_data.pop("OPENAI_API_KEY", None)
         # Flip auth_mode back to chatgpt when OAuth tokens still exist
@@ -439,6 +482,31 @@ def apply_codex_auth(
     _atomic_write(auth_path, json.dumps(auth_data, indent=2) + "\n", mode=0o600)
     _atomic_write(config_path, _dump_toml(toml_data), mode=0o600)
     return {"notices": notices}
+
+
+def read_codex_relay_marker(marker: object) -> Optional[Dict[str, str]]:
+    """Normalize a persisted ``oauth_relay_marker`` value for consumption.
+
+    The marker is the explicit OAuth-transition record
+    (``{"provider_id": str, "base_url": str}``) captured by
+    ``AgentAuthService._persist_backend_auth_mode`` immediately before
+    the OAuth cleanup clears the provider pointer / managed section.
+    Because the marker *is* the provenance, it is consumed verbatim —
+    no ambient-state inference. Shape validation: both fields must be
+    non-empty strings (every legitimate capture with a relay URL also
+    resolves a non-empty ``active_provider_id``), so a truncated or
+    corrupted marker degrades to "no marker" — disabling recovery —
+    rather than steering credentials at an unverifiable URL.
+    """
+    if not isinstance(marker, dict):
+        return None
+    base_url = marker.get("base_url")
+    provider_id = marker.get("provider_id")
+    if not isinstance(base_url, str) or not base_url.strip():
+        return None
+    if not isinstance(provider_id, str) or not provider_id.strip():
+        return None
+    return {"base_url": base_url.strip(), "provider_id": provider_id.strip()}
 
 
 def read_codex_api_key(home: Path | None = None) -> Optional[str]:
@@ -542,6 +610,7 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
     providers = toml_data.get("model_providers")
     base_url: Optional[str] = None
     wire_api: Optional[str] = None
+    active_provider_id: Optional[str] = None
     if isinstance(providers, dict):
         # Codex's runtime selects the provider named by top-level
         # ``model_provider``. When that's a user-defined section (e.g.
@@ -554,8 +623,10 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
         active_section: Optional[dict] = None
         if isinstance(active_provider, str) and isinstance(providers.get(active_provider), dict):
             active_section = providers[active_provider]
+            active_provider_id = active_provider
         elif isinstance(providers.get(MANAGED_PROVIDER_ID), dict):
             active_section = providers[MANAGED_PROVIDER_ID]
+            active_provider_id = MANAGED_PROVIDER_ID
         else:
             # Legacy fallback: older releases wrote our managed shape
             # under ``[model_providers.openai]``. New Codex rejects that
@@ -565,6 +636,7 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
                 legacy_section = providers.get(legacy_id)
                 if isinstance(legacy_section, dict):
                     active_section = legacy_section
+                    active_provider_id = legacy_id
                     break
         if isinstance(active_section, dict):
             raw = active_section.get("base_url")
@@ -573,6 +645,17 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
             raw_wire_api = active_section.get("wire_api")
             if isinstance(raw_wire_api, str) and raw_wire_api.strip():
                 wire_api = raw_wire_api.strip()
+
+        # NOTE: no orphaned-section recovery here. After the OAuth flows
+        # clear ``model_provider``, a surviving user relay section is
+        # unpointed — but its mere presence is not proof it was the
+        # active relay (a never-used dormant provider would be picked up
+        # and silently reroute a freshly saved API key to an unintended
+        # endpoint). Recovery is driven exclusively by the explicit
+        # ``oauth_relay_marker`` captured at the OAuth transition
+        # (``AgentAuthService._persist_backend_auth_mode`` → V2Config
+        # ``agents.codex.oauth_relay_marker``); the Settings read merges
+        # that in (``vibe.api.get_codex_auth``).
 
     store_raw = toml_data.get(CREDENTIALS_STORE_KEY)
     credentials_store = store_raw if isinstance(store_raw, str) else None
@@ -602,6 +685,12 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
         "api_key_raw": api_key if isinstance(api_key, str) and api_key else None,
         "base_url": base_url,
         "wire_api": wire_api,
+        # Provider id the chain above resolved to (``model_provider``
+        # pointer, our managed id, or a legacy managed id). ``None`` when
+        # no provider section matched. Consumed by the OAuth-transition
+        # capture so the recovery marker records *which* section carried
+        # the relay, not just its URL.
+        "active_provider_id": active_provider_id,
         "has_chatgpt_tokens": has_chatgpt_tokens,
         # ``chatgpt_account``: best-effort identity from the OAuth JWT in
         # ``auth.json`` so the Settings page can show "Signed in as

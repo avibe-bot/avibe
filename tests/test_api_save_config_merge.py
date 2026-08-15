@@ -1089,6 +1089,29 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path)
     _assert_complete("V2Config.save", json.loads(paths.get_config_path().read_text(encoding="utf-8")))
 
 
+def test_save_config_strips_codex_relay_marker_from_generic_patch(monkeypatch, tmp_path):
+    """The relay marker is auth-owned state like ``api_key``: a generic
+    Settings save that round-trips a stale full-config snapshot (loaded
+    before an OAuth transition captured the marker) must not null the
+    fresh marker."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    original = api.save_config(_full_config_payload())
+    original.agents.codex.oauth_relay_marker = {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
+    original.save()
+
+    # Stale snapshot still carrying a null marker (the pre-transition view).
+    updated = api.save_config({"agents": {"codex": {"oauth_relay_marker": None}}})
+
+    assert updated.agents.codex.oauth_relay_marker == {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
+
+
 def test_non_owner_config_keeps_asr_and_pairing_without_host_secrets(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = V2Config.from_payload(_full_config_payload())
