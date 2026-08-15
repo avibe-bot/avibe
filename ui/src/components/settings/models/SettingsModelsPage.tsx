@@ -36,7 +36,7 @@ import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type E
 import { readFirstPaintRegions, type SurfaceLanding } from './firstPaintRegions';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
-import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import type { SourceMutationLanding, SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { modelChainKey, modelChainRequests, type ModelChainIndex } from './modelRows';
 import {
   beginRegionRead,
@@ -519,7 +519,7 @@ export const SettingsModelsPage: React.FC = () => {
     if (landing.supply.kind !== 'ready') setChainsRead(failRegionRead);
   }));
 
-  const refresh = React.useCallback(async () => {
+  const refresh = React.useCallback(async (): Promise<SourceMutationLanding> => {
     void refreshEventHead();
     const outcome: { landing: SurfaceLanding | null } = { landing: null };
     const result = await refreshAuthority.run(async () => {
@@ -527,9 +527,16 @@ export const SettingsModelsPage: React.FC = () => {
       outcome.landing = await readSurfaceLanding(sourceCollectionReads, agentCollectionReads);
       return { landing: outcome.landing, sourceSnapshot };
     });
-    if (aliveRef.current && result === 'landed' && outcome.landing && surfaceLandingFailed(outcome.landing)) {
+    const failed = Boolean(aliveRef.current
+      && result === 'landed'
+      && outcome.landing
+      && surfaceLandingFailed(outcome.landing));
+    if (failed) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
+    return aliveRef.current && result === 'landed' && outcome.landing && !failed
+      ? 'landed'
+      : 'degraded';
   }, [agentCollectionReads, refreshAuthority, refreshEventHead, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
 
   const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
@@ -539,11 +546,12 @@ export const SettingsModelsPage: React.FC = () => {
       if (!current) throw new Error(`Source ${sourceId} is no longer available`);
       const generation = sourceEntityAuthority.begin(sourceId);
       let settled = false;
-      const finish = async (apply: () => void, reconcile = true): Promise<void> => {
-        if (settled) return;
-        settled = true;
-        apply();
-        if (reconcile) await refresh();
+      const finish = async (apply: () => void, reconcile = true): Promise<SourceMutationLanding> => {
+        if (!settled) {
+          settled = true;
+          apply();
+        }
+        return reconcile ? refresh() : 'landed';
       };
       const settlement: SourceMutationSettlement = {
         source: async (echoed) => finish(() => { sourceEntityAuthority.settle(generation, echoed); }),

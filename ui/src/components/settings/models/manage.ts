@@ -1,5 +1,6 @@
 import type { RouteHopRef, Source, SourcePatch, SupplyGap } from './types';
 import { SOURCE_DISPLAY_NAME_MAX_LENGTH } from './types';
+import type { SourceMutationLanding } from './mutationSettlement';
 import { optionalTrimmedTextWithin } from './validation';
 
 /** Management changes a valid Source; repair restores a blocked one. */
@@ -53,38 +54,196 @@ export type ManageStage =
   | { kind: 'edit_failed'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
   | { kind: 'confirming_delete'; plan: ManageGuardPlan | null }
   | { kind: 'submitting_delete'; plan: ManageGuardPlan | null; forced: boolean }
-  | { kind: 'delete_failed'; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean }
-  | { kind: 'committed_edit_impact'; plan: ManageGuardPlan; complete: () => Promise<void> }
-  | { kind: 'committed_delete_impact'; plan: ManageGuardPlan; complete: () => Promise<void> };
+  | { kind: 'delete_failed'; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
+  | { kind: 'committed_edit_impact'; plan: ManageGuardPlan; complete: () => Promise<SourceMutationLanding>; landingFailed: boolean }
+  | { kind: 'committed_delete_impact'; plan: ManageGuardPlan; complete: () => Promise<SourceMutationLanding>; landingFailed: boolean };
 
-type ManageStageDestination = ManageStageKind | 'none' | 'blocked' | 'complete';
 export type ManageFailureSurface = 'none' | 'edit_dialog' | 'guard_dialog' | 'delete_inline' | 'committed_dialog';
 
-/** Total transition metadata: a new stage cannot omit its exit or failure owner. */
-export const MANAGE_STAGE_CANCEL: Record<ManageStageKind, ManageStageDestination> = {
-  idle: 'none',
-  editing: 'idle',
-  submitting_edit: 'blocked',
-  confirming_edit: 'editing',
-  edit_failed: 'idle',
-  confirming_delete: 'idle',
-  submitting_delete: 'blocked',
-  delete_failed: 'idle',
-  committed_edit_impact: 'complete',
-  committed_delete_impact: 'complete',
+type ManageStageTransition<Event> = {
+  [Kind in ManageStageKind]: (
+    stage: Extract<ManageStage, { kind: Kind }>,
+    event: Event,
+  ) => ManageStage;
 };
 
-export const MANAGE_STAGE_RETRY: Record<ManageStageKind, ManageStageDestination> = {
-  idle: 'none',
-  editing: 'submitting_edit',
-  submitting_edit: 'none',
-  confirming_edit: 'submitting_edit',
-  edit_failed: 'submitting_edit',
-  confirming_delete: 'submitting_delete',
-  submitting_delete: 'none',
-  delete_failed: 'submitting_delete',
-  committed_edit_impact: 'none',
-  committed_delete_impact: 'none',
+type CancelManageStage = { type: 'cancel' };
+type RetryManageStage = { type: 'retry' };
+type EditManageDraft = { type: 'edit_draft'; draft: SourceEditDraft };
+type DismissUnresolvedManageStage = { type: 'dismiss_unresolved' };
+type LandManageStage = { type: 'land'; verdict: SourceMutationLanding };
+
+const keepManageStage = <Stage extends ManageStage>(stage: Stage): Stage => stage;
+const idleManageStage = (): ManageStage => ({ kind: 'idle' });
+
+/** Total event authority: a new stage cannot omit any user-driven transition. */
+export const MANAGE_STAGE_CANCEL = {
+  idle: keepManageStage,
+  editing: idleManageStage,
+  submitting_edit: keepManageStage,
+  confirming_edit: (stage) => ({ kind: 'editing', draft: stage.draft }),
+  edit_failed: (stage) => stage.retryRead ? stage : idleManageStage(),
+  confirming_delete: idleManageStage,
+  submitting_delete: keepManageStage,
+  delete_failed: (stage) => stage.retryRead ? stage : idleManageStage(),
+  committed_edit_impact: keepManageStage,
+  committed_delete_impact: keepManageStage,
+} satisfies ManageStageTransition<CancelManageStage>;
+
+export const MANAGE_STAGE_RETRY = {
+  idle: keepManageStage,
+  editing: keepManageStage,
+  submitting_edit: keepManageStage,
+  confirming_edit: (stage) => ({
+    kind: 'submitting_edit',
+    draft: stage.draft,
+    patch: stage.patch,
+    plan: stage.plan,
+    forced: true,
+    surface: 'guard',
+  }),
+  edit_failed: (stage) => ({
+    kind: 'submitting_edit',
+    draft: stage.draft,
+    patch: stage.patch,
+    plan: stage.plan,
+    forced: stage.forced,
+    surface: 'edit',
+  }),
+  confirming_delete: (stage) => ({
+    kind: 'submitting_delete',
+    plan: stage.plan,
+    forced: stage.plan !== null,
+  }),
+  submitting_delete: keepManageStage,
+  delete_failed: (stage) => ({
+    kind: 'submitting_delete',
+    plan: stage.plan,
+    forced: stage.forced,
+  }),
+  committed_edit_impact: keepManageStage,
+  committed_delete_impact: keepManageStage,
+} satisfies ManageStageTransition<RetryManageStage>;
+
+export const MANAGE_STAGE_EDIT_DRAFT = {
+  idle: keepManageStage,
+  editing: (stage, event) => ({ ...stage, draft: event.draft }),
+  submitting_edit: keepManageStage,
+  confirming_edit: keepManageStage,
+  edit_failed: (stage, event) => ({ ...stage, draft: event.draft }),
+  confirming_delete: keepManageStage,
+  submitting_delete: keepManageStage,
+  delete_failed: keepManageStage,
+  committed_edit_impact: keepManageStage,
+  committed_delete_impact: keepManageStage,
+} satisfies ManageStageTransition<EditManageDraft>;
+
+export const MANAGE_STAGE_DISMISS_UNRESOLVED = {
+  idle: keepManageStage,
+  editing: keepManageStage,
+  submitting_edit: keepManageStage,
+  confirming_edit: keepManageStage,
+  edit_failed: (stage) => stage.retryRead ? idleManageStage() : stage,
+  confirming_delete: keepManageStage,
+  submitting_delete: keepManageStage,
+  delete_failed: (stage) => stage.retryRead ? idleManageStage() : stage,
+  committed_edit_impact: keepManageStage,
+  committed_delete_impact: keepManageStage,
+} satisfies ManageStageTransition<DismissUnresolvedManageStage>;
+
+export const MANAGE_STAGE_LANDING = {
+  idle: keepManageStage,
+  editing: keepManageStage,
+  submitting_edit: keepManageStage,
+  confirming_edit: keepManageStage,
+  edit_failed: keepManageStage,
+  confirming_delete: keepManageStage,
+  submitting_delete: keepManageStage,
+  delete_failed: keepManageStage,
+  committed_edit_impact: (stage, event) => event.verdict === 'landed'
+    ? idleManageStage()
+    : { ...stage, landingFailed: true },
+  committed_delete_impact: (stage, event) => event.verdict === 'landed'
+    ? idleManageStage()
+    : { ...stage, landingFailed: true },
+} satisfies ManageStageTransition<LandManageStage>;
+
+export type ManageStageEvent =
+  | { type: 'begin_edit'; draft: SourceEditDraft }
+  | { type: 'begin_delete' }
+  | { type: 'submit_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; surface: 'edit' | 'guard' }
+  | { type: 'submit_delete'; plan: ManageGuardPlan | null }
+  | { type: 'guard_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan }
+  | { type: 'guard_delete'; plan: ManageGuardPlan }
+  | { type: 'fail_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
+  | { type: 'fail_delete'; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
+  | { type: 'commit_impact'; action: 'edit' | 'delete'; plan: ManageGuardPlan; complete: () => Promise<SourceMutationLanding> }
+  | { type: 'settled' }
+  | CancelManageStage
+  | RetryManageStage
+  | EditManageDraft
+  | DismissUnresolvedManageStage
+  | LandManageStage;
+
+const applyManageStageTransition = <Event,>(
+  transitions: ManageStageTransition<Event>,
+  stage: ManageStage,
+  event: Event,
+): ManageStage => {
+  const transition = transitions[stage.kind] as (current: ManageStage, currentEvent: Event) => ManageStage;
+  return transition(stage, event);
+};
+
+export const transitionManageStage = (stage: ManageStage, event: ManageStageEvent): ManageStage => {
+  switch (event.type) {
+    case 'begin_edit': return { kind: 'editing', draft: event.draft };
+    case 'begin_delete': return { kind: 'confirming_delete', plan: null };
+    case 'submit_edit': return {
+      kind: 'submitting_edit',
+      draft: event.draft,
+      patch: event.patch,
+      plan: event.plan,
+      forced: event.plan !== null,
+      surface: event.surface,
+    };
+    case 'submit_delete': return {
+      kind: 'submitting_delete',
+      plan: event.plan,
+      forced: event.plan !== null,
+    };
+    case 'guard_edit': return {
+      kind: 'confirming_edit',
+      draft: event.draft,
+      patch: event.patch,
+      plan: event.plan,
+    };
+    case 'guard_delete': return { kind: 'confirming_delete', plan: event.plan };
+    case 'fail_edit': return {
+      kind: 'edit_failed',
+      draft: event.draft,
+      patch: event.patch,
+      plan: event.plan,
+      forced: event.forced,
+      retryRead: event.retryRead,
+      before: event.before,
+    };
+    case 'fail_delete': return {
+      kind: 'delete_failed',
+      plan: event.plan,
+      forced: event.forced,
+      retryRead: event.retryRead,
+      before: event.before,
+    };
+    case 'commit_impact': return event.action === 'edit'
+      ? { kind: 'committed_edit_impact', plan: event.plan, complete: event.complete, landingFailed: false }
+      : { kind: 'committed_delete_impact', plan: event.plan, complete: event.complete, landingFailed: false };
+    case 'settled': return idleManageStage();
+    case 'cancel': return applyManageStageTransition(MANAGE_STAGE_CANCEL, stage, event);
+    case 'retry': return applyManageStageTransition(MANAGE_STAGE_RETRY, stage, event);
+    case 'edit_draft': return applyManageStageTransition(MANAGE_STAGE_EDIT_DRAFT, stage, event);
+    case 'dismiss_unresolved': return applyManageStageTransition(MANAGE_STAGE_DISMISS_UNRESOLVED, stage, event);
+    case 'land': return applyManageStageTransition(MANAGE_STAGE_LANDING, stage, event);
+  }
 };
 
 export const MANAGE_STAGE_FAILURE_SURFACE: Record<ManageStageKind, ManageFailureSurface> = {

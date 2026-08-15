@@ -33,6 +33,7 @@ import {
   createContinuationSettlement,
   createSourceCreatedDelivery,
   type ContinuationTicket,
+  type SourceMutationLanding,
   type SourceMutationSettlement,
   type TrackSourceMutation,
 } from './mutationSettlement';
@@ -252,7 +253,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const publishReplacementFailure = React.useCallback((
     seq: ContinuationTicket,
     failureClass: ModelHubFailureClass,
-    settle?: () => Promise<void>,
+    settle?: () => Promise<SourceMutationLanding>,
   ) => {
     continuation.settle(seq, () => setReplacePhase({ kind: 'failure', failureClass }));
     if (settle) void settle().catch(() => undefined);

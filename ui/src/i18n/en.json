@@ -1317,6 +1317,9 @@
             "done": "Done"
           }
         },
+        "impact": {
+          "refreshFail": "The change committed, but the model surface could not be refreshed. Try the reconciliation again."
+        },
         "refetch": {
           "added": "New",
           "removed_one": "This fetch removed {{count}} model: {{models}}",
@@ -1335,6 +1338,7 @@
           "verifyDeleteSource": "Could not verify whether the source was removed"
         },
         "retry": "Try again",
+        "dismissUnverified": "Dismiss unverified result",
         "search": "Search model IDs",
         "col": {
           "id": "Model ID",

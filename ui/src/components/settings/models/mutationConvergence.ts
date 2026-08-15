@@ -22,7 +22,7 @@ export type MutationConvergence<T> = {
   entity?: T;
   applyEntity: (entity: T) => void;
   intent?: { authority: IntentAuthority; apply: () => void };
-  reconcile: () => Promise<void>;
+  reconcile: () => Promise<unknown>;
 };
 
 /** Every mutation converges in the same order: the server-owned entity first,

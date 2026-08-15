@@ -1317,6 +1317,9 @@
             "done": "完成"
           }
         },
+        "impact": {
+          "refreshFail": "变更已经提交，但模型页面暂时无法刷新。请再次重试对账。"
+        },
         "refetch": {
           "added": "新增",
           "removed_one": "本次拉取移除了 {{count}} 个型号：{{models}}",
@@ -1335,6 +1338,7 @@
           "verifyDeleteSource": "无法确认这个来源是否已移除"
         },
         "retry": "重试",
+        "dismissUnverified": "忽略未确认的结果",
         "search": "搜索型号 ID",
         "col": {
           "id": "型号 ID",

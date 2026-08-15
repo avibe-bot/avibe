@@ -11,11 +11,16 @@ import {
   MANAGE_DESTINATION,
   MANAGE_LABEL_KEY,
   MANAGE_STAGE_CANCEL,
+  MANAGE_STAGE_DISMISS_UNRESOLVED,
+  MANAGE_STAGE_EDIT_DRAFT,
   MANAGE_STAGE_FAILURE_SURFACE,
   MANAGE_STAGE_KINDS,
+  MANAGE_STAGE_LANDING,
   MANAGE_STAGE_RETRY,
   SOURCE_EDIT_REASON_KEY,
+  transitionManageStage,
 } from './manage';
+import type { ManageStage } from './manage';
 import { SOURCE_PROTOCOLS } from './types';
 import type { Source, SourceProtocol } from './types';
 
@@ -77,10 +82,73 @@ describe('source management capabilities', () => {
     expect(canEditSourceEndpoint(source({ credential_ref: null }))).toBe(false);
   });
 
-  it('defines every stage cancel, retry, and visible-failure destination', () => {
-    for (const record of [MANAGE_STAGE_CANCEL, MANAGE_STAGE_RETRY, MANAGE_STAGE_FAILURE_SURFACE]) {
+  it('defines every user event and visible-failure owner over every stage', () => {
+    for (const record of [
+      MANAGE_STAGE_CANCEL,
+      MANAGE_STAGE_RETRY,
+      MANAGE_STAGE_EDIT_DRAFT,
+      MANAGE_STAGE_DISMISS_UNRESOLVED,
+      MANAGE_STAGE_LANDING,
+    ]) {
       expect(new Set(Object.keys(record))).toEqual(new Set(MANAGE_STAGE_KINDS));
-      for (const kind of MANAGE_STAGE_KINDS) expect(record[kind]).toEqual(expect.any(String));
+      for (const kind of MANAGE_STAGE_KINDS) expect(record[kind]).toEqual(expect.any(Function));
+    }
+    expect(new Set(Object.keys(MANAGE_STAGE_FAILURE_SURFACE))).toEqual(new Set(MANAGE_STAGE_KINDS));
+    for (const kind of MANAGE_STAGE_KINDS) expect(MANAGE_STAGE_FAILURE_SURFACE[kind]).toEqual(expect.any(String));
+  });
+
+  it('keeps unresolved evidence fenced under every incidental edit and dismissal event', () => {
+    type UnresolvedStage = Extract<ManageStage, { retryRead: boolean }>;
+    const before = source();
+    const plan = { hops: [], gaps: [] };
+    const unresolved = {
+      edit_failed: {
+        kind: 'edit_failed',
+        draft: { displayName: 'Pending edit', baseUrl: before.base_url ?? '' },
+        patch: { display_name: 'Pending edit' },
+        plan,
+        forced: true,
+        retryRead: true,
+        before,
+      },
+      delete_failed: {
+        kind: 'delete_failed',
+        plan,
+        forced: true,
+        retryRead: true,
+        before,
+      },
+    } satisfies { [Kind in UnresolvedStage['kind']]: Extract<UnresolvedStage, { kind: Kind }> };
+    const editedDraft = { displayName: 'Typing resolves nothing', baseUrl: 'https://other.example/v1' };
+
+    for (const stage of Object.values(unresolved)) {
+      for (const event of [{ type: 'cancel' }, { type: 'edit_draft', draft: editedDraft }] as const) {
+        const next = transitionManageStage(stage, event);
+        expect(next.kind, `${stage.kind}:${event.type}`).toBe(stage.kind);
+        expect('retryRead' in next && next.retryRead, `${stage.kind}:${event.type}`).toBe(true);
+        expect('before' in next && next.before, `${stage.kind}:${event.type}`).toBe(before);
+        expect('plan' in next && next.plan, `${stage.kind}:${event.type}`).toBe(plan);
+        expect('forced' in next && next.forced, `${stage.kind}:${event.type}`).toBe(true);
+      }
+    }
+  });
+
+  it('earns exit from every committed impact stage from landing evidence', () => {
+    const plan = { hops: [], gaps: [] };
+    const complete = async () => 'landed' as const;
+    const committed = {
+      committed_edit_impact: { kind: 'committed_edit_impact', plan, complete, landingFailed: false },
+      committed_delete_impact: { kind: 'committed_delete_impact', plan, complete, landingFailed: false },
+    } satisfies {
+      [Kind in Extract<ManageStage, { landingFailed: boolean }>['kind']]: Extract<ManageStage, { kind: Kind }>
+    };
+
+    for (const stage of Object.values(committed)) {
+      const degraded = transitionManageStage(stage, { type: 'land', verdict: 'degraded' });
+      expect(degraded.kind).toBe(stage.kind);
+      expect('plan' in degraded && degraded.plan).toBe(plan);
+      expect('landingFailed' in degraded && degraded.landingFailed).toBe(true);
+      expect(transitionManageStage(degraded, { type: 'land', verdict: 'landed' })).toEqual({ kind: 'idle' });
     }
   });
 

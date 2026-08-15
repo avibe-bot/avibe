@@ -113,9 +113,9 @@ const deferred = <T,>() => {
 let sourceSnapshot = 0;
 const beginSourceSnapshot = () => ++sourceSnapshot;
 const settlement = (overrides: Partial<SourceMutationSettlement> = {}): SourceMutationSettlement => ({
-  source: vi.fn().mockResolvedValue(undefined),
-  gone: vi.fn().mockResolvedValue(undefined),
-  unread: vi.fn().mockResolvedValue(undefined),
+  source: vi.fn().mockResolvedValue('landed'),
+  gone: vi.fn().mockResolvedValue('landed'),
+  unread: vi.fn().mockResolvedValue('landed'),
   release: vi.fn(),
   readInventory: async () => ({ snapshot: beginSourceSnapshot(), sources: await modelsApi.listSources() }),
   ...overrides,
@@ -147,9 +147,9 @@ const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; scheduler?: 
     const latest = currentRef.current;
     if (!latest) throw new Error('Source is gone');
     return work(latest, settlement({
-      source: async (echoed) => { currentRef.current = echoed; setCurrent(echoed); await reconcile(); },
-      gone: async () => { currentRef.current = null; setCurrent(null); await reconcile(); },
-      unread: async () => { await reconcile(); },
+      source: async (echoed) => { currentRef.current = echoed; setCurrent(echoed); await reconcile(); return 'landed'; },
+      gone: async () => { currentRef.current = null; setCurrent(null); await reconcile(); return 'landed'; },
+      unread: async () => { await reconcile(); return 'landed'; },
     }));
   });
   return current
@@ -557,6 +557,82 @@ describe('SourceDetailPanel', () => {
     },
   );
 
+  it('rereads instead of issuing another PATCH while an unknown edit remains unresolved', async () => {
+    const patch = vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(new TypeError('response lost'));
+    const inventory = vi.spyOn(modelsApi, 'listSources')
+      .mockRejectedValueOnce(new Error('inventory unavailable'))
+      .mockResolvedValueOnce([source]);
+    renderEchoPanel();
+
+    await submitManagementWrite('edit', false);
+    await waitFor(() => expect(inventory).toHaveBeenCalledOnce());
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.type(name, ' still fenced');
+    await userEvent.keyboard('{Escape}');
+    expect(screen.getByDisplayValue('Unknown edit still fenced')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: /^Try again$|^重试$/i }));
+    await waitFor(() => expect(inventory).toHaveBeenCalledTimes(2));
+    expect(patch).toHaveBeenCalledOnce();
+  });
+
+  it.each(['edit', 'delete'] as const)(
+    'keeps the exact committed $action impact mounted until settlement lands',
+    async (action) => {
+      const reconcile = vi.fn()
+        .mockResolvedValueOnce('degraded')
+        .mockResolvedValueOnce('landed');
+      const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
+      const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
+      if (action === 'edit') {
+        vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
+          source: { ...source, display_name: 'Unknown edit' },
+          removed_hops: hops,
+          interrupted: gaps,
+        });
+      } else {
+        vi.spyOn(modelsApi, 'deleteSource').mockResolvedValueOnce({
+          removed_hops: hops,
+          interrupted: gaps,
+        });
+      }
+      const trackMutation: TrackSourceMutation = (work) => work(source, settlement({
+        source: reconcile,
+        gone: reconcile,
+      }));
+      render(
+        <ToastProvider>
+          <I18nextProvider i18n={i18n}>
+            <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
+          </I18nextProvider>
+        </ToastProvider>,
+      );
+
+      await submitManagementWrite(action, false);
+      const impact = await screen.findByRole('dialog', {
+        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+      });
+      const committedEvidence = () => Array.from(impact.querySelectorAll('.model-hub-guard-hop'))
+        .map((node) => node.textContent);
+      const evidenceBeforeRetry = committedEvidence();
+      expect(impact.textContent).toContain(hops[0].menu_model);
+      expect(impact.textContent).toContain(gaps[0].agents[0]);
+
+      const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
+        .find((button) => button.classList.contains('model-hub-guard-action'));
+      expect(done).toBeTruthy();
+      await userEvent.click(done!);
+      expect(await within(impact).findByText(/could not be refreshed|暂时无法刷新/i)).toBeTruthy();
+      expect(committedEvidence()).toEqual(evidenceBeforeRetry);
+
+      await userEvent.click(within(impact).getByRole('button', { name: /^Try again$|^重试$/i }));
+      await waitFor(() => expect(screen.queryByRole('dialog', {
+        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+      })).toBeNull());
+      expect(reconcile).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it.each(['edit', 'delete'] as const)(
     'does not reread after a server-named $action failure',
     async (action) => {
@@ -688,6 +764,17 @@ describe('SourceDetailPanel', () => {
     expect(detail).toMatch(/const submitEdit = \(draft: SourceEditDraft, patch: SourcePatch, plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const submitDelete = \(plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const commit = async[\s\S]*?setSaving\(true\)[\s\S]*?trackMutation\(async \(latest, settlement\)[\s\S]*?tierMutationPayload\(latest/);
+  });
+
+  it('routes every JSX management gesture through the stage authority', () => {
+    const detail = readFileSync(join(process.cwd(), 'src/components/settings/models/SourceDetailPanel.tsx'), 'utf8');
+    const jsx = detail.slice(detail.lastIndexOf('\n  return ('));
+    expect(detail).toContain('React.useReducer(transitionManageStage');
+    expect(jsx).not.toMatch(/setManageStage|dispatchManageStage\(\{\s*type:\s*['"](?:begin|submit|guard|fail|commit|settled)/);
+    expect(jsx).toMatch(/editManageDraft/);
+    expect(jsx).toMatch(/cancelManage/);
+    expect(jsx).toMatch(/dismissUnresolvedManage/);
+    expect(jsx).toMatch(/completeManageImpact/);
   });
 
   it('keeps Source entities behind one generation authority without an adoption side cache', () => {
