@@ -17,7 +17,10 @@ EverOS dictionaries or broaden the existing profile lookup.
   CLI rejects `--project all`; only the verified UI/controller path may request
   an Avibe-aggregated `all` listing.
 - The `all` result uses a versioned, bounded Avibe cursor that records per-project
-  consumed offsets and a project-catalog fingerprint. It is not an EverOS cursor.
+  timestamp/opaque-id boundaries, provider-page hints, observed-total hints, and
+  a principal-bound project-catalog fingerprint. Continuations locate the current
+  boundary timestamp with revalidated provider-page probes, so inserts and deletes
+  do not turn page offsets into replay or skip positions. It is not an EverOS cursor.
 - `vibe memory list` is not added to the injected Personal Memory prompt. Parser
   contracts must prove the injected CLI surface remains unchanged.
 - JSON output includes the provider-neutral opaque episode `id` for future item

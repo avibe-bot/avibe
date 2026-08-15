@@ -876,6 +876,80 @@ class MemoryModule:
     ) -> MemoryListResult:
         """Return one bounded page of processed episodes or a closed error."""
 
+        invalid = self._list_request_error(
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
+        if invalid is not None:
+            return invalid
+        async with self._lifecycle_lock:
+            return await self._list_episodes_under_lifecycle(
+                principal_id=principal_id,
+                project_id=project_id,
+                page=page,
+                page_size=page_size,
+            )
+
+    @asynccontextmanager
+    async def concurrent_episode_lists(
+        self,
+        *,
+        deadline: float,
+    ) -> AsyncIterator[Callable[..., Awaitable[MemoryListResult]]]:
+        """Fence one aggregate read while allowing its provider calls to overlap."""
+
+        def unavailable(
+            error: MemoryErrorCode,
+        ) -> Callable[..., Awaitable[MemoryListResult]]:
+            async def result(**_kwargs: Any) -> MemoryListResult:
+                return OperationFailed(error=error)
+
+            return result
+
+        if self._clear_active or self._is_maintenance_open():
+            yield unavailable("memory_clear_failed")
+            return
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            yield unavailable("memory_provider_timeout")
+            return
+        try:
+            await asyncio.wait_for(
+                self._lifecycle_lock.acquire(),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            yield unavailable("memory_provider_timeout")
+            return
+        try:
+            if self._clear_active or self._is_maintenance_open():
+                yield unavailable("memory_clear_failed")
+                return
+            try:
+                meta = await self._store_call(self._store.ensure_meta)
+            except Exception:
+                yield unavailable("memory_store_unavailable")
+                return
+            if meta.clear_in_progress:
+                yield unavailable("memory_clear_failed")
+                return
+            if monotonic() >= deadline:
+                yield unavailable("memory_provider_timeout")
+                return
+            yield self._list_episodes_after_store_check
+        finally:
+            self._lifecycle_lock.release()
+
+    def _list_request_error(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        page: int,
+        page_size: int,
+    ) -> OperationFailed | None:
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
         if not is_principal_id(principal_id):
@@ -893,24 +967,61 @@ class MemoryModule:
             return OperationFailed(error="memory_invalid_input")
         if self._clear_active or self._is_maintenance_open():
             return OperationFailed(error="memory_clear_failed")
+        return None
 
-        async with self._lifecycle_lock:
-            if not self._is_enabled():
-                return OperationFailed(error="memory_disabled")
-            try:
-                meta = await self._store_call(self._store.ensure_meta)
-            except Exception:
-                return OperationFailed(error="memory_store_unavailable")
-            if meta.clear_in_progress:
-                return OperationFailed(error="memory_clear_failed")
-            result = await self._provider_list_read(
-                lambda: self._provider.list_episodes(
-                    principal_id,
-                    project_id,
-                    page,
-                    page_size,
-                )
+    async def _list_episodes_under_lifecycle(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        page: int,
+        page_size: int,
+    ) -> MemoryListResult:
+        invalid = self._list_request_error(
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
+        if invalid is not None:
+            return invalid
+        try:
+            meta = await self._store_call(self._store.ensure_meta)
+        except Exception:
+            return OperationFailed(error="memory_store_unavailable")
+        if meta.clear_in_progress:
+            return OperationFailed(error="memory_clear_failed")
+        return await self._list_episodes_after_store_check(
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
+
+    async def _list_episodes_after_store_check(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        page: int,
+        page_size: int,
+    ) -> MemoryListResult:
+        invalid = self._list_request_error(
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
+        if invalid is not None:
+            return invalid
+        result = await self._provider_list_read(
+            lambda: self._provider.list_episodes(
+                principal_id,
+                project_id,
+                page,
+                page_size,
             )
+        )
         if isinstance(result, OperationFailed):
             return result
         return self._bounded_list_page(

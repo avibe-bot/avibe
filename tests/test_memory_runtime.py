@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
@@ -3989,6 +3990,1333 @@ def test_list_episodes_payload_serializes_opaque_id_and_page_metadata(
         "count": 1,
         "total_count": 6,
         "warnings": ["memory_list_truncated"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_uses_stable_project_boundaries_across_pages() -> None:
+    def item(entry_id: str, project: str, timestamp: str) -> MemoryListItem:
+        return MemoryListItem(
+            id=entry_id,
+            subject=entry_id,
+            summary="",
+            body=f"body {entry_id}",
+            timestamp=timestamp,
+            project=project,
+        )
+
+    by_project = {
+        "default": (
+            item("d-1", "default", "2026-08-14T12:00:00Z"),
+            item("d-2", "default", "2026-08-14T10:00:00Z"),
+            item("d-3", "default", "2026-08-14T08:00:00Z"),
+        ),
+        "notes": (
+            item("n-1", "notes", "2026-08-14T11:00:00Z"),
+            item("n-2", "notes", "2026-08-14T09:00:00Z"),
+        ),
+    }
+
+    class _ListModule:
+        async def list_episodes(self, *, project_id: str, page: int, page_size: int, **_kwargs):
+            assert page_size == 20
+            start = (page - 1) * page_size
+            entries = by_project[project_id][start : start + page_size]
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=len(entries),
+                total_count=len(by_project[project_id]),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default", "notes")
+
+    first = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=2)
+    second = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=first["next_cursor"],
+        limit=2,
+    )
+    third = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=second["next_cursor"],
+        limit=2,
+    )
+
+    assert [entry["id"] for entry in first["items"]] == ["d-1", "n-1"]
+    assert [entry["id"] for entry in second["items"]] == ["d-2", "n-2"]
+    assert [entry["id"] for entry in third["items"]] == ["d-3"]
+    assert first["total_count"] == second["total_count"] == third["total_count"] == 5
+    assert first["next_cursor"] and second["next_cursor"]
+    assert third["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_orders_fractional_timestamps_by_instant() -> None:
+    whole = MemoryListItem(
+        id="whole-second",
+        subject="whole",
+        summary="",
+        body="whole",
+        timestamp="2026-08-14T12:00:00Z",
+        project="default",
+    )
+    fractional = MemoryListItem(
+        id="fractional-second",
+        subject="fractional",
+        summary="",
+        body="fractional",
+        timestamp="2026-08-14T12:00:00.500000Z",
+        project="notes",
+    )
+
+    class _ListModule:
+        async def list_episodes(self, *, project_id: str, page: int, page_size: int, **_kwargs):
+            entry = whole if project_id == "default" else fractional
+            return MemoryListPage(
+                items=(entry,),
+                page=page,
+                page_size=page_size,
+                count=1,
+                total_count=1,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default", "notes")
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=2)
+
+    assert [entry["id"] for entry in payload["items"]] == [
+        "fractional-second",
+        "whole-second",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_cursor_survives_insert_and_delete_between_pages() -> None:
+    def item(entry_id: str, timestamp: str) -> MemoryListItem:
+        return MemoryListItem(
+            id=entry_id,
+            subject=entry_id,
+            summary="",
+            body=entry_id,
+            timestamp=timestamp,
+            project="default",
+        )
+
+    entries = [
+        item("e-12", "2026-08-14T12:00:00Z"),
+        item("e-11", "2026-08-14T11:00:00Z"),
+        item("e-10", "2026-08-14T10:00:00Z"),
+    ]
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            start = (page - 1) * page_size
+            selected = tuple(entries[start : start + page_size])
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    first = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=1)
+    entries.insert(0, item("e-13", "2026-08-14T13:00:00Z"))
+    second = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=first["next_cursor"],
+        limit=1,
+    )
+    entries[:] = [entry for entry in entries if entry.id != "e-12"]
+    third = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=second["next_cursor"],
+        limit=1,
+    )
+
+    assert [entry["id"] for entry in first["items"]] == ["e-12"]
+    assert [entry["id"] for entry in second["items"]] == ["e-11"]
+    assert [entry["id"] for entry in third["items"]] == ["e-10"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_cursor_uses_bounded_provider_page_hint() -> None:
+    base = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+
+    def item(index: int) -> MemoryListItem:
+        return MemoryListItem(
+            id=f"entry-{index:05d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=(base - timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            project="default",
+        )
+
+    requested_pages: list[int] = []
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            requested_pages.append(page)
+            start = (page - 1) * page_size + 1
+            entries = tuple(item(index) for index in range(start, start + page_size))
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=len(entries),
+                total_count=20_000,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    boundary = item(9_980)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": (boundary.timestamp, boundary.id)},
+        {"default": 499},
+        {"default": 20_000},
+    )
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
+
+    assert requested_pages[0] == 499
+    assert len(requested_pages) <= 30
+    assert [entry["id"] for entry in payload["items"]] == ["entry-09981"]
+    assert payload["next_cursor"]
+    _, page_hints, total_hints = memory_runtime._decode_memory_list_cursor(
+        payload["next_cursor"],
+        projects=projects,
+        fingerprint=fingerprint,
+    )
+    assert page_hints == {"default": 500}
+    assert total_hints == {"default": 20_000}
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_repositions_page_hint_after_large_shrink() -> None:
+    base = datetime(2026, 8, 13, 12, tzinfo=timezone.utc)
+    surviving = tuple(
+        MemoryListItem(
+            id=f"survivor-{index}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=(base - timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            project="default",
+        )
+        for index in range(159)
+    )
+    requested_pages: list[int] = []
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            requested_pages.append(page)
+            start = (page - 1) * page_size
+            selected = surviving[start : start + page_size]
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(surviving),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": ("2026-08-14T12:00:00Z", "removed-boundary")},
+        {"default": 5},
+        {"default": 200},
+    )
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=5)
+
+    assert requested_pages[0] == 5
+    assert len(requested_pages) <= 14
+    assert [entry["id"] for entry in payload["items"]] == [
+        f"survivor-{index}" for index in range(5)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_does_not_rewind_for_deletions_after_boundary() -> None:
+    base = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+
+    def item(index: int) -> MemoryListItem:
+        return MemoryListItem(
+            id=f"entry-{index:05d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=(base - timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            project="default",
+        )
+
+    requested_pages: list[int] = []
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            requested_pages.append(page)
+            start = (page - 1) * page_size + 1
+            entries = tuple(item(index) for index in range(start, start + page_size))
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=len(entries),
+                total_count=12_000,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    boundary = item(9_980)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": (boundary.timestamp, boundary.id)},
+        {"default": 500},
+        {"default": 20_000},
+    )
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
+
+    assert requested_pages[0] == 500
+    assert len(requested_pages) <= 30
+    assert [entry["id"] for entry in payload["items"]] == ["entry-09981"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_repositions_after_large_front_insertion() -> None:
+    base = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+
+    def item(index: int) -> MemoryListItem:
+        return MemoryListItem(
+            id=f"entry-{index:05d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=(base - timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            project="default",
+        )
+
+    requested_pages: list[int] = []
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            requested_pages.append(page)
+            start = (page - 1) * page_size + 1
+            entries = tuple(item(index) for index in range(start, start + page_size))
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=len(entries),
+                total_count=10_000,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    boundary = item(9_980)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": (boundary.timestamp, boundary.id)},
+        {"default": 100},
+        {"default": 2_000},
+    )
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
+
+    assert requested_pages[0] == 100
+    assert len(requested_pages) <= 30
+    assert [entry["id"] for entry in payload["items"]] == ["entry-09981"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_retries_changed_binary_locator_probe() -> None:
+    base = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+
+    def item(index: int) -> MemoryListItem:
+        return MemoryListItem(
+            id=f"entry-{index:03d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=(base - timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            project="default",
+        )
+
+    entries = [item(index) for index in range(1, 101)]
+    boundary = item(70)
+    mutated = False
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            nonlocal mutated
+            if page != 3 and not mutated:
+                del entries[:40]
+                entries.extend(item(index) for index in range(101, 141))
+                mutated = True
+            start = (page - 1) * page_size
+            selected = tuple(entries[start : start + page_size])
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": (boundary.timestamp, boundary.id)},
+        {"default": 3},
+        {"default": 100},
+    )
+
+    inconsistent = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=5)
+    retried = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=inconsistent["next_cursor"],
+        limit=5,
+    )
+
+    assert inconsistent["items"] == []
+    assert inconsistent["warnings"] == ["memory_list_partial"]
+    assert inconsistent["next_cursor"]
+    assert [entry["id"] for entry in retried["items"]] == [
+        f"entry-{index:03d}" for index in range(71, 76)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_resumes_before_equal_timestamp_peers() -> None:
+    entries = tuple(
+        MemoryListItem(
+            id=f"entry-{index:03d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp="2026-08-14T12:00:00Z",
+            project="default",
+        )
+        for index in range(60, 0, -1)
+    )
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            start = (page - 1) * page_size
+            selected = entries[start : start + page_size]
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    first = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    _, first_page_hints, _ = memory_runtime._decode_memory_list_cursor(
+        first["next_cursor"],
+        projects=projects,
+        fingerprint=fingerprint,
+    )
+    second = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=first["next_cursor"],
+        limit=20,
+    )
+    third = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=second["next_cursor"],
+        limit=20,
+    )
+
+    assert [entry["id"] for entry in first["items"]] == [
+        f"entry-{index:03d}" for index in range(1, 21)
+    ]
+    assert first_page_hints == {"default": 1}
+    assert [entry["id"] for entry in second["items"]] == [
+        f"entry-{index:03d}" for index in range(21, 41)
+    ]
+    assert [entry["id"] for entry in third["items"]] == [
+        f"entry-{index:03d}" for index in range(41, 61)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_retries_when_total_changes_mid_window() -> None:
+    entries = [
+        MemoryListItem(
+            id=f"entry-{index:03d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=f"2026-08-14T12:{59 - index:02d}:00Z",
+            project="default",
+        )
+        for index in range(21)
+    ]
+    mutated = False
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            nonlocal mutated
+            if page == 2 and not mutated:
+                entries.pop(0)
+                mutated = True
+            start = (page - 1) * page_size
+            selected = tuple(entries[start : start + page_size])
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    inconsistent = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+    retried = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=inconsistent["next_cursor"],
+        limit=20,
+    )
+
+    assert inconsistent["items"] == []
+    assert inconsistent["warnings"] == ["memory_list_partial"]
+    assert inconsistent["total_count"] is None
+    assert inconsistent["next_cursor"]
+    assert [entry["id"] for entry in retried["items"]] == [
+        entry.id for entry in entries
+    ]
+    assert retried["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_preserves_total_hint_for_retry_window() -> None:
+    base = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+    entries = [
+        MemoryListItem(
+            id=f"entry-{index:03d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=(base - timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            project="default",
+        )
+        for index in range(200)
+    ]
+    boundary = entries[80]
+    page_five_reads = 0
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            nonlocal page_five_reads
+            if page == 5:
+                page_five_reads += 1
+            if page == 5 and page_five_reads == 2:
+                del entries[:41]
+            start = (page - 1) * page_size
+            selected = tuple(entries[start : start + page_size])
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": (boundary.timestamp, boundary.id)},
+        {"default": 5},
+        {"default": 200},
+    )
+
+    inconsistent = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=5)
+    _, retry_page_hints, retry_total_hints = memory_runtime._decode_memory_list_cursor(
+        inconsistent["next_cursor"],
+        projects=projects,
+        fingerprint=fingerprint,
+    )
+    retried = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=inconsistent["next_cursor"],
+        limit=5,
+    )
+
+    assert inconsistent["items"] == []
+    assert inconsistent["warnings"] == ["memory_list_partial"]
+    assert retry_page_hints == {"default": 5}
+    assert retry_total_hints == {"default": 200}
+    assert [entry["id"] for entry in retried["items"]] == [
+        f"entry-{index:03d}" for index in range(81, 86)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_retries_same_count_page_membership_change() -> None:
+    entries = [
+        MemoryListItem(
+            id=f"entry-{index:03d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=f"2026-08-14T12:{59 - index:02d}:00Z",
+            project="default",
+        )
+        for index in range(21)
+    ]
+    inserted = MemoryListItem(
+        id="inserted",
+        subject="subject",
+        summary="summary",
+        body="body",
+        timestamp="2026-08-13T12:00:00Z",
+        project="default",
+    )
+    mutated = False
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            nonlocal mutated
+            if page == 2 and not mutated:
+                entries.pop(0)
+                entries.append(inserted)
+                mutated = True
+            start = (page - 1) * page_size
+            selected = tuple(entries[start : start + page_size])
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    inconsistent = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+    retried = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=inconsistent["next_cursor"],
+        limit=20,
+    )
+    final = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=retried["next_cursor"],
+        limit=20,
+    )
+
+    assert inconsistent["items"] == []
+    assert inconsistent["warnings"] == ["memory_list_partial"]
+    assert [entry["id"] for entry in retried["items"]] == [
+        entry.id for entry in entries[:20]
+    ]
+    assert [entry["id"] for entry in final["items"]] == [inserted.id]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_rejects_cursor_after_catalog_change() -> None:
+    class _ListModule:
+        async def list_episodes(self, *, project_id: str, page: int, page_size: int, **_kwargs):
+            entries = tuple(
+                MemoryListItem(
+                    id=f"{project_id}-{index}",
+                    subject="subject",
+                    summary="summary",
+                    body="body",
+                    timestamp=f"2026-08-14T{13 - index:02d}:00:00Z",
+                    project=project_id,
+                )
+                for index in (1, 2)
+            )
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=2,
+                total_count=2,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    projects = ["default"]
+    runtime.list_memory_projects = lambda _principal_id: tuple(projects)
+
+    first = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=1)
+    projects.append("notes")
+    changed = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=first["next_cursor"],
+        limit=1,
+    )
+
+    assert changed == {"status": "failed", "error": "memory_invalid_input"}
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_cursor_survives_project_catalog_reordering() -> None:
+    class _ListModule:
+        async def list_episodes(
+            self,
+            *,
+            project_id: str,
+            page: int,
+            page_size: int,
+            **_kwargs,
+        ) -> MemoryListPage:
+            entry = MemoryListItem(
+                id=f"{project_id}-entry",
+                subject="subject",
+                summary="summary",
+                body="body",
+                timestamp=(
+                    "2026-08-14T12:00:00Z"
+                    if project_id == "alpha"
+                    else "2026-08-14T11:00:00Z"
+                ),
+                project=project_id,
+            )
+            return MemoryListPage(
+                items=(entry,),
+                page=page,
+                page_size=page_size,
+                count=1,
+                total_count=1,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    projects = ["alpha", "beta"]
+    runtime.list_memory_projects = lambda _principal_id: tuple(projects)
+
+    first = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=1)
+    projects.reverse()
+    second = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=first["next_cursor"],
+        limit=1,
+    )
+
+    assert [entry["id"] for entry in first["items"]] == ["alpha-entry"]
+    assert [entry["id"] for entry in second["items"]] == ["beta-entry"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_returns_retry_cursor_for_empty_partial_page() -> None:
+    notes_available = False
+
+    class _ListModule:
+        async def list_episodes(
+            self,
+            *,
+            project_id: str,
+            page: int,
+            page_size: int,
+            **_kwargs,
+        ) -> MemoryListPage | OperationFailed:
+            if project_id == "notes" and not notes_available:
+                return OperationFailed(error="memory_provider_unavailable")
+            items = (
+                (
+                    MemoryListItem(
+                        id="notes-entry",
+                        subject="subject",
+                        summary="summary",
+                        body="body",
+                        timestamp="2026-08-14T12:00:00Z",
+                        project="notes",
+                    ),
+                )
+                if project_id == "notes"
+                else ()
+            )
+            return MemoryListPage(
+                items=items,
+                page=page,
+                page_size=page_size,
+                count=len(items),
+                total_count=len(items),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default", "notes")
+
+    first = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+    notes_available = True
+    retried = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=first["next_cursor"],
+        limit=20,
+    )
+
+    assert first["items"] == []
+    assert first["warnings"] == ["memory_list_partial"]
+    assert first["total_count"] is None
+    assert first["next_cursor"]
+    assert [entry["id"] for entry in retried["items"]] == ["notes-entry"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("late_error", "expected_warning"),
+    [
+        ("memory_provider_timeout", "memory_list_truncated"),
+        ("memory_sidecar_unavailable", "memory_list_partial"),
+    ],
+)
+async def test_list_all_episodes_preserves_rows_before_late_page_failure(
+    late_error: str,
+    expected_warning: str,
+) -> None:
+    entries = tuple(
+        MemoryListItem(
+            id=f"entry-{index:03d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=f"2026-08-14T12:{59 - index:02d}:00Z",
+            project="default",
+        )
+        for index in range(20)
+    )
+
+    class _ListModule:
+        async def list_episodes(
+            self,
+            *,
+            page: int,
+            page_size: int,
+            **_kwargs,
+        ) -> MemoryListPage | OperationFailed:
+            if page == 2:
+                return OperationFailed(error=late_error)
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=len(entries),
+                total_count=21,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+
+    assert [entry["id"] for entry in payload["items"]] == [
+        entry.id for entry in entries[:-1]
+    ]
+    assert payload["warnings"] == [expected_warning]
+    assert payload["total_count"] is None
+    assert payload["next_cursor"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_does_not_advance_incomplete_timestamp_group() -> None:
+    timestamp = "2026-08-14T12:00:00Z"
+    entries = tuple(
+        MemoryListItem(
+            id=f"z-{index:02d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=timestamp,
+            project="default",
+        )
+        for index in range(20)
+    ) + tuple(
+        MemoryListItem(
+            id=f"a-{index:02d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=timestamp,
+            project="default",
+        )
+        for index in range(20)
+    )
+    page_two_available = False
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            if page == 2 and not page_two_available:
+                return OperationFailed(error="memory_provider_timeout")
+            start = (page - 1) * page_size
+            selected = entries[start : start + page_size]
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    partial = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+    page_two_available = True
+    retried = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=partial["next_cursor"],
+        limit=20,
+    )
+
+    assert partial["items"] == []
+    assert partial["warnings"] == ["memory_list_truncated"]
+    assert partial["next_cursor"]
+    assert [entry["id"] for entry in retried["items"]] == [
+        f"a-{index:02d}" for index in range(20)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_does_not_let_one_project_starve_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        memory_runtime,
+        "_MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS",
+        0.05,
+    )
+    healthy = MemoryListItem(
+        id="notes-entry",
+        subject="subject",
+        summary="summary",
+        body="body",
+        timestamp="2026-08-14T12:00:00Z",
+        project="notes",
+    )
+
+    class _ListProvider(FakeMemoryProvider):
+        async def list_episodes(
+            self,
+            principal_id: str,
+            project_id: str,
+            page: int,
+            page_size: int,
+        ) -> MemoryListPage:
+            self.list_requests.append((principal_id, project_id, page, page_size))
+            if project_id == "default":
+                await asyncio.Event().wait()
+            return MemoryListPage(
+                items=(healthy,),
+                page=page,
+                page_size=page_size,
+                count=1,
+                total_count=1,
+            )
+
+    module = memory_module.MemoryModule(
+        store=MemoryStore(),
+        provider=_ListProvider(),
+        enabled=True,
+    )
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = module
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default", "notes")
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+
+    assert [entry["id"] for entry in payload["items"]] == ["notes-entry"]
+    assert payload["warnings"] == ["memory_list_truncated"]
+    assert payload["total_count"] is None
+    assert payload["next_cursor"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_bounds_lifecycle_lock_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        memory_runtime,
+        "_MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    provider = FakeMemoryProvider()
+    module = memory_module.MemoryModule(
+        store=MemoryStore(),
+        provider=provider,
+        enabled=True,
+    )
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = module
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    await module._lifecycle_lock.acquire()
+    try:
+        payload = await asyncio.wait_for(
+            runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20),
+            timeout=0.2,
+        )
+    finally:
+        module._lifecycle_lock.release()
+
+    assert payload == {"status": "failed", "error": "memory_provider_timeout"}
+    assert provider.list_requests == []
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_rejects_active_maintenance_before_lock_wait() -> None:
+    provider = FakeMemoryProvider()
+    module = memory_module.MemoryModule(
+        store=MemoryStore(),
+        provider=provider,
+        enabled=True,
+    )
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = module
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    module.enter_maintenance()
+    await module._lifecycle_lock.acquire()
+    try:
+        payload = await asyncio.wait_for(
+            runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20),
+            timeout=0.2,
+        )
+    finally:
+        module._lifecycle_lock.release()
+
+    assert payload == {"status": "failed", "error": "memory_clear_failed"}
+    assert provider.list_requests == []
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_checks_store_once_before_provider_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = tuple(
+        MemoryListItem(
+            id=f"entry-{index:02d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=f"2026-08-14T{23 - index:02d}:00:00Z",
+            project="default",
+        )
+        for index in range(21)
+    )
+
+    class _ListProvider(FakeMemoryProvider):
+        async def list_episodes(
+            self,
+            principal_id: str,
+            project_id: str,
+            page: int,
+            page_size: int,
+        ) -> MemoryListPage:
+            self.list_requests.append((principal_id, project_id, page, page_size))
+            start = (page - 1) * page_size
+            selected = entries[start : start + page_size]
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    provider = _ListProvider()
+    module = memory_module.MemoryModule(
+        store=MemoryStore(),
+        provider=provider,
+        enabled=True,
+    )
+    ensure_meta = module._store.ensure_meta
+    store_checks = 0
+
+    def counted_ensure_meta():
+        nonlocal store_checks
+        store_checks += 1
+        return ensure_meta()
+
+    monkeypatch.setattr(module._store, "ensure_meta", counted_ensure_meta)
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = module
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+
+    assert len(payload["items"]) == 20
+    assert store_checks == 1
+    assert len(provider.list_requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_stops_when_store_check_consumes_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        memory_runtime,
+        "_MEMORY_LIST_AGGREGATE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    provider = FakeMemoryProvider()
+    module = memory_module.MemoryModule(
+        store=MemoryStore(),
+        provider=provider,
+        enabled=True,
+    )
+    ensure_meta = module._store.ensure_meta
+
+    def slow_ensure_meta():
+        threading.Event().wait(timeout=0.03)
+        return ensure_meta()
+
+    monkeypatch.setattr(module._store, "ensure_meta", slow_ensure_meta)
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = module
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+
+    assert payload == {"status": "failed", "error": "memory_provider_timeout"}
+    assert provider.list_requests == []
+
+
+def test_memory_list_cursor_bound_covers_maximum_valid_catalog() -> None:
+    projects = (
+        "default",
+        *(f"p{index:02d}-" + "x" * 59 for index in range(16)),
+    )
+    timestamp = "2026-08-14T12:00:00." + "1" * 38 + "+00:00"
+    boundaries = {
+        project_id: (timestamp, "\\" * 128)
+        for project_id in projects
+    }
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+
+    page_hints = {
+        project_id: memory_runtime._MEMORY_LIST_PROVIDER_MAX_PAGE
+        for project_id in projects
+    }
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        boundaries,
+        page_hints,
+        {project_id: 20_000_000 for project_id in projects},
+    )
+
+    assert len(cursor.encode("ascii")) <= memory_runtime.MEMORY_LIST_CURSOR_MAX_BYTES
+    assert memory_runtime._decode_memory_list_cursor(
+        cursor,
+        projects=projects,
+        fingerprint=fingerprint,
+    ) == (
+        boundaries,
+        page_hints,
+        {project_id: 20_000_000 for project_id in projects},
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_rejects_surrogate_boundary_id() -> None:
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    raw = json.dumps(
+        {
+            "v": memory_runtime._MEMORY_LIST_CURSOR_VERSION,
+            "f": fingerprint,
+            "b": {
+                "default": {
+                    "t": "2026-08-14T12:00:00Z",
+                    "i": "\ud800",
+                    "p": 1,
+                    "n": 1,
+                }
+            },
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    cursor = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    class _ListModule:
+        async def list_episodes(self, **_kwargs):
+            raise AssertionError("invalid cursor reached the provider")
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: projects
+
+    result = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
+
+    assert result == {"status": "failed", "error": "memory_invalid_input"}
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_rejects_cursor_from_another_principal() -> None:
+    items = (
+        MemoryListItem(
+            id="entry-1",
+            subject="Subject 1",
+            summary="",
+            body="Body 1",
+            timestamp="2026-08-14T12:00:00Z",
+            project="default",
+        ),
+        MemoryListItem(
+            id="entry-2",
+            subject="Subject 2",
+            summary="",
+            body="Body 2",
+            timestamp="2026-08-14T11:00:00Z",
+            project="default",
+        ),
+    )
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            start = (page - 1) * page_size
+            entries = items[start : start + page_size]
+            return MemoryListPage(
+                items=entries,
+                page=page,
+                page_size=page_size,
+                count=len(entries),
+                total_count=len(items),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+
+    first = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=1)
+    other = await runtime.list_all_episodes_payload(
+        "u-22222222222222222222222222222222",
+        cursor=first["next_cursor"],
+        limit=1,
+    )
+
+    assert other == {"status": "failed", "error": "memory_invalid_input"}
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_marks_partial_results_and_omits_total() -> None:
+    """Scenario: MEMORY-LIST-005."""
+
+    good = MemoryListItem(
+        id="default-1",
+        subject="subject",
+        summary="summary",
+        body="body",
+        timestamp="2026-08-14T12:00:00Z",
+        project="default",
+    )
+
+    class _ListModule:
+        async def list_episodes(self, *, project_id: str, page: int, page_size: int, **_kwargs):
+            if project_id == "notes":
+                return OperationFailed(error="memory_provider_unavailable")
+            return MemoryListPage(
+                items=(good,),
+                page=page,
+                page_size=page_size,
+                count=1,
+                total_count=1,
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default", "notes")
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+
+    assert [entry["id"] for entry in payload["items"]] == ["default-1"]
+    assert payload["total_count"] is None
+    assert payload["warnings"] == ["memory_list_partial"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_returns_closed_failure_when_every_project_fails() -> None:
+    class _ListModule:
+        async def list_episodes(self, **_kwargs):
+            return OperationFailed(error="memory_sidecar_unavailable")
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default", "notes")
+
+    payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=None, limit=20)
+
+    assert payload == {
+        "status": "failed",
+        "error": "memory_sidecar_unavailable",
     }
 
 

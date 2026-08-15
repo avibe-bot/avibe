@@ -697,10 +697,13 @@
         "command": "通过运行中的控制器使用本地记忆",
         "status": "显示记忆状态",
         "profile": "显示记忆档案",
+        "list": "列出已处理的记忆片段",
         "search": "搜索本地记忆",
         "remember": "将长期个人信息加入队列",
         "query": "搜索内容",
         "project": "记忆项目：default，或 billing 这类小写 slug",
+        "page": "页码（从 1 开始）",
+        "pageLimit": "每页记忆片段数（1-20）",
         "limit": "最大结果数（1-20）",
         "mode": "召回模式（默认：hybrid）",
         "text": "要记住的文本（最多 4,000 个字符）",
@@ -749,6 +752,9 @@
       },
       "empty": "未找到记忆条目。",
       "remembered": "记忆已加入队列。",
+      "listWarning": {
+        "truncated": "记忆列表已达到服务排序上限，后续页面可能不完整。"
+      },
       "partialRestartWarning": "记忆设置内容暂不可用：Web UI 已重启，但服务仍在运行，\n  两者共享的记忆访问凭证仅存在于运行中的进程内。\n  请先运行 'vibe stop'，再运行 'vibe'，以同时重启两者。"
     },
     "alert": {

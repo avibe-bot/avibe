@@ -890,6 +890,37 @@ async def memory_projects(
     )
 
 
+async def memory_list(
+    *,
+    user_key: str,
+    project: str | None = None,
+    page: int | None = None,
+    cursor: str | None = None,
+    limit: int = 20,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    payload: dict[str, object] = {"limit": limit}
+    if project is not None:
+        payload["project"] = project
+    if page is not None:
+        payload["page"] = page
+    if cursor is not None:
+        payload["cursor"] = cursor
+    return await _memory_request(
+        "POST",
+        "/internal/memory/list",
+        payload=payload,
+        headers=_memory_user_key_headers(
+            "POST",
+            "/internal/memory/list",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_search(
     query: str,
     policy: dict[str, object],
@@ -1001,6 +1032,28 @@ def memory_profile_sync(
     return _memory_request_sync(
         "GET",
         "/internal/memory/profile",
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_list_sync(
+    *,
+    page: int = 1,
+    limit: int = 20,
+    caller_session_id: str | None = None,
+    project: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    payload: dict[str, object] = {"page": page, "limit": limit}
+    if project is not None:
+        payload["project"] = project
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/list",
+        payload=payload,
         headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,

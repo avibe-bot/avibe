@@ -14,6 +14,18 @@ Avibe Memory distills eligible Workbench and private-IM messages into a
 per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
 Processing Record, current profile, search results, and settings.
 
+## Processed episode listing
+
+`vibe memory list` reads only valid, active processed episodes for the current
+scoped principal and project. It does not include profiles, agent memories,
+atomic facts, unprocessed messages, or superseded episodes. Single-project
+reads use EverOS's 1-based pages and fixed newest-first order. The verified
+Settings UI may aggregate the same principal's projects through a bounded,
+versioned Avibe cursor; the Agent CLI cannot request `all`. JSON preserves the
+provider's opaque entry id as a future inspection handle. Listing does not add
+Search/Get payloads to provider diagnostics and does not invoke LLM, embedding,
+or reranking providers.
+
 ## Optional reranking endpoint
 
 The third processing endpoint in **Settings > Memory** is optional. Configure

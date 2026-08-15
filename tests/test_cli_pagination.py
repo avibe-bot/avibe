@@ -62,6 +62,7 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         ("agent", "list"),
         ("agent", "models"),
         ("runs", "list"),
+        ("memory", "list"),
         ("session", "list"),
         ("session", "queue", "list"),
         ("vault", "list"),

@@ -1,0 +1,43 @@
+version: 1
+capability:
+  id: memory_list
+  name: Scoped processed Memory episode listing
+  canonical_tests:
+    - tests/scenarios/memory_list/test_memory_list_scenarios.py
+    - tests/test_memory_runtime.py
+    - tests/test_internal_server.py
+    - tests/test_memory_cli.py
+status_legend:
+  covered: executable evidence exists
+  partial: contract coverage exists
+scenarios:
+  - id: MEMORY-LIST-001
+    name: Captured processed episodes are returned through the scoped CLI list
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/scenarios/memory_list/test_memory_list_scenarios.py::test_captured_processed_episodes_list_through_cli_with_exact_page_boundary
+  - id: MEMORY-LIST-002
+    name: A named project list excludes episodes captured in other projects
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/memory_list/test_memory_list_scenarios.py::test_captured_processed_episodes_list_through_cli_with_exact_page_boundary
+  - id: MEMORY-LIST-003
+    name: Settings all is principal-scoped and Agent CLI all is rejected
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_internal_server.py::test_memory_list_all_is_available_only_to_signed_ui_principal
+  - id: MEMORY-LIST-004
+    name: Exact 1-based page boundary preserves newest-first order
+    status: covered
+    kind: boundary
+    layer: scenario
+    test: tests/scenarios/memory_list/test_memory_list_scenarios.py::test_captured_processed_episodes_list_through_cli_with_exact_page_boundary
+  - id: MEMORY-LIST-005
+    name: Aggregate project failures return partial data without an invented total
+    status: covered
+    kind: degradation
+    layer: contract
+    test: tests/test_memory_runtime.py::test_list_all_episodes_marks_partial_results_and_omits_total

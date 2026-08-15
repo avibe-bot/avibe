@@ -1,0 +1,17 @@
+version: 1
+capability: memory_list
+observations:
+  - id: MEMORY-LIST-OBS-001
+    scenarios:
+      - MEMORY-LIST-001
+      - MEMORY-LIST-002
+      - MEMORY-LIST-004
+    observation: The hermetic provider derives only extracted episodes from real module captures, and the public CLI reads two exact pages from one named project.
+  - id: MEMORY-LIST-OBS-002
+    scenarios:
+      - MEMORY-LIST-003
+    observation: The controller selects the UI or Agent project parser only after validating the caller scope; only the signed UI parser admits all.
+  - id: MEMORY-LIST-OBS-003
+    scenarios:
+      - MEMORY-LIST-005
+    observation: Aggregate reads retain healthy project items while surfacing a closed warning and nullable total when another project fails.

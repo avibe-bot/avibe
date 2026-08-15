@@ -1149,6 +1149,82 @@ def register_memory_routes(app) -> None:
 
         return await app.dispatch_native_request(starlette_request, handler)
 
+    @app.post("/api/memory/list", include_in_schema=False)
+    async def memory_list_post(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            try:
+                payload = await starlette_request.json()
+            except Exception:
+                payload = None
+            if not isinstance(payload, dict) or set(payload) - {
+                "project",
+                "page",
+                "cursor",
+                "limit",
+            }:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            project = payload.get("project")
+            page = payload.get("page")
+            cursor = payload.get("cursor")
+            limit = payload.get("limit", 20)
+            from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
+
+            cursor_bytes: int | None = None
+            if isinstance(cursor, str):
+                try:
+                    cursor_bytes = len(cursor.encode("utf-8"))
+                except UnicodeEncodeError:
+                    pass
+
+            if (
+                (project is not None and not isinstance(project, str))
+                or isinstance(limit, bool)
+                or not isinstance(limit, int)
+                or not 1 <= limit <= 20
+                or (
+                    page is not None
+                    and (
+                        isinstance(page, bool)
+                        or not isinstance(page, int)
+                        or page < 1
+                    )
+                )
+                or (
+                    cursor is not None
+                    and (
+                        not isinstance(cursor, str)
+                        or not cursor
+                        or cursor_bytes is None
+                        or cursor_bytes > MEMORY_LIST_CURSOR_MAX_BYTES
+                    )
+                )
+                or (project == "all" and page is not None)
+                or (project != "all" and cursor is not None)
+            ):
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_list(
+                    user_key=user_key,
+                    project=project,
+                    page=page,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
     @app.post("/api/memory/runtime/restart", include_in_schema=False)
     async def memory_runtime_restart_post(starlette_request: FastAPIRequest):
         """Restart the live sidecar without changing persisted settings."""
