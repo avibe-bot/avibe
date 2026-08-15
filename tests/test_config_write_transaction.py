@@ -40,48 +40,73 @@ def test_update_config_fields_writes_and_returns_fresh_state(
     assert V2Config.load().language == "zh"
 
 
-def test_transaction_sees_concurrent_write_inside_lock(
-    isolated_config_home: Path,
-) -> None:
-    """The lock serializes whole RMW cycles: two concurrent
-    transactions on disjoint fields BOTH survive, and the later one's
-    mutator sees the earlier one's committed field (its load ran after
-    the earlier save). Under the plain load→save pattern the second
-    writer's field would be reverted by the first writer's stale
-    snapshot — the #1458 race."""
+def _txn_worker_a(home: str, entered: threading.Event, release: threading.Event) -> None:
+    """Hold the transaction open (file lock held) until released."""
+    import os as _os
 
-    a_entered = threading.Event()
-    b_saw_a: dict = {}
+    _os.environ["AVIBE_HOME"] = home
+    from config.v2_config import update_config_fields
 
-    def mutator_a(cfg: V2Config) -> None:
-        a_entered.set()
+    def mutator(cfg: V2Config) -> None:
         cfg.language = "zh"
+        entered.set()
+        assert release.wait(timeout=15), "worker A never released"
 
-    def mutator_b(cfg: V2Config) -> None:
-        b_saw_a["language"] = cfg.language
+    update_config_fields(mutator)
+
+
+def _txn_worker_b(home: str, done: threading.Event, saw_queue) -> None:
+    import os as _os
+
+    _os.environ["AVIBE_HOME"] = home
+    from config.v2_config import update_config_fields
+
+    def mutator(cfg: V2Config) -> None:
+        saw_queue.put(cfg.language)
         cfg.runtime.log_level = "DEBUG"
 
-    done: list = []
+    update_config_fields(mutator)
+    done.set()
 
-    def txn(mutator):
-        update_config_fields(mutator)
-        done.append(True)
 
-    ta = threading.Thread(target=txn, args=(mutator_a,))
-    tb = threading.Thread(target=txn, args=(mutator_b,))
-    ta.start()
-    assert a_entered.wait(timeout=5)  # A is inside its cycle
-    tb.start()                        # B queues on the file lock
-    ta.join(timeout=5)
-    tb.join(timeout=5)
-    assert len(done) == 2
+def test_transaction_blocks_second_process_until_first_releases(
+    isolated_config_home: Path,
+) -> None:
+    """The cross-process contract, exercised across REAL processes:
+    while worker A sits inside its transaction (file lock held), worker
+    B's transaction must not enter — and once A releases, B's mutator
+    sees A's committed field. Thread-based variants of this test are
+    vacuous: the process-local ``CONFIG_LOCK`` serializes them before
+    the file lock, so they would pass even with a no-op flock."""
+
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    entered = ctx.Event()
+    release = ctx.Event()
+    b_done = ctx.Event()
+    saw_queue = ctx.Queue()
+
+    a = ctx.Process(target=_txn_worker_a, args=(str(isolated_config_home.parent.parent), entered, release))
+    b = ctx.Process(target=_txn_worker_b, args=(str(isolated_config_home.parent.parent), b_done, saw_queue))
+    a.start()
+    assert entered.wait(timeout=15), "worker A never entered its transaction"
+    b.start()
+    # B must be blocked on the file lock while A holds it. Generous
+    # margin: an unblocked trivial transaction finishes well inside it.
+    assert not b_done.wait(timeout=1.0), "B entered the transaction while A held the file lock"
+    release.set()
+    a.join(timeout=15)
+    b.join(timeout=15)
+    assert a.exitcode == 0, f"worker A failed: {a.exitcode}"
+    assert b.exitcode == 0, f"worker B failed: {b.exitcode}"
 
     loaded = V2Config.load()
     # Both writes survive.
     assert loaded.language == "zh"
     assert loaded.runtime.log_level == "DEBUG"
     # B's snapshot was loaded after A's save (inside the lock).
-    assert b_saw_a["language"] == "zh"
+    assert saw_queue.get(timeout=5) == "zh"
 
 
 def test_mutator_exception_aborts_without_write(isolated_config_home: Path) -> None:
