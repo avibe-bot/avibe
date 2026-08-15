@@ -219,7 +219,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
               className={clsx(
                 'inline-flex h-7 items-center gap-1 rounded-full border px-3 text-[11px] font-medium transition-colors',
                 selectedSource === source.key
-                  ? 'border-mint/35 bg-mint/[0.08] text-mint-ink shadow-glow-sm-mint'
+                  ? 'border-mint/35 bg-mint/[0.08] text-mint-ink shadow-glow-xs-mint'
                   : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
               )}
             >

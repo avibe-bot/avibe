@@ -94,7 +94,11 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
   return (
     <div className={clsx('flex w-full flex-col gap-5', isPage && 'h-full')}>
       {/* diagHero */}
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-mint/30 bg-surface-2 px-6 py-5 shadow-mint-card-sm">
+      {/* Not `shadow-mint-card-sm`: design.pen draws this card at y16, and that
+          rung is y8. Card washes are not this change's scope -- 41 of them are
+          still literals -- so it keeps its own value rather than being snapped
+          to the nearest rung. */}
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-mint/30 bg-surface-2 px-6 py-5 shadow-[0_16px_32px_-8px_rgba(91,255,160,0.078)]">
         <div className="flex min-w-0 items-center gap-3.5">
           <div className="flex size-[42px] shrink-0 items-center justify-center rounded-full border border-mint/35 bg-mint/[0.08] shadow-glow-sm-mint">
             <Activity className="size-5 text-mint-ink" strokeWidth={2.25} />

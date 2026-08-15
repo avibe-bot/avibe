@@ -1073,7 +1073,7 @@ function assertGlowsReadThroughTokens(root) {
       + `neither can be re-anchored for light, and blur, spread and alpha have no scale left to be `
       + `checked against -- so a managed colour does not redeem hand-picked offsets, and neither `
       + `does a tidy name wrapped around them. Pick the token whose blur this is nearest -- dot, `
-      + `wire, sm, md, lg or cta -- and use shadow-glow-<role>-<accent>, or `
+      + `wire, xs, sm, md, lg, xl or cta -- and use shadow-glow-<role>-<accent>, or `
       + `var(--shadow-glow-<role>-<accent>) as a whole layer inside a composite shadow. Inside `
       + `drop-shadow() only the spreadless roles fit, dot and wire, because that function takes no `
       + `spread and silently drops a layer carrying one. Add the token to @theme if that accent does `

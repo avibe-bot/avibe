@@ -115,12 +115,13 @@
   --shadow-mint-card: 0 24px 48px -12px var(--card-wash);
   --shadow-mint-card-lg: 0 32px 64px -12px var(--card-wash);
 
-  /* The accent glow scale, read off design.pen's Landing Page frame: `dot` is
-     its status dot, `sm` its icon tile, `md` its nav CTA and eyebrow badge,
-     `lg` its hero button. Geometry and alpha come from that frame, with one
-     departure: its dot glows at full alpha over near-black, and ours also sit
-     on lit panels, so `dot` is clamped to 0.9 -- the brightest value the call
-     sites were already using.
+  /* The accent glow scale, read off design.pen: `dot` is the Landing Page's
+     status dot, `xs` a control track, `sm` its icon tile and the Doctor pulse,
+     `md` its nav CTA, eyebrow badge and the Dashboard hero pulse, `lg` its hero
+     button, `xl` the Welcome logo. Geometry and alpha come from those frames,
+     with one departure: the dot glows at full alpha over near-black, and ours
+     also sit on lit panels, so `dot` is clamped to 0.9 -- the brightest value
+     the call sites were already using.
 
      `cta` is the exception that is not from design.pen. Its blur is themed
      because a neon that reads on black barely registers over a white card
@@ -151,19 +152,41 @@
   --shadow-glow-wire-cyan: 0 0 4px color-mix(in srgb, var(--cyan) 40%, transparent);
   --shadow-glow-wire-violet: 0 0 4px color-mix(in srgb, var(--violet) 40%, transparent);
 
-  --shadow-glow-sm-mint: 0 0 16px -2px rgba(91, 255, 160, 0.44);
-  --shadow-glow-sm-cyan: 0 0 16px -2px rgba(63, 224, 229, 0.44);
-  --shadow-glow-sm-violet: 0 0 16px -2px rgba(124, 91, 255, 0.44);
-  --shadow-glow-sm-gold: 0 0 16px -2px rgba(255, 200, 87, 0.44);
+  /* The sized rungs are derived from one rule design.pen follows, not chosen
+     one triple at a time: a glow is centred, its spread is a quarter of its
+     blur, and its colour is the accent at #5BFFA070. Five annotated frames
+     agree -- diagPulse 16/-4, heroPulse 24/-6, diagHero 32/-8, StepCard 48/-12
+     -- and welCard, at blur 64, still holds -12, so that is the cap.
 
-  --shadow-glow-md-mint: 0 0 24px -4px rgba(91, 255, 160, 0.4);
-  --shadow-glow-md-cyan: 0 0 24px -4px rgba(63, 224, 229, 0.4);
-  --shadow-glow-md-violet: 0 0 24px -4px rgba(124, 91, 255, 0.4);
-  --shadow-glow-md-gold: 0 0 24px -4px rgba(255, 200, 87, 0.4);
+     Reading the rule off the design rather than off the call sites is what
+     makes the rungs land on their frames. The first cut of this scale did the
+     opposite: it took each rung from the middle of the literals it had to
+     absorb, which produced `sm` at -2px -- a spread written nowhere in
+     design.pen and nowhere in this tree -- and every 16px glow moved off its
+     frame to reach it. glowScale.test.mjs asserts the rule so a rung cannot be
+     nudged back off it.
 
-  --shadow-glow-lg-mint: 0 0 32px -6px rgba(91, 255, 160, 0.44);
-  --shadow-glow-lg-cyan: 0 0 32px -6px rgba(63, 224, 229, 0.44);
-  --shadow-glow-lg-violet: 0 0 32px -6px rgba(124, 91, 255, 0.44);
+     The rungs stop at the blurs design.pen actually draws. `xs` and `xl` exist
+     because 12px and 48px glows are in the tree; without them a hero logo gets
+     snapped to 32px, which is not a token conversion but a redesign. */
+  --shadow-glow-xs-mint: 0 0 12px -3px rgba(91, 255, 160, 0.44);
+  --shadow-glow-xs-cyan: 0 0 12px -3px rgba(63, 224, 229, 0.44);
+
+  --shadow-glow-sm-mint: 0 0 16px -4px rgba(91, 255, 160, 0.44);
+  --shadow-glow-sm-cyan: 0 0 16px -4px rgba(63, 224, 229, 0.44);
+  --shadow-glow-sm-violet: 0 0 16px -4px rgba(124, 91, 255, 0.44);
+  --shadow-glow-sm-gold: 0 0 16px -4px rgba(255, 200, 87, 0.44);
+
+  --shadow-glow-md-mint: 0 0 24px -6px rgba(91, 255, 160, 0.44);
+  --shadow-glow-md-cyan: 0 0 24px -6px rgba(63, 224, 229, 0.44);
+  --shadow-glow-md-violet: 0 0 24px -6px rgba(124, 91, 255, 0.44);
+  --shadow-glow-md-gold: 0 0 24px -6px rgba(255, 200, 87, 0.44);
+
+  --shadow-glow-lg-mint: 0 0 32px -8px rgba(91, 255, 160, 0.44);
+  --shadow-glow-lg-cyan: 0 0 32px -8px rgba(63, 224, 229, 0.44);
+  --shadow-glow-lg-violet: 0 0 32px -8px rgba(124, 91, 255, 0.44);
+
+  --shadow-glow-xl-mint: 0 0 48px -12px rgba(91, 255, 160, 0.44);
 
   --shadow-glow-cta-mint: 0 0 var(--brand-glow-blur) -4px rgba(91, 255, 160, 0.6);
   --shadow-glow-cta-cyan: 0 0 var(--brand-glow-blur) -4px rgba(63, 224, 229, 0.6);

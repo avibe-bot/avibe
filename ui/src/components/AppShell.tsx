@@ -146,7 +146,7 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
           // Emphasized green circle — the back-to-workbench tab, mirroring the
           // desktop sidebar's distinct mint mode-switch button. Sized to fill the
           // slot so it sits on the same baseline as the plain icons.
-          <span className="grid size-7 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-glow-sm-mint">
+          <span className="grid size-7 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-glow-xs-mint">
             <Icon className="size-4 text-mint-ink" />
           </span>
         ) : (

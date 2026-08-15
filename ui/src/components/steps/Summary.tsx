@@ -197,7 +197,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     return (
       <div className="flex w-full justify-center">
         <WizardCard accent size="hero" className="items-center gap-6 text-center">
-          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-glow-lg-mint">
+          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-glow-xl-mint">
             <Check size={36} strokeWidth={2.4} />
           </div>
           <div className="space-y-2">
@@ -246,7 +246,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     <div className="flex w-full justify-center">
       <WizardCard accent size="hero" className="gap-6">
         <div className="flex flex-col items-center gap-5 text-center">
-          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-glow-lg-mint">
+          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-glow-xl-mint">
             <Check size={36} strokeWidth={2.4} />
           </div>
           <div className="space-y-2">

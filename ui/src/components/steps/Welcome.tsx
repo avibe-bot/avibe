@@ -44,7 +44,7 @@ export const Welcome: React.FC<WelcomeProps> = ({ onNext }) => {
       >
         {/* welBigLogo (A3aTA) */}
         <div
-          className="mx-auto flex size-20 items-center justify-center rounded-[20px] border-2 border-mint/40 bg-mint/[0.16] shadow-glow-lg-mint"
+          className="mx-auto flex size-20 items-center justify-center rounded-[20px] border-2 border-mint/40 bg-mint/[0.16] shadow-glow-xl-mint"
           aria-hidden
         >
           <Radio className="size-10 text-mint-ink" strokeWidth={1.75} />

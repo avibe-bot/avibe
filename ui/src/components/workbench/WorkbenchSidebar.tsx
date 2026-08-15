@@ -783,7 +783,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               <Inbox className={clsx('size-4', isActive ? 'text-cyan-ink' : 'text-foreground')} />
               <span className="flex-1">{t('workbench.nav.inbox')}</span>
               {badge && (
-                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-sm-cyan">
+                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                   {badge}
                 </span>
               )}

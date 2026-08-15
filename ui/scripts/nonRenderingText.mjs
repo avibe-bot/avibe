@@ -99,20 +99,41 @@ function blankCssComments(source) {
 // as copy on the page and is never parsed as CSS, so it belongs to the same
 // class -- text in a position that cannot draw light -- and is closed here
 // rather than left for the round that would have found it next.
-function blankTypeScriptComments(source, file) {
+// The parse, shared by the two callers that need it. Comments are kept apart
+// from JSX text because one caller wants the boundary and the other wants the
+// prose: `glowScale.test.mjs` reads the design annotations that document a
+// component's frame, which are comments and never page copy.
+function nonRenderingRanges(source, file) {
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const blanks = [];
+  const comments = [];
+  const jsxText = [];
   const collect = (ranges) => {
-    for (const range of ranges ?? []) blanks.push([range.pos, range.end]);
+    for (const range of ranges ?? []) comments.push([range.pos, range.end]);
   };
 
   const visit = (node) => {
     collect(ts.getLeadingCommentRanges(source, node.getFullStart()));
     collect(ts.getTrailingCommentRanges(source, node.getEnd()));
-    if (node.kind === ts.SyntaxKind.JsxText) blanks.push([node.getStart(tree), node.getEnd()]);
+    if (node.kind === ts.SyntaxKind.JsxText) jsxText.push([node.getStart(tree), node.getEnd()]);
     node.getChildren(tree).forEach(visit);
   };
   visit(tree);
+
+  return { comments, jsxText };
+}
+
+// Every comment in a file, as text. A design annotation is a comment by
+// construction, so this is the same boundary read from the other side.
+function typeScriptComments(source, file) {
+  const seen = new Set();
+  return nonRenderingRanges(source, file)
+    .comments.filter(([start, end]) => !seen.has(`${start}:${end}`) && seen.add(`${start}:${end}`))
+    .map(([start, end]) => source.slice(start, end));
+}
+
+function blankTypeScriptComments(source, file) {
+  const { comments, jsxText } = nonRenderingRanges(source, file);
+  const blanks = [...comments, ...jsxText];
 
   // `split('')`, not `[...source]`: the spread iterates code POINTS, while every
   // offset TypeScript hands back counts UTF-16 code UNITS. An emoji anywhere
@@ -134,4 +155,4 @@ function withoutNonRenderingText(source, file) {
   return file.endsWith('.css') ? blankCssComments(source) : blankTypeScriptComments(source, file);
 }
 
-export { blankCssComments, blankTypeScriptComments, withoutNonRenderingText };
+export { blankCssComments, blankTypeScriptComments, typeScriptComments, withoutNonRenderingText };

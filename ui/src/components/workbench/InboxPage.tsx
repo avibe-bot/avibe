@@ -181,7 +181,7 @@ export const InboxPage: React.FC = () => {
               className={clsx(
                 'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold transition sm:flex-none',
                 filter === key
-                  ? 'bg-mint/[0.10] text-mint-ink shadow-glow-sm-mint'
+                  ? 'bg-mint/[0.10] text-mint-ink shadow-glow-xs-mint'
                   : 'text-muted hover:text-foreground',
               )}
             >
