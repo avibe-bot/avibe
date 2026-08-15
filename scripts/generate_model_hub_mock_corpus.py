@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import socket
 import sys
 from contextlib import contextmanager
@@ -30,6 +31,8 @@ if str(ROOT) not in sys.path:
 from config import v2_config as config_module  # noqa: E402
 from config.v2_config import ModelHubConfig  # noqa: E402
 from core.handlers.model_hub.adapter import (  # noqa: E402
+    EngineHealth,
+    EngineStatus,
     OAuthFlowState,
     ObservationDiscovery,
     ObservationOutcome,
@@ -47,6 +50,7 @@ from core.handlers.model_hub.service import (  # noqa: E402
     ModelHubService,
 )
 from vibe.opencode_config import OpenCodeConfigProbeResult  # noqa: E402
+from vibe.model_hub_runtime import installer as runtime_installer_module  # noqa: E402
 
 SEED_PATH = Path(
     os.environ.get(
@@ -63,7 +67,8 @@ SEQUENCES_PATH = Path(
 OUTPUT_PATH = Path(
     os.environ.get(
         "MODEL_HUB_MOCK_OUTPUT_PATH",
-        ROOT / "ui/src/components/settings/models/modelHubMockCorpus.json",
+        ROOT
+        / "ui/src/components/settings/models/mock-only/modelHubMockCorpus.json",
     )
 )
 GENERATOR_COMMAND = "python3 scripts/generate_model_hub_mock_corpus.py"
@@ -311,6 +316,29 @@ class RecordedAdapter:
             flow_id: OAuthFlowState(**flow)
             for flow_id, flow in payload["oauth_flows"].items()
         }
+        self.runtime_status = self._runtime_status(payload["runtime"]["status"])
+        self.runtime_install_result = self._runtime_status(
+            payload["runtime"]["install_result"]
+        )
+
+    @staticmethod
+    def _runtime_status(payload: dict[str, Any]) -> EngineStatus:
+        return EngineStatus(
+            **{
+                **copy.deepcopy(payload),
+                "health": EngineHealth(payload["health"]),
+            }
+        )
+
+    async def status(self) -> EngineStatus:
+        return self.runtime_status
+
+    async def recover_installation(self) -> EngineStatus:
+        return self.runtime_status
+
+    async def install(self) -> EngineStatus:
+        self.runtime_status = self.runtime_install_result
+        return self.runtime_status
 
     async def provision_transient_credential(
         self,
@@ -478,6 +506,10 @@ class RecordedAdapter:
                 flow_id: _json_value(flow)
                 for flow_id, flow in self.oauth_flows.items()
             },
+            "runtime": {
+                "status": _json_value(self.runtime_status),
+                "install_result": _json_value(self.runtime_install_result),
+            },
         }
 
     def __getattr__(self, member: str) -> Any:
@@ -608,6 +640,14 @@ def _fixture_guards(
 ) -> Iterator[None]:
     builtin_ids = world["agent_facts"]["builtin_model_ids"]
     migration = world["migration"]
+    runtime_contract = world["runtime_contract"]
+
+    class RecordedRuntimeManager:
+        def contract_manifest(self) -> dict[str, Any]:
+            return copy.deepcopy(runtime_contract["manifest"])
+
+        def host_platform(self) -> str:
+            return runtime_contract["host_platform"]
 
     def registered_builtin_ids(backend: str) -> tuple[str, ...]:
         if backend not in builtin_ids:
@@ -624,6 +664,11 @@ def _fixture_guards(
         patch.object(service_module, "uuid", UnregisteredCollaborator("id_stream")),
         patch.object(service_module, "_builtin_model_ids", registered_builtin_ids),
         patch.object(config_module, "model_hub_fixed_menu_ids", registered_builtin_ids),
+        patch.object(
+            runtime_installer_module,
+            "EngineRuntimeManager",
+            RecordedRuntimeManager,
+        ),
         patch.object(
             migration_module,
             "read_claude_settings_env",
@@ -734,31 +779,45 @@ class ReachabilitySpec:
 
 FieldPath = tuple[str, ...]
 SENSITIVE_PLACEHOLDER = "<sensitive>"
-VOLATILE_PLACEHOLDER = "<volatile>"
-
-
-@dataclass(frozen=True)
-class EligibilitySpec:
-    kind: Literal["always", "observation_fixture", "unrecordable"] = "always"
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.kind == "unrecordable" and not self.reason:
-            raise ValueError("unrecordable request identity requires a reason")
-        if self.kind != "unrecordable" and self.reason is not None:
-            raise ValueError("only unrecordable request identity can carry a reason")
+VOLATILE_PLACEHOLDER = "<volatile:{index}>"
+_VOLATILE_ALIAS = re.compile(r"^<volatile:(?P<index>[1-9][0-9]*)>$")
 
 
 @dataclass(frozen=True)
 class RequestIdentitySpec:
     sensitive_fields: tuple[FieldPath, ...] = ()
     volatile_fields: tuple[FieldPath, ...] = ()
-    eligibility: EligibilitySpec = EligibilitySpec()
 
     def __post_init__(self) -> None:
         overlap = set(self.sensitive_fields) & set(self.volatile_fields)
         if overlap:
             raise ValueError(f"request identity fields overlap: {sorted(overlap)}")
+
+
+class VolatileAliases:
+    """Stable first-appearance aliases scoped to one recorded action sequence."""
+
+    def __init__(self) -> None:
+        self._values: dict[tuple[str, FieldPath], dict[str, str]] = {}
+        self._next: dict[tuple[str, FieldPath], int] = {}
+
+    def alias(self, operation: str, path: FieldPath, value: Any) -> str:
+        scope = (operation, path)
+        existing_alias = value if isinstance(value, str) else None
+        match = _VOLATILE_ALIAS.fullmatch(existing_alias or "")
+        if match is not None:
+            index = int(match.group("index"))
+            self._next[scope] = max(self._next.get(scope, 1), index + 1)
+            self._values.setdefault(scope, {})[_canonical(value)] = existing_alias
+            return existing_alias
+
+        identity = _canonical(value)
+        values = self._values.setdefault(scope, {})
+        if identity not in values:
+            index = self._next.get(scope, 1)
+            values[identity] = VOLATILE_PLACEHOLDER.format(index=index)
+            self._next[scope] = index + 1
+        return values[identity]
 
 
 @dataclass(frozen=True)
@@ -857,7 +916,19 @@ def _replace_field(
         parent[path[-1]] = replacement
 
 
-def _canonical_request(request: dict[str, Any]) -> dict[str, Any]:
+def _field_value(value: dict[str, Any], path: FieldPath) -> tuple[bool, Any]:
+    current: Any = value
+    for member in path:
+        if not isinstance(current, dict) or member not in current:
+            return False, None
+        current = current[member]
+    return True, current
+
+
+def _canonical_request(
+    request: dict[str, Any],
+    aliases: VolatileAliases | None = None,
+) -> dict[str, Any]:
     operation = request.get("operation")
     spec = OPERATION_REGISTRY.get(operation)
     if spec is None:
@@ -867,52 +938,21 @@ def _canonical_request(request: dict[str, Any]) -> dict[str, Any]:
     canonical = copy.deepcopy(request)
     for path in spec.request_identity.sensitive_fields:
         _replace_field(canonical, path, SENSITIVE_PLACEHOLDER)
+    sequence_aliases = aliases or VolatileAliases()
     for path in spec.request_identity.volatile_fields:
-        _replace_field(canonical, path, VOLATILE_PLACEHOLDER)
+        present, value = _field_value(canonical, path)
+        if present:
+            _replace_field(
+                canonical,
+                path,
+                sequence_aliases.alias(operation, path, value),
+            )
     return canonical
 
 
-def _recording_eligibility(
-    request: dict[str, Any],
-    fixture_world: dict[str, Any],
-) -> tuple[bool, str | None]:
-    spec = OPERATION_REGISTRY[request["operation"]].request_identity.eligibility
-    if spec.kind == "unrecordable":
-        return False, spec.reason
-    if spec.kind == "always":
-        return True, None
-    body = _body_value(request)
-    if not isinstance(body, dict):
-        return True, None
-    vendor = body.get("vendor")
-    if not isinstance(vendor, str):
-        return True, None
-    base_url = body.get("base_url")
-    key = f"{vendor}|{base_url or ''}"
-    fixtures = fixture_world["adapter"]["observation_script"]
-    if key in fixtures:
-        return True, None
-    return (
-        False,
-        "request needs a registered observation fixture for "
-        f"{key}; add it to scripts/model_hub_mock_seed.json before recording",
-    )
-
-
-INSTALL_RUNTIME_REASON = (
-    "unrecordable pending #1462: the server has no /api/models/runtime/install "
-    "operation, so the mock cannot record or invent an installation result"
-)
-
-
-OPERATION_REGISTRY["installRuntime"] = OperationSpec(
-    handler=None,
-    recording_probe=_request("installRuntime"),
-    reachability=ReachabilitySpec("unrecordable", reason=INSTALL_RUNTIME_REASON),
-    request_identity=RequestIdentitySpec(
-        eligibility=EligibilitySpec("unrecordable", INSTALL_RUNTIME_REASON)
-    ),
-)
+@_seed_operation("installRuntime", _request("installRuntime"))
+async def _install_runtime(runtime: FixtureRuntime, _request: dict[str, Any]) -> Any:
+    return await runtime.service.runtime_install()
 
 
 @_seed_operation(
@@ -933,7 +973,6 @@ OPERATION_REGISTRY["installRuntime"] = OperationSpec(
     ),
     request_identity=RequestIdentitySpec(
         sensitive_fields=(("body", "value", "key"),),
-        eligibility=EligibilitySpec("observation_fixture"),
     ),
 )
 async def _observe_source(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
@@ -963,7 +1002,6 @@ async def _observe_source(runtime: FixtureRuntime, request: dict[str, Any]) -> A
     request_identity=RequestIdentitySpec(
         sensitive_fields=(("body", "value", "key"),),
         volatile_fields=(("body", "value", "client_nonce"),),
-        eligibility=EligibilitySpec("observation_fixture"),
     ),
 )
 async def _create_source(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
@@ -1301,11 +1339,7 @@ async def _execute(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     operation = request["operation"]
     spec = OPERATION_REGISTRY.get(operation)
     if spec is None or spec.handler is None:
-        reason = (
-            spec.request_identity.eligibility.reason
-            if spec is not None
-            else None
-        )
+        reason = spec.reachability.reason if spec is not None else None
         raise UnregisteredFixtureAccess(
             reason
             or f"no authoritative server dispatch is registered for corpus operation: {operation}"
@@ -1313,38 +1347,75 @@ async def _execute(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     return await spec.handler(runtime, request)
 
 
-async def _validate_operation_registry(seed: dict[str, Any]) -> None:
-    """Prove every advertised probe is reachable through its declared path."""
+async def _validate_operation_registry(
+    seed: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Execute every recovery path and return the exact transitions it proves."""
 
+    proofs: dict[str, dict[str, Any]] = {}
     for operation, spec in OPERATION_REGISTRY.items():
         if spec.reachability.kind == "unrecordable":
             if spec.handler is not None or not spec.reachability.reason:
                 raise RuntimeError(f"{operation} has an invalid unrecordable declaration")
+            proofs[operation] = {
+                "prerequisites": [],
+                "request": _canonical_request(spec.recording_probe),
+                "transitions": [],
+            }
             continue
+        if spec.handler is None:
+            raise RuntimeError(f"{operation} has no authoritative server dispatch")
+
         runtime = FixtureRuntime(seed["config"], seed["fixture_world"])
-        for prerequisite in spec.reachability.prerequisites:
-            canonical_prerequisite = _canonical_request(prerequisite)
-            prerequisite_operation = canonical_prerequisite.get("operation")
+        aliases = VolatileAliases()
+        canonical_prerequisites: list[dict[str, Any]] = []
+        for step, prerequisite in enumerate(
+            spec.reachability.prerequisites,
+            start=1,
+        ):
+            prerequisite_operation = prerequisite.get("operation")
             if prerequisite_operation not in OPERATION_REGISTRY:
                 raise RuntimeError(
                     f"{operation} has an unregistered prerequisite: "
                     f"{prerequisite_operation}"
                 )
-            try:
-                with sealed_execution(runtime):
-                    await _execute(runtime, canonical_prerequisite)
-            except ModelHubError as error:
+            record = await _record_transition(
+                runtime,
+                prerequisite,
+                sequence_id=f"registry-proof-{operation}",
+                step=step,
+                aliases=aliases,
+            )
+            canonical_prerequisites.append(record["key"]["request"])
+            if record["outcome"]["kind"] == "error":
                 raise RuntimeError(
                     f"{operation} prerequisite failed: "
-                    f"{prerequisite_operation} ({error.code})"
-                ) from error
-        try:
-            with sealed_execution(runtime):
-                await _execute(runtime, _canonical_request(spec.recording_probe))
-        except ModelHubError:
-            # A server-named refusal is a recordable outcome. Escapes from the
-            # sealed fixture world remain loud and fail generation.
-            pass
+                    f"{prerequisite_operation} "
+                    f"({record['outcome']['error']})"
+                )
+
+        target = await _record_transition(
+            runtime,
+            spec.recording_probe,
+            sequence_id=f"registry-proof-{operation}",
+            step=len(canonical_prerequisites) + 1,
+            aliases=aliases,
+        )
+        key_input = {
+            member: copy.deepcopy(target["key"][member])
+            for member in ("version", "pre", "request")
+        }
+        proofs[operation] = {
+            "prerequisites": canonical_prerequisites,
+            "request": target["key"]["request"],
+            "transitions": [
+                {
+                    "id": target["key"]["id"],
+                    "request_token": _token(key_input),
+                }
+            ],
+        }
+    return proofs
 
 
 async def _record_transition(
@@ -1353,8 +1424,9 @@ async def _record_transition(
     *,
     sequence_id: str,
     step: int,
+    aliases: VolatileAliases | None = None,
 ) -> dict[str, Any]:
-    canonical_request = _canonical_request(request)
+    canonical_request = _canonical_request(request, aliases)
     pre_config = runtime.config_snapshot()
     pre_world = runtime.world_snapshot()
     key_body = {
@@ -1414,7 +1486,7 @@ async def _generate(
     seed: dict[str, Any],
     sequence_spec: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
-    await _validate_operation_registry(seed)
+    registry_proofs = await _validate_operation_registry(seed)
     seed_runtime = FixtureRuntime(seed["config"], seed["fixture_world"])
     with sealed_execution(seed_runtime):
         seed_reads = seed_runtime.read_projections()
@@ -1425,6 +1497,7 @@ async def _generate(
     traces: dict[str, list[dict[str, Any]]] = {}
     for sequence in sequence_spec["sequences"]:
         runtime = FixtureRuntime(seed["config"], seed["fixture_world"])
+        aliases = VolatileAliases()
         records: list[dict[str, Any]] = []
         transition_ids: list[str] = []
         for step, action in enumerate(sequence["actions"], start=1):
@@ -1441,6 +1514,7 @@ async def _generate(
                 request,
                 sequence_id=sequence["id"],
                 step=step,
+                aliases=aliases,
             )
             transition_id = record["key"]["id"]
             existing = transitions.get(transition_id)
@@ -1468,16 +1542,18 @@ async def _generate(
                     "command": (
                         GENERATOR_COMMAND if spec.handler is not None else None
                     ),
-                    "request": _canonical_request(spec.recording_probe),
+                    "request": registry_proofs[operation]["request"],
+                    "proven_transitions": registry_proofs[operation][
+                        "transitions"
+                    ],
+                    "unproven_reason": (
+                        spec.reachability.reason
+                        or "this exact pre-state and request have no generator execution proof"
+                    ),
                 },
                 "reachability": {
                     "kind": spec.reachability.kind,
-                    "prerequisites": copy.deepcopy(
-                        [
-                            _canonical_request(request)
-                            for request in spec.reachability.prerequisites
-                        ]
-                    ),
+                    "prerequisites": registry_proofs[operation]["prerequisites"],
                     "reason": spec.reachability.reason,
                 },
                 "request_identity": {
@@ -1492,10 +1568,6 @@ async def _generate(
                         for path in spec.request_identity.volatile_fields
                     ],
                     "volatile_placeholder": VOLATILE_PLACEHOLDER,
-                    "eligibility": {
-                        "kind": spec.request_identity.eligibility.kind,
-                        "reason": spec.request_identity.eligibility.reason,
-                    },
                 },
             }
             for operation, spec in sorted(OPERATION_REGISTRY.items())
@@ -1543,13 +1615,11 @@ def _record_miss(
         raise ValueError("request token is not canonically redacted")
     target_pre = missing["pre"]
     prefix: list[dict[str, Any]] | None = None
-    target_world: dict[str, Any] | None = None
     if target_pre == {
         "model_hub_config_sha256": corpus["seed"]["model_hub_config_sha256"],
         "fixture_world_sha256": corpus["seed"]["fixture_world_sha256"],
     }:
         prefix = []
-        target_world = corpus["seed"]["fixture_world"]
     if prefix is None:
         by_id = {
             sequence["id"]: sequence
@@ -1563,16 +1633,27 @@ def _record_miss(
                     "fixture_world_sha256": _sha256(post["fixture_world"]),
                 }:
                     prefix = copy.deepcopy(by_id[sequence_id]["actions"][: index + 1])
-                    target_world = post["fixture_world"]
                     break
             if prefix is not None:
                 break
     if prefix is None:
         raise ValueError("missing pre-state is not reachable from a recorded sequence")
-    assert target_world is not None
-    eligible, reason = _recording_eligibility(action, target_world)
-    if not eligible:
-        raise ValueError(reason or "request is not eligible for recording")
+    registration = next(
+        (
+            entry
+            for entry in corpus["operation_registry"]
+            if entry["operation"] == action["operation"]
+        ),
+        None,
+    )
+    if registration is None:
+        raise ValueError(f"unregistered corpus operation: {action['operation']}")
+    proven_ids = {
+        item["id"]
+        for item in registration["recording"]["proven_transitions"]
+    }
+    if transition_id not in proven_ids:
+        raise ValueError(registration["recording"]["unproven_reason"])
     sequence_id = f"recorded-{transition_id[:12]}"
     if any(item["id"] == sequence_id for item in sequence_spec["sequences"]):
         return

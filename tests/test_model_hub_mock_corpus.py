@@ -14,7 +14,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR_PATH = ROOT / "scripts/generate_model_hub_mock_corpus.py"
 CORPUS_PATH = (
-    ROOT / "ui/src/components/settings/models/modelHubMockCorpus.json"
+    ROOT
+    / "ui/src/components/settings/models/mock-only/modelHubMockCorpus.json"
 )
 
 

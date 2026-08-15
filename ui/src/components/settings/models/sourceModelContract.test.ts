@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { buildMockSources } from './mockData';
+import { buildMockSources } from './mock-only/mockData';
 
 const SOURCE_SCHEMA = resolve(
   dirname(fileURLToPath(import.meta.url)),

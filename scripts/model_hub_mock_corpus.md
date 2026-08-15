@@ -47,8 +47,10 @@ operation cannot silently omit dispatch, recovery, reachability, or response
 normalization, and request identity.
 
 Production imports only the live client. Hermetic callers opt into
-`modelsApi.mockEntry.ts`, which lazily loads the replay engine and corpus. The UI
-build fails if the corpus marker reaches any production asset.
+`mock-only/modelsApi.mockEntry.ts`, which lazily loads the replay engine and
+corpus. The UI build resolves the live client's module graph and fails if it can
+reach any file under `mock-only/`; a post-build marker scan remains as a second
+check on emitted production assets.
 
 Only the five currently exercised sequences are recorded. There is deliberately
 no speculative walkthrough corpus. Fixture-world content grows when a sequence

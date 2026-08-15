@@ -4,7 +4,7 @@ import type {
   ResolutionEvent,
   RuntimeDependency,
   Source,
-} from './types';
+} from '../types';
 
 const corpus = mockCorpusJson as unknown as {
   seed: { reads: { sources: Source[] } };

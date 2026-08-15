@@ -11,13 +11,13 @@ import { join, resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import mockCorpusJson from './modelHubMockCorpus.json';
+import mockCorpusJson from './mock-only/modelHubMockCorpus.json';
 import { ApiCallError, modelHubOperationRegistry } from './modelsApi';
 import {
   MockStore,
   UncontractedMockTransitionError,
   type MockCorpus,
-} from './modelsApi.mock';
+} from './mock-only/modelsApi.mock';
 import type { RouteHopRef } from './types';
 
 const referencesTo = (store: MockStore, sourceId: string): RouteHopRef[] =>

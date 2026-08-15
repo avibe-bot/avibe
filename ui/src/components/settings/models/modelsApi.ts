@@ -1,6 +1,7 @@
 // Model Hub API client. Presents one typed live surface over the frozen
 // `/api/models/*` REST endpoints. Hermetic tests load the recorded replay client
-// through `modelsApi.mockEntry.ts`, which keeps its corpus outside live bundles.
+// through `mock-only/modelsApi.mockEntry.ts`; the build validates that this
+// directory is unreachable from the live module graph.
 //
 // Methods unwrap the frozen envelope ({ok:true, …} | {ok:false, error}) and
 // throw an Error carrying the machine code on failure, so callers work with
@@ -415,19 +416,67 @@ export const oauthResult = (r: OAuthResultResponse): OAuthResult => {
 export type ModelHubOperation = keyof ModelsApi;
 type ModelHubOperationResult<Operation extends ModelHubOperation> =
   Awaited<ReturnType<ModelsApi[Operation]>>;
-type ModelHubOperationRegistry = {
+type ModelHubOperationDefinitions = {
   [Operation in ModelHubOperation]: {
     responseTransform: (response: unknown) => ModelHubOperationResult<Operation>;
+  };
+};
+type ModelHubCallOptions = {
+  signal?: AbortSignal;
+  commit?: () => void;
+};
+type ModelHubOperationRegistry = {
+  [Operation in ModelHubOperation]: ModelHubOperationDefinitions[Operation] & {
+    execute: (
+      invoke: () => Promise<unknown>,
+      options?: ModelHubCallOptions,
+    ) => Promise<ModelHubOperationResult<Operation>>;
   };
 };
 
 const responseAs = <Response>(response: unknown): Response => response as Response;
 
+const abortReason = (signal: AbortSignal): unknown =>
+  signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+
+const executeModelHubCall = async <Result>(
+  responseTransform: (response: unknown) => Result,
+  invoke: () => Promise<unknown>,
+  { signal, commit }: ModelHubCallOptions = {},
+): Promise<Result> => {
+  if (signal?.aborted) throw abortReason(signal);
+
+  type Outcome =
+    | { kind: 'success'; value: unknown }
+    | { kind: 'error'; error: unknown };
+  const outcome = invoke()
+    .then<Outcome>(
+      (value) => ({ kind: 'success', value }),
+      (error) => ({ kind: 'error', error }),
+    );
+  let removeAbortListener = () => undefined;
+  const settled = signal
+    ? await Promise.race([
+        outcome,
+        new Promise<never>((_resolve, reject) => {
+          const onAbort = () => reject(abortReason(signal));
+          signal.addEventListener('abort', onAbort, { once: true });
+          removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+        }),
+      ]).finally(() => removeAbortListener())
+    : await outcome;
+
+  if (signal?.aborted) throw abortReason(signal);
+  commit?.();
+  if (settled.kind === 'error') throw settled.error;
+  return responseTransform(settled.value);
+};
+
 /**
  * The one client-response boundary for live calls and recorded service bodies.
  * Existing bare-body fallbacks remain live compatibility behavior, not mock policy.
  */
-export const modelHubOperationRegistry = {
+const modelHubOperationDefinitions = {
   listSources: {
     responseTransform: (response) => responseAs<{ sources: Source[] }>(response).sources,
   },
@@ -551,67 +600,143 @@ export const modelHubOperationRegistry = {
   cancelOAuth: {
     responseTransform: (_response) => undefined,
   },
-} satisfies ModelHubOperationRegistry;
+} satisfies ModelHubOperationDefinitions;
+
+export const modelHubOperationRegistry = Object.fromEntries(
+  (Object.keys(modelHubOperationDefinitions) as ModelHubOperation[]).map((operation) => {
+    const definition = modelHubOperationDefinitions[operation] as {
+      responseTransform: (response: unknown) => unknown;
+    };
+    return [
+      operation,
+      {
+        ...definition,
+        execute: (invoke: () => Promise<unknown>, options?: ModelHubCallOptions) =>
+          executeModelHubCall(definition.responseTransform, invoke, options),
+      },
+    ];
+  }),
+) as ModelHubOperationRegistry;
 
 const liveApi: ModelsApi = {
-  listSources: () => call<{ sources: Source[] }>('/api/models/sources')
-    .then(modelHubOperationRegistry.listSources.responseTransform),
+  listSources: () => modelHubOperationRegistry.listSources.execute(
+    () => call<{ sources: Source[] }>('/api/models/sources'),
+  ),
   observeApiKeySource: (draft, signal) =>
-    call<{ observation: SourceObservation }>('/api/models/sources/observe', {
-      ...jsonInit('POST', draft),
-      signal,
-    }).then(modelHubOperationRegistry.observeApiKeySource.responseTransform),
+    modelHubOperationRegistry.observeApiKeySource.execute(
+      () => call<{ observation: SourceObservation }>('/api/models/sources/observe', {
+        ...jsonInit('POST', draft),
+        signal,
+      }),
+      { signal },
+    ),
   // Both keep `adopted_by`. The old unwrap-to-`source` dropped it on the floor,
   // and no later read can put it back: `/agents` shows today's orders, not which
   // of them this commit changed.
-  createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(modelHubOperationRegistry.createApiKeySource.responseTransform),
-  patchSource: (id, patch) => call<SourcePatchedResponse>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then(modelHubOperationRegistry.patchSource.responseTransform),
-  refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})).then(modelHubOperationRegistry.refreshSource.responseTransform),
-  deleteSource: (id, confirmation) => call<SourceDeletedResponse>(
-    `/api/models/sources/${encodeURIComponent(id)}${confirmation ? '?force=true' : ''}`,
-    jsonInit('DELETE', confirmation ? {
-      would_remove_hops: confirmation.would_remove_hops,
-      would_interrupt: confirmation.would_interrupt,
-    } : undefined),
-  ).then(modelHubOperationRegistry.deleteSource.responseTransform),
+  createApiKeySource: (draft) => modelHubOperationRegistry.createApiKeySource.execute(
+    () => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)),
+  ),
+  patchSource: (id, patch) => modelHubOperationRegistry.patchSource.execute(
+    () => call<SourcePatchedResponse>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)),
+  ),
+  refreshSource: (id, confirmation) => modelHubOperationRegistry.refreshSource.execute(
+    () => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
+  ),
+  deleteSource: (id, confirmation) => modelHubOperationRegistry.deleteSource.execute(
+    () => call<SourceDeletedResponse>(
+      `/api/models/sources/${encodeURIComponent(id)}${confirmation ? '?force=true' : ''}`,
+      jsonInit('DELETE', confirmation ? {
+        would_remove_hops: confirmation.would_remove_hops,
+        would_interrupt: confirmation.would_interrupt,
+      } : undefined),
+    ),
+  ),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
   // and carry no `contract_version` — the same closed-body rule as putAgentSources.
-  replaceCredential: (id, body) => call<CredentialReplacementResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(modelHubOperationRegistry.replaceCredential.responseTransform),
+  replaceCredential: (id, body) => modelHubOperationRegistry.replaceCredential.execute(
+    () => call<CredentialReplacementResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)),
+  ),
   // The OAuth acknowledgement is unconditional because beginning reauth may
   // irreversibly replace grant material. It does not stand in for destructive
   // supply consent: guarded inventory mutations separately echo the server plan.
-  reauthSource: (id) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })).then(modelHubOperationRegistry.reauthSource.responseTransform),
-  listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then(modelHubOperationRegistry.listAgents.responseTransform),
-  getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then(modelHubOperationRegistry.getAgentSources.responseTransform),
+  reauthSource: (id) => modelHubOperationRegistry.reauthSource.execute(
+    () => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })),
+  ),
+  listAgents: () => modelHubOperationRegistry.listAgents.execute(
+    () => call<{ agents: AgentSupply[] }>('/api/models/agents'),
+  ),
+  getAgentSources: (backend) => modelHubOperationRegistry.getAgentSources.execute(
+    () => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`),
+  ),
   // The body is TOTAL and closed: the route rejects unknown keys, so
   // `contract_version` is deliberately absent (unlike every other write here).
-  putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then(modelHubOperationRegistry.putAgentSources.responseTransform),
-  getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then(modelHubOperationRegistry.getAgentChain.responseTransform),
-  putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)).then(modelHubOperationRegistry.putAgentChain.responseTransform),
-  probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then(modelHubOperationRegistry.probeAgent.responseTransform),
-  setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then(modelHubOperationRegistry.setAgentMode.responseTransform),
-  putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then(modelHubOperationRegistry.putMenu.responseTransform),
-  addCustomModel: (sourceId, draft) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models`, jsonInit('POST', draft)).then(modelHubOperationRegistry.addCustomModel.responseTransform),
-  updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })).then(modelHubOperationRegistry.updateModelReasoningEfforts.responseTransform),
-  deleteCustomModel: (sourceId, modelId, confirmation) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', confirmation ?? {})).then(modelHubOperationRegistry.deleteCustomModel.responseTransform),
-  scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then(modelHubOperationRegistry.scanMigration.responseTransform),
-  applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })).then(modelHubOperationRegistry.applyMigration.responseTransform),
+  putAgentSources: (backend, body) => modelHubOperationRegistry.putAgentSources.execute(
+    () => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)),
+  ),
+  getAgentChain: (backend, model) => modelHubOperationRegistry.getAgentChain.execute(
+    () => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`),
+  ),
+  putAgentChain: (backend, model, body) => modelHubOperationRegistry.putAgentChain.execute(
+    () => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),
+  ),
+  probeAgent: (backend, model) => modelHubOperationRegistry.probeAgent.execute(
+    () => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})),
+  ),
+  setAgentMode: (backend, mode) => modelHubOperationRegistry.setAgentMode.execute(
+    () => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })),
+  ),
+  putMenu: (menu) => modelHubOperationRegistry.putMenu.execute(
+    () => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })),
+  ),
+  addCustomModel: (sourceId, draft) => modelHubOperationRegistry.addCustomModel.execute(
+    () => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models`, jsonInit('POST', draft)),
+  ),
+  updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) =>
+    modelHubOperationRegistry.updateModelReasoningEfforts.execute(
+      () => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })),
+    ),
+  deleteCustomModel: (sourceId, modelId, confirmation) =>
+    modelHubOperationRegistry.deleteCustomModel.execute(
+      () => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', confirmation ?? {})),
+    ),
+  scanMigration: () => modelHubOperationRegistry.scanMigration.execute(
+    () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')),
+  ),
+  applyMigration: (itemIds) => modelHubOperationRegistry.applyMigration.execute(
+    () => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
+  ),
   listEvents: (limit = 20, before) =>
-    call<{ events: ResolutionEvent[] }>(
-      `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
-    ).then(modelHubOperationRegistry.listEvents.responseTransform),
-  getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then(modelHubOperationRegistry.getRuntimeStatus.responseTransform),
-  installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then(modelHubOperationRegistry.installRuntime.responseTransform),
-  startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then(modelHubOperationRegistry.startRuntime.responseTransform),
+    modelHubOperationRegistry.listEvents.execute(
+      () => call<{ events: ResolutionEvent[] }>(
+        `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
+      ),
+    ),
+  getRuntimeStatus: () => modelHubOperationRegistry.getRuntimeStatus.execute(
+    () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status'),
+  ),
+  installRuntime: () => modelHubOperationRegistry.installRuntime.execute(
+    () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')),
+  ),
+  startRuntime: () => modelHubOperationRegistry.startRuntime.execute(
+    () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')),
+  ),
   startOAuth: (vendor, channel, clientNonce) =>
-    call<{ flow?: OAuthFlow } & OAuthFlow>(
-      '/api/models/oauth/start',
-      jsonInit('POST', { vendor, channel, ...(clientNonce ? { client_nonce: clientNonce } : {}) }),
-    ).then(modelHubOperationRegistry.startOAuth.responseTransform),
-  getOAuthStatus: (flowId) => call<OAuthResultResponse>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then(modelHubOperationRegistry.getOAuthStatus.responseTransform),
-  submitOAuth: (flowId, value) => call<OAuthResultResponse>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then(modelHubOperationRegistry.submitOAuth.responseTransform),
-  cancelOAuth: (flowId) => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })).then(modelHubOperationRegistry.cancelOAuth.responseTransform),
+    modelHubOperationRegistry.startOAuth.execute(
+      () => call<{ flow?: OAuthFlow } & OAuthFlow>(
+        '/api/models/oauth/start',
+        jsonInit('POST', { vendor, channel, ...(clientNonce ? { client_nonce: clientNonce } : {}) }),
+      ),
+    ),
+  getOAuthStatus: (flowId) => modelHubOperationRegistry.getOAuthStatus.execute(
+    () => call<OAuthResultResponse>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`),
+  ),
+  submitOAuth: (flowId, value) => modelHubOperationRegistry.submitOAuth.execute(
+    () => call<OAuthResultResponse>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })),
+  ),
+  cancelOAuth: (flowId) => modelHubOperationRegistry.cancelOAuth.execute(
+    () => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })),
+  ),
 };
 
 /** The single client instance. Stable across renders (safe in effect deps). */

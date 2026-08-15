@@ -14,7 +14,7 @@ import {
   type SourceDeleted,
   type SourcePatched,
   type SourceRefresh,
-} from './modelsApi';
+} from '../modelsApi';
 import type {
   AgentBackend,
   AgentChain,
@@ -38,7 +38,7 @@ import type {
   SourceObservation,
   SourcePatch,
   SupplyChannel,
-} from './types';
+} from '../types';
 
 type JsonObject = Record<string, unknown>;
 type RecordedBody =
@@ -90,10 +90,6 @@ type RequestIdentity = {
   sensitive_placeholder: string;
   volatile_fields: FieldPath[];
   volatile_placeholder: string;
-  eligibility:
-    | { kind: 'always'; reason: null }
-    | { kind: 'observation_fixture'; reason: null }
-    | { kind: 'unrecordable'; reason: string };
 };
 type OperationRegistration = {
   operation: ModelHubOperation;
@@ -101,6 +97,8 @@ type OperationRegistration = {
   recording: {
     command: string | null;
     request: RecordedRequest;
+    proven_transitions: { id: string; request_token: string }[];
+    unproven_reason: string;
   };
   reachability:
     | { kind: 'seed'; prerequisites: []; reason: null }
@@ -174,45 +172,75 @@ const replaceField = (value: JsonObject, path: FieldPath, replacement: string): 
   }
 };
 
+const fieldValue = (value: JsonObject, path: FieldPath): { present: boolean; value?: unknown } => {
+  let current: unknown = value;
+  for (const member of path) {
+    if (current === null || typeof current !== 'object' || !(member in current)) {
+      return { present: false };
+    }
+    current = (current as JsonObject)[member];
+  }
+  return { present: true, value: current };
+};
+
+class VolatileAliases {
+  private readonly values = new Map<string, Map<string, string>>();
+  private readonly next = new Map<string, number>();
+
+  alias(
+    operation: ModelHubOperation,
+    path: FieldPath,
+    value: unknown,
+    template: string,
+  ): string {
+    const scope = `${operation}\u0000${path.join('\u0000')}`;
+    const existing = typeof value === 'string'
+      ? /^<volatile:([1-9][0-9]*)>$/.exec(value)
+      : null;
+    const values = this.values.get(scope) ?? new Map<string, string>();
+    this.values.set(scope, values);
+    if (existing) {
+      this.next.set(scope, Math.max(this.next.get(scope) ?? 1, Number(existing[1]) + 1));
+      values.set(canonicalJson(value), value as string);
+      return value as string;
+    }
+
+    const identity = canonicalJson(value);
+    const known = values.get(identity);
+    if (known) return known;
+    const index = this.next.get(scope) ?? 1;
+    const alias = template.replace('{index}', String(index));
+    values.set(identity, alias);
+    this.next.set(scope, index + 1);
+    return alias;
+  }
+}
+
 const canonicalRequest = (
   request: RecordedRequest,
   identity: RequestIdentity,
+  aliases: VolatileAliases,
 ): RecordedRequest => {
   const canonical = clone(request) as RecordedRequest & JsonObject;
   for (const path of identity.sensitive_fields) {
     replaceField(canonical, path, identity.sensitive_placeholder);
   }
   for (const path of identity.volatile_fields) {
-    replaceField(canonical, path, identity.volatile_placeholder);
+    const field = fieldValue(canonical, path);
+    if (field.present) {
+      replaceField(
+        canonical,
+        path,
+        aliases.alias(
+          request.operation,
+          path,
+          field.value,
+          identity.volatile_placeholder,
+        ),
+      );
+    }
   }
   return canonical;
-};
-
-const recordingEligibility = (
-  registration: OperationRegistration,
-  request: RecordedRequest,
-  fixtureWorld: unknown,
-): { recordable: boolean; reason: string | null } => {
-  const eligibility = registration.request_identity.eligibility;
-  if (eligibility.kind === 'unrecordable') {
-    return { recordable: false, reason: eligibility.reason };
-  }
-  if (eligibility.kind === 'always') return { recordable: true, reason: null };
-  const body = request.body.present && request.body.value !== null
-    && typeof request.body.value === 'object'
-    ? request.body.value as JsonObject
-    : null;
-  const vendor = body?.vendor;
-  if (typeof vendor !== 'string') return { recordable: true, reason: null };
-  const key = `${vendor}|${body?.base_url || ''}`;
-  const observationScript = (
-    fixtureWorld as { adapter?: { observation_script?: JsonObject } }
-  )?.adapter?.observation_script ?? {};
-  if (key in observationScript) return { recordable: true, reason: null };
-  return {
-    recordable: false,
-    reason: `request needs a registered observation fixture for ${key}; add it to scripts/model_hub_mock_seed.json before recording`,
-  };
 };
 
 export class UncontractedMockTransitionError extends Error {

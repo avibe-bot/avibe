@@ -83,7 +83,7 @@ describe("routeChainDraft", () => {
   });
 
   it("keeps UI draft validation out of the recorded mock write path", () => {
-    const api = readFileSync(new URL("./modelsApi.mock.ts", import.meta.url), "utf8");
+    const api = readFileSync(new URL("./mock-only/modelsApi.mock.ts", import.meta.url), "utf8");
 
     expect(api).not.toMatch(/import .*validateRouteDraft/);
     expect(api).toMatch(

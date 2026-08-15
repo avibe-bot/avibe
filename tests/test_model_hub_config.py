@@ -83,7 +83,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
         "types.ts",
         "vendorMeta.ts",
         "modelsApi.ts",
-        "mockData.ts",
+        "mock-only/mockData.ts",
         "modelRows.test.ts",
     ):
         assert retired_alias not in (UI_MODEL_CONSUMERS / filename).read_text(
