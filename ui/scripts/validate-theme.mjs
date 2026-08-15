@@ -491,25 +491,28 @@ assertAccentAliasesKeepTheirTokenName(css);
 //
 // Only the glow layer is held to it. An offset shadow is directional light,
 // not a glow, and `0 0 0 2px` is a ring -- no blur, nothing to colour-manage.
-function shadowLayers(value) {
-  const layers = [];
+// Top-level split, blind to anything inside parentheses. Layers are separated
+// by commas in every syntax below; the parts of one layer are separated by
+// spaces in CSS and by `_` in a Tailwind arbitrary value, so one splitter reads
+// either and no channel needs its own normalisation step.
+function splitTopLevel(value, isSeparator) {
+  const parts = [];
   let depth = 0;
   let start = 0;
   for (let i = 0; i < value.length; i += 1) {
     if (value[i] === '(') depth += 1;
     else if (value[i] === ')') depth -= 1;
-    else if (value[i] === ',' && depth === 0) {
-      layers.push(value.slice(start, i));
+    else if (depth === 0 && isSeparator(value[i])) {
+      parts.push(value.slice(start, i));
       start = i + 1;
     }
   }
-  layers.push(value.slice(start));
-  return layers;
+  parts.push(value.slice(start));
+  return parts.filter((part) => part !== '');
 }
 
-function layerParts(layer) {
-  return shadowLayers(layer.replace(/_/g, ',')).filter((part) => part !== '');
-}
+const shadowLayers = (value) => splitTopLevel(value, (char) => char === ',');
+const layerParts = (layer) => splitTopLevel(layer, (char) => char === '_' || /\s/.test(char));
 
 // Both halves of the test below are stated as properties, the colour half
 // deliberately so. Asking "does this layer contain `rgba(` or a hex?" would be
@@ -524,34 +527,102 @@ const ZERO_LENGTH = /^0(px|rem|em)?$/;
 const LENGTH = /^[+-]?(\d+(\.\d+)?|\.\d+)(px|rem|em|ch|vw|vh)?$/;
 const MANAGED_COLOUR = /^(var\(--[^)]*\)|currentColor)$/;
 
+// Every channel a shadow value reaches the page through. The first cut of this
+// scan read only `shadow-[...]`, which repeated one level up the mistake the
+// colour test above was written to stop: it enumerated its own input, so a
+// `[box-shadow:...]` written the next day would have walked straight past the
+// assertion meant to catch it. Unlike colour syntax this list can genuinely be
+// closed -- a shadow is a Tailwind arbitrary value, a Tailwind arbitrary
+// property, a CSS declaration or an inline style object, and the stack offers
+// no fifth way to write one. But "can be closed" is a claim, so it is measured
+// rather than believed: SHADOW_MENTION below finds every place the word appears
+// and each one must fall inside a channel, which turns a spelling this file has
+// never seen into a loud failure instead of a silent gap.
+const SHADOW_CHANNELS = [
+  // `shadow-[0_0_16px_-4px_var(--x)]`, including variants such as `hover:shadow-[…]`.
+  { pattern: /shadow-\[([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
+  // `[box-shadow:0_0_16px_-4px_var(--x)]` -- Tailwind's arbitrary *property*.
+  { pattern: /\[box-shadow\s*:([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
+  // `box-shadow: 0 0 16px -4px var(--x);` in a stylesheet. The lookbehind hands
+  // the arbitrary-property spelling to the channel above rather than matching it
+  // twice, once with a stray `]` glued to the colour.
+  { pattern: /(?<!\[)box-shadow\s*:([^;}]*)/g, valuesOf: (match) => [match[1]] },
+  // `style={{ boxShadow: … }}` and `el.style.boxShadow = …`. What follows is an
+  // expression rather than a value, so read the string literals out of it: a
+  // ternary's two branches are two shadows and both of them render.
+  {
+    pattern: /boxShadow\s*[:=]([^;\n]*)/g,
+    valuesOf: (match) => [...match[1].matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`/g)]
+      .map(([, single, double, template]) => single ?? double ?? template),
+  },
+];
+
+// A glow is a *value*, and there are only so many ways to introduce one: a `:`
+// in a declaration or an object literal, an `=` in an assignment, and Tailwind's
+// `shadow-[`. Naming the property without carrying a value cannot hide a glow --
+// `transition-[background-color,box-shadow]`, `will-change: box-shadow`, a
+// sentence in a comment -- so those are not mentions. What the measurement then
+// pins is exactly what failed before: every place a shadow value is INTRODUCED
+// is also a place it is READ.
+const SHADOW_MENTION = /shadow-\[|box-shadow\s*:|boxShadow\s*[:=]/g;
+
+// Token definitions (`--shadow-glow-cta-mint: …`) name none of those spellings
+// and so are never scanned, which is the point: the token layer is the one place
+// a literal is allowed to live, because it is the one place light can re-anchor
+// it. What this walks is call sites.
 function assertGlowsReadThroughTokens(root) {
   const offenders = [];
+  const unscanned = [];
 
-  for (const relative of intendedFiles(root)) {
+  for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
     const file = path.join(root, relative);
     const source = fs.readFileSync(file, 'utf8');
+    const claimed = [];
 
-    for (const [, value] of source.matchAll(/shadow-\[([^\]]*)\]/g)) {
-      for (const layer of shadowLayers(value)) {
-        const parts = layerParts(layer);
-        if (parts[0] === 'inset') parts.shift();
-        // CSS lets the colour lead instead of trail, so move a leading literal
-        // to the back and let the lengths line up. A leading `var()` is left
-        // alone: it only means this layer is not read as a glow, and a managed
-        // colour is not an offender either way.
-        if (parts.length > 1 && !LENGTH.test(parts[0]) && !MANAGED_COLOUR.test(parts[0])) {
-          parts.push(parts.shift());
-        }
-        const [x, y, blur] = parts;
-        const isGlow = ZERO_LENGTH.test(x ?? '') && ZERO_LENGTH.test(y ?? '')
-          && blur !== undefined && !ZERO_LENGTH.test(blur);
-        if (!isGlow) continue;
-        const literal = parts.some((part) => !LENGTH.test(part) && !MANAGED_COLOUR.test(part));
-        if (literal) {
-          offenders.push(`${file}: ${layer}`);
+    for (const { pattern, valuesOf } of SHADOW_CHANNELS) {
+      for (const match of source.matchAll(pattern)) {
+        claimed.push([match.index, match.index + match[0].length]);
+
+        for (const value of valuesOf(match)) {
+          for (const layer of shadowLayers(value)) {
+            const parts = layerParts(layer);
+            if (parts[0] === 'inset') parts.shift();
+            // CSS lets the colour lead instead of trail, so move a leading literal
+            // to the back and let the lengths line up. A leading `var()` is left
+            // alone: it only means this layer is not read as a glow, and a managed
+            // colour is not an offender either way.
+            if (parts.length > 1 && !LENGTH.test(parts[0]) && !MANAGED_COLOUR.test(parts[0])) {
+              parts.push(parts.shift());
+            }
+            const [x, y, blur] = parts;
+            const isGlow = ZERO_LENGTH.test(x ?? '') && ZERO_LENGTH.test(y ?? '')
+              && blur !== undefined && !ZERO_LENGTH.test(blur);
+            if (!isGlow) continue;
+            const literal = parts.some((part) => !LENGTH.test(part) && !MANAGED_COLOUR.test(part));
+            if (literal) {
+              offenders.push(`${file}: ${layer}`);
+            }
+          }
         }
       }
     }
+
+    for (const mention of source.matchAll(SHADOW_MENTION)) {
+      if (!claimed.some(([start, end]) => mention.index >= start && mention.index < end)) {
+        unscanned.push(`${file}:${source.slice(0, mention.index).split('\n').length}: ${
+          source.slice(mention.index, mention.index + 60).split('\n')[0]}`);
+      }
+    }
+  }
+
+  if (unscanned.length > 0) {
+    throw new Error(
+      `${unscanned.length} place(s) introduce a shadow value through a spelling no channel of this `
+      + `scan reads, so nothing checks whether they hold a glow colour inline. Teach SHADOW_CHANNELS `
+      + `the spelling; do NOT narrow SHADOW_MENTION to make this pass, because a mention it stops `
+      + `matching is exactly the silent gap these two lists exist to close.\n  `
+      + unscanned.join('\n  '),
+    );
   }
 
   if (offenders.length > 0) {
@@ -566,7 +637,47 @@ function assertGlowsReadThroughTokens(root) {
   }
 }
 
+// Tailwind substitutes an `@theme inline` entry's VALUE into every utility it
+// generates from that entry, so the utility never reads the custom property at
+// runtime and redeclaring that same token later -- in `:root`, in a light block,
+// anywhere -- compiles to nothing. This is not a tidiness rule: it is how
+// `--shadow-mint-card` kept the dark frame's neon on a white page while three
+// light overrides sat directly above it looking correct. Theming therefore
+// happens in the variable an alias POINTS AT, never in the alias, and a dead
+// redeclaration now fails here instead of rendering.
+function assertInlineThemeTokensAreNotRedeclared(source) {
+  const root = postcss.parse(source);
+  const inlined = new Set();
+
+  root.walkAtRules('theme', (atRule) => {
+    if (!atRule.params.split(/\s+/).includes('inline')) return;
+    atRule.walkDecls((decl) => {
+      if (decl.prop.startsWith('--')) inlined.add(decl.prop);
+    });
+  });
+
+  const dead = [];
+  root.walkDecls((decl) => {
+    if (!inlined.has(decl.prop)) return;
+    for (let node = decl.parent; node; node = node.parent) {
+      if (node.type === 'atrule' && node.name === 'theme') return;
+    }
+    dead.push(`line ${decl.source?.start?.line}: ${decl.prop}`);
+  });
+
+  if (dead.length > 0) {
+    throw new Error(
+      `${dead.length} declaration(s) override a token that @theme inline has already substituted into `
+      + `its utilities, so they change nothing at all. Point the @theme entry at a runtime variable `
+      + `(the shape every other entry uses -- \`--color-mint: var(--mint)\`) and move the override `
+      + `onto that variable.\n  `
+      + dead.join('\n  '),
+    );
+  }
+}
+
 assertGlowsReadThroughTokens('src');
+assertInlineThemeTokensAreNotRedeclared(css);
 assertEveryAcceptedRatioStillExists();
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });

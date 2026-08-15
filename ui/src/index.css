@@ -104,10 +104,16 @@
   --radius-2xl: 20px;
   --radius-3xl: 24px;
 
-  /* Card glow shadows (matches design.pen). */
-  --shadow-mint-card-sm: 0 8px 32px -8px rgba(91, 255, 160, 0.078);
-  --shadow-mint-card: 0 24px 48px -12px rgba(91, 255, 160, 0.078);
-  --shadow-mint-card-lg: 0 32px 64px -12px rgba(91, 255, 160, 0.078);
+  /* Card wash shadows (matches design.pen). The colour is `--card-wash` rather
+     than a literal because this block is `@theme inline`: Tailwind substitutes
+     each entry's value into the generated utility, so a light-theme override of
+     the token itself would compile to nothing and the wash would keep the dark
+     neon on a white page. Every other entry here is the same shape for the same
+     reason -- `--color-mint: var(--mint)` and friends -- so theming happens in
+     the runtime variable, never in the token. */
+  --shadow-mint-card-sm: 0 8px 32px -8px var(--card-wash);
+  --shadow-mint-card: 0 24px 48px -12px var(--card-wash);
+  --shadow-mint-card-lg: 0 32px 64px -12px var(--card-wash);
 
   /* The accent glow scale, read off design.pen's Landing Page frame: `dot` is
      its status dot, `sm` its icon tile, `md` its nav CTA and eyebrow badge,
@@ -121,9 +127,9 @@
      (owner decision 2026-08-14); its 0.6 is likewise owner-set.
 
      The colour, unlike the blur, does NOT vary by theme. design.pen's Light
-     frame recolours the card washes below to the light brand mint and keeps
-     every glow on the dark neon, so these stay literal instead of reading
-     through `--mint` and friends. */
+     frame recolours the card washes above to the light brand mint and keeps
+     every glow on the dark neon, so these stay literal instead of routing
+     through a runtime variable the way `--card-wash` does. */
   --shadow-glow-dot-mint: 0 0 8px rgba(91, 255, 160, 0.9);
   --shadow-glow-dot-gold: 0 0 8px rgba(255, 200, 87, 0.9);
   --shadow-glow-dot-danger: 0 0 8px rgba(255, 107, 107, 0.9);
@@ -231,6 +237,11 @@
      the drift that variant exists to remove. It lives here rather than in the class
      because it is the one part of that glow that differs per theme. */
   --brand-glow-blur: 16px;
+
+  /* Colour of the card wash shadows (`--shadow-mint-card*`). design.pen writes it
+     as the frame's own brand mint at 0.078, which is why it is the one part of
+     those shadows that moves between themes. */
+  --card-wash: rgba(91, 255, 160, 0.078);
 
   /* Page-family gradients (mirror design.pen 1:1). Layers ordered top-most first. */
   --gradient-console:
@@ -377,11 +388,9 @@
 
     --bg-page: var(--gradient-console);
 
-    /* Light card wash — design.pen's Light frame keeps the dark frame's
-       geometry and 0.078 and swaps only the hue to the light brand mint. */
-    --shadow-mint-card-sm: 0 8px 32px -8px rgba(16, 185, 129, 0.078);
-    --shadow-mint-card: 0 24px 48px -12px rgba(16, 185, 129, 0.078);
-    --shadow-mint-card-lg: 0 32px 64px -12px rgba(16, 185, 129, 0.078);
+    /* design.pen's Light frame keeps the dark frame's geometry and 0.078 and
+       swaps only the hue to the light brand mint. */
+    --card-wash: rgba(16, 185, 129, 0.078);
 
     /* Wider CTA glow than dark: the same neon spreads far less over a white card,
        so 16px read as almost nothing here (owner decision 2026-08-14). */
@@ -483,11 +492,9 @@
 
   --bg-page: var(--gradient-console);
 
-  /* Light card wash — design.pen's Light frame keeps the dark frame's
-     geometry and 0.078 and swaps only the hue to the light brand mint. */
-  --shadow-mint-card-sm: 0 8px 32px -8px rgba(16, 185, 129, 0.078);
-  --shadow-mint-card: 0 24px 48px -12px rgba(16, 185, 129, 0.078);
-  --shadow-mint-card-lg: 0 32px 64px -12px rgba(16, 185, 129, 0.078);
+  /* design.pen's Light frame keeps the dark frame's geometry and 0.078 and
+     swaps only the hue to the light brand mint. */
+  --card-wash: rgba(16, 185, 129, 0.078);
 
   /* Wider CTA glow than dark: the same neon spreads far less over a white card,
      so 16px read as almost nothing here (owner decision 2026-08-14). */
