@@ -552,8 +552,12 @@ const SHADOW_CHANNELS = [
   { pattern: /\[box-shadow\s*:([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
   // `box-shadow: 0 0 16px -4px var(--x);` in a stylesheet. The lookbehind hands
   // the arbitrary-property spelling to the channel above rather than matching it
-  // twice, once with a stray `]` glued to the colour.
-  { pattern: /(?<!\[)box-shadow\s*:([^;}]*)/g, valuesOf: (match) => [match[1]] },
+  // twice, once with a stray `]` glued to the colour. A declaration also ends at
+  // a quote, because this same spelling appears inside assertion strings in the
+  // `.ts` files scanned alongside the CSS -- and a shadow value of its own never
+  // contains one, so the quotes cost nothing to stop at and stop the closing one
+  // from being read as part of the colour.
+  { pattern: /(?<!\[)box-shadow\s*:([^;}'"`]*)/g, valuesOf: (match) => [match[1]] },
   // `style={{ boxShadow: … }}` and `el.style.boxShadow = …`. What follows is an
   // expression rather than a value, so read the string literals out of it: a
   // ternary's two branches are two shadows and both of them render.
@@ -573,13 +577,94 @@ const SHADOW_CHANNELS = [
 // is also a place it is READ.
 const SHADOW_MENTION = /shadow-\[|box-shadow\s*:|boxShadow\s*[:=]/g;
 
-// Token definitions (`--shadow-glow-cta-mint: …`) name none of those spellings
-// and so are never scanned, which is the point: the token layer is the one place
-// a literal is allowed to live, because it is the one place light can re-anchor
-// it. What this walks is call sites.
+// Every custom property declared anywhere in the scanned stylesheets, name to
+// the set of values it is given. A name is collected once per distinct value
+// rather than last-write-wins, because a property is routinely declared several
+// times -- dark, `prefers-color-scheme: light`, `[data-theme="light"]` -- and a
+// glow smuggled into just one of those blocks is still a glow that ships.
+function collectCustomProperties(root) {
+  const values = new Map();
+  for (const relative of intendedFiles(root, { extensions: ['.css'] })) {
+    postcss.parse(fs.readFileSync(path.join(root, relative), 'utf8')).walkDecls((decl) => {
+      if (!decl.prop.startsWith('--')) return;
+      if (!values.has(decl.prop)) values.set(decl.prop, new Set());
+      values.get(decl.prop).add(decl.value);
+    });
+  }
+  return values;
+}
+
+const CSS_WIDE_KEYWORDS = new Set(['none', 'inherit', 'initial', 'unset', 'revert', 'revert-layer']);
+const GLOW_TOKEN = /^--shadow-glow-/;
+const VAR_REFERENCE = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([\s\S]*))?\)$/;
+const MAX_INDIRECTION = 8;
+
+// The classification is DENY BY DEFAULT, and that is the whole point of it.
+// Three review rounds each found another spelling that fell past a check built
+// to recognise glows and reject them -- an unlisted colour syntax, an unread
+// input channel, hand-picked geometry behind a managed colour -- because
+// anything the parser failed to recognise landed in an implicit "accept". A
+// fourth then found the cheapest fall-through of all: `shadow-[var(--anything)]`
+// is a single part, so it had no offsets to test and was waved through, which
+// let `--rogue-glow: 0 0 93px var(--mint)` ship a hand-drawn glow behind a name.
+// Widening the recogniser a fourth time would just relocate the gap, so the
+// default is inverted instead: every layer must land in a form named here, and
+// a layer this scan cannot classify FAILS asking to be made legible. A name is
+// not taken at face value either -- indirection is resolved and the same test
+// runs on what it resolves to, so a glow cannot hide one alias deeper.
+function glowOffencesInValue(value, cssVars, seen = new Set(), depth = 0) {
+  return shadowLayers(value).flatMap((layer) => glowOffencesInLayer(layer, cssVars, seen, depth));
+}
+
+function glowOffencesInLayer(layer, cssVars, seen, depth) {
+  const parts = layerParts(layer);
+  if (parts[0] === 'inset') parts.shift();
+  const shown = layer.trim();
+
+  if (parts.length === 1) {
+    const only = parts[0];
+    if (CSS_WIDE_KEYWORDS.has(only.toLowerCase())) return [];
+    const reference = only.match(VAR_REFERENCE);
+    if (!reference) return [`${shown} -- not a length triple, a keyword or a var() this scan can read`];
+    const [, name, fallback] = reference;
+    if (depth >= MAX_INDIRECTION) return [`${shown} -- indirection deeper than ${MAX_INDIRECTION} hops`];
+    if (seen.has(name)) return [];
+    const declared = cssVars.get(name);
+    if (!declared) return [`${shown} -- ${name} is declared in no scanned stylesheet, so its value cannot be checked`];
+    const next = new Set(seen).add(name);
+    // The sanctioned home for a shadow literal, and the only stop condition
+    // here: a --shadow-glow-* token is read against design.pen and re-anchored
+    // for light in one place, which is exactly what a call site cannot do. It
+    // stops the recursion, not the check -- the name still has to exist, and a
+    // fallback beside it is a second value that renders whenever it does not,
+    // so the fallback is classified even when the token it guards is managed.
+    const resolved = GLOW_TOKEN.test(name) ? [] : [...declared];
+    const deeper = [...resolved, ...(fallback ? [fallback] : [])]
+      .flatMap((declaredValue) => glowOffencesInValue(declaredValue, cssVars, next, depth + 1));
+    return deeper.map((offence) => `${offence}  <- reached through ${shown}`);
+  }
+
+  // CSS lets the colour lead instead of trail, so move a leading non-length to
+  // the back and let the offsets line up. This used to exempt a leading `var()`,
+  // which quietly reopened the same hole from the other end: `var(--mint) 0 0
+  // 93px` kept its colour in the offset slot and drew whatever geometry it liked.
+  if (!LENGTH.test(parts[0])) parts.push(parts.shift());
+  const [x, y, blur] = parts;
+  const isGlow = ZERO_LENGTH.test(x ?? '') && ZERO_LENGTH.test(y ?? '')
+    && blur !== undefined && !ZERO_LENGTH.test(blur);
+  return isGlow ? [shown] : [];
+}
+
+// Token definitions (`--shadow-glow-cta-mint: …`) name none of the channel
+// spellings and so are never scanned as call sites, which is the point: the
+// token layer is the one place a literal is allowed to live, because it is the
+// one place light can re-anchor it. What this walks is call sites -- but it now
+// follows their names into that layer, so defining a glow under some other name
+// is not a way around it.
 function assertGlowsReadThroughTokens(root) {
   const offenders = [];
   const unscanned = [];
+  const cssVars = collectCustomProperties(root);
 
   for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
     const file = path.join(root, relative);
@@ -591,24 +676,8 @@ function assertGlowsReadThroughTokens(root) {
         claimed.push([match.index, match.index + match[0].length]);
 
         for (const value of valuesOf(match)) {
-          for (const layer of shadowLayers(value)) {
-            const parts = layerParts(layer);
-            if (parts[0] === 'inset') parts.shift();
-            // CSS lets the colour lead instead of trail, so move a leading
-            // non-length to the back and let the offsets line up. This used to
-            // exempt a leading `var()`, which quietly reopened the same hole from
-            // the other end: `var(--mint) 0 0 93px` kept its colour in the offset
-            // slot, failed to read as a glow, and drew whatever geometry it liked.
-            // A single-part layer -- the compliant `var(--shadow-glow-md-mint)` --
-            // is untouched here and has no offsets to test below, so a token
-            // reference never reaches the check either way.
-            if (parts.length > 1 && !LENGTH.test(parts[0])) {
-              parts.push(parts.shift());
-            }
-            const [x, y, blur] = parts;
-            const isGlow = ZERO_LENGTH.test(x ?? '') && ZERO_LENGTH.test(y ?? '')
-              && blur !== undefined && !ZERO_LENGTH.test(blur);
-            if (isGlow) offenders.push(`${file}: ${layer.trim()}`);
+          for (const offence of glowOffencesInValue(value, cssVars)) {
+            offenders.push(`${file}: ${offence}`);
           }
         }
       }
@@ -634,13 +703,16 @@ function assertGlowsReadThroughTokens(root) {
 
   if (offenders.length > 0) {
     throw new Error(
-      `${offenders.length} glow shadow(s) draw their own shape instead of reading a --shadow-glow-* `
-      + `token. Spelled-out geometry drifts from design.pen exactly the way a spelled-out colour `
-      + `does: neither can be re-anchored for light, and blur, spread and alpha have no scale left `
-      + `to be checked against -- so a managed colour does not redeem hand-picked offsets. Pick the `
-      + `token whose blur this is nearest -- dot, sm, md, lg or cta -- and use `
-      + `shadow-glow-<role>-<accent>, or var(--shadow-glow-<role>-<accent>) as a whole layer inside `
-      + `a composite shadow. Add the token to @theme if that accent does not have one yet.\n  `
+      `${offenders.length} shadow layer(s) either draw a glow themselves or cannot be shown not to. `
+      + `Spelled-out geometry drifts from design.pen exactly the way a spelled-out colour does: `
+      + `neither can be re-anchored for light, and blur, spread and alpha have no scale left to be `
+      + `checked against -- so a managed colour does not redeem hand-picked offsets, and neither `
+      + `does a tidy name wrapped around them. Pick the token whose blur this is nearest -- dot, sm, `
+      + `md, lg or cta -- and use shadow-glow-<role>-<accent>, or var(--shadow-glow-<role>-<accent>) `
+      + `as a whole layer inside a composite shadow. Add the token to @theme if that accent does not `
+      + `have one yet. A layer reported as unreadable rather than as a glow is not asking to be `
+      + `special-cased: give it a form this scan can classify, or it keeps its own geometry `
+      + `unexamined.\n  `
       + offenders.join('\n  '),
     );
   }
