@@ -104,6 +104,7 @@ class SessionFlushCoordinator:
             weakref.WeakValueDictionary()
         )
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
+        self._processing_task: asyncio.Task[None] | None = None
         self._add_outage_until: datetime | None = None
         self._processing_retry_at: datetime | None = None
         self._paused = False
@@ -137,7 +138,6 @@ class SessionFlushCoordinator:
             lease_owner=lease_owner,
             clock=self._current_time,
         )
-        await self._reconcile_processing_events()
         if self._attachment_store is not None:
             if self._attachment_admission_lock is None:
                 await self._reconcile_attachments()
@@ -208,8 +208,7 @@ class SessionFlushCoordinator:
         if self._paused or not self._enabled():
             return 0
         current_time = self._current_time()
-        if self._processing_retry_at is not None:
-            await self._reconcile_processing_events()
+        self._schedule_processing_actions()
         now = _iso(current_time)
         refs = await self._store_call(
             self._store.list_flush_candidates,
@@ -281,15 +280,27 @@ class SessionFlushCoordinator:
 
         self.pause()
         tasks = tuple(task for task in self._flush_tasks.values() if not task.done())
+        processing_task = self._processing_task
+        if processing_task is not None and not processing_task.done():
+            processing_task.cancel()
+            tasks = (*tasks, processing_task)
         if not tasks:
             return True
         try:
-            await asyncio.wait_for(
-                asyncio.gather(*(asyncio.shield(task) for task in tasks)),
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(asyncio.shield(task) for task in tasks),
+                    return_exceptions=True,
+                ),
                 timeout=_positive_timeout(timeout_seconds),
             )
         except asyncio.TimeoutError:
             return False
+        for task, result in zip(tasks, results, strict=True):
+            if task is processing_task and isinstance(result, asyncio.CancelledError):
+                continue
+            if isinstance(result, BaseException):
+                raise result
         return True
 
     async def prepare_shutdown(self, *, timeout_seconds: float = 2.0) -> None:
@@ -297,6 +308,9 @@ class SessionFlushCoordinator:
 
         self.pause()
         tasks = tuple(task for task in self._flush_tasks.values() if not task.done())
+        processing_task = self._processing_task
+        if processing_task is not None and not processing_task.done():
+            tasks = (*tasks, processing_task)
         for task in tasks:
             task.cancel()
         if not tasks:
@@ -331,6 +345,26 @@ class SessionFlushCoordinator:
 
         task.add_done_callback(remove)
         return task
+
+    def _schedule_processing_actions(self) -> None:
+        current = self._processing_task
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(
+            self._reconcile_processing_events(),
+            name="memory-processing-actions",
+        )
+        self._processing_task = task
+
+        def remove(completed: asyncio.Task[None]) -> None:
+            if completed.cancelled():
+                return
+            try:
+                completed.result()
+            except Exception:
+                logger.exception("Memory processing action execution failed")
+
+        task.add_done_callback(remove)
 
     async def _run_session_flush(
         self,
@@ -446,13 +480,11 @@ class SessionFlushCoordinator:
             if isinstance(result, FlushRetryable):
                 async with self._processing_fault_lock:
                     settled_at = self._current_time()
-                    settled = await self._store_call(
+                    await self._store_call(
                         self._store.retry_unsubmitted_flush,
                         lease,
                         now=settled_at,
                     )
-                    if settled.settled and settled.state == "manual_required":
-                        await self._reconcile_processing_events_locked()
             else:
                 await self._finalize_flush_outcome(lease, result)
 
@@ -619,8 +651,6 @@ class SessionFlushCoordinator:
             )
         if settled.attachment_release_id is not None:
             await self._release_bundle(settled.attachment_release_id)
-        if settled.settled:
-            await self._reconcile_processing_events()
         return settled.settled
 
     async def _finalize_flush_outcome(
@@ -628,15 +658,12 @@ class SessionFlushCoordinator:
         lease: FlushLease,
         result: FlushSucceeded | FlushRejected | FlushUnknown,
     ) -> None:
-        settled, cancellation = await self._drain_local_flush_outcome(
+        _settled, cancellation = await self._drain_local_flush_outcome(
             lease,
             result,
         )
         if cancellation is not None:
             raise cancellation
-        if not settled:
-            return
-        await self._reconcile_processing_events()
 
     async def _drain_local_flush_outcome(
         self,
@@ -711,7 +738,6 @@ class SessionFlushCoordinator:
                     now=settled_at,
                 )
                 if settled.settled:
-                    await self._reconcile_processing_events_locked()
                     if isinstance(outcome, SystemOutage):
                         self._add_outage_until = self._current_time() + timedelta(
                             seconds=SYSTEM_OUTAGE_RETRY_SECONDS
@@ -735,50 +761,50 @@ class SessionFlushCoordinator:
             )
 
     async def _reconcile_processing_events(self) -> None:
-        async with self._processing_fault_lock:
-            await self._reconcile_processing_events_locked()
-
-    async def _reconcile_processing_events_locked(self) -> None:
         if self._processing_retry_at is not None:
             if self._current_time() < self._processing_retry_at:
                 return
             self._processing_retry_at = None
         for _ in range(MAX_PROCESSING_ACTIONS_PER_PASS):
-            action = await self._store_call(self._store.next_processing_action)
-            if action is None:
-                return
-            if isinstance(action, ProcessingHealthProbe):
-                try:
-                    healthy = bool(await self._provider.processing_healthy())
-                except Exception:
-                    self._defer_processing_retry()
+            async with self._processing_fault_lock:
+                action = await self._store_call(self._store.next_processing_action)
+                if action is None:
                     return
+                if isinstance(action, ProcessingNotification):
+                    async with self._processing_notification_lock:
+                        current = await self._store_call(
+                            self._store.next_processing_action
+                        )
+                        if current != action:
+                            return
+                        if not await self._emit_processing_event(
+                            action.event,
+                            action.kind,
+                            action.occurred_at,
+                        ):
+                            self._defer_processing_retry()
+                            return
+                        acknowledged = await self._store_call(
+                            self._store.acknowledge_processing_notification,
+                            action,
+                        )
+                        if not acknowledged:
+                            return
+                    continue
+            if not isinstance(action, ProcessingHealthProbe):
+                return
+            try:
+                healthy = bool(await self._provider.processing_healthy())
+            except Exception:
+                self._defer_processing_retry()
+                return
+            async with self._processing_fault_lock:
                 committed = await self._store_call(
                     self._store.record_processing_health,
                     action,
                     healthy=healthy,
                 )
                 if not committed.committed:
-                    return
-                continue
-            if not isinstance(action, ProcessingNotification):
-                return
-            async with self._processing_notification_lock:
-                current = await self._store_call(self._store.next_processing_action)
-                if current != action:
-                    return
-                if not await self._emit_processing_event(
-                    action.event,
-                    action.kind,
-                    action.occurred_at,
-                ):
-                    self._defer_processing_retry()
-                    return
-                acknowledged = await self._store_call(
-                    self._store.acknowledge_processing_notification,
-                    action,
-                )
-                if not acknowledged:
                     return
 
     def _defer_processing_retry(self) -> None:
@@ -874,6 +900,8 @@ class SessionFlushCoordinator:
         for key, task in tuple(self._flush_tasks.items()):
             if task.done():
                 self._flush_tasks.pop(key, None)
+        if self._processing_task is not None and self._processing_task.done():
+            self._processing_task = None
 
     def _current_time(self) -> datetime:
         value = self._now()

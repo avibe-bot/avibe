@@ -30,6 +30,7 @@ from core.memory.observations import (
     FlushUnknown,
 )
 from core.memory.store import (
+    AmbiguousAdd,
     Delivered,
     MemoryStore,
     MessageFailure,
@@ -178,6 +179,31 @@ async def _wait_for_scheduled_flush(
         await asyncio.wait_for(asyncio.shield(task), timeout=2)
 
 
+async def _wait_for_processing_actions(
+    coordinator: SessionFlushCoordinator,
+) -> None:
+    task = coordinator._processing_task
+    if task is not None:
+        await asyncio.wait_for(asyncio.shield(task), timeout=2)
+
+
+async def _run_processing_actions(
+    coordinator: SessionFlushCoordinator,
+) -> None:
+    coordinator._schedule_processing_actions()
+    await _wait_for_processing_actions(coordinator)
+
+
+async def _run_due_and_wait(
+    coordinator: SessionFlushCoordinator,
+    *,
+    max_sessions: int = 8,
+) -> int:
+    scheduled = await coordinator.run_due(max_sessions=max_sessions)
+    await _wait_for_processing_actions(coordinator)
+    return scheduled
+
+
 async def test_accumulated_add_waits_for_idle_flush(tmp_path: Path) -> None:
     store = _store(tmp_path)
     provider = FakeMemoryProvider()
@@ -198,13 +224,268 @@ async def test_accumulated_add_waits_for_idle_flush(tmp_path: Path) -> None:
     assert state.due_at == "2026-01-01T00:05:00.000Z"
 
     current[0] += timedelta(minutes=5)
-    assert await worker.coordinator.run_due() == 1
+    assert await _run_due_and_wait(worker.coordinator) == 1
     await _wait_for_scheduled_flush(worker.coordinator, row.provider_session_ref)
 
     assert provider.flushes == [row.provider_session_ref]
     state = store.get_session_flush_state(row.provider_session_ref)
     assert state is not None and state.state == "idle"
     assert state.open_generation == 2
+
+
+async def test_tick_runs_processing_action_without_due_sessions(tmp_path: Path) -> None:
+    """MEMORY-IM-ATTACH-001: the periodic owner never skips a durable action."""
+
+    store = _store(tmp_path)
+    _open_store_processing_fault(
+        store,
+        "tick-only-processing-action",
+        at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    health_calls = 0
+    events: list[tuple[str, str | None]] = []
+
+    class Provider(FakeMemoryProvider):
+        async def processing_healthy(self) -> bool:
+            nonlocal health_calls
+            health_calls += 1
+            return True
+
+    async def notify(event, kind, _occurred_at, _queued) -> bool:
+        events.append((event, kind))
+        return True
+
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=Provider(),
+        enabled=lambda: True,
+        processing_event=notify,
+    )
+
+    assert await coordinator.run_due() == 0
+    await _wait_for_processing_actions(coordinator)
+
+    assert health_calls == 1
+    assert events == [("fault", "engine")]
+    assert store.next_processing_action() is None
+
+
+async def test_processing_probe_runs_after_exact_session_lock_release(tmp_path: Path) -> None:
+    """MEMORY-IM-ATTACH-003: provider health is outside the delivery fence."""
+
+    store = _store(tmp_path)
+    health_entered = asyncio.Event()
+    release_health = asyncio.Event()
+
+    class Provider(FakeMemoryProvider):
+        async def add(self, capture):
+            self.captures.append(capture)
+            raise MemoryProviderFailure("memory_processing_failed", retryable=True)
+
+        async def processing_healthy(self) -> bool:
+            health_entered.set()
+            await release_health.wait()
+            return True
+
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=Provider(),
+        enabled=lambda: True,
+    )
+    row = _enqueue(store, "lock-free-processing-probe")
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+    session_lock = coordinator._session_lock(row.provider_session_ref.serialize())
+    assert not session_lock.locked()
+    assert await coordinator.run_due() == 0
+    await asyncio.wait_for(health_entered.wait(), timeout=1)
+    assert not session_lock.locked()
+
+    release_health.set()
+    await _wait_for_processing_actions(coordinator)
+
+
+async def test_boot_recovery_leaves_processing_action_for_next_tick(tmp_path: Path) -> None:
+    """MEMORY-IM-ATTACH-003: recovery restores state without running the probe."""
+
+    store = _store(tmp_path)
+    _open_store_processing_fault(
+        store,
+        "restart-before-processing-probe",
+        at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    health_calls = 0
+
+    class Provider(FakeMemoryProvider):
+        async def processing_healthy(self) -> bool:
+            nonlocal health_calls
+            health_calls += 1
+            return True
+
+    restarted = SessionFlushCoordinator(
+        store=MemoryStore(store.path),
+        provider=Provider(),
+        enabled=lambda: True,
+    )
+
+    await restarted.recover(lease_owner="next-boot")
+    assert health_calls == 0
+    assert isinstance(store.next_processing_action(), ProcessingHealthProbe)
+
+    assert await restarted.run_due() == 0
+    await _wait_for_processing_actions(restarted)
+    assert health_calls == 1
+    assert store.next_processing_action() is None
+
+
+async def test_stale_processing_probe_cannot_commit_across_generation(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-IM-ATTACH-003: a superseded probe remains fail-closed."""
+
+    store = _store(tmp_path)
+    _open_store_processing_fault(
+        store,
+        "stale-processing-generation-1",
+        at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    health_entered = asyncio.Event()
+    release_health = asyncio.Event()
+    events: list[str] = []
+
+    class Provider(FakeMemoryProvider):
+        async def processing_healthy(self) -> bool:
+            health_entered.set()
+            await release_health.wait()
+            return True
+
+    async def notify(event, _kind, _occurred_at, _queued) -> bool:
+        events.append(event)
+        return True
+
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=Provider(),
+        enabled=lambda: True,
+        processing_event=notify,
+    )
+    assert await coordinator.run_due() == 0
+    await asyncio.wait_for(health_entered.wait(), timeout=1)
+
+    _close_store_processing_fault(
+        store,
+        at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+    )
+    _open_store_processing_fault(
+        store,
+        "stale-processing-generation-2",
+        at=datetime(2026, 1, 1, 0, 0, 2, tzinfo=UTC),
+    )
+    release_health.set()
+    await _wait_for_processing_actions(coordinator)
+
+    current = store.next_processing_action()
+    assert isinstance(current, ProcessingHealthProbe)
+    assert current.generation == 2
+    assert store.ensure_meta().processing_fault_kind is None
+    assert events == []
+
+
+async def test_blocked_processing_probe_does_not_serialize_other_session(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-IM-ATTACH-001: independent failure settlement stays concurrent."""
+
+    store = _store(tmp_path)
+    fault_row = _enqueue(store, "blocked-probe-session", session="blocked-probe-session")
+    claimed = store.claim_due(
+        lease_owner="setup",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed.source_message_digest == fault_row.source_message_digest
+    assert store.settle(
+        claimed,
+        AmbiguousAdd(error="memory_provider_timeout"),
+        lease_owner="setup",
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    ).settled
+    _enqueue(store, "independent-session", session="independent-session")
+    independent = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:01.000Z",
+    )
+    assert independent is not None
+    health_entered = asyncio.Event()
+    release_health = asyncio.Event()
+
+    class Provider(FakeMemoryProvider):
+        async def add(self, capture):
+            self.captures.append(capture)
+            raise MemoryProviderFailure("memory_processing_failed", retryable=True)
+
+        async def processing_healthy(self) -> bool:
+            health_entered.set()
+            await release_health.wait()
+            return True
+
+    provider = Provider()
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+    )
+    assert await coordinator.run_due() == 0
+
+    await asyncio.wait_for(health_entered.wait(), timeout=1)
+    assert not await asyncio.wait_for(
+        coordinator.deliver(independent, lease_owner="worker"),
+        timeout=1,
+    )
+    session_lock = coordinator._session_lock(
+        independent.provider_session_ref.serialize()
+    )
+    assert not session_lock.locked()
+
+    release_health.set()
+    await _wait_for_processing_actions(coordinator)
+
+
+async def test_quiescence_cancels_and_joins_processing_action(tmp_path: Path) -> None:
+    """MEMORY-IM-ATTACH-003: lifecycle quiescence retires the active probe."""
+
+    store = _store(tmp_path)
+    _open_store_processing_fault(
+        store,
+        "quiesce-processing-probe",
+        at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    health_entered = asyncio.Event()
+    health_finished = asyncio.Event()
+
+    class Provider(FakeMemoryProvider):
+        async def processing_healthy(self) -> bool:
+            health_entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                health_finished.set()
+
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=Provider(),
+        enabled=lambda: True,
+    )
+    assert await coordinator.run_due() == 0
+    await asyncio.wait_for(health_entered.wait(), timeout=1)
+
+    assert await coordinator.pause_and_wait(timeout_seconds=1)
+    assert health_finished.is_set()
+    assert isinstance(store.next_processing_action(), ProcessingHealthProbe)
 
 
 async def test_processing_probe_error_retries_on_tick_after_backoff(
@@ -241,17 +522,18 @@ async def test_processing_probe_error_retries_on_tick_after_backoff(
         processing_event=notify,
     )
     await coordinator.recover(lease_owner="next-boot")
+    await _run_processing_actions(coordinator)
 
     assert health_attempts == 1
     assert store.next_processing_action() == expected
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     current[0] += timedelta(seconds=4)
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     assert health_attempts == 1
     assert events == []
 
     current[0] += timedelta(seconds=1)
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     assert health_attempts == 2
     assert events == ["fault"]
     assert store.next_processing_action() is None
@@ -294,6 +576,7 @@ async def test_add_settlement_does_not_bypass_processing_probe_backoff(
         processing_event=notify,
     )
     await coordinator.recover(lease_owner="next-boot")
+    await _run_processing_actions(coordinator)
     _enqueue(store, "activity-before-probe-retry", session="activity")
     claimed = store.claim_due(
         lease_owner="worker",
@@ -307,7 +590,7 @@ async def test_add_settlement_does_not_bypass_processing_probe_backoff(
     assert isinstance(store.next_processing_action(), ProcessingHealthProbe)
 
     current[0] += timedelta(seconds=5)
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     assert health_attempts == 2
     assert events == ["fault"]
     assert store.next_processing_action() is None
@@ -338,12 +621,14 @@ async def test_processing_probe_cancellation_does_not_schedule_retry(
         enabled=lambda: True,
         now=lambda: current[0],
     )
+    await coordinator.recover(lease_owner="next-boot")
     with pytest.raises(asyncio.CancelledError):
-        await coordinator.recover(lease_owner="next-boot")
+        await _run_due_and_wait(coordinator)
 
     current[0] += timedelta(minutes=1)
-    assert await coordinator.run_due() == 0
-    assert health_attempts == 1
+    with pytest.raises(asyncio.CancelledError):
+        await _run_due_and_wait(coordinator)
+    assert health_attempts == 2
     assert store.next_processing_action() == expected
 
 
@@ -382,14 +667,15 @@ async def test_processing_notification_failure_retries_on_tick_after_backoff(
         processing_event=notify,
     )
     await coordinator.recover(lease_owner="next-boot")
+    await _run_processing_actions(coordinator)
 
     assert attempts == 1
     assert store.next_processing_action() == expected
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     assert attempts == 1
 
     current[0] += timedelta(seconds=5)
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     assert attempts == 2
     assert store.next_processing_action() is None
 
@@ -453,7 +739,7 @@ async def test_flush_settlement_does_not_bypass_processing_notification_backoff(
     assert isinstance(store.next_processing_action(), ProcessingNotification)
 
     current[0] += timedelta(seconds=5)
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     assert notification_attempts == 2
     assert store.next_processing_action() is None
 
@@ -485,13 +771,14 @@ async def test_processing_retry_does_not_run_while_paused_or_shutdown(
         now=lambda: current[0],
     )
     await coordinator.recover(lease_owner="next-boot")
+    await _run_processing_actions(coordinator)
     if stop == "pause":
         coordinator.pause()
     else:
         await coordinator.prepare_shutdown()
 
     current[0] += timedelta(minutes=1)
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     assert health_attempts == 1
     assert isinstance(store.next_processing_action(), ProcessingHealthProbe)
 
@@ -529,16 +816,19 @@ async def test_processing_notification_cancellation_leaves_action_pending(
         now=lambda: current[0],
         processing_event=notify,
     )
-    recovery = asyncio.create_task(coordinator.recover(lease_owner="next-boot"))
+    await coordinator.recover(lease_owner="next-boot")
+    assert await coordinator.run_due() == 0
+    recovery = coordinator._processing_task
+    assert recovery is not None
     await asyncio.wait_for(entered.wait(), timeout=1)
     recovery.cancel()
     with pytest.raises(asyncio.CancelledError):
         await recovery
 
     current[0] += timedelta(minutes=1)
-    assert await coordinator.run_due() == 0
-    assert attempts == 1
-    assert store.next_processing_action() == expected
+    assert await _run_due_and_wait(coordinator) == 0
+    assert attempts == 2
+    assert store.next_processing_action() is None
 
 
 async def test_processing_notification_is_at_least_once_when_ack_is_missing(
@@ -572,8 +862,9 @@ async def test_processing_notification_is_at_least_once_when_ack_is_missing(
         enabled=lambda: True,
         processing_event=notify,
     )
+    await first.recover(lease_owner="first-boot")
     with pytest.raises(OSError, match="ack unavailable"):
-        await first.recover(lease_owner="first-boot")
+        await _run_due_and_wait(first)
 
     monkeypatch.setattr(store, "acknowledge_processing_notification", original_ack)
     restarted = SessionFlushCoordinator(
@@ -583,6 +874,7 @@ async def test_processing_notification_is_at_least_once_when_ack_is_missing(
         processing_event=notify,
     )
     await restarted.recover(lease_owner="second-boot")
+    await _run_processing_actions(restarted)
 
     assert len(events) == 2
     assert events[0] == events[1]
@@ -610,7 +902,9 @@ async def test_processing_notification_ack_suppresses_later_replays(
         processing_event=notify,
     )
     await coordinator.recover(lease_owner="first-boot")
+    await _run_processing_actions(coordinator)
     await coordinator.recover(lease_owner="second-boot")
+    await _run_processing_actions(coordinator)
 
     assert len(events) == 1
 
@@ -668,6 +962,7 @@ async def test_successful_add_waits_for_blocked_fault_notification_ack(
     release_callback.set()
     await asyncio.wait_for(reconciliation, timeout=1)
     assert await asyncio.wait_for(success, timeout=1)
+    await _run_due_and_wait(coordinator)
 
     assert events == ["fault", "recovered"]
     assert store.next_processing_action() is None
@@ -741,6 +1036,7 @@ async def test_successful_flush_waits_for_blocked_fault_notification_ack(
     release_callback.set()
     await asyncio.wait_for(reconciliation, timeout=1)
     await asyncio.wait_for(success, timeout=1)
+    await _run_due_and_wait(coordinator)
 
     assert events == ["fault", "recovered"]
     assert store.next_processing_action() is None
@@ -776,6 +1072,7 @@ async def test_processing_action_loop_orders_recovery_probe_and_fault(
         processing_event=notify,
     )
     await coordinator.recover(lease_owner="next-boot")
+    await _run_processing_actions(coordinator)
 
     assert events == [("recovered", None), ("fault", "engine")]
     assert store.next_processing_action() is None
@@ -812,13 +1109,15 @@ async def test_notification_queue_count_is_live_and_not_durable_identity(
         processing_event=notify,
     )
     await coordinator.recover(lease_owner="first-boot")
+    await _run_processing_actions(coordinator)
     _enqueue(store, "live-queued-2", session="live-queued-2")
     assert store.next_processing_action() == durable_event
     await coordinator.recover(lease_owner="second-boot")
+    await _run_processing_actions(coordinator)
     assert queued_values == [1]
 
     current[0] += timedelta(seconds=5)
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
 
     assert queued_values == [1, 2]
     assert store.next_processing_action() is None
@@ -849,6 +1148,7 @@ async def test_stale_processing_commit_stops_without_hot_loop(
         enabled=lambda: True,
     )
     await coordinator.recover(lease_owner="next-boot")
+    await _run_processing_actions(coordinator)
 
     assert commits == 1
 
@@ -901,7 +1201,10 @@ async def test_processing_action_cancellation_drains_started_store_commit(
         enabled=lambda: True,
         processing_event=notify,
     )
-    recovery = asyncio.create_task(coordinator.recover(lease_owner="next-boot"))
+    await coordinator.recover(lease_owner="next-boot")
+    assert await coordinator.run_due() == 0
+    recovery = coordinator._processing_task
+    assert recovery is not None
     assert await asyncio.to_thread(entered.wait, 1)
     recovery.cancel()
     await asyncio.sleep(0)
@@ -934,13 +1237,14 @@ async def test_final_flush_upgrades_joined_due_flush_after_due_at_shifts(
     )
     first = _enqueue(store, "first-final-flush-race")
     assert await worker.drain_once() == 1
+    await _wait_for_processing_actions(worker.coordinator)
 
     current[0] += timedelta(minutes=5)
     session_lock = worker.coordinator._session_lock(
         first.provider_session_ref.serialize()
     )
     await session_lock.acquire()
-    assert await worker.coordinator.run_due() == 1
+    assert await _run_due_and_wait(worker.coordinator) == 1
     ordinary_flush = worker.coordinator._flush_tasks[
         first.provider_session_ref.serialize()
     ]
@@ -1151,6 +1455,7 @@ async def test_processing_fault_emits_one_fault_and_recovery_edge(tmp_path: Path
     _enqueue(store, "processing-fault")
 
     assert await worker.drain_once() == 1
+    await _wait_for_processing_actions(worker.coordinator)
     opened = store.get_meta()
     assert opened is not None
     assert opened.processing_fault_kind == "credential"
@@ -1161,6 +1466,7 @@ async def test_processing_fault_emits_one_fault_and_recovery_edge(tmp_path: Path
     provider.processing_healthy_flag = True
     current[0] += timedelta(seconds=5)
     assert await worker.drain_once() == 1
+    await _wait_for_processing_actions(worker.coordinator)
     closed = store.get_meta()
     assert closed is not None
     assert closed.processing_fault_since is None
@@ -1212,6 +1518,7 @@ async def test_ambiguous_add_opens_one_durable_fault_without_replay(
     _enqueue(store, f"ambiguous-{failure}")
 
     assert await worker.drain_once() == 1
+    await _wait_for_processing_actions(worker.coordinator)
     row = store.list_queue_rows()[0]
     assert row.state == "manual_required"
     assert len(provider.captures) == 1
@@ -1262,8 +1569,9 @@ async def test_restart_finishes_ambiguous_add_fault_after_classification_interru
 
     original_health = provider.processing_healthy
     monkeypatch.setattr(provider, "processing_healthy", interrupt_classification)
+    assert not await coordinator.deliver(claimed, lease_owner="old-boot")
     with pytest.raises(asyncio.CancelledError):
-        await coordinator.deliver(claimed, lease_owner="old-boot")
+        await _run_due_and_wait(coordinator)
 
     queued = store.list_queue_rows()[0]
     assert queued.state == "manual_required"
@@ -1292,7 +1600,9 @@ async def test_restart_finishes_ambiguous_add_fault_after_classification_interru
         processing_event=record_event,
     )
     await restarted.recover(lease_owner="new-boot")
+    await _run_processing_actions(restarted)
     await restarted.recover(lease_owner="same-boot")
+    await _run_processing_actions(restarted)
 
     recovered = store.ensure_meta()
     assert recovered.processing_fault_kind == "credential"
@@ -1330,6 +1640,7 @@ async def test_confirmed_client_rejection_does_not_open_processing_fault(
     _enqueue(store, "client-rejection")
 
     assert await worker.drain_once() == 1
+    await _wait_for_processing_actions(worker.coordinator)
     rejected = store.list_queue_rows()[0]
     assert (rejected.state, rejected.add_request_id) == (
         "dead",
@@ -1371,6 +1682,7 @@ async def test_server_rejected_add_is_terminal_but_opens_processing_fault(tmp_pa
     _enqueue(store, "server-rejection")
 
     assert await worker.drain_once() == 1
+    await _wait_for_processing_actions(worker.coordinator)
     rejected = store.list_queue_rows()[0]
     assert (rejected.state, rejected.attempts, rejected.add_request_id) == (
         "dead",
@@ -1402,6 +1714,7 @@ async def test_server_rejected_add_is_terminal_but_opens_processing_fault(tmp_pa
     provider.processing_healthy_flag = True
     _enqueue(store, "recovery")
     assert await worker.drain_once() == 1
+    await _wait_for_processing_actions(worker.coordinator)
     closed = store.get_meta()
     assert closed is not None
     assert closed.processing_fault_since is None
@@ -1481,7 +1794,9 @@ async def test_cancelled_server_rejection_commit_is_completed_once_after_restart
         processing_event=record_event,
     )
     await restarted.recover(lease_owner="next-boot")
+    await _run_processing_actions(restarted)
     await restarted.recover(lease_owner="same-boot")
+    await _run_processing_actions(restarted)
     assert [event[:2] for event in events] == [("fault", "credential")]
     assert len(provider.captures) == 1
 
@@ -1494,6 +1809,7 @@ async def test_cancelled_server_rejection_commit_is_completed_once_after_restart
         coordinator=restarted,
     )
     assert await restarted_worker.drain_once() == 1
+    await _wait_for_processing_actions(restarted)
     assert len(provider.captures) == 2
     assert reopened_store.ensure_meta().processing_fault_since is None
     assert [event[:2] for event in events] == [
@@ -1517,7 +1833,7 @@ async def test_fence_routes_new_capture_to_next_generation(tmp_path: Path) -> No
     first = _enqueue(store, "first")
     assert await worker.drain_once() == 1
     current[0] += timedelta(minutes=5)
-    assert await worker.coordinator.run_due() == 1
+    assert await _run_due_and_wait(worker.coordinator) == 1
     await asyncio.wait_for(flush.entered.wait(), timeout=1)
 
     second = _enqueue(store, "second")
@@ -1739,7 +2055,9 @@ async def test_boot_recovery_opens_and_emits_processing_fault_once(
     )
 
     await coordinator.recover(lease_owner="next-boot")
+    await _run_processing_actions(coordinator)
     await coordinator.recover(lease_owner="same-boot")
+    await _run_processing_actions(coordinator)
 
     meta = store.get_meta()
     assert meta is not None
@@ -1823,7 +2141,9 @@ async def test_restart_finishes_submitted_flush_fault_notification_once(
         processing_event=record_event,
     )
     await restarted.recover(lease_owner="next-boot")
+    await _run_processing_actions(restarted)
     await restarted.recover(lease_owner="same-boot")
+    await _run_processing_actions(restarted)
 
     assert [event[:3] for event in events] == [
         ("fault", "engine", "2026-01-01T00:00:03.000Z")
@@ -1923,7 +2243,9 @@ async def test_restart_finishes_atomic_processing_recovery_notification_once(
         processing_event=record_event,
     )
     await restarted.recover(lease_owner="next-boot")
+    await _run_processing_actions(restarted)
     await restarted.recover(lease_owner="same-boot")
+    await _run_processing_actions(restarted)
 
     assert [event[:3] for event in events] == [
         ("recovered", None, expected_at)
@@ -1955,7 +2277,7 @@ async def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: 
     expected_delays = (1, 2, 4)
     current[0] += timedelta(minutes=5)
     for retry_count, delay in enumerate(expected_delays, start=1):
-        assert await coordinator.run_due() == 1
+        assert await _run_due_and_wait(coordinator) == 1
         await _wait_for_scheduled_flush(coordinator, row.provider_session_ref)
 
         state = store.get_session_flush_state(row.provider_session_ref)
@@ -1968,8 +2290,9 @@ async def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: 
         assert state.submission_started_at is None
         current[0] += timedelta(seconds=delay)
 
-    assert await coordinator.run_due() == 1
+    assert await _run_due_and_wait(coordinator) == 1
     await _wait_for_scheduled_flush(coordinator, row.provider_session_ref)
+    await _run_due_and_wait(coordinator)
     terminal = store.get_session_flush_state(row.provider_session_ref)
     assert terminal is not None
     assert terminal.state == "manual_required"
@@ -2019,7 +2342,7 @@ async def test_cancelled_exhausted_flush_retry_is_completed_once_after_restart(
     assert await worker.drain_once() == 1
     current[0] += timedelta(minutes=5)
     for delay in (1, 2, 4):
-        assert await coordinator.run_due() == 1
+        assert await _run_due_and_wait(coordinator) == 1
         await _wait_for_scheduled_flush(coordinator, row.provider_session_ref)
         current[0] += timedelta(seconds=delay)
 
@@ -2034,7 +2357,7 @@ async def test_cancelled_exhausted_flush_retry_is_completed_once_after_restart(
         return result
 
     monkeypatch.setattr(store, "retry_unsubmitted_flush", blocking_retry)
-    assert await coordinator.run_due() == 1
+    assert await _run_due_and_wait(coordinator) == 1
     flush_task = coordinator._flush_tasks[row.provider_session_ref.serialize()]
     assert await asyncio.to_thread(retry_committed.wait, 1)
     flush_task.cancel()
@@ -2063,7 +2386,9 @@ async def test_cancelled_exhausted_flush_retry_is_completed_once_after_restart(
         processing_event=record_event,
     )
     await restarted.recover(lease_owner="next-boot")
+    await _run_processing_actions(restarted)
     await restarted.recover(lease_owner="same-boot")
+    await _run_processing_actions(restarted)
     assert [event[:2] for event in events] == [("fault", "engine")]
     assert len(provider.flushes) == 4
 
@@ -2076,6 +2401,7 @@ async def test_cancelled_exhausted_flush_retry_is_completed_once_after_restart(
         coordinator=restarted,
     )
     assert await restarted_worker.drain_once() == 1
+    await _wait_for_processing_actions(restarted)
     assert reopened_store.ensure_meta().processing_fault_since is None
     assert [event[:2] for event in events] == [
         ("fault", "engine"),
@@ -2118,9 +2444,9 @@ async def test_continuous_activity_cannot_extend_flush_past_max_age(tmp_path: Pa
     assert state.due_at == "2026-01-01T00:30:00.000Z"
 
     current[0] = start + timedelta(minutes=29, seconds=59)
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     current[0] = start + timedelta(minutes=30)
-    assert await coordinator.run_due() == 1
+    assert await _run_due_and_wait(coordinator) == 1
     await _wait_for_scheduled_flush(coordinator, session_ref)
 
     assert provider.flushes == [session_ref]
@@ -2232,7 +2558,7 @@ async def test_shutdown_does_not_initiate_a_provider_flush(tmp_path: Path) -> No
 
     current[0] += timedelta(minutes=5)
     await worker.prepare_shutdown()
-    assert await worker.coordinator.run_due() == 0
+    assert await _run_due_and_wait(worker.coordinator) == 0
     assert not await worker.coordinator.final_flush(row.provider_session_ref)
 
     assert len(provider.captures) == 1
@@ -2354,6 +2680,7 @@ async def test_cancelled_flush_while_submission_marker_commits_remains_retryable
 
     with pytest.raises(asyncio.CancelledError):
         await flush_call
+    await _run_due_and_wait(coordinator)
     state = store.get_session_flush_state(row.provider_session_ref)
     assert state is not None
     assert state.state == "due"
@@ -2468,6 +2795,7 @@ async def test_cancelled_flush_after_provider_entry_opens_one_fault_and_later_re
     flush_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await flush_call
+    await _run_due_and_wait(coordinator)
 
     state = store.get_session_flush_state(cancelled.provider_session_ref)
     assert state is not None and state.state == "manual_required"
@@ -2488,12 +2816,14 @@ async def test_cancelled_flush_after_provider_entry_opens_one_fault_and_later_re
         processing_event=record_event,
     )
     await recovered.recover(lease_owner="next-boot")
+    await _run_processing_actions(recovered)
     assert [event[:2] for event in events] == [("fault", "engine")]
 
     assert await recovered.final_flush(
         recovery.provider_session_ref,
         deadline_seconds=1,
     )
+    await _run_due_and_wait(recovered)
     closed = store.get_meta()
     assert closed is not None and closed.processing_fault_since is None
     assert [event[:2] for event in events] == [
@@ -2508,9 +2838,6 @@ async def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
 ) -> None:
     store = _store(tmp_path)
     flush_entered = asyncio.Event()
-    health_entered = asyncio.Event()
-    health_finished = asyncio.Event()
-    release_health = asyncio.Event()
     events: list[tuple[str, str | None, str, int]] = []
     health_calls = 0
 
@@ -2520,15 +2847,9 @@ async def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
             flush_entered.set()
             await asyncio.Event().wait()
 
-    async def block_first_health_probe() -> None:
+    async def record_health_probe() -> None:
         nonlocal health_calls
         health_calls += 1
-        if health_calls == 1:
-            health_entered.set()
-            try:
-                await release_health.wait()
-            finally:
-                health_finished.set()
 
     async def record_event(
         event: str,
@@ -2539,7 +2860,7 @@ async def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
         events.append((event, kind, occurred_at, queued))
         return True
 
-    provider = Provider(processing_healthy_hook=block_first_health_probe)
+    provider = Provider(processing_healthy_hook=record_health_probe)
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
@@ -2554,21 +2875,12 @@ async def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
     )
     row = _enqueue(store, "shutdown-finalizer")
     assert await worker.drain_once() == 1
-    assert await coordinator.run_due() == 0
+    assert await _run_due_and_wait(coordinator) == 0
     flush_task = coordinator._schedule(row.provider_session_ref, force=True)
     assert flush_task is not None
     await asyncio.wait_for(flush_entered.wait(), timeout=1)
 
-    shutdown = asyncio.create_task(
-        coordinator.prepare_shutdown(timeout_seconds=1)
-    )
-    await asyncio.wait_for(health_entered.wait(), timeout=1)
-    assert not shutdown.done()
-
-    # Cancel the blocked classification only after the durable local phase.
-    flush_task.cancel()
-    await asyncio.wait_for(shutdown, timeout=1)
-    assert health_finished.is_set()
+    await coordinator.prepare_shutdown(timeout_seconds=1)
     assert flush_task.cancelled()
     state = store.get_session_flush_state(row.provider_session_ref)
     assert state is not None and state.state == "manual_required"
@@ -2578,8 +2890,6 @@ async def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
     assert pending_fault.processing_fault_kind is None
     assert pending_fault.processing_alert_active is False
     assert events == []
-
-    release_health.set()
     completed_failures = store.failure_log()
     completed_meta = store.get_meta()
     await asyncio.sleep(0)
@@ -2594,6 +2904,8 @@ async def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
         processing_event=record_event,
     )
     await recovered.recover(lease_owner="next-boot")
+    assert health_calls == 0
+    await _run_due_and_wait(recovered)
     assert [event[:2] for event in events] == [("fault", "engine")]
     recovered_meta = store.get_meta()
     assert recovered_meta is not None
@@ -2691,6 +3003,7 @@ async def test_shutdown_drains_local_flush_commit_then_boot_alerts(
         processing_event=record_event,
     )
     await recovered.recover(lease_owner="next-boot")
+    await _run_processing_actions(recovered)
     assert health_calls == 1
     assert [event[:2] for event in events] == [("fault", "engine")]
 
@@ -2783,7 +3096,9 @@ async def test_shutdown_local_flush_phase_does_not_wait_for_classification_lock(
         processing_event=record_event,
     )
     await recovered.recover(lease_owner="next-boot")
+    await _run_processing_actions(recovered)
     await recovered.recover(lease_owner="same-boot")
+    await _run_processing_actions(recovered)
     assert health_calls == 2
     assert [event[:2] for event in events] == [("fault", "engine")]
 
@@ -3043,6 +3358,7 @@ async def test_attachment_preflight_failure_is_bounded_without_session_fence(
         attachment_store=attachment_store,
     )
     await coordinator.recover(lease_owner="initial-boot")
+    await _run_processing_actions(coordinator)
 
     for expected_attempts, delay in ((1, 30), (2, 120), (3, 0)):
         claimed = store.claim_due(
@@ -3074,6 +3390,7 @@ async def test_attachment_preflight_failure_is_bounded_without_session_fence(
         attachment_store=attachment_store,
     )
     await restarted.recover(lease_owner="restarted-worker")
+    await _run_processing_actions(restarted)
     assert store.attachment_bundle_sets() == (
         frozenset(),
         frozenset({bundle.bundle_id}),
@@ -3132,6 +3449,7 @@ async def test_successful_boot_attachment_reconcile_finalizes_release(tmp_path: 
         attachment_store=attachment_store,
     )
     await coordinator.recover(lease_owner="next-boot")
+    await _run_processing_actions(coordinator)
 
     assert store.attachment_bundle_sets() == (frozenset(), frozenset())
     assert not pinned_path.exists()
