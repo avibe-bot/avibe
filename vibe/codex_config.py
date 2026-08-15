@@ -533,20 +533,16 @@ def persist_codex_relay_marker(marker: Optional[Dict[str, str]]) -> bool:
     ``save_codex_auth`` — can persist a fresh capture BEFORE the
     destructive ``apply_codex_auth(oauth)`` cleanup destroys the on-disk
     relay evidence (#1450). A later V2Config failure in the owning flow
-    then cannot lose the capture. Returns ``True`` when the write
-    landed; ``False`` (never raises) so callers can degrade to "recovery
-    lost, OAuth proceeds".
+    then cannot lose the capture. Runs through the cross-process
+    ``update_config_fields`` transaction (#1458) so the marker write
+    cannot revert a concurrent Settings save from the other process.
+    Returns ``True`` when the write landed; ``False`` (never raises) so
+    callers can degrade to "recovery lost, OAuth proceeds".
     """
-    from config.v2_config import CONFIG_LOCK, V2Config
+    from config.v2_config import update_config_fields
 
     try:
-        with CONFIG_LOCK:
-            try:
-                config = V2Config.load()
-            except FileNotFoundError:
-                config = V2Config.default()
-            config.agents.codex.oauth_relay_marker = marker
-            config.save()
+        update_config_fields(lambda config: setattr(config.agents.codex, "oauth_relay_marker", marker))
         return True
     except Exception:  # noqa: BLE001
         return False

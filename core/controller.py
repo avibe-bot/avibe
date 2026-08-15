@@ -1171,11 +1171,9 @@ class Controller:
                     counts,
                 )
 
-            from config.v2_config import V2Config
+            from config.v2_config import update_config_fields
 
-            v2_config = V2Config.load()
-            v2_config.language = chosen
-            v2_config.save()
+            update_config_fields(lambda cfg: setattr(cfg, "language", chosen))
             self.config.language = chosen
             logger.info("Migrated legacy per-channel language to global config: %s", chosen)
         except Exception as err:

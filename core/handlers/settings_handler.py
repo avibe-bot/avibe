@@ -706,11 +706,9 @@ class SettingsHandler(BaseHandler):
             language_saved = True
             if language is not None and language != self.config.language:
                 try:
-                    from config.v2_config import V2Config
+                    from config.v2_config import update_config_fields
 
-                    v2_config = V2Config.load()
-                    v2_config.language = language
-                    v2_config.save()
+                    update_config_fields(lambda cfg: setattr(cfg, "language", language))
                     self.config.language = language
                 except Exception as err:
                     language_saved = False

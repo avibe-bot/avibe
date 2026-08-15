@@ -162,6 +162,56 @@ def _memory_config_transaction(config_path: Path) -> Iterator[None]:
             os.close(descriptor)
 
 
+@contextmanager
+def config_write_transaction(config_path: Optional[Path] = None) -> Iterator["V2Config"]:
+    """Cross-process read-modify-write transaction for ``config.json`` (#1458).
+
+    Generalizes the Memory transaction: the same file lock serializes the
+    WHOLE load→mutate→save cycle, so the mutator always sees a snapshot
+    loaded inside the transaction and cannot revert a concurrent writer's
+    fields (the stale-snapshot race ``CONFIG_LOCK`` cannot fix because it
+    is process-local while the UI API and controller are separate
+    processes). Lock order and re-entrancy match the Memory transaction:
+    ``CONFIG_LOCK`` first, then the file lock; nested acquisitions
+    re-enter the process lock only.
+
+    Yields a freshly loaded ``V2Config``; mutate it in place and it is
+    saved on clean context exit. Mutator exceptions abort with no write.
+    """
+
+    from config import paths as _paths
+
+    path = config_path or _paths.get_config_path()
+    with _memory_config_transaction(path):
+        try:
+            config = V2Config.load(path)
+        except FileNotFoundError:
+            config = V2Config.default()
+        yield config
+        config.save(path)
+
+
+def update_config_fields(
+    mutator: Callable[["V2Config"], None],
+    *,
+    config_path: Optional[Path] = None,
+) -> "V2Config":
+    """Apply ``mutator`` to a fresh config under the cross-process lock.
+
+    The preferred shape for narrow field writers (relay marker, language,
+    default provider, secrets rotation): decisions are made before the
+    call, the mutator only assigns fields, and the transaction guarantees
+    neither snapshot staleness nor lost updates. Direct
+    ``V2Config.load`` → mutate → ``save()`` pairs outside a transaction
+    are a defect for cross-process state (see docs/plans/
+    config-cross-process-write-serialization.md).
+    """
+
+    with config_write_transaction(config_path) as config:
+        mutator(config)
+    return config
+
+
 _MODEL_HUB_CREDENTIAL_PATTERNS = (
     re.compile(r"(?i)\b(?:sk|rk|pk|sess|token)[-_][a-z0-9_-]{8,}\b"),
     re.compile(

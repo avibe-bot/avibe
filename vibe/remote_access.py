@@ -3600,8 +3600,19 @@ def stop(config: V2Config | None = None) -> dict[str, Any]:
 
 
 def rotate_session_secret(config: V2Config) -> None:
-    config.remote_access.vibe_cloud.session_secret = secrets.token_urlsafe(32)
-    config.save()
+    """Rotate the cloud session secret through the cross-process write
+    transaction (#1458) so the rotation cannot revert a concurrent
+    Settings save, and mirror the new secret onto the caller's live
+    config object."""
+    from config.v2_config import update_config_fields
+
+    new_secret = secrets.token_urlsafe(32)
+
+    def _apply(cfg: V2Config) -> None:
+        cfg.remote_access.vibe_cloud.session_secret = new_secret
+
+    update_config_fields(_apply)
+    config.remote_access.vibe_cloud.session_secret = new_secret
 
 
 def start(config: V2Config | None = None) -> dict[str, Any]:
