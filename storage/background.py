@@ -8800,10 +8800,18 @@ class SQLiteBackgroundTaskStore:
             "message_payload": _json_loads(row["message_payload_json"], None),
             "cwd": row["cwd"],
             "mode": row["mode"] or "once",
-            "timeout_seconds": float(row["timeout_seconds"] or 21600.0),
+            "timeout_seconds": (
+                float(row["timeout_seconds"])
+                if row["timeout_seconds"] is not None
+                else 21600.0
+            ),
             "lifetime_timeout_seconds": float(row["lifetime_timeout_seconds"] or 0.0),
             "retry_exit_codes": [int(code) for code in _json_loads(row["retry_exit_codes_json"], [])],
-            "retry_delay_seconds": float(row["retry_delay_seconds"] or 30.0),
+            "retry_delay_seconds": (
+                float(row["retry_delay_seconds"])
+                if row["retry_delay_seconds"] is not None
+                else 30.0
+            ),
             "post_to": row["post_to"],
             "deliver_key": row["deliver_key"],
             "enabled": bool(row["enabled"]),
