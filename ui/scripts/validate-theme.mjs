@@ -648,7 +648,20 @@ const SHADOW_CHANNELS = [
     // -- so the channel reads exactly what the measurement counts. Widening one
     // without the other is how a spelling becomes scanned-but-unreported or
     // reported-but-unscannable, and both of those are silence.
-    pattern: /(?<![\w-])[A-Za-z]*[Ss]hadow[A-Za-z]*['"]?\s*\]?\s*[:=]([^;\n]*)/g,
+    //
+    // The identifier ENDS at the word. Reading `[Ss]hadow[A-Za-z]*` matched any
+    // name merely containing it, so `const shadowPreset = 'compact'` was scanned
+    // as a style property and `compact` was reported as an unreadable shadow
+    // layer -- a false failure, which is the one failure mode this guard cannot
+    // afford: a missed glow leaves the tree where it already was, while a false
+    // positive fails an unrelated PR's CI for naming a variable. Ending at the
+    // word is not the property enumeration that cost the earlier rounds either;
+    // it is a fact about CSS naming. Shadow properties are `box-shadow`,
+    // `text-shadow`, `-webkit-box-shadow`, `drop-shadow` -- the word is always
+    // the TAIL. Application names that merely contain it -- `shadowPreset`,
+    // `shadowRoot`, `useShadows` -- put it at the head or pluralise it, and none
+    // of them is a property a browser will read a shadow out of.
+    pattern: /(?<![\w-])[A-Za-z]*[Ss]hadow(?![A-Za-z])['"]?\s*\]?\s*[:=]([^;\n]*)/g,
     valuesOf: (match) => [...match[1].matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`/g)]
       .map(([, single, double, template]) => single ?? double ?? template),
     // A CSS shadow is a string, so a bare non-string literal is provably not
@@ -664,12 +677,46 @@ const SHADOW_CHANNELS = [
   // widened in lockstep by hand for three rounds, and a shared source is the
   // version of that discipline which cannot be forgotten.
   {
-    pattern: new RegExp(`${CSSOM_SETTER.source}([^;\\n]*)`, 'gi'),
-    valuesOf: (match) => [...match[2].matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`/g)]
-      .map(([, single, double, template]) => single ?? double ?? template),
-    provablyNotAShadow: (match) => NON_STRING_LITERAL.test(match[2]),
+    pattern: new RegExp(CSSOM_SETTER.source, 'gi'),
+    valuesOf: (match) => stringLiterals(valueArgument(match.input, match.index + match[0].length)),
+    provablyNotAShadow: (match) =>
+      NON_STRING_LITERAL.test(valueArgument(match.input, match.index + match[0].length) ?? ''),
   },
 ];
+
+// The string literals in an expression: a ternary's two branches are two
+// shadows and both of them render.
+function stringLiterals(expression) {
+  if (expression === null) return [];
+  return [...expression.matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`/g)]
+    .map(([, single, double, template]) => single ?? double ?? template);
+}
+
+// The VALUE argument of a call, and only it. `setProperty` takes a third,
+// `priority`, and reading "every string literal after the property name" swept
+// it up as a second layer -- so the entirely valid
+// `setProperty('box-shadow', 'none', 'important')` accepted `none` and then
+// failed on `important`. The argument ends at the first comma that is not
+// nested inside a call or a string, which is the same notion of "top level"
+// that balancedArgument already uses; null when the call never closes, so an
+// unreadable one stays loud instead of quietly yielding nothing.
+function valueArgument(source, start) {
+  let depth = 0;
+  let quote = null;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      if (char === '\\') index += 1;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') quote = char;
+    else if (char === '(' || char === '[' || char === '{') depth += 1;
+    else if ((char === ',' || char === ')') && depth === 0) return source.slice(start, index);
+    else if (char === ')' || char === ']' || char === '}') depth -= 1;
+  }
+  return null;
+}
 
 // The parenthesis-balanced span starting at `openIndex`, or null when it never
 // closes -- null is not a quiet skip, it lands in the unreadable bucket.
@@ -778,8 +825,15 @@ function blankCssComments(source) {
 // keeps the channel and this measurement describing one span: widen one alone
 // and a spelling becomes either scanned-but-uncounted or counted-but-unscannable,
 // and both of those are silence.
+//
+// The word is the TAIL of the identifier here for the same reason it is in the
+// channel above: `box-shadow`, `text-shadow` and `drop-shadow` all end in it,
+// while `shadowPreset` and `shadowRoot` only start with it and are not
+// properties at all. The two must narrow together -- a mention this stopped
+// counting while the channel still read it would be scanned-but-unreported,
+// which is the silence these two exist to make impossible.
 const SHADOW_MENTION = new RegExp(
-  `(?<![\\w-])(?!--)[A-Za-z-]*shadow[A-Za-z]*(?:['"]?\\s*\\]?\\s*[:=]|-?[([])|${CSSOM_SETTER.source}`,
+  `(?<![\\w-])(?!--)[A-Za-z-]*shadow(?![A-Za-z])(?:['"]?\\s*\\]?\\s*[:=]|-?[([])|${CSSOM_SETTER.source}`,
   'gi',
 );
 
