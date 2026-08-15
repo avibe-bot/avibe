@@ -606,7 +606,7 @@ export const HarnessPage: React.FC = () => {
       <CapabilityTabs />
       {/* Header */}
       <div className="flex items-center gap-4">
-        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-violet/30 bg-violet/[0.08] text-violet-ink shadow-[0_0_24px_-6px_rgba(124,91,255,0.5)]">
+        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-violet/30 bg-violet/[0.08] text-violet-ink shadow-glow-md-violet">
           <Activity className="size-5" />
         </div>
         <div className="flex flex-1 flex-col">
@@ -989,7 +989,7 @@ const TasksList: React.FC<TasksListProps> = ({
 // their second line *says*, never in how the row is built. ``definitionRowLine``
 // owns that difference so this component stays a single anatomy.
 const STATE_DOT_CLASS: Record<HarnessLifecycleState, string> = {
-  running: 'bg-mint shadow-[0_0_5px_rgba(52,211,153,0.7)]',
+  running: 'bg-mint shadow-glow-dot-mint',
   waiting: 'bg-cyan',
   paused: 'bg-muted/70',
   finished: 'bg-border-strong',

@@ -396,7 +396,7 @@ export const RemoteAccess: React.FC = () => {
   return (
     <section
       id="remote-access"
-      className="scroll-mt-24 overflow-hidden rounded-xl border border-cyan/45 bg-cyan/[0.06] shadow-[0_0_40px_-10px_rgba(63,224,229,0.45)]"
+      className="scroll-mt-24 overflow-hidden rounded-xl border border-cyan/45 bg-cyan/[0.06] shadow-glow-lg-cyan"
     >
       <div className="flex items-start justify-between gap-4 border-b border-cyan/20 bg-cyan/[0.07] px-5 py-4">
         <div className="min-w-0 space-y-2">

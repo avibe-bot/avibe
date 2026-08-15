@@ -148,7 +148,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
       {!compact && (
         <div className="hidden items-center md:flex">
           {enabled ? (
-            <div className="flex h-7 items-center gap-0.5 rounded-lg border border-mint/40 bg-mint/[0.06] p-0.5 shadow-[0_0_16px_-6px_rgba(91,255,160,0.5)]">
+            <div className="flex h-7 items-center gap-0.5 rounded-lg border border-mint/40 bg-mint/[0.06] p-0.5 shadow-glow-sm-mint">
               <Button
                 type="button"
                 variant="default"

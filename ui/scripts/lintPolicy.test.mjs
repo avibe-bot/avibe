@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ESLint, Linter } from 'eslint';
 import globals from 'globals';
+import ts from 'typescript';
 
 import sharedConfig from '../eslint.config.js';
 import { EXPECTED_BROWSER_GLOBALS } from './browserGlobals.mjs';
@@ -21,6 +22,7 @@ import {
   policyDifferences,
   withoutRules,
 } from './lintPolicy.mjs';
+import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // What the gate measures, measured. Every case here is a way the lint run could
 // look at less than it claims to while `eslint-baseline.json` stays green — the
@@ -109,14 +111,14 @@ describe('the real UI tree is what the gate measures', () => {
     // old hand-written contract listed left byte-identical, and `vite.config.ts`
     // silently stopped being linted. It is in the domain by construction now.
     expect(intendedFiles(UI_ROOT)).toContain('vite.config.ts');
-  });
+  }, WHOLE_TREE_SCAN);
 
   it('covers nested sources without anyone listing them', () => {
     const found = intendedFiles(UI_ROOT);
     expect(found.length).toBeGreaterThan(100);
     expect(found.every((file) => file.endsWith('.ts') || file.endsWith('.tsx'))).toBe(true);
     expect(found.some((file) => file.split('/').length > 3)).toBe(true);
-  });
+  }, WHOLE_TREE_SCAN);
 
   it('resolves exactly the pinned policy for every one of them', async () => {
     const drifted = [];
@@ -125,6 +127,72 @@ describe('the real UI tree is what the gate measures', () => {
       if (differences.length > 0) drifted.push({ file, differences });
     }
     expect(groupByDifferences(drifted)).toEqual([]);
+  }, WHOLE_TREE_SCAN);
+
+  // The rule those three are instances of, and the reason it is asserted rather
+  // than remembered: a test that walks the real tree is not a unit test, so
+  // vitest's default clock measures the runner's contention instead of the
+  // test's subject. The two that forgot did not fail on a defect -- they failed
+  // on a busy CI machine, six pushes in a row, on the one gate whose entire job
+  // is to tell a defect from a correct file.
+  //
+  // The members are found by asking the parser which `it()` reaches for the
+  // walk, rather than by listing the ones that happened to be slow the week this
+  // was written. That is the same lesson as the scan these tests guard: a
+  // question about structure answered by structure. A whole-tree test added
+  // later is covered without editing this, and one that drops its clock fails
+  // here instead of on someone else's pull request.
+  //
+  // Structural is not a preference here, it is the only thing that works. The
+  // first cut asked whether the test's TEXT contained `intendedFiles(` and
+  // `new URL('../'`, and this test failed on itself: those spellings are in the
+  // marker, so the guard read its own source and reported the search string as a
+  // finding. A call is a call and a string that spells one is not.
+  it('gives every whole-tree test a clock that measures a hang, not a busy runner', () => {
+    const untimed = [];
+    const misnamed = [];
+
+    for (const file of fs.readdirSync(SCRIPTS_ROOT).filter((name) => name.endsWith('.test.mjs'))) {
+      const source = fs.readFileSync(path.join(SCRIPTS_ROOT, file), 'utf8');
+      const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+
+      const names = (node) =>
+        (ts.isIdentifier(node) && node.text === 'UI_ROOT') || Boolean(ts.forEachChild(node, names));
+
+      const walksTheTree = (node) =>
+        (ts.isCallExpression(node)
+          && node.expression.getText(tree) === 'intendedFiles'
+          && node.arguments.some(names))
+        || Boolean(ts.forEachChild(node, walksTheTree));
+
+      const visit = (node) => {
+        // The real tree has exactly one spelling, which is what makes the marker
+        // above complete: a walk introduced under some other name would be
+        // invisible to it, so the name itself is pinned here.
+        if (ts.isNewExpression(node)
+          && node.expression.getText(tree) === 'URL'
+          && node.arguments?.[0] && ts.isStringLiteral(node.arguments[0])
+          && node.arguments[0].text === '../') {
+          let bound = node.parent;
+          while (bound && !ts.isVariableDeclaration(bound)) bound = bound.parent;
+          const name = bound ? bound.name.getText(tree) : 'the tree root, bound to no name';
+          if (name !== 'UI_ROOT') misnamed.push(`${file} > ${name}`);
+        }
+
+        if (ts.isCallExpression(node) && ['it', 'test'].includes(node.expression.getText(tree))) {
+          const [name, body, timeout] = node.arguments;
+          if (body && walksTheTree(body) && timeout === undefined) {
+            untimed.push(`${file} > ${name.getText(tree)}`);
+          }
+        }
+
+        node.forEachChild(visit);
+      };
+      visit(tree);
+    }
+
+    expect(misnamed).toEqual([]);
+    expect(untimed).toEqual([]);
   });
 });
 

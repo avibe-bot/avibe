@@ -170,7 +170,7 @@ function OrganizationNavbar() {
           <div className="hidden items-center gap-2 sm:flex">
             <div className="rounded-lg border border-mint/30 bg-mint/10 px-3 py-2">
               <div className="flex items-center gap-2 text-[12px] font-semibold">
-                <span className="size-2 rounded-full bg-mint shadow-[0_0_8px_rgba(91,255,160,0.8)]" />
+                <span className="size-2 rounded-full bg-mint shadow-glow-dot-mint" />
                 {t('organization.sidebar.cloudConnected')}
                 <span className="font-mono text-[10px] font-normal text-muted">
                   · {t('organization.sidebar.sessionRemaining', { minutes: Math.max(1, Math.ceil((session?.expires_in ?? 0) / 60)) })}

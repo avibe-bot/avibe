@@ -131,8 +131,8 @@ export const AppsLauncher: React.FC = () => {
         className={clsx(
           'group flex w-full items-center gap-2.5 rounded-full border bg-cyan-soft px-4 py-2.5 text-[13px] font-bold text-foreground transition-colors',
           visible
-            ? 'border-cyan shadow-[0_0_22px_-4px_rgba(63,224,229,0.7)]'
-            : 'border-cyan/45 shadow-[0_0_14px_-5px_rgba(63,224,229,0.55)] hover:border-cyan/70',
+            ? 'border-cyan shadow-glow-md-cyan'
+            : 'border-cyan/45 shadow-glow-sm-cyan hover:border-cyan/70',
         )}
       >
         <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />

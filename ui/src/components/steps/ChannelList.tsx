@@ -1599,7 +1599,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   className={clsx(
                     'rounded-xl border transition-colors',
                     expanded
-                      ? 'border-mint/30 bg-surface-2/70 shadow-[0_0_32px_-8px_rgba(91,255,160,0.45)]'
+                      ? 'border-mint/30 bg-surface-2/70 shadow-glow-lg-mint'
                       : 'border-border bg-background hover:border-border-strong'
                   )}
                 >
@@ -1666,7 +1666,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         <span
                           className={clsx(
                             'size-1.5 rounded-full',
-                            channelEnabled ? 'bg-mint shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted'
+                            channelEnabled ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
                           )}
                         />
                         {channelEnabled ? t('common.enabled') : t('common.disabled')}
@@ -1857,7 +1857,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-[12px] font-medium transition-colors',
                 platform === candidate
-                  ? 'border-mint/50 bg-mint/[0.16] text-mint-ink shadow-[0_0_20px_-4px_rgba(91,255,160,0.4)]'
+                  ? 'border-mint/50 bg-mint/[0.16] text-mint-ink shadow-glow-md-mint'
                   : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
               )}
             >

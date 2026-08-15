@@ -1328,13 +1328,13 @@
 .model-hub-wire--native {
   stroke: var(--cyan);
   stroke-width: var(--model-hub-wire-active-width);
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--cyan) 40%, transparent));
+  filter: drop-shadow(var(--shadow-glow-wire-cyan));
 }
 
 .model-hub-wire--gateway {
   stroke: var(--mint);
   stroke-width: var(--model-hub-wire-active-width);
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--mint) 40%, transparent));
+  filter: drop-shadow(var(--shadow-glow-wire-mint));
 }
 
 .model-hub-wire--connected_unused {
@@ -1345,7 +1345,7 @@
 .model-hub-wire--takeover {
   stroke: var(--violet);
   stroke-width: var(--model-hub-wire-active-width);
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--violet) 40%, transparent));
+  filter: drop-shadow(var(--shadow-glow-wire-violet));
 }
 
 .model-hub-wire--unavailable {
