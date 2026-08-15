@@ -146,7 +146,9 @@ redacted `multimodal_llm` record, while an unconfigured skip produces no provide
 add or call-log row.
 
 Settings exposes an optional Multimodal endpoint card with the same write-only-key
-and clear semantics as rerank. Status continues to project EverOS
+and clear semantics as rerank. Either optional endpoint can be cleared while Memory
+remains enabled; required LLM and embedding keys retain the enabled-state clear gate.
+Status continues to project EverOS
 `multimodal_llm`, `parser`, and `disabled_features` and adds a concise attachment
 capture availability line. Configuration remains UI-only; no CLI config flags are
 added.

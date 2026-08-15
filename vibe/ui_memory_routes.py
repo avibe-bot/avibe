@@ -190,12 +190,13 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
                     "api_key": None,
                 }
 
-    explicit_key_clear = any(
+    explicit_required_key_clear = any(
         endpoint_patch.get("api_key") in {None, ""}
-        for endpoint_patch in (processing_patch or {}).values()
+        for endpoint, endpoint_patch in (processing_patch or {}).items()
+        if endpoint in {"llm", "embedding"}
         if isinstance(endpoint_patch, dict) and "api_key" in endpoint_patch
     )
-    if explicit_key_clear and target["enabled"]:
+    if explicit_required_key_clear and target["enabled"]:
         raise ValueError("memory_key_clear_while_enabled")
     return target, confirm_rebuild
 

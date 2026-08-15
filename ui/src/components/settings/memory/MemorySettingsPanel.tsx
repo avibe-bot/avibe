@@ -192,35 +192,39 @@ export const MemorySettingsPanel: React.FC<{
 
   const rebuildRequired = settings.rebuild_required === true;
   const factoryResetRequired = settings.factory_reset_required === true;
-  const canClearKeys = !enabledDraft;
+  const canClearRequiredKeys = !enabledDraft;
   const canClearMemory = maintenance?.can_clear === true;
   const busy = saving || rebuildBusy || repairBusy || mutationBusy;
 
   const buildPatch = (): MemorySettingsPatch => {
     const patch: MemorySettingsPatch = {};
     if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
-    // A key clear is accepted only while the resulting state stays disabled.
-    const allowClear = !enabledDraft;
-    const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
+    // Required keys can clear only while the resulting state stays disabled.
+    const allowRequiredClear = !enabledDraft;
+    const llmPatch = buildEndpointPatch(
+      llmDraft,
+      settings.processing.llm,
+      allowRequiredClear,
+    );
     // Identity fields stay editable even when data exists; rebuild confirmation
     // is the safety gate instead of a silent lock.
     const embeddingPatch = buildEndpointPatch(
       embeddingDraft,
       settings.processing.embedding,
-      allowClear,
+      allowRequiredClear,
       false,
     );
     const rerankPatch = buildEndpointPatch(
       rerankDraft,
       settings.processing.rerank ?? EMPTY_ENDPOINT,
-      allowClear,
+      true,
       false,
       true,
     );
     const multimodalPatch = buildEndpointPatch(
       multimodalDraft,
       settings.processing.multimodal ?? EMPTY_ENDPOINT,
-      allowClear,
+      true,
       false,
       true,
     );
@@ -403,7 +407,7 @@ export const MemorySettingsPanel: React.FC<{
         original={settings.processing.llm}
         onChange={setLlmDraft}
         disabled={busy}
-        canClearKey={canClearKeys}
+        canClearKey={canClearRequiredKeys}
       />
 
       <EndpointFields
@@ -415,7 +419,7 @@ export const MemorySettingsPanel: React.FC<{
         onChange={setEmbeddingDraft}
         disabled={busy}
         identityHint={t('memory.settings.embeddingIdentityHint')}
-        canClearKey={canClearKeys}
+        canClearKey={canClearRequiredKeys}
       />
 
       <EndpointFields
@@ -427,7 +431,7 @@ export const MemorySettingsPanel: React.FC<{
         onChange={setRerankDraft}
         disabled={busy}
         identityHint={t('memory.settings.rerankIdentityHint')}
-        canClearKey={canClearKeys}
+        canClearKey
         clearKeyLabel={t('memory.settings.rerankClearLabel')}
       />
 
@@ -440,7 +444,7 @@ export const MemorySettingsPanel: React.FC<{
         onChange={setMultimodalDraft}
         disabled={busy}
         identityHint={t('memory.settings.multimodalIdentityHint')}
-        canClearKey={canClearKeys}
+        canClearKey
         clearKeyLabel={t('memory.settings.multimodalClearLabel')}
       />
 

@@ -158,6 +158,64 @@ def test_memory_settings_patch_accepts_and_clears_multimodal_endpoint() -> None:
     assert cleared.memory.processing.multimodal is None
 
 
+@pytest.mark.parametrize("endpoint", ["rerank", "multimodal"])
+def test_enabled_memory_can_clear_optional_endpoint_and_reconcile(
+    monkeypatch,
+    tmp_path,
+    endpoint: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(
+        MemoryConfig(
+            enabled=True,
+            processing=MemoryProcessingConfig(
+                llm=MemoryEndpointConfig(
+                    "https://llm.example.test/v1", "chat", "llm-key"
+                ),
+                embedding=MemoryEndpointConfig(
+                    "https://embed.example.test/v1", "embed", "embed-key"
+                ),
+                rerank=MemoryEndpointConfig(
+                    "https://rerank.example.test/v1/inference",
+                    "rerank-model",
+                    "rerank-key",
+                ),
+                multimodal=MemoryEndpointConfig(
+                    "https://vision.example.test/v1", "vision-model", "vision-key"
+                ),
+            ),
+        )
+    )
+    reconcile_calls: list[bool] = []
+
+    async def preflight_must_not_run(*_args, **_kwargs):
+        pytest.fail("removing an optional endpoint must not preflight it")
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight_must_not_run)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"processing": {endpoint: {"api_key": None}}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["enabled"] is True
+    assert endpoint not in response.get_json()["processing"]
+    saved = V2Config.load().memory
+    assert saved.enabled is True
+    assert getattr(saved.processing, endpoint) is None
+    assert reconcile_calls == [True]
+
+
 def _save_config(tmp_path) -> None:
     V2Config(
         mode="self_host",

@@ -42,6 +42,7 @@ from core.memory.confined_filesystem import (
 from core.memory.everos import (
     EverOSPort,
     MULTIMODAL_EXPLICIT_ENV,
+    PROCESSING_PROBE_MAX_DEADLINE_SECONDS,
     processing_probe_deadline_seconds,
 )
 from core.memory.secret_scrubber import scrub_text
@@ -107,6 +108,8 @@ _STOP_TIMEOUT_SECONDS = 10.0
 _HEALTHY_RESET_SECONDS = 5 * 60.0
 _RESTART_DELAYS_SECONDS = (1.0, 5.0, 30.0, 120.0)
 _MAX_CONSECUTIVE_FAILURES = 5
+# Reconcile's transport budget must cover the worst derived probe-child deadline.
+_PROCESSING_PROBE_TIMEOUT_SECONDS = PROCESSING_PROBE_MAX_DEADLINE_SECONDS
 _PROCESSING_PROBE_STDERR_BYTES = 2048
 _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700

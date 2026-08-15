@@ -144,9 +144,14 @@ describe('MemorySettingsPanel', () => {
 
   it('clears the complete multimodal endpoint to disable IM attachment capture', async () => {
     const configured: MemorySettings = {
-      ...firstSetupSettings,
+      ...legacySettings,
       processing: {
-        ...firstSetupSettings.processing,
+        ...legacySettings.processing,
+        rerank: {
+          ...endpoint('https://rerank.example.test/v1/inference'),
+          model: 'rerank-model',
+          has_api_key: true,
+        },
         multimodal: {
           ...endpoint('https://vision.example.test/v1'),
           model: 'vision-model',
@@ -154,7 +159,7 @@ describe('MemorySettingsPanel', () => {
         },
       },
     };
-    api.saveMemorySettings.mockResolvedValue(firstSetupSettings);
+    api.saveMemorySettings.mockResolvedValue(legacySettings);
     const user = userEvent.setup();
     render(
       <MemorySettingsPanel
@@ -170,6 +175,9 @@ describe('MemorySettingsPanel', () => {
       />,
     );
 
+    expect(screen.getByRole('checkbox', {
+      name: 'memory.settings.rerankClearLabel',
+    })).not.toBeNull();
     await user.click(screen.getByRole('checkbox', {
       name: 'memory.settings.multimodalClearLabel',
     }));
