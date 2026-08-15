@@ -548,6 +548,13 @@ def test_every_install_claim_transition_preserves_live_generation_ownership(
             target=RUNTIME_INSTALL_TARGET,
         )
         live_generations = {RUNTIME_INSTALL_GENERATION_B}
+    elif transition is InstallClaimTransition.ADMISSION_FAILURE:
+        applied = manager.transition_install_claim(
+            transition,
+            generation=RUNTIME_INSTALL_GENERATION_B,
+            reason="fixture_admission_failure",
+        )
+        live_generations = set()
     else:
         _create_runtime_install_claim(manager)
         if transition is InstallClaimTransition.RESUME:
@@ -618,10 +625,15 @@ def test_new_owner_claim_survives_every_stale_settlement(
     kwargs = {}
     if stale_settlement is not InstallClaimTransition.SETTLE_SUCCESS:
         kwargs["reason"] = "fixture_stale_owner"
+    target = (
+        None
+        if stale_settlement is InstallClaimTransition.ADMISSION_FAILURE
+        else RUNTIME_INSTALL_TARGET
+    )
     assert owner_a.transition_install_claim(
         stale_settlement,
         generation=RUNTIME_INSTALL_GENERATION_A,
-        target=RUNTIME_INSTALL_TARGET,
+        target=target,
         **kwargs,
     ) is False
 
@@ -2408,6 +2420,58 @@ def test_platform_refusal_never_creates_or_settles_an_install_claim(
             adapter.supervisor.status()["manifest"]["resolution"]
             == ManifestResolution.UNSUPPORTED.value
         )
+
+    asyncio.run(run())
+
+
+def test_every_pre_resolution_failure_persists_unless_platform_is_unsupported(
+    tmp_path: Path,
+) -> None:
+    class FailedBeforeResolutionInstaller(EngineRuntimeManager):
+        def __init__(self, runtime_dir: Path, reason: str) -> None:
+            super().__init__(runtime_dir=runtime_dir, offline=True)
+            self.failure_reason = reason
+
+        def ensure(self, **_kwargs):
+            return {
+                "ok": False,
+                "changed": False,
+                "reason": self.failure_reason,
+            }
+
+    async def run() -> None:
+        vocabulary = EngineRuntimeManager(
+            runtime_dir=tmp_path / "vocabulary",
+            offline=True,
+        ).install_failure_reasons()
+        for index, reason in enumerate(sorted(vocabulary)):
+            installer = FailedBeforeResolutionInstaller(
+                tmp_path / f"runtime-{index}",
+                reason,
+            )
+            adapter = CLIProxyEngineAdapter(
+                supervisor=EngineSupervisor(
+                    installer=installer,
+                    state_store=EngineStateStore(tmp_path / f"state-{index}"),
+                )
+            )
+
+            with pytest.raises((EngineUnavailableError, RuntimePlatformUnsupportedError)):
+                await adapter.install()
+
+            state = EngineRuntimeManager(
+                runtime_dir=installer.runtime_dir,
+                offline=True,
+            ).install_state()
+            projected = await adapter.status()
+            if reason == "model_hub_engine_platform_unsupported":
+                assert state is None
+                assert projected.error_key is None
+            else:
+                assert state is not None
+                assert state["state"] == "not_installed"
+                assert state["reason"] == reason
+                assert projected.error_key == "settings.models.install.fail.detail"
 
     asyncio.run(run())
 

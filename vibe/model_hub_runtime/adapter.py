@@ -55,6 +55,7 @@ _OAUTH_ENDPOINTS = {
 }
 _WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
 _INSTALL_ALREADY_RUNNING_REASON = "model_hub_engine_install_already_running"
+_INSTALL_PLATFORM_UNSUPPORTED_REASON = "model_hub_engine_platform_unsupported"
 _INSTALL_RECOVERY_TIMEOUT_REASON = "model_hub_engine_install_lock_timeout"
 _INSTALL_RECOVERY_ABANDONED_REASON = "model_hub_engine_install_abandoned"
 _INSTALL_RECOVERY_SCHEDULE_FAILED_REASON = "model_hub_engine_install_schedule_failed"
@@ -768,6 +769,16 @@ class CLIProxyEngineAdapter:
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("Failed to persist Model Hub runtime install failure")
+            elif admission is not None and reason != _INSTALL_PLATFORM_UNSUPPORTED_REASON:
+                try:
+                    await asyncio.to_thread(
+                        self.supervisor.installer.transition_install_claim,
+                        InstallClaimTransition.ADMISSION_FAILURE,
+                        generation=generation,
+                        reason=reason,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to persist Model Hub runtime admission failure")
             if admission is not None:
                 self._reject_install_admission(admission, exc)
 
@@ -809,14 +820,14 @@ class CLIProxyEngineAdapter:
     @staticmethod
     def _install_failure_reason(error: Exception) -> str:
         if isinstance(error, RuntimePlatformUnsupportedError):
-            return "model_hub_engine_platform_unsupported"
+            return _INSTALL_PLATFORM_UNSUPPORTED_REASON
         if isinstance(error, EngineUnavailableError) and error.reason:
             return error.reason
         return "model_hub_engine_install_failed"
 
     @staticmethod
     def _install_failure(reason: str) -> Exception:
-        if reason == "model_hub_engine_platform_unsupported":
+        if reason == _INSTALL_PLATFORM_UNSUPPORTED_REASON:
             return RuntimePlatformUnsupportedError()
         return EngineUnavailableError("models.engine.install_failed", reason=reason)
 

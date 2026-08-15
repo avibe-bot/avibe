@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 class InstallClaimTransition(str, Enum):
     CREATE = "create"
     RESUME = "resume"
+    ADMISSION_FAILURE = "admission_failure"
     SETTLE_SUCCESS = "settle_success"
     SETTLE_FAILURE = "settle_failure"
     ABANDON = "abandon"
@@ -153,7 +154,11 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                 raise ValueError("invalid Model Hub runtime install target")
         elif target is not None and resolved_target is None:
             raise ValueError("invalid Model Hub runtime install target")
-        if transition in {InstallClaimTransition.SETTLE_FAILURE, InstallClaimTransition.ABANDON}:
+        if transition in {
+            InstallClaimTransition.ADMISSION_FAILURE,
+            InstallClaimTransition.SETTLE_FAILURE,
+            InstallClaimTransition.ABANDON,
+        }:
             if not reason:
                 raise ValueError("missing Model Hub runtime install failure reason")
 
@@ -184,6 +189,18 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                     ):
                         return False
                     self._write_installing_claim(generation, resolved_target)
+                    return True
+
+                if transition is InstallClaimTransition.ADMISSION_FAILURE:
+                    if current is not None and current.get("state") == "installing":
+                        return False
+                    assert reason is not None
+                    payload = self._failed_install_state(
+                        generation=generation,
+                        target=None,
+                        reason=reason,
+                    )
+                    self._write_owned_failure(generation, payload)
                     return True
 
                 if (
