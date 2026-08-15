@@ -699,6 +699,7 @@ class MessageHandler(BaseHandler):
             # owns stable local media references and can survive a restart.
             processed_files = None
             attachment_errors: List[str] = []
+            attachment_failure_reasons: tuple[str, ...] = ()
             downloaded_attachment_paths: list[str] = []
             if context.files:
                 existing_local_paths = {
@@ -714,6 +715,9 @@ class MessageHandler(BaseHandler):
                 attachment_lease = attachment_batch.lease
                 processed_files = list(attachment_batch.attachments) or None
                 attachment_errors = list(attachment_batch.display_errors)
+                attachment_failure_reasons = tuple(
+                    getattr(attachment_batch, "errors", ())
+                )
                 if processed_files:
                     downloaded_attachment_paths = [
                         str(attachment.local_path)
@@ -734,7 +738,7 @@ class MessageHandler(BaseHandler):
                 capture_memory = getattr(self.controller, "capture_user_memory", None)
                 if callable(capture_memory):
                     memory_attachment_lease = None
-                    admitted = False
+                    attachment_config_generation = None
                     if attachment_lease is not None:
                         admits_attachment = getattr(
                             self.controller,
@@ -742,21 +746,35 @@ class MessageHandler(BaseHandler):
                             None,
                         )
                         try:
-                            admitted = bool(
-                                callable(admits_attachment)
-                                and admits_attachment(context, memory_session_id)
+                            observed_generation = (
+                                admits_attachment(context, memory_session_id)
+                                if callable(admits_attachment)
+                                else None
                             )
+                            if (
+                                not isinstance(observed_generation, bool)
+                                and isinstance(observed_generation, int)
+                                and observed_generation >= 0
+                            ):
+                                attachment_config_generation = observed_generation
                         except Exception:
-                            admitted = False
+                            attachment_config_generation = None
                     try:
-                        if admitted:
+                        if attachment_config_generation is not None:
                             memory_attachment_lease = attachment_lease.retain()
                         turn_lifecycle_admission = await self._acquire_memory_capture_admission(
                             memory_session_id,
                             turn_lifecycle_admission,
                         )
                         admission_ready = asyncio.Event()
-                        capture_options = {"admission_ready": admission_ready}
+                        capture_options = {
+                            "admission_ready": admission_ready,
+                            "attachment_config_generation": attachment_config_generation,
+                        }
+                        if attachment_failure_reasons:
+                            capture_options["attachment_failure_reasons"] = (
+                                attachment_failure_reasons
+                            )
                         if memory_attachment_lease is not None:
                             capture_options["attachment_lease"] = memory_attachment_lease
                         capture = capture_memory(

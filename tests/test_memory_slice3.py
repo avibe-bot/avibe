@@ -17,7 +17,13 @@ import pytest
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
 from core.controller import Controller
 from core.handlers.message_handler import MessageHandler
-from core.memory import CaptureAccepted, CaptureDuplicate, CaptureRequest, CaptureSkipped
+from core.memory import (
+    CaptureAccepted,
+    CaptureAttachment,
+    CaptureDuplicate,
+    CaptureRequest,
+    CaptureSkipped,
+)
 from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.everos import FakeMemoryProvider
 from core.memory.runtime import MemoryRuntime
@@ -64,6 +70,7 @@ class _Runtime:
         self.available = True
         self.retired = False
         self.attachment_status = "ready"
+        self.attachment_generation: int | None = 1
         self.final_flush_calls: list[dict[str, object]] = []
         self.final_flush_result = True
         self.final_flush_error: Exception | None = None
@@ -84,6 +91,9 @@ class _Runtime:
 
     async def attachment_capture_status(self) -> str:
         return self.attachment_status
+
+    def attachment_capture_config_generation(self) -> int | None:
+        return self.attachment_generation
 
     async def resolve_current_session_scope(self, raw_session_id: str) -> tuple[str, str] | None:
         self.scope_recovery_calls.append(raw_session_id)
@@ -248,14 +258,14 @@ def test_slack_memory_lease_retention_is_local_and_ignores_runtime_health(
     ]
     context.is_ordinary_attachment = True
 
-    assert controller.memory_attachment_capture_admitted(context, "stable-session") is True
+    assert controller.memory_attachment_capture_admitted(context, "stable-session") == 1
 
 
 def test_slack_memory_lease_retention_requires_explicit_multimodal_config() -> None:
     """Scenario: MEMORY-IM-ATTACH-003."""
 
     controller = _controller()
-    controller.config.memory.processing.multimodal = None
+    controller.memory_runtime.attachment_generation = None
     context = _context("slack", ordinary=False)
     context.files = [
         FileAttachment(
@@ -266,7 +276,7 @@ def test_slack_memory_lease_retention_requires_explicit_multimodal_config() -> N
     ]
     context.is_ordinary_attachment = True
 
-    assert controller.memory_attachment_capture_admitted(context, "stable-session") is False
+    assert controller.memory_attachment_capture_admitted(context, "stable-session") is None
 
 
 def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
@@ -300,6 +310,7 @@ def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
                 "remember this",
                 "stable-session",
                 attachment_lease=object(),
+                attachment_config_generation=1,
                 admission_ready=admission_ready,
             )
         )
@@ -309,6 +320,56 @@ def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
 
         release_health.set()
         await asyncio.wait_for(capture, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_attachment_capture_fails_closed_when_config_generation_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-003."""
+
+    async def run() -> None:
+        controller = _controller()
+        attachment = CaptureAttachment(
+            kind="pdf",
+            name="receipt.pdf",
+            uri="file:///leased/receipt.pdf",
+            ext="pdf",
+        )
+        monkeypatch.setattr(
+            "core.memory.admission.select_memory_attachments",
+            lambda _lease: SimpleNamespace(attachments=(attachment,), skipped=()),
+        )
+
+        async def attachment_capture_status() -> str:
+            controller.memory_runtime.attachment_generation = 2
+            return "ready"
+
+        controller.memory_runtime.attachment_capture_status = attachment_capture_status
+        context = _context("slack", ordinary=False)
+        context.files = [
+            FileAttachment(
+                name="receipt.pdf",
+                mimetype="application/pdf",
+                url="https://files.slack.test/private",
+            )
+        ]
+        context.is_ordinary_attachment = True
+
+        await controller.capture_user_memory(
+            context,
+            "keep the caption",
+            "stable-session",
+            attachment_lease=object(),
+            attachment_config_generation=1,
+        )
+
+        assert len(controller.memory_module.accepted) == 1
+        request = controller.memory_module.accepted[0]
+        assert request.text == "keep the caption"
+        assert request.attachments == ()
+        assert request.attachment_config_generation is None
 
     asyncio.run(run())
 

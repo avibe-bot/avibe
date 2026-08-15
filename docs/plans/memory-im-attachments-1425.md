@@ -289,6 +289,13 @@ all capture work to one late stage.
   handoff. It must never await a provider, subprocess, or any other deadline-bound
   health read. Current multimodal readiness is read only inside the background
   capture task.
+- Multimodal opt-in is an authoritative, generation-bound fact. The synchronous
+  segment snapshots the stable Runtime configuration generation that proves an
+  explicit endpoint and carries it on the immutable capture request. Immediately
+  before enqueue, the replacement gate compares that generation with the current
+  Runtime generation; absence or mismatch fails closed for attachments, including
+  an opt-out or endpoint replacement that completed while readiness was being read.
+  Eligible text remains independently best effort.
 - The per-session `SessionTurn` lifecycle admission is held only until the
   background task has acquired Memory's exact-session capture fence. It is then
   released before durable Agent admission. Attachment validation, bundle pin/copy,

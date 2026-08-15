@@ -51,7 +51,11 @@ from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.memory import CaptureReceipt, CaptureRequest, CaptureSkipped
-from core.memory.admission import CaptureAdmission, InboundTurnFacts
+from core.memory.admission import (
+    WORKBENCH_PLATFORM,
+    CaptureAdmission,
+    InboundTurnFacts,
+)
 from core.memory.blocking import run_blocking
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -1848,6 +1852,8 @@ class Controller:
         session_id: object = None,
         attachment_lease: object = None,
         attachment_capture_status: object = None,
+        attachment_config_generation: object = None,
+        attachment_failures: object = None,
         include_workdir: bool = True,
     ) -> InboundTurnFacts:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
@@ -1870,6 +1876,8 @@ class Controller:
             is_ordinary_attachment=context.is_ordinary_attachment,
             attachment_lease=attachment_lease,
             attachment_capture_status=attachment_capture_status,
+            attachment_config_generation=attachment_config_generation,
+            attachment_failures=attachment_failures,
             memory_enabled=bool(
                 getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
             ),
@@ -1884,8 +1892,8 @@ class Controller:
         self,
         context: MessageContext,
         session_id: str,
-    ) -> bool:
-        """Locally authorize retaining a materialized lease for Memory."""
+    ) -> int | None:
+        """Return the local config generation authorizing a Memory lease."""
 
         admission = self._memory_admission()
         facts = self._memory_turn_facts(
@@ -1895,23 +1903,22 @@ class Controller:
             include_workdir=False,
         )
         if not admission.admits_attachment_turn(facts):
-            return False
-        multimodal = getattr(
-            getattr(
-                getattr(getattr(self, "config", None), "memory", None),
-                "processing",
-                None,
-            ),
-            "multimodal",
+            return None
+        runtime = getattr(self, "memory_runtime", None)
+        read_generation = getattr(
+            runtime,
+            "attachment_capture_config_generation",
             None,
         )
-        complete = getattr(multimodal, "complete", None)
-        if not callable(complete):
-            return False
+        if not callable(read_generation):
+            return None
         try:
-            return complete() is True
+            generation = read_generation()
         except Exception:
-            return False
+            return None
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            return None
+        return generation if generation >= 0 else None
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
         return self._memory_admission().principal_for(
@@ -2308,6 +2315,8 @@ class Controller:
         session_id: str,
         *,
         attachment_lease: object = None,
+        attachment_config_generation: int | None = None,
+        attachment_failure_reasons: object = None,
         admission_ready: asyncio.Event | None = None,
     ) -> Awaitable[None]:
         """Submit one eligible attributed human turn after session resolution.
@@ -2322,6 +2331,8 @@ class Controller:
             text,
             session_id,
             attachment_lease=attachment_lease,
+            attachment_config_generation=attachment_config_generation,
+            attachment_failure_reasons=attachment_failure_reasons,
             admission_ready=admission_ready,
             observed_runtime=getattr(self, "memory_runtime", None),
         )
@@ -2333,6 +2344,8 @@ class Controller:
         session_id: str,
         *,
         attachment_lease: object = None,
+        attachment_config_generation: int | None = None,
+        attachment_failure_reasons: object = None,
         admission_ready: asyncio.Event | None = None,
         observed_runtime: object,
     ) -> None:
@@ -2342,6 +2355,8 @@ class Controller:
             text=text,
             session_id=session_id,
             attachment_lease=attachment_lease,
+            attachment_config_generation=attachment_config_generation,
+            attachment_failures=attachment_failure_reasons,
         )
         try:
             if admission.admits_attachment_turn(facts):
@@ -2422,6 +2437,26 @@ class Controller:
                     or not runtime.available
                 ):
                     return
+                if request.attachments and platform != WORKBENCH_PLATFORM:
+                    read_generation = getattr(
+                        runtime,
+                        "attachment_capture_config_generation",
+                        None,
+                    )
+                    current_generation = (
+                        read_generation() if callable(read_generation) else None
+                    )
+                    if (
+                        isinstance(current_generation, bool)
+                        or current_generation != request.attachment_config_generation
+                    ):
+                        request = replace(
+                            request,
+                            attachments=(),
+                            attachment_config_generation=None,
+                        )
+                        if not request.text.strip():
+                            return
                 capture_options = {}
                 if held_admission is not None:
                     capture_options["admission"] = held_admission

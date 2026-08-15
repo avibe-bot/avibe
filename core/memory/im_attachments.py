@@ -22,6 +22,7 @@ from core.memory.types import CaptureAttachment
 
 AttachmentSkipReason = Literal[
     "count_limit",
+    "download_failed",
     "file_too_large",
     "bundle_too_large",
     "unsupported_type",

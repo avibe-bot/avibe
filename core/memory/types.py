@@ -195,6 +195,7 @@ class CaptureRequest:
     text: str
     occurred_at_ms: int
     attachments: tuple[CaptureAttachment, ...] = ()
+    attachment_config_generation: int | None = None
 
 
 def encode_capture_attachments(attachments: tuple[CaptureAttachment, ...]) -> str | None:

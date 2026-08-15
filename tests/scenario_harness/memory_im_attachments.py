@@ -133,6 +133,9 @@ class _Runtime:
         self.available = True
         self.retired = False
         self._attachment_status = attachment_status
+        self._attachment_generation = (
+            None if attachment_status == "not_configured" else 1
+        )
 
     def principal_for_user_key(self, user_key: str) -> str:
         assert user_key == "slack:U1"
@@ -140,6 +143,9 @@ class _Runtime:
 
     async def attachment_capture_status(self) -> str:
         return self._attachment_status
+
+    def attachment_capture_config_generation(self) -> int | None:
+        return self._attachment_generation
 
 
 class MemoryIMAttachmentScenarioHarness:
@@ -244,16 +250,19 @@ class MemoryIMAttachmentScenarioHarness:
         ).materialize(context, self.downloader)
         memory_lease = None
         try:
-            if self.controller.memory_attachment_capture_admitted(
+            config_generation = self.controller.memory_attachment_capture_admitted(
                 context,
                 "stable-session",
-            ):
+            )
+            if config_generation is not None:
                 memory_lease = batch.lease.retain()
             await self.controller.capture_user_memory(
                 context,
                 text,
                 "stable-session",
                 attachment_lease=memory_lease,
+                attachment_config_generation=config_generation,
+                attachment_failure_reasons=batch.errors,
             )
             batch.lease.adopt()
         finally:

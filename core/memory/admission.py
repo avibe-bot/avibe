@@ -75,6 +75,8 @@ class InboundTurnFacts:
     is_ordinary_attachment: bool | None = None
     attachment_lease: object = None
     attachment_capture_status: object = None
+    attachment_config_generation: object = None
+    attachment_failures: object = None
     memory_enabled: bool = False
 
 
@@ -172,6 +174,7 @@ class CaptureAdmission:
         if not isinstance(facts.text, str):
             return CaptureSkipped(reason="memory_invalid_input")
         workbench = platform == WORKBENCH_PLATFORM
+        config_generation: int | None = None
         # Converted before the text check so an attachment-only turn is judged
         # on the uploads Memory can actually carry: a turn whose every upload
         # was filtered out would otherwise be enqueued with no text and no
@@ -189,23 +192,33 @@ class CaptureAdmission:
                 if not self.admits_attachment_turn(facts):
                     return CaptureSkipped(reason="memory_invalid_input")
                 status = facts.attachment_capture_status
-                if status == "ready":
+                config_generation = _attachment_config_generation(
+                    facts.attachment_config_generation
+                )
+                if status == "ready" and config_generation is not None:
                     try:
                         selection = select_memory_attachments(facts.attachment_lease)  # type: ignore[arg-type]
                     except (OSError, ValueError):
                         _log_attachment_skip(platform, native_files, "unavailable")
                     else:
                         attachments = selection.attachments
-                        if selection.skipped:
-                            reasons = set(selection.skipped)
+                        skipped = (
+                            *_materialization_failures(
+                                facts.attachment_failures,
+                                maximum=native_files,
+                            ),
+                            *selection.skipped,
+                        )[:native_files]
+                        if skipped:
+                            reasons = set(skipped)
                             reason = (
-                                selection.skipped[0]
+                                skipped[0]
                                 if len(reasons) == 1
                                 else "mixed_rejections"
                             )
                             _log_attachment_skip(
                                 platform,
-                                len(selection.skipped),
+                                len(skipped),
                                 reason,
                             )
                 else:
@@ -226,6 +239,7 @@ class CaptureAdmission:
             text=facts.text,
             occurred_at_ms=int(time.time() * 1000),
             attachments=attachments,
+            attachment_config_generation=config_generation,
         )
 
 
@@ -244,6 +258,23 @@ def _asserted_true(value: object) -> bool:
     """
 
     return value is True
+
+
+def _attachment_config_generation(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _materialization_failures(
+    value: object,
+    *,
+    maximum: int,
+) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    closed = {"download_failed", "file_too_large"}
+    return tuple(reason for reason in value if reason in closed)[:maximum]
 
 
 def _native_file_count(value: object) -> int | None:

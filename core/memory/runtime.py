@@ -1345,6 +1345,20 @@ class MemoryRuntime:
             payload.get("health"),
         )
 
+    def attachment_capture_config_generation(self) -> int | None:
+        """Return the stable explicit opt-in generation without probing providers."""
+
+        snapshot = self._processing_runtime_snapshot()
+        multimodal = self._config.processing.multimodal
+        if snapshot.transition_active or not self._config.enabled or multimodal is None:
+            return None
+        try:
+            if not multimodal.complete():
+                return None
+        except Exception:
+            return None
+        return snapshot.generation
+
     async def failure_log_payload(
         self,
         *,

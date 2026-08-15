@@ -12,7 +12,7 @@ import pytest
 
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from core.memory.attachments import workbench_capture_attachments
-from core.memory.types import CaptureRequest, CaptureSkipped
+from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
 from modules.im.message_facts import is_ordinary_workbench_text
@@ -270,6 +270,7 @@ def test_bound_slack_attachment_turn_selects_only_the_materialized_lease(
                 is_ordinary_attachment=True,
                 attachment_lease=batch.lease,
                 attachment_capture_status="ready",
+                attachment_config_generation=1,
             )
         )
     finally:
@@ -389,6 +390,7 @@ def test_mixed_attachment_rejections_emit_one_aggregate_log(
                 is_ordinary_attachment=True,
                 attachment_lease=object(),
                 attachment_capture_status="ready",
+                attachment_config_generation=1,
             )
         )
 
@@ -400,6 +402,86 @@ def test_mixed_attachment_rejections_emit_one_aggregate_log(
     ]
     assert len(records) == 1
     assert "count=2 reason=mixed_rejections" in records[0].getMessage()
+
+
+def test_materialization_failures_join_attachment_skip_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-004."""
+
+    attachment = CaptureAttachment(
+        kind="pdf",
+        name="receipt.pdf",
+        uri="file:///leased/receipt.pdf",
+        ext="pdf",
+    )
+    monkeypatch.setattr(
+        "core.memory.admission.select_memory_attachments",
+        lambda _lease: SimpleNamespace(attachments=(attachment,), skipped=()),
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.memory.admission"):
+        request = _admission().decide(
+            _facts(
+                text="keep the valid sibling",
+                files=[object(), object()],
+                is_ordinary_text=False,
+                is_ordinary_attachment=True,
+                attachment_lease=object(),
+                attachment_capture_status="ready",
+                attachment_config_generation=7,
+                attachment_failures=("download_failed",),
+            )
+        )
+
+    assert isinstance(request, CaptureRequest)
+    assert request.attachments == (attachment,)
+    assert request.attachment_config_generation == 7
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("memory_attachment_capture_skipped")
+    ]
+    assert len(records) == 1
+    assert "count=1 reason=download_failed" in records[0].getMessage()
+
+
+def test_all_materialization_failures_keep_text_and_emit_one_skip(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-004."""
+
+    monkeypatch.setattr(
+        "core.memory.admission.select_memory_attachments",
+        lambda _lease: SimpleNamespace(attachments=(), skipped=()),
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.memory.admission"):
+        request = _admission().decide(
+            _facts(
+                text="keep this caption",
+                files=[object()],
+                is_ordinary_text=False,
+                is_ordinary_attachment=True,
+                attachment_lease=object(),
+                attachment_capture_status="ready",
+                attachment_config_generation=9,
+                attachment_failures=("download_failed",),
+            )
+        )
+
+    assert isinstance(request, CaptureRequest)
+    assert request.text == "keep this caption"
+    assert request.attachments == ()
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("memory_attachment_capture_skipped")
+    ]
+    assert len(records) == 1
+    assert "count=1 reason=download_failed" in records[0].getMessage()
 
 
 def test_disabled_memory_is_answered_before_any_directory_lookup() -> None:

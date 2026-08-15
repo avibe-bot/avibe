@@ -5777,6 +5777,32 @@ def _processing_config() -> MemoryProcessingConfig:
     )
 
 
+async def test_attachment_capture_config_generation_is_transition_bound(
+    memory_runtime_factory,
+) -> None:
+    processing = replace(
+        _processing_config(),
+        multimodal=MemoryEndpointConfig(
+            "https://vision.example.test/v1",
+            "vision-model",
+            "vision-secret",
+        ),
+    )
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=processing),
+        artifact_manager=_installed_artifact(),
+    )
+
+    before = runtime.attachment_capture_config_generation()
+    assert isinstance(before, int)
+    async with runtime._reconcile_lock:
+        assert runtime.attachment_capture_config_generation() is None
+    after = runtime.attachment_capture_config_generation()
+
+    assert isinstance(after, int)
+    assert after > before
+
+
 async def test_runtime_restart_replaces_process_without_processing_preflight(
     tmp_path: Path,
     memory_runtime_factory,

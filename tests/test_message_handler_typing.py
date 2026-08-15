@@ -472,7 +472,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             typing_result=True,
         )
         controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
-        controller.memory_attachment_capture_admitted = Mock(return_value=True)
+        controller.memory_attachment_capture_admitted = Mock(return_value=1)
         events = []
         retained_lease = Mock()
         lease = Mock()
@@ -490,8 +490,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             _session_id,
             *,
             attachment_lease,
+            attachment_config_generation,
+            attachment_failure_reasons,
             admission_ready,
         ):
+            self.assertEqual(attachment_config_generation, 1)
+            self.assertEqual(attachment_failure_reasons, ("download_failed",))
             admission_ready.set()
             events.append(("capture", attachment_lease))
 
@@ -506,6 +510,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             return types.SimpleNamespace(
                 attachments=(attachment,),
                 display_errors=(),
+                errors=("download_failed",),
                 lease=lease,
             )
 
@@ -886,7 +891,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
-        controller.memory_attachment_capture_admitted = Mock(return_value=True)
+        controller.memory_attachment_capture_admitted = Mock(return_value=1)
         captured_session_ids = []
         lease = Mock()
         retained_lease = Mock()
@@ -904,9 +909,11 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             session_id,
             *,
             attachment_lease,
+            attachment_config_generation,
             admission_ready,
         ):
             self.assertIs(attachment_lease, retained_lease)
+            self.assertEqual(attachment_config_generation, 1)
             captured_session_ids.append(session_id)
             admission_ready.set()
 
@@ -969,7 +976,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             deliver=AsyncMock(),
             acquire_lifecycle_admission=acquire_lifecycle_admission,
         )
-        controller.memory_attachment_capture_admitted = Mock(return_value=True)
+        controller.memory_attachment_capture_admitted = Mock(return_value=1)
         lease = Mock()
         retained_lease = Mock()
         lease.retain.return_value = retained_lease
@@ -986,9 +993,11 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             _session_id,
             *,
             attachment_lease,
+            attachment_config_generation,
             admission_ready,
         ):
             self.assertIs(attachment_lease, retained_lease)
+            self.assertEqual(attachment_config_generation, 1)
             admission_ready.set()
             await capture_can_finish.wait()
             capture_finished.set()
