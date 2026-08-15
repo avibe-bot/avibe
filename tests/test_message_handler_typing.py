@@ -632,6 +632,261 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         lease.adopt.assert_called_once_with()
         lease.release.assert_called_once_with()
 
+    async def test_materializer_global_failures_capture_caption_once(self):
+        """Scenario: MEMORY-IM-ATTACH-004."""
+
+        from modules.im.base import FileAttachment
+
+        cases = (
+            ("slack", OSError("attachment root initialization failed")),
+            ("discord", RuntimeError("attachment lease initialization failed")),
+            ("telegram", RuntimeError("attachment gather failed")),
+        )
+        for platform, materialization_error in cases:
+            with self.subTest(platform=platform):
+                controller = _StubController(
+                    platform=platform,
+                    ack_mode="reaction",
+                    typing_result=True,
+                )
+                controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+                controller.capture_user_memory = AsyncMock()
+                controller.reserve_memory_attachment_capture = Mock()
+                handler = MessageHandler(controller)
+                handler.set_session_handler(_StubSessionHandler())
+                handler._is_duplicate_human_delivery = Mock(return_value=False)
+                handler._prepend_message_metadata = AsyncMock(
+                    return_value="remember this caption"
+                )
+                handler._materialize_file_attachments = AsyncMock(
+                    side_effect=materialization_error
+                )
+                handler._emit_agent_dispatch_failure = AsyncMock()
+                context = MessageContext(
+                    user_id="U1",
+                    channel_id="D1",
+                    message_id=f"m-materializer-{platform}",
+                    platform=platform,
+                    platform_specific={"is_dm": True},
+                    files=[
+                        FileAttachment(
+                            "report.pdf",
+                            "application/pdf",
+                            url="private",
+                        )
+                    ],
+                    is_ordinary_attachment=True,
+                )
+
+                result = await handler._handle_turn(
+                    context,
+                    "remember this caption",
+                    source=handler.TURN_SOURCE_HUMAN,
+                )
+                await handler.drain_memory_capture_tasks()
+
+                self.assertEqual(result, str(materialization_error))
+                controller.capture_user_memory.assert_awaited_once_with(
+                    context,
+                    "remember this caption",
+                    "base-session",
+                )
+                controller.reserve_memory_attachment_capture.assert_not_called()
+                handler._emit_agent_dispatch_failure.assert_awaited_once()
+                self.assertIs(
+                    handler._emit_agent_dispatch_failure.await_args.args[2],
+                    materialization_error,
+                )
+                self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_materializer_failure_with_empty_caption_does_not_capture(self):
+        """Scenario: MEMORY-IM-ATTACH-004."""
+
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="discord",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        controller.capture_user_memory = AsyncMock()
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="")
+        handler._materialize_file_attachments = AsyncMock(
+            side_effect=RuntimeError("materialization failed")
+        )
+        handler._emit_agent_dispatch_failure = AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-empty-caption-materializer",
+            platform="discord",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        await handler._handle_turn(
+            context,
+            "   ",
+            source=handler.TURN_SOURCE_HUMAN,
+        )
+
+        controller.capture_user_memory.assert_not_called()
+
+    async def test_materializer_cancellation_does_not_capture_caption(self):
+        """Scenario: MEMORY-IM-ATTACH-004."""
+
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="telegram",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        controller.capture_user_memory = AsyncMock()
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="remember this")
+        handler._materialize_file_attachments = AsyncMock(
+            side_effect=asyncio.CancelledError
+        )
+        handler._emit_agent_dispatch_failure = AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-cancelled-materializer",
+            platform="telegram",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await handler._handle_turn(
+                context,
+                "remember this",
+                source=handler.TURN_SOURCE_HUMAN,
+            )
+
+        controller.capture_user_memory.assert_not_called()
+        handler._emit_agent_dispatch_failure.assert_not_awaited()
+
+    async def test_caption_fallback_scheduling_failure_preserves_materializer_error(self):
+        """Scenario: MEMORY-IM-ATTACH-004."""
+
+        from modules.im.base import FileAttachment
+
+        materialization_error = RuntimeError("materialization failed")
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            acquire_lifecycle_admission=AsyncMock(
+                side_effect=RuntimeError("capture scheduling failed")
+            ),
+        )
+        controller.capture_user_memory = AsyncMock()
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="remember this")
+        handler._materialize_file_attachments = AsyncMock(
+            side_effect=materialization_error
+        )
+        handler._emit_agent_dispatch_failure = AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-failed-caption-fallback",
+            platform="slack",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        result = await handler._handle_turn(
+            context,
+            "remember this",
+            source=handler.TURN_SOURCE_HUMAN,
+        )
+
+        self.assertEqual(result, "materialization failed")
+        controller.capture_user_memory.assert_not_called()
+        self.assertIs(
+            handler._emit_agent_dispatch_failure.await_args.args[2],
+            materialization_error,
+        )
+
+    async def test_invalid_attachment_generation_is_normalized_before_capture(self):
+        """Scenario: MEMORY-IM-ATTACH-003."""
+
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        reservation = _capture_reservation(generation=True)
+        controller.reserve_memory_attachment_capture = Mock(
+            return_value=reservation
+        )
+        controller.capture_user_memory = AsyncMock()
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="remember this")
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                lease=lease,
+            )
+        )
+
+        async def admit(**_kwargs):
+            lease.adopt()
+            lease.release()
+            return True
+
+        handler._admit_human_delivery = AsyncMock(side_effect=admit)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-invalid-generation",
+            platform="slack",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        await handler.handle_user_message(context, "remember this")
+        await handler.drain_memory_capture_tasks()
+
+        capture_call = controller.capture_user_memory.await_args
+        self.assertIsNone(
+            capture_call.kwargs["attachment_config_generation"]
+        )
+        self.assertNotIn("attachment_lease", capture_call.kwargs)
+        lease.retain.assert_not_called()
+
     async def test_denied_attachment_turn_does_not_retain_a_memory_lease(self):
         """Scenario: MEMORY-IM-ATTACH-002."""
 

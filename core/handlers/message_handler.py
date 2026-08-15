@@ -116,6 +116,45 @@ class MessageHandler(BaseHandler):
             return None
         return await acquire(session_id)
 
+    async def _schedule_text_only_memory_capture(
+        self,
+        context: MessageContext,
+        text: str,
+        session_id: str,
+        lifecycle_admission: Any,
+    ) -> Any:
+        capture_memory = getattr(self.controller, "capture_user_memory", None)
+        if not callable(capture_memory) or not text.strip():
+            return lifecycle_admission
+
+        admission_was_owned_by_turn = lifecycle_admission is not None
+        lifecycle_admission = await self._acquire_memory_capture_admission(
+            session_id,
+            lifecycle_admission,
+        )
+        if not self._memory_capture_registration_open:
+            release = getattr(lifecycle_admission, "release", None)
+            if callable(release):
+                release()
+            return None
+
+        try:
+            capture_task = asyncio.create_task(
+                capture_memory(context, text, session_id),
+                name="memory-capture",
+            )
+            self._track_memory_capture_task(
+                capture_task,
+                lifecycle_admission=lifecycle_admission,
+            )
+        except BaseException:
+            if not admission_was_owned_by_turn:
+                release = getattr(lifecycle_admission, "release", None)
+                if callable(release):
+                    release()
+            raise
+        return None
+
     def _memory_session_lifecycle_epoch(self, session_id: str) -> int:
         manager = getattr(self.controller, "session_turns", None)
         read_epoch = getattr(manager, "session_lifecycle_epoch", None)
@@ -355,25 +394,14 @@ class MessageHandler(BaseHandler):
             # turns defer only until the shared materializer has produced a
             # descriptor-backed lease.
             if is_human and not context.files:
-                capture_memory = getattr(self.controller, "capture_user_memory", None)
-                if callable(capture_memory):
-                    turn_lifecycle_admission = await self._acquire_memory_capture_admission(
+                turn_lifecycle_admission = (
+                    await self._schedule_text_only_memory_capture(
+                        context,
+                        control_message,
                         memory_session_id,
                         turn_lifecycle_admission,
                     )
-                    if self._memory_capture_registration_open:
-                        capture_task = asyncio.create_task(
-                            capture_memory(context, control_message, memory_session_id),
-                            name="memory-capture",
-                        )
-                        self._track_memory_capture_task(
-                            capture_task,
-                            lifecycle_admission=turn_lifecycle_admission,
-                        )
-                        turn_lifecycle_admission = None
-                    elif turn_lifecycle_admission is not None:
-                        turn_lifecycle_admission.release()
-                        turn_lifecycle_admission = None
+                )
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -755,10 +783,29 @@ class MessageHandler(BaseHandler):
                     if isinstance(attachment, FileAttachment)
                     and attachment.local_path
                 }
-                attachment_batch = await self._materialize_file_attachments(
-                    context,
-                    working_path,
-                )
+                try:
+                    attachment_batch = await self._materialize_file_attachments(
+                        context,
+                        working_path,
+                    )
+                except Exception:
+                    if is_human:
+                        try:
+                            turn_lifecycle_admission = (
+                                await self._schedule_text_only_memory_capture(
+                                    context,
+                                    control_message,
+                                    memory_session_id,
+                                    turn_lifecycle_admission,
+                                )
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Memory caption capture could not be scheduled "
+                                "after attachment materialization failed",
+                                exc_info=True,
+                            )
+                    raise
                 attachment_lease = attachment_batch.lease
                 processed_files = list(attachment_batch.attachments) or None
                 attachment_errors = list(attachment_batch.display_errors)
@@ -810,15 +857,19 @@ class MessageHandler(BaseHandler):
                             and not stale_attachment_capture
                             else None
                         )
-                        attachment_config_generation = getattr(
-                            memory_capture_reservation,
-                            "config_generation",
-                            None,
+                        from core.memory import admission as memory_admission
+
+                        attachment_config_generation = (
+                            memory_admission.normalize_attachment_config_generation(
+                                getattr(
+                                    memory_capture_reservation,
+                                    "config_generation",
+                                    None,
+                                )
+                            )
                         )
                         if (
-                            not isinstance(attachment_config_generation, bool)
-                            and isinstance(attachment_config_generation, int)
-                            and attachment_config_generation >= 0
+                            attachment_config_generation is not None
                             and attachment_lease is not None
                         ):
                             try:
