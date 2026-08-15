@@ -1428,7 +1428,7 @@ def test_terminal_websocket_unsupported_accepts_before_policy_close(monkeypatch)
     assert websocket.calls == [("accept", None), ("close", 1008)]
 
 
-def test_remote_terminal_websocket_closes_at_authorization_refresh(monkeypatch):
+def test_remote_terminal_websocket_closes_when_authorization_becomes_unavailable(monkeypatch):
     from vibe import remote_access
 
     class BlockingTerminalService:
@@ -1441,23 +1441,46 @@ def test_remote_terminal_websocket_closes_at_authorization_refresh(monkeypatch):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
     monkeypatch.setattr(ui_server, "_terminal_origin_allowed", lambda websocket: True)
-    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(ui_server, "_load_remote_access_config", V2Config.default)
+    monkeypatch.setattr(ui_server, "_websocket_is_local_request", lambda *args: False)
+
+    async def authorize(*args, **kwargs):
+        payload = {
+            "email": "owner@example.com",
+            "sub": "remote-owner",
+            "instance_id": "inst-1",
+            "iat": 1,
+            "exp": 4_102_444_800,
+            "vibe_instance_id": "inst-1",
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
+        }
+        return payload, remote_access.AuthorizationResolution("current", payload=payload)
+
+    async def authorization_loss(*args, **kwargs):
+        return "unavailable"
+
     monkeypatch.setattr(
         ui_server,
-        "_remote_access_websocket_session_claims",
-        lambda websocket, config: {"sub": "remote-owner", "claims_issued_at": 1},
+        "_remote_access_websocket_authorization",
+        authorize,
     )
-    monkeypatch.setattr(remote_access, "session_authorization_refresh_deadline", lambda payload: 0)
+    monkeypatch.setattr(
+        ui_server,
+        "_wait_for_remote_session_authorization_loss",
+        authorization_loss,
+    )
     monkeypatch.setattr(ui_server, "get_terminal_service", lambda: BlockingTerminalService())
     websocket = _RecordingWebSocket()
     websocket.client = None
+    websocket.headers = {"host": "alex.avibe.bot"}
     websocket.query_params = {}
 
     asyncio.run(ui_server.terminal_websocket(websocket, "test"))
 
     assert websocket.calls == [
         ("accept", None),
-        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+        ("close", ui_server._AUTHORIZATION_UNAVAILABLE_WEBSOCKET_CLOSE_CODE),
     ]
 
 

@@ -18,6 +18,17 @@
     "body": "Sign in with Avibe Cloud to continue securely.",
     "action": "Sign in"
   },
+  "remoteAuthorization": {
+    "revoked": {
+      "title": "Access removed",
+      "body": "Your access to this Avibe instance has been removed."
+    },
+    "unavailable": {
+      "title": "Access check unavailable",
+      "body": "Avibe cannot verify access right now. It will reconnect automatically."
+    },
+    "retry": "Retry now"
+  },
   "preview": {
     "title": "Preview",
     "unsupported": "This file can't be previewed.",

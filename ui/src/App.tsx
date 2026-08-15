@@ -56,6 +56,9 @@ import {
     isSetupCheckBypassed,
     remoteLoginPath,
     REMOTE_AUTH_REQUIRED_EVENT,
+    REMOTE_AUTH_STATE_EVENT,
+    reportRemoteAuthorizationState,
+    type RemoteAuthorizationState,
     shouldBypassSetupForRemoteOwner,
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
@@ -144,6 +147,31 @@ const RemoteLoginGate = ({ target }: { target: string }) => {
     return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
 };
 
+const RemoteAuthorizationGate = ({
+    state,
+    onRetry,
+}: {
+    state: 'revoked' | 'unavailable';
+    onRetry: () => void;
+}) => {
+    const { t } = useTranslation();
+    return (
+        <main className="min-h-screen flex items-center justify-center bg-bg text-text p-4">
+            <Card className="max-w-md w-full">
+                <CardHeader>
+                    <CardTitle>{t(`remoteAuthorization.${state}.title`)}</CardTitle>
+                    <CardDescription>{t(`remoteAuthorization.${state}.body`)}</CardDescription>
+                </CardHeader>
+                {state === 'unavailable' ? (
+                    <CardContent>
+                        <Button onClick={onRetry}>{t('remoteAuthorization.retry')}</Button>
+                    </CardContent>
+                ) : null}
+            </Card>
+        </main>
+    );
+};
+
 // Server error codes (from the Web UI's enforce_remote_access_cookie guard)
 // that mean the control UI is reachable but is refusing THIS request on
 // policy grounds — a disallowed entry host, or broken remote-access config —
@@ -203,7 +231,14 @@ const AccessBlocked = ({ code }: { code: string | null }) => {
     );
 };
 
-type GuardStatus = 'loading' | 'ready' | 'needs-setup' | 'remote-login-required' | 'access-blocked';
+type GuardStatus =
+    | 'loading'
+    | 'ready'
+    | 'needs-setup'
+    | 'remote-login-required'
+    | 'authorization-revoked'
+    | 'authorization-unavailable'
+    | 'access-blocked';
 
 const notificationClickPath = (value: unknown): string | null => {
     if (typeof value !== 'string' || !value.startsWith('/')) return null;
@@ -244,7 +279,7 @@ const WebPushNotificationNavigator = () => {
 // change and reset the layout to a "Loading..." div while the two API
 // calls round-tripped — that made every sidebar click feel like a full
 // page reload because ``<AppShell>`` got unmounted and re-mounted.
-const AuthGuard = ({ children }: { children: ReactNode }) => {
+export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const { getConfig, getAuthSession } = useApi();
     const { t } = useTranslation();
     const location = useLocation();
@@ -253,6 +288,8 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
     const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(null);
+    const [authorizationUnavailable, setAuthorizationUnavailable] = useState(false);
+    const authorizationUnavailableRef = useRef(false);
     const bypassSetupGuard = isSetupCheckBypassed(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
@@ -268,9 +305,41 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
 
     useEffect(() => {
         const onRemoteAuthRequired = () => setGuardStatus('remote-login-required');
+        const onRemoteAuthorizationState = (event: Event) => {
+            const state = (event as CustomEvent<{ state?: RemoteAuthorizationState }>).detail?.state;
+            if (state === 'revoked') {
+                authorizationUnavailableRef.current = false;
+                setAuthorizationUnavailable(false);
+                setGuardStatus('authorization-revoked');
+            } else if (state === 'unavailable') {
+                if (guardStatus === 'ready') {
+                    authorizationUnavailableRef.current = true;
+                    setAuthorizationUnavailable(true);
+                } else {
+                    authorizationUnavailableRef.current = false;
+                    setGuardStatus('authorization-unavailable');
+                }
+            } else if (state === 'current') {
+                const recoveredFromUnavailable = authorizationUnavailableRef.current
+                    || guardStatus === 'authorization-unavailable';
+                authorizationUnavailableRef.current = false;
+                setAuthorizationUnavailable(false);
+                if (recoveredFromUnavailable) {
+                    setAuthCheckVersion((version) => version + 1);
+                }
+            } else if (state === 'changed') {
+                authorizationUnavailableRef.current = false;
+                setAuthorizationUnavailable(false);
+                setAuthCheckVersion((version) => version + 1);
+            }
+        };
         window.addEventListener(REMOTE_AUTH_REQUIRED_EVENT, onRemoteAuthRequired);
-        return () => window.removeEventListener(REMOTE_AUTH_REQUIRED_EVENT, onRemoteAuthRequired);
-    }, []);
+        window.addEventListener(REMOTE_AUTH_STATE_EVENT, onRemoteAuthorizationState);
+        return () => {
+            window.removeEventListener(REMOTE_AUTH_REQUIRED_EVENT, onRemoteAuthRequired);
+            window.removeEventListener(REMOTE_AUTH_STATE_EVENT, onRemoteAuthorizationState);
+        };
+    }, [guardStatus]);
 
     useEffect(() => {
         if (guardStatus !== 'remote-login-required' || !shouldDeferRemoteAuthRedirect()) return;
@@ -306,7 +375,29 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
                 setGuardStatus('remote-login-required');
                 return null;
             }
-            if (session.remote && session.authenticated && !session.capabilities.can_manage_instance) {
+            if (
+                session.remote
+                && session.authenticated
+                && session.authorization_state === 'revoked'
+            ) {
+                setGuardStatus('authorization-revoked');
+                return null;
+            }
+            if (
+                session.remote
+                && session.authenticated
+                && session.authorization_state === 'unavailable'
+            ) {
+                setGuardStatus('authorization-unavailable');
+                reportRemoteAuthorizationState('unavailable');
+                return null;
+            }
+            if (
+                session.remote
+                && session.authenticated
+                && session.authorization_state === 'current'
+                && !session.capabilities.can_manage_instance
+            ) {
                 setGuardStatus('ready');
                 return null;
             }
@@ -337,6 +428,23 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
             if (authCheck?.loginRequired) {
                 setGuardStatus('remote-login-required');
+                return;
+            }
+            if (
+                authCheck?.session.remote
+                && authCheck.session.authenticated
+                && authCheck.session.authorization_state === 'revoked'
+            ) {
+                setGuardStatus('authorization-revoked');
+                return;
+            }
+            if (
+                authCheck?.session.remote
+                && authCheck.session.authenticated
+                && authCheck.session.authorization_state === 'unavailable'
+            ) {
+                setGuardStatus('authorization-unavailable');
+                reportRemoteAuthorizationState('unavailable');
                 return;
             }
             if (authCheck && !authCheck.checkSetup) {
@@ -376,6 +484,22 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     if (guardStatus === 'remote-login-required') {
         return <RemoteLoginGate target={guardTarget} />;
     }
+    if (guardStatus === 'authorization-revoked') {
+        return (
+            <RemoteAuthorizationGate
+                state="revoked"
+                onRetry={() => undefined}
+            />
+        );
+    }
+    if (guardStatus === 'authorization-unavailable') {
+        return (
+            <RemoteAuthorizationGate
+                state="unavailable"
+                onRetry={() => reportRemoteAuthorizationState('changed')}
+            />
+        );
+    }
     if (guardStatus === 'access-blocked') {
         return <AccessBlocked code={blockedCode} />;
     }
@@ -403,7 +527,26 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     if (!authorizationSession) {
         return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
     }
-    return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
+    return (
+        <>
+            <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>
+            {authorizationUnavailable ? (
+                <div
+                    role="status"
+                    className="fixed inset-x-3 bottom-3 z-[100] mx-auto flex max-w-xl items-center justify-between gap-3 border border-border bg-surface px-3 py-2 text-sm text-text shadow-lg"
+                >
+                    <span>{t('remoteAuthorization.unavailable.body')}</span>
+                    <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => reportRemoteAuthorizationState('changed')}
+                    >
+                        {t('remoteAuthorization.retry')}
+                    </Button>
+                </div>
+            ) : null}
+        </>
+    );
 };
 
 // Brief fallback while a lazy Apps route chunk loads (the pages render their own

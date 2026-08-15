@@ -36,6 +36,7 @@ describe('normalizeSessionInfo', () => {
       instance_kind: null,
       instance_role: 'owner',
       capabilities: OWNER_INSTANCE_CAPABILITIES,
+      authorization_state: 'current',
     });
   });
 
@@ -63,8 +64,30 @@ describe('normalizeSessionInfo', () => {
         can_read_instance: true,
         can_use_show_pages: true,
       },
+      authorization_state: 'current',
     });
   });
+
+  it.each(['revoked', 'unavailable'] as const)(
+    'keeps an authenticated %s session distinct from login expiry',
+    (authorizationState) => {
+      expect(normalizeSessionInfo({
+        remote: true,
+        authenticated: true,
+        email: 'member@example.com',
+        sub: 'member-1',
+        instance_kind: 'organization',
+        authorization_state: authorizationState,
+      })).toEqual({
+        remote: true,
+        authenticated: true,
+        email: 'member@example.com',
+        sub: 'member-1',
+        instance_kind: 'organization',
+        authorization_state: authorizationState,
+      });
+    },
+  );
 
   it('keeps local sessions owner-compatible when an older server omits capabilities', () => {
     expect(normalizeSessionInfo({ remote: false })).toEqual({

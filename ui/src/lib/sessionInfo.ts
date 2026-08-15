@@ -16,6 +16,7 @@ export type InstanceCapabilities = {
 };
 
 export type InstanceKind = 'personal' | 'organization';
+export type RemoteAuthorizationState = 'current' | 'revoked' | 'unavailable';
 
 export type SessionInfo =
   | {
@@ -31,8 +32,17 @@ export type SessionInfo =
       email: string;
       sub?: string;
       instance_kind: InstanceKind | null;
+      authorization_state: 'revoked' | 'unavailable';
+    }
+  | {
+      remote: true;
+      authenticated: true;
+      email: string;
+      sub?: string;
+      instance_kind: InstanceKind | null;
       instance_role: 'owner' | 'editor' | 'viewer';
       capabilities: InstanceCapabilities;
+      authorization_state: 'current';
     };
 
 export const DENIED_INSTANCE_CAPABILITIES: InstanceCapabilities = {
@@ -92,6 +102,17 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
     };
   }
 
+  if (value.authorization_state === 'revoked' || value.authorization_state === 'unavailable') {
+    return {
+      remote: true,
+      authenticated: true,
+      email: typeof value.email === 'string' ? value.email : '',
+      ...(typeof value.sub === 'string' ? { sub: value.sub } : {}),
+      instance_kind: normalizeInstanceKind(value.instance_kind),
+      authorization_state: value.authorization_state,
+    };
+  }
+
   const rawCapabilities = isRecord(value.capabilities) ? value.capabilities : null;
   // Releases before instance roles treated every authenticated remote user as
   // the instance owner and did not return a capabilities object.
@@ -115,5 +136,6 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
     instance_kind: normalizeInstanceKind(value.instance_kind),
     instance_role: instanceRole,
     capabilities,
+    authorization_state: 'current',
   };
 };

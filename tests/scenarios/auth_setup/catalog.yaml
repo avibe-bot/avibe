@@ -246,6 +246,20 @@ scenarios:
     layer: scenario
     backend: show_page_email
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::ShowPageEmailAccessScenarioTests::test_exact_email_login_is_confined_to_its_signed_show_page
+  - id: AUTH-SETUP-402
+    name: Personal remote activity slides past the original identity deadline without another authorization prompt
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_remote_session_slides_without_interactive_reauthorization
+  - id: AUTH-SETUP-403
+    name: Organization remote access enters grace, recovers silently, and enforces confirmed revocation without OAuth
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_organization_remote_session_recovers_and_revokes_without_oauth
   - id: AUTH-SETUP-210
     name: Lost Model Hub OAuth start response converges on one provider flow
     status: covered

@@ -2758,8 +2758,9 @@ def test_cloud_token_for_request_returns_none_without_valid_session(monkeypatch)
     assert remote_access.cloud_token_for_request(config, "bogus.cookie") is None
 
 
-def test_cloud_token_for_request_rejects_stale_authorization_claims(monkeypatch) -> None:
+def test_cloud_token_for_request_uses_shared_personal_authorization_policy(monkeypatch) -> None:
     config = _cloud_broker_config()
+    config.remote_access.vibe_cloud.instance_kind = "personal"
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
     cookie = _session_cookie(config)
     called = False
@@ -2776,8 +2777,8 @@ def test_cloud_token_for_request_rejects_stale_authorization_claims(monkeypatch)
         lambda payload: True,
     )
 
-    assert remote_access.cloud_token_for_request(config, cookie) is None
-    assert called is False
+    assert remote_access.cloud_token_for_request(config, cookie) is not None
+    assert called is True
 
 
 def test_cloud_token_for_request_requires_editor_role(monkeypatch) -> None:

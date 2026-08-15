@@ -352,14 +352,13 @@ def test_workbench_memory_text_is_persisted_and_dispatched_as_ordinary_input(
     ],
 )
 def test_remote_workbench_memory_identity_requires_a_stable_subject(session_payload, expected):
-    from vibe import remote_access
     from vibe.ui_server import app, _workbench_memory_user_id
 
     with (
         app.test_request_context("/chat/session", headers={"Cookie": "avibe_remote_session=session"}),
         patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
         patch("vibe.ui_server._load_remote_access_config", return_value=object()),
-        patch.object(remote_access, "parse_session_cookie", return_value=session_payload),
+        patch("vibe.ui_server._resolved_remote_session_payload", return_value=session_payload),
     ):
         assert _workbench_memory_user_id() == expected
 

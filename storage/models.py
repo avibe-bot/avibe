@@ -155,10 +155,25 @@ remote_access_authorizations = Table(
     Column("id", String, primary_key=True),
     Column("instance_id", String, nullable=False),
     Column("subject", String, nullable=False),
+    Column("email", String, nullable=True),
+    Column("scope_kind", String, nullable=True),
+    Column("scope_ref", String, nullable=True),
+    Column("authorization_state", String, nullable=True),
     Column("claims_json", Text, nullable=False),
-    Column("expires_at", Integer, nullable=False),
+    Column("expires_at", Integer, nullable=True),
     Column("created_at", Integer, nullable=False),
+    Column("last_checked_at", Integer, nullable=True),
+    Column("updated_at", Integer, nullable=True),
     Index("ix_remote_access_authorizations_expires", "expires_at"),
+    Index(
+        "ux_remote_access_authorizations_scope",
+        "instance_id",
+        "subject",
+        "scope_kind",
+        "scope_ref",
+        unique=True,
+        sqlite_where=text("scope_kind is not null and scope_ref is not null"),
+    ),
 )
 
 auth_codes = Table(

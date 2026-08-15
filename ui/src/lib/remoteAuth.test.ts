@@ -10,9 +10,11 @@ vi.mock('./platform', () => platform);
 import {
   checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
+  reportRemoteAuthorizationState,
   remoteLoginPath,
   shouldBypassSetupForRemoteOwner,
   REMOTE_AUTH_REQUIRED_EVENT,
+  REMOTE_AUTH_STATE_EVENT,
   shouldDeferRemoteAuthRedirect,
 } from './remoteAuth';
 
@@ -87,6 +89,79 @@ describe('remote auth navigation', () => {
     expect(dispatchEvent).toHaveBeenCalledOnce();
     expect(dispatchEvent.mock.calls[0]?.[0]).toBeInstanceOf(Event);
     expect(dispatchEvent.mock.calls[0]?.[0].type).toBe(REMOTE_AUTH_REQUIRED_EVENT);
+  });
+});
+
+describe('remote authorization recovery', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    reportRemoteAuthorizationState('current');
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps probing with bounded backoff until authorization recovers', async () => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal('window', {
+      clearTimeout: globalThis.clearTimeout,
+      dispatchEvent,
+      setTimeout: globalThis.setTimeout,
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        json: async () => ({
+          remote: true,
+          authenticated: true,
+          authorization_state: 'unavailable',
+        }),
+      })
+      .mockResolvedValueOnce({
+        json: async () => ({
+          remote: true,
+          authenticated: true,
+          authorization_state: 'current',
+        }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    reportRemoteAuthorizationState('unavailable');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(dispatchEvent.mock.calls.some(([event]) => (
+      event.type === REMOTE_AUTH_STATE_EVENT && event.detail?.state === 'current'
+    ))).toBe(true);
+  });
+
+  it('replaces a pending backoff with an immediate manual retry', async () => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal('window', {
+      clearTimeout: globalThis.clearTimeout,
+      dispatchEvent,
+      setTimeout: globalThis.setTimeout,
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: async () => ({
+        remote: true,
+        authenticated: true,
+        authorization_state: 'current',
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    reportRemoteAuthorizationState('unavailable');
+    reportRemoteAuthorizationState('changed');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
 

@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +42,7 @@ from tests.scenario_harness.organization_management import (
     OrganizationManagementScenarioHarness,
 )
 from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
+from storage import remote_access_authorization_service
 from vibe import cloud_management
 from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
@@ -629,6 +631,190 @@ def test_remote_web_oauth_cold_launch_retry_is_single_owner(monkeypatch, tmp_pat
             "retry_after_browser_context_loss",
             "complete_retry",
         ],
+    )
+
+
+def _save_remote_session_authorization_config(instance_kind: str) -> V2Config:
+    config = _save_remote_web_auth_config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "device-secret"
+    cloud.instance_kind = instance_kind
+    config.save()
+    remote_access._clear_authorization_revision_cache()
+    remote_access._replace_authorization_revision(config, 1)
+    return config
+
+
+def test_personal_remote_session_slides_without_interactive_reauthorization(
+    monkeypatch,
+    tmp_path,
+):
+    """Scenario: AUTH-SETUP-402."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_session_authorization_config("personal")
+    base = int(time.time())
+    harness = SimpleNamespace(config=config, cookie=None, payload=None)
+    runner = ScenarioRunner(harness)
+
+    def sign_in_once(current):
+        monkeypatch.setattr(remote_access.time, "time", lambda: base)
+        current.cookie = remote_access.make_session_cookie(
+            current.config,
+            "owner@example.com",
+            "owner-1",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "owner",
+                "vibe_instance_access_source": "owner",
+                "vibe_instance_authorization_revision": 1,
+            },
+        )
+
+    def slide_after_half_life(current):
+        monkeypatch.setattr(
+            remote_access.time,
+            "time",
+            lambda: base + remote_access.PERSONAL_SESSION_RENEW_AFTER_SECONDS + 1,
+        )
+        identity = remote_access.parse_session_identity(current.config, current.cookie)
+        assert identity is not None
+        resolution = remote_access.resolve_current_authorization(current.config, identity)
+        assert resolution.current is True
+        current.cookie = remote_access.renew_session_cookie(current.config, resolution.payload)
+
+    def continue_after_original_expiry(current):
+        monkeypatch.setattr(
+            remote_access.time,
+            "time",
+            lambda: base + remote_access.PERSONAL_SESSION_TTL_SECONDS + 60,
+        )
+        identity = remote_access.parse_session_identity(current.config, current.cookie)
+        assert identity is not None
+        resolution = remote_access.resolve_current_authorization(current.config, identity)
+        assert resolution.current is True
+        assert resolution.policy == "personal"
+        assert resolution.payload["claims_issued_at"] == base
+
+    asyncio.run(
+        runner.run(
+            ScenarioStep("sign_in_once", sign_in_once),
+            ScenarioStep("slide_after_half_life", slide_after_half_life),
+            ScenarioStep("continue_after_original_expiry", continue_after_original_expiry),
+        )
+    )
+    ScenarioExpect.step_history(
+        runner,
+        ["sign_in_once", "slide_after_half_life", "continue_after_original_expiry"],
+    )
+
+
+def test_organization_remote_session_recovers_and_revokes_without_oauth(
+    monkeypatch,
+    tmp_path,
+):
+    """Scenario: AUTH-SETUP-403."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_session_authorization_config("organization")
+    mode = {"value": "unavailable", "revision": 2}
+
+    def device_request(_config, method, suffix, payload=None, *, timeout=8.0):
+        assert (method, suffix, timeout) == ("POST", "authorization-context", 8.0)
+        if mode["value"] == "unavailable":
+            raise remote_access.BackendRequestError(503, {"error": "unavailable"})
+        if mode["value"] == "revoked":
+            raise remote_access.BackendRequestError(403, {"error": "access_denied"})
+        return {
+            "sub": payload["sub"],
+            "email": payload["email"],
+            "instance_kind": "organization",
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_instance_authorization_revision": mode["revision"],
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-1",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-1"],
+            "vibe_membership_version": f"v{mode['revision']}",
+        }
+
+    monkeypatch.setattr(remote_access, "_device_json_request", device_request)
+    cookie = remote_access.make_session_cookie(
+        config,
+        "member@example.com",
+        "member-1",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_instance_authorization_revision": 1,
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-1",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-1"],
+            "vibe_membership_version": "v1",
+        },
+    )
+    client = app.test_client()
+    client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
+    harness = SimpleNamespace(config=config, client=client)
+    runner = ScenarioRunner(harness)
+
+    def enter_control_plane_grace(current):
+        now = int(time.time())
+        assert remote_access_authorization_service.mark_matching_revision_checked(
+            instance_id="inst_123",
+            authorization_revision=1,
+            checked_at=now,
+        ) == 1
+        remote_access._replace_authorization_revision(current.config, 2)
+        session = current.client.get(
+            "/api/session",
+            base_url="https://alex.avibe.bot",
+        ).get_json()
+        assert session["authenticated"] is True
+        assert session["authorization_state"] == "current"
+
+    def recover_silently(current):
+        remote_access._AUTHORIZATION_REFRESH_FAILURES.clear()
+        mode["value"] = "current"
+        session = current.client.get(
+            "/api/session",
+            base_url="https://alex.avibe.bot",
+        ).get_json()
+        assert session["authenticated"] is True
+        assert session["authorization_state"] == "current"
+        assert session["instance_role"] == "editor"
+
+    def enforce_confirmed_revocation(current):
+        mode.update(value="revoked", revision=3)
+        remote_access._replace_authorization_revision(current.config, 3)
+        protected = current.client.get(
+            "/api/config",
+            base_url="https://alex.avibe.bot",
+        )
+        session = current.client.get(
+            "/api/session",
+            base_url="https://alex.avibe.bot",
+        ).get_json()
+        assert protected.status_code == 403
+        assert protected.get_json()["error"] == "remote_access_revoked"
+        assert session["authenticated"] is True
+        assert session["authorization_state"] == "revoked"
+
+    asyncio.run(
+        runner.run(
+            ScenarioStep("enter_control_plane_grace", enter_control_plane_grace),
+            ScenarioStep("recover_silently", recover_silently),
+            ScenarioStep("enforce_confirmed_revocation", enforce_confirmed_revocation),
+        )
+    )
+    ScenarioExpect.step_history(
+        runner,
+        ["enter_control_plane_grace", "recover_silently", "enforce_confirmed_revocation"],
     )
 
 
