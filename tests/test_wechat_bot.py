@@ -470,6 +470,37 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         context = bot.on_message_callback.await_args.args[0]  # type: ignore[union-attr]
         self.assertFalse(context.is_ordinary_text)
 
+    async def test_direct_voice_and_video_publish_ordinary_attachment_fact(self):
+        bot = self._make_bot()
+        bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=True)
+        bot.dispatch_text_command = AsyncMock(return_value=False)
+        bot.on_message_callback = AsyncMock()
+        message = {
+            "message_id": "mid-media",
+            "from_user_id": "user-1",
+            "item_list": [
+                {
+                    "type": 3,
+                    "voice_item": {
+                        "media": {"encrypt_query_param": "voice-query"}
+                    },
+                },
+                {
+                    "type": 5,
+                    "video_item": {
+                        "media": {"encrypt_query_param": "video-query"}
+                    },
+                },
+            ],
+        }
+
+        await bot._process_inbound_message(message)
+        await asyncio.gather(*tuple(bot._message_callback_tasks))
+
+        context = bot.on_message_callback.await_args.args[0]  # type: ignore[union-attr]
+        self.assertIs(context.is_ordinary_attachment, True)
+        self.assertEqual([file.mimetype for file in context.files or []], ["audio/silk", "video/mp4"])
+
     async def test_process_inbound_message_sends_pending_bind_menu_hint_once(self):
         SettingsStore.reset_instance()
         store = SettingsStore.get_instance()

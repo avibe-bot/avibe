@@ -28,7 +28,7 @@ from .base import (
     InlineKeyboard,
 )
 from .formatters import TelegramFormatter
-from .message_facts import is_ordinary_telegram_text
+from .message_facts import is_ordinary_telegram_attachment, is_ordinary_telegram_text
 from . import telegram_api
 
 logger = logging.getLogger(__name__)
@@ -761,6 +761,7 @@ class TelegramBot(BaseIMClient):
             message_id=str(message.get("message_id")),
             files=files,
             is_ordinary_text=is_ordinary_telegram_text(message, files),
+            is_ordinary_attachment=is_ordinary_telegram_attachment(message, files),
             platform="telegram",
             platform_specific={
                 "is_dm": chat.get("type") == "private",

@@ -61,6 +61,10 @@ def test_memory_im_attachment_catalog_is_indexed_and_locks_the_approved_contract
         ("MEMORY-IM-ATTACH-002", "authorization", 4),
         ("MEMORY-IM-ATTACH-003", "degradation", 4),
         ("MEMORY-IM-ATTACH-004", "boundary", 4),
+        ("MEMORY-IM-ATTACH-005", "platform_contract", 5),
+        ("MEMORY-IM-ATTACH-006", "platform_contract", 5),
+        ("MEMORY-IM-ATTACH-007", "platform_contract", 5),
+        ("MEMORY-IM-ATTACH-008", "platform_contract", 5),
     ],
 )
 def test_memory_im_attachment_covered_scenario_contract(
@@ -68,7 +72,7 @@ def test_memory_im_attachment_covered_scenario_contract(
     kind: str,
     delivery_slice: int,
 ) -> None:
-    """The four MEMORY-IM-ATTACH scenario IDs map to executable evidence."""
+    """Every MEMORY-IM-ATTACH scenario ID maps to executable evidence."""
 
     catalog = _load(SCENARIO_ROOT / "catalog.yaml")
     rows = {row["id"]: row for row in catalog["scenarios"]}
@@ -79,6 +83,10 @@ def test_memory_im_attachment_covered_scenario_contract(
         "MEMORY-IM-ATTACH-002",
         "MEMORY-IM-ATTACH-003",
         "MEMORY-IM-ATTACH-004",
+        "MEMORY-IM-ATTACH-005",
+        "MEMORY-IM-ATTACH-006",
+        "MEMORY-IM-ATTACH-007",
+        "MEMORY-IM-ATTACH-008",
     }
     assert rows[scenario_id]["status"] == "covered"
     assert rows[scenario_id]["kind"] == kind

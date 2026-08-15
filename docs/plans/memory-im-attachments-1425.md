@@ -382,7 +382,16 @@ The canonical capability is `memory_im_attachment_capture` under
 - `MEMORY-IM-ATTACH-003`: absent multimodal configuration captures eligible text
   only and creates no attachment provider/call-log activity; and
 - `MEMORY-IM-ATTACH-004`: count, per-file, total-size, unsupported-type, and partial
-  download failures preserve valid siblings and leave no temp or bundle leak.
+  download failures preserve valid siblings and leave no temp or bundle leak;
+- `MEMORY-IM-ATTACH-005`: a native human Discord file share reaches attachment
+  admission while rich, bot, webhook, sticker, forwarded, and snapshot shapes
+  remain closed;
+- `MEMORY-IM-ATTACH-006`: Telegram document, largest-photo, voice, and audio
+  shapes reach admission independently, including separate album messages;
+- `MEMORY-IM-ATTACH-007`: Lark file and image messages with non-empty native keys
+  reach admission while `media` and malformed events remain closed; and
+- `MEMORY-IM-ATTACH-008`: direct WeChat image, voice, file, and video items reach
+  admission while reference and malformed media items remain closed.
 
 The closed-loop harness uses a stub platform client, a real test-owned bundle path,
 and local fake OpenAI-compatible providers. It must not use live credentials,
@@ -413,9 +422,24 @@ next slice.
 ## Residual manual checks
 
 Hermetic tests prove the product contracts without live platform credentials.
-After all five slices merge, the orchestrator's integration pass should verify one
-eligible image and one rejected file on every configured IM platform in the local
-Incus regression environment, preserving accumulated product state.
+After all five slices merge, the orchestrator's integration pass should run the
+following matrix in the local Incus regression environment while preserving
+accumulated product state:
+
+- Slack: one eligible image and one rejected file;
+- Discord: one ordinary upload and captured fixtures for ordinary-upload embeds,
+  authored embeds, components, stickers, webhooks, forwards, and snapshots. The
+  repository has no fixture proving whether an ordinary upload receives an embed,
+  so PR5 conservatively rejects every embed-bearing message until this check;
+- Telegram: document, largest photo variant, voice, audio, separate messages in
+  one album, and non-published video, animation, and sticker shapes;
+- Lark: file, image, malformed/empty native keys, and a captured real `media`
+  event for a later admission decision. Runtime tracing confirms the adapter sends
+  the literal platform name `lark`; the separate `IM_PLATFORMS` set still carrying
+  both `lark` and `feishu` is a future namespace-cleanup item; and
+- WeChat: direct image, voice, file, and video items plus quoted/reference and
+  source-identity cases. Video must reach the shared modality policy and produce
+  its existing skip accounting rather than being prefiltered in the adapter.
 
 The final PR4 invariant audit also found five pre-existing paths outside this
 slice's implementation files. The two bounded-wait spans are tracked by #1470;

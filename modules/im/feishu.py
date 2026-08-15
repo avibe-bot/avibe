@@ -20,7 +20,7 @@ from .base import (
     MessageContext,
 )
 from .formatters import FeishuFormatter
-from .message_facts import is_ordinary_feishu_text
+from .message_facts import is_ordinary_feishu_attachment, is_ordinary_feishu_text
 from .download_target import open_download_target
 from config.v2_config import LarkConfig
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -1761,6 +1761,12 @@ class FeishuBot(BaseIMClient):
                 files=file_attachments,
                 is_ordinary_text=is_ordinary_feishu_text(
                     event_data,
+                    file_attachments,
+                    shared_text=shared_text,
+                ),
+                is_ordinary_attachment=is_ordinary_feishu_attachment(
+                    event_data,
+                    msg_content,
                     file_attachments,
                     shared_text=shared_text,
                 ),

@@ -182,6 +182,47 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bot.on_message_callback.await_args.args[0].is_ordinary_text)
         self.assertEqual(bot.on_message_callback.await_args.args[1], "scheduled follow-up context")
 
+    async def test_native_file_message_publishes_ordinary_attachment_fact(self):
+        bot = object.__new__(DiscordBot)
+        bot.config = DiscordConfig(require_mention=False)
+        bot._controller = None
+        bot.client = SimpleNamespace(user=SimpleNamespace(id=42))
+        bot.on_message_callback = AsyncMock()
+        bot.sessions = None
+        bot.settings_manager = None
+        bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=False)
+        bot.dispatch_text_command = AsyncMock(return_value=False)
+        attachment = SimpleNamespace(
+            filename="diagram.png",
+            content_type="image/png",
+            url="https://cdn.discord.test/diagram.png",
+            size=123,
+        )
+        message = SimpleNamespace(
+            author=SimpleNamespace(id=456, bot=False),
+            content="remember this",
+            channel=SimpleNamespace(id=123),
+            guild=None,
+            attachments=[attachment],
+            mentions=[],
+            id=888,
+            edited_at=None,
+            embeds=[],
+            components=[],
+            stickers=[],
+            sticker_items=[],
+            webhook_id=None,
+            flags=SimpleNamespace(forwarded=False),
+            message_snapshots=(),
+            is_system=lambda: False,
+        )
+
+        await DiscordBot._on_message_event(bot, message)
+
+        bot.on_message_callback.assert_awaited_once()
+        context = bot.on_message_callback.await_args.args[0]
+        self.assertIs(context.is_ordinary_attachment, True)
+
     async def test_send_auth_denial_acknowledges_silent_interaction_denial(self):
         bot = object.__new__(DiscordBot)
         bot.build_auth_denial_text = lambda denial, channel_id=None: None

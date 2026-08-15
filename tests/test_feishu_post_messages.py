@@ -132,6 +132,35 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         assert context.files is not None
         self.assertEqual(len(context.files), 1)
         self.assertEqual(context.files[0].name, "img_123.image")
+        self.assertIs(context.is_ordinary_attachment, False)
+
+    async def test_native_file_message_publishes_lark_attachment_fact(self):
+        bot = self._make_bot()
+        bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=True)
+        bot.dispatch_text_command = AsyncMock(return_value=False)
+        bot.on_message_callback = AsyncMock()
+        event_data = {
+            "sender": {
+                "sender_type": "user",
+                "sender_id": {"open_id": "ou_user"},
+            },
+            "message": {
+                "chat_id": "oc_chat",
+                "chat_type": "p2p",
+                "message_id": "om_file",
+                "message_type": "file",
+                "content": json.dumps(
+                    {"file_key": "file-key", "file_name": "report.pdf"}
+                ),
+            },
+        }
+
+        await bot._async_handle_message(event_data)
+
+        bot.on_message_callback.assert_awaited_once()
+        context = bot.on_message_callback.await_args.args[0]
+        self.assertEqual(context.platform, "lark")
+        self.assertIs(context.is_ordinary_attachment, True)
 
     async def test_active_thread_requires_fresh_mention_when_require_mention_enabled(self):
         bot = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret", require_mention=True))

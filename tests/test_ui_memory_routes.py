@@ -67,7 +67,12 @@ def test_memory_rebuild_result_preserves_closed_preflight_diagnostic() -> None:
     ("enabled_platforms", "expected"),
     [
         (["slack"], True),
-        (["discord"], False),
+        (["discord"], True),
+        (["telegram"], True),
+        (["lark"], True),
+        (["wechat"], True),
+        (["feishu"], False),
+        (["email"], False),
         (["discord", "slack"], True),
         ([], False),
     ],
