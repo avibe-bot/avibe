@@ -286,7 +286,7 @@ export const Dashboard: React.FC = () => {
       <div
         className={clsx(
           'flex flex-wrap items-center justify-between gap-6 rounded-2xl border bg-surface-2 px-6 py-7 md:px-8',
-          'shadow-[0_24px_48px_-12px_rgba(91,255,160,0.078)]',
+          'shadow-mint-card',
           isRunning ? 'border-mint/30' : 'border-border'
         )}
       >
@@ -296,7 +296,7 @@ export const Dashboard: React.FC = () => {
             className={clsx(
               'flex size-[52px] shrink-0 items-center justify-center rounded-full border',
               isRunning
-                ? 'border-mint/35 bg-mint/[0.08] shadow-[0_0_24px_-6px_rgba(91,255,160,0.44)]'
+                ? 'border-mint/35 bg-mint/[0.08] shadow-glow-md-mint'
                 : 'border-border bg-foreground/[0.04]'
             )}
           >
@@ -318,7 +318,7 @@ export const Dashboard: React.FC = () => {
                 <span
                   className={clsx(
                     'size-1.5 rounded-full',
-                    isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
+                    isRunning ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
                   )}
                 />
                 {isRunning ? t('dashboard.runningTitle') : t('dashboard.stoppedTitle')}

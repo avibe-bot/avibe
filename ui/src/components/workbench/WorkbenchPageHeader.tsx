@@ -6,10 +6,10 @@ type Accent = 'mint' | 'cyan' | 'violet' | 'gold';
 // Accent-driven icon-box surface. The mint variant is the canonical workbench
 // page header (Agents, Skills); cyan/violet/gold are available for siblings.
 const ACCENT_BOX: Record<Accent, string> = {
-  mint: 'border-mint/40 bg-mint-soft text-mint-ink shadow-[0_0_18px_-6px_rgba(91,255,160,0.5)]',
-  cyan: 'border-cyan/40 bg-cyan-soft text-cyan-ink shadow-[0_0_18px_-6px_rgba(63,224,229,0.5)]',
-  violet: 'border-violet/40 bg-violet-soft text-violet-ink shadow-[0_0_18px_-6px_rgba(124,91,255,0.5)]',
-  gold: 'border-gold/40 bg-gold/[0.12] text-gold-ink shadow-[0_0_18px_-6px_rgba(255,200,87,0.5)]',
+  mint: 'border-mint/40 bg-mint-soft text-mint-ink shadow-glow-sm-mint',
+  cyan: 'border-cyan/40 bg-cyan-soft text-cyan-ink shadow-glow-sm-cyan',
+  violet: 'border-violet/40 bg-violet-soft text-violet-ink shadow-glow-sm-violet',
+  gold: 'border-gold/40 bg-gold/[0.12] text-gold-ink shadow-glow-sm-gold',
 };
 
 export interface WorkbenchPageHeaderProps {

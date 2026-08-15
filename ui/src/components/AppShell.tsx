@@ -80,7 +80,7 @@ const ShellNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
       className={clsx(
         'group flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
         active
-          ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]'
+          ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-glow-sm-mint'
           : 'border border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground'
       )}
     >
@@ -146,7 +146,7 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
           // Emphasized green circle — the back-to-workbench tab, mirroring the
           // desktop sidebar's distinct mint mode-switch button. Sized to fill the
           // slot so it sits on the same baseline as the plain icons.
-          <span className="grid size-7 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-[0_0_12px_-3px_rgba(91,255,160,0.6)]">
+          <span className="grid size-7 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-glow-xs-mint">
             <Icon className="size-4 text-mint-ink" />
           </span>
         ) : (
@@ -595,7 +595,7 @@ export const AppShell: React.FC = () => {
             <img
               src={logoImg}
               alt="avibe logo"
-              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)] transition-shadow group-hover:shadow-[0_0_20px_-3px_rgba(91,255,160,0.65)]"
+              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-glow-sm-mint transition-shadow group-hover:shadow-glow-md-mint"
             />
             <div className="min-w-0 leading-tight">
               <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
@@ -685,7 +685,7 @@ export const AppShell: React.FC = () => {
                 <span
                   className={clsx(
                     'size-2 shrink-0 rounded-full',
-                    isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
+                    isRunning ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
                   )}
                 />
                 {isRunning ? t('common.running') : t('common.stopped')}

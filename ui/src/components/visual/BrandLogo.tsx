@@ -16,7 +16,7 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({
   <span
     className={cn(
       'inline-flex shrink-0 items-center justify-center overflow-hidden rounded-xl border border-mint/30 bg-mint/[0.08]',
-      withGlow && 'shadow-[0_0_24px_-4px_rgba(91,255,160,0.45)]',
+      withGlow && 'shadow-glow-md-mint',
       className
     )}
     style={{ width: size, height: size }}

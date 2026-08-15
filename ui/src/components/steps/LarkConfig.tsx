@@ -244,7 +244,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                 className={clsx(
                   'flex-1 rounded-lg border px-3 py-2 text-[12px] font-semibold transition',
                   domain === opt
-                    ? 'border-mint/45 bg-mint/[0.08] text-mint-ink shadow-[0_0_24px_-4px_rgba(91,255,160,0.4)]'
+                    ? 'border-mint/45 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint'
                     : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
                 )}
               >
@@ -559,7 +559,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                   key={i}
                   className={clsx(
                     'h-1 w-4 rounded-full',
-                    i < completedCount ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.6)]' : 'bg-foreground/[0.08]'
+                    i < completedCount ? 'bg-mint shadow-glow-dot-mint' : 'bg-foreground/[0.08]'
                   )}
                 />
               ))}

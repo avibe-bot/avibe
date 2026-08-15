@@ -367,7 +367,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           {isAlreadyBound && (
             <div className="rounded-xl border border-border bg-background px-6 py-6">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-[0_0_32px_-6px_rgba(91,255,160,0.5)]">
+                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-lg-mint">
                   <Check size={32} />
                 </div>
                 <div>
@@ -424,9 +424,9 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
 
           {/* QR */}
           {(loginState === 'qr_ready' || loginState === 'scanning' || loginState === 'confirming') && (
-            <div className="rounded-xl border border-mint/35 bg-surface-2 px-6 py-6 shadow-[0_8px_32px_-8px_rgba(91,255,160,0.078)]">
+            <div className="rounded-xl border border-mint/35 bg-surface-2 px-6 py-6 shadow-mint-card-sm">
               <div className="flex flex-col items-center gap-4">
-                <div className="rounded-xl border border-border bg-white p-4 shadow-[0_0_24px_-4px_rgba(91,255,160,0.4)]">
+                <div className="rounded-xl border border-border bg-white p-4 shadow-glow-md-mint">
                   <QRCodeSVG value={qrCodeUrl} size={224} level="M" includeMargin={false} />
                 </div>
                 <div
@@ -471,9 +471,9 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
 
           {/* Connected */}
           {loginState === 'connected' && (
-            <div className="rounded-xl border border-mint/35 bg-surface-2 px-6 py-6 shadow-[0_8px_32px_-8px_rgba(91,255,160,0.078)]">
+            <div className="rounded-xl border border-mint/35 bg-surface-2 px-6 py-6 shadow-mint-card-sm">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-[0_0_32px_-6px_rgba(91,255,160,0.5)]">
+                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-lg-mint">
                   <Check size={32} />
                 </div>
                 <div>
@@ -557,7 +557,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
                   key={i}
                   className={clsx(
                     'h-1 w-6 rounded-full',
-                    i < completedDots ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.6)]' : 'bg-foreground/[0.08]'
+                    i < completedDots ? 'bg-mint shadow-glow-dot-mint' : 'bg-foreground/[0.08]'
                   )}
                 />
               ))}

@@ -196,8 +196,8 @@ const InboxHoverPopover: React.FC<{
 // gray / green / red: idle → muted (gray), running → mint (green) + glow,
 // failed → destructive (red) + glow. Tokens resolve from src/index.css.
 const STATUS_DOT_CLASS: Record<string, string> = {
-  running: 'bg-mint shadow-[0_0_6px_0_rgba(91,255,160,0.65)]',
-  failed: 'bg-destructive shadow-[0_0_6px_0_rgba(255,107,107,0.6)]',
+  running: 'bg-mint shadow-glow-dot-mint',
+  failed: 'bg-destructive shadow-glow-dot-destructive',
   idle: 'bg-muted',
 };
 
@@ -773,7 +773,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               // Cyan active state per design.pen ze15A — mint is reserved
               // for sessions / projects so the two reads stay distinct.
               isActive
-                ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-[0_0_16px_-4px_rgba(63,224,229,0.5)]'
+                ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-glow-sm-cyan'
                 : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
             )
           }
@@ -783,7 +783,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               <Inbox className={clsx('size-4', isActive ? 'text-cyan-ink' : 'text-foreground')} />
               <span className="flex-1">{t('workbench.nav.inbox')}</span>
               {badge && (
-                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-[0_0_10px_-2px_rgba(63,224,229,0.7)]">
+                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
                   {badge}
                 </span>
               )}
@@ -826,7 +826,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                 clsx(
                   'group flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors',
                   isActive
-                    ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]'
+                    ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-glow-sm-mint'
                     : 'border border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',
                 )
               }

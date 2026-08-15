@@ -19,7 +19,7 @@ export const badgeVariants = cva(
           'max-w-[140px] shrink-0 whitespace-normal rounded-full border px-[7px] py-0.5 text-center text-[10px] font-semibold leading-[1.2] tracking-normal',
         // Eyebrow — JetBrains Mono cyan w/ glow (design.pen Badge/Eyebrow mtcmf).
         eyebrow:
-          'rounded-full border border-cyan/50 bg-cyan/[0.16] px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-cyan-ink shadow-[0_0_24px_-4px_rgba(63,224,229,0.33)]',
+          'rounded-full border border-cyan/50 bg-cyan/[0.16] px-3 py-1.5 font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-cyan-ink shadow-glow-md-cyan',
       },
     },
     defaultVariants: {

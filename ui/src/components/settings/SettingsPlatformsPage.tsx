@@ -434,7 +434,7 @@ const PlatformCard: React.FC<{
     <section
       className={clsx(
         'overflow-hidden rounded-xl border bg-surface-2 transition-colors',
-        expanded ? 'border-mint/35 shadow-[0_8px_32px_-8px_rgba(91,255,160,0.078)]' : 'border-border'
+        expanded ? 'border-mint/35 shadow-mint-card-sm' : 'border-border'
       )}
     >
       <div className="flex items-stretch gap-3 px-5 py-4">

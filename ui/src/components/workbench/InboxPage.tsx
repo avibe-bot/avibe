@@ -120,7 +120,7 @@ export const InboxPage: React.FC = () => {
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 py-2">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-4">
-        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-[0_0_24px_-6px_rgba(91,255,160,0.5)]">
+        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
           <Inbox className="size-5" />
         </div>
         <div className="flex flex-1 flex-col">
@@ -181,7 +181,7 @@ export const InboxPage: React.FC = () => {
               className={clsx(
                 'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold transition sm:flex-none',
                 filter === key
-                  ? 'bg-mint/[0.10] text-mint-ink shadow-[0_0_12px_-4px_rgba(91,255,160,0.5)]'
+                  ? 'bg-mint/[0.10] text-mint-ink shadow-glow-xs-mint'
                   : 'text-muted hover:text-foreground',
               )}
             >
@@ -241,7 +241,7 @@ export const InboxPage: React.FC = () => {
                 className={clsx(
                   'flex flex-col gap-3 rounded-xl border p-4 transition',
                   unread > 0
-                    ? 'border-mint/30 bg-mint/[0.05] shadow-[0_0_24px_-12px_rgba(91,255,160,0.4)]'
+                    ? 'border-mint/30 bg-mint/[0.05] shadow-glow-md-mint'
                     : 'border-border bg-surface',
                 )}
               >

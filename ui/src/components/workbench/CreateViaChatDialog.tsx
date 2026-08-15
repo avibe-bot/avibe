@@ -100,7 +100,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
       onClick={onClose}
     >
       <div
-        className="flex w-full max-w-[500px] flex-col items-center gap-5 rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),0_0_32px_-12px_rgba(124,91,255,0.55)]"
+        className="flex w-full max-w-[500px] flex-col items-center gap-5 rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),var(--shadow-glow-lg-violet)]"
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -113,7 +113,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
         </button>
 
         {/* Hero icon — 64x64 violet-soft tile with glow */}
-        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-[0_0_28px_-6px_rgba(124,91,255,0.6)]">
+        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-glow-md-violet">
           <Sparkles className="size-[30px]" />
         </div>
 

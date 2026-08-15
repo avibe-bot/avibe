@@ -10,10 +10,10 @@ interface EyebrowBadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
 // Mirrors design.pen Badge/Eyebrow (mtcmf): JetBrains Mono, 11px, weight 700,
 // letterSpacing 1.4, cyan glow shadow. Used for `01 — STEP` style labels.
 const TONE_CLASSES: Record<Tone, string> = {
-  cyan: 'border-cyan/50 bg-cyan/[0.16] text-cyan-ink shadow-[0_0_24px_-4px_rgba(63,224,229,0.33)]',
-  mint: 'border-mint/50 bg-mint/[0.16] text-mint-ink shadow-[0_0_24px_-4px_rgba(91,255,160,0.33)]',
-  violet: 'border-violet/50 bg-violet/[0.16] text-violet-ink shadow-[0_0_24px_-4px_rgba(124,91,255,0.33)]',
-  gold: 'border-gold/50 bg-gold/[0.16] text-gold-ink shadow-[0_0_24px_-4px_rgba(255,200,87,0.33)]',
+  cyan: 'border-cyan/50 bg-cyan/[0.16] text-cyan-ink shadow-glow-md-cyan',
+  mint: 'border-mint/50 bg-mint/[0.16] text-mint-ink shadow-glow-md-mint',
+  violet: 'border-violet/50 bg-violet/[0.16] text-violet-ink shadow-glow-md-violet',
+  gold: 'border-gold/50 bg-gold/[0.16] text-gold-ink shadow-glow-md-gold',
 };
 
 export const EyebrowBadge = React.forwardRef<HTMLSpanElement, EyebrowBadgeProps>(
