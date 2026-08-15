@@ -7,7 +7,6 @@ import inspect
 import os
 import re
 import secrets
-import shutil
 import stat
 import threading
 from dataclasses import dataclass, field
@@ -35,9 +34,17 @@ class _LeasedAttachmentRecord:
 
 
 class _LeaseState:
-    def __init__(self, root: Path, directory: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        directory: Path,
+        root_fd: int,
+        directory_fd: int,
+    ) -> None:
         self.root = root
         self.directory = directory
+        self.root_fd = root_fd
+        self.directory_fd = directory_fd
         self.records: tuple[_LeasedAttachmentRecord, ...] = ()
         self.references = 1
         self.adopted = False
@@ -81,9 +88,13 @@ class InboundAttachmentLease:
                 return
             self.__released = True
             state.references -= 1
-            remove = state.references == 0 and (not state.adopted or not state.records)
+            last_reference = state.references == 0
+            remove = last_reference and (not state.adopted or not state.records)
         if remove:
-            shutil.rmtree(state.directory, ignore_errors=True)
+            _remove_lease_directory(state)
+        elif last_reference:
+            os.close(state.directory_fd)
+            os.close(state.root_fd)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,16 +143,17 @@ class InboundAttachmentMaterializer:
         root_fd = _open_or_create_private_directory(self._root)
         lease_id = secrets.token_hex(16)
         lease_dir = self._root / lease_id
+        lease_fd: int | None = None
         try:
             os.mkdir(lease_id, mode=0o700, dir_fd=root_fd)
             lease_fd = os.open(lease_id, _directory_open_flags(), dir_fd=root_fd)
-            try:
-                _make_private_directory(lease_fd, "attachment lease directory")
-            finally:
+            _make_private_directory(lease_fd, "attachment lease directory")
+        except BaseException:
+            if lease_fd is not None:
                 os.close(lease_fd)
-        finally:
             os.close(root_fd)
-        state = _LeaseState(self._root, lease_dir)
+            raise
+        state = _LeaseState(self._root, lease_dir, root_fd, lease_fd)
         lease = InboundAttachmentLease(state)
 
         candidates = tuple(
@@ -157,6 +169,7 @@ class InboundAttachmentMaterializer:
                     context,
                     im_client,
                     lease_dir,
+                    lease_fd,
                     index,
                     attachment,
                     max_bytes=max_bytes,
@@ -168,6 +181,7 @@ class InboundAttachmentMaterializer:
             outcomes = await asyncio.gather(
                 *(acquire(index, attachment) for index, attachment in enumerate(candidates))
             )
+            _verify_lease_directory_entry(state)
         except BaseException:
             lease.release()
             raise
@@ -198,6 +212,7 @@ class InboundAttachmentMaterializer:
         context: MessageContext,
         im_client: Any,
         lease_dir: Path,
+        lease_fd: int,
         index: int,
         attachment: FileAttachment,
         *,
@@ -225,26 +240,34 @@ class InboundAttachmentMaterializer:
             )
 
         safe_name = _sanitize_filename(attachment.name)
-        final_path = lease_dir / f"{index:02d}-{safe_name}"
-        partial_path = lease_dir / f"{index:02d}-{safe_name}.part"
+        final_name = f"{index:02d}-{safe_name}"
+        partial_name = f"{final_name}.part"
         file_info = _download_info(context, attachment)
-        published_paths: set[Path] = set()
+        published_names: set[str] = set()
+        partial_fd: int | None = None
         materialized = False
         try:
+            partial_fd = os.open(
+                partial_name,
+                _file_create_flags(),
+                0o600,
+                dir_fd=lease_fd,
+            )
             stream_download = getattr(im_client, "download_file_to_path", None)
             if callable(stream_download):
                 result = await stream_download(
                     file_info,
-                    str(partial_path),
+                    _descriptor_path(partial_fd),
                     **_supported_download_options(
                         stream_download,
                         max_bytes=max_bytes,
                         timeout_seconds=timeout_seconds,
+                        target_fd=partial_fd,
                     ),
                 )
                 if not isinstance(result, FileDownloadResult):
                     result = FileDownloadResult(bool(result))
-                if not result.success or not partial_path.is_file():
+                if not result.success:
                     reason = (
                         "file_too_large"
                         if result.failure_reason == "file_too_large"
@@ -258,20 +281,30 @@ class InboundAttachmentMaterializer:
                 content = await download(file_info)
                 if not content:
                     return _materialization_failure("download_failed", attachment.name, language)
-                partial_path.write_bytes(content)
-            size = partial_path.stat().st_size
+                os.ftruncate(partial_fd, 0)
+                os.lseek(partial_fd, 0, os.SEEK_SET)
+                _write_all(partial_fd, content)
+            size = os.fstat(partial_fd).st_size
             if max_bytes is not None and size > max_bytes:
                 return _materialization_failure("file_too_large", attachment.name, language)
-            partial_path.chmod(0o600)
-            os.replace(partial_path, final_path)
-            published_paths.add(final_path)
-            name, mimetype, final_path = _normalize_detected_media(
+            os.fchmod(partial_fd, 0o600)
+            os.rename(
+                partial_name,
+                final_name,
+                src_dir_fd=lease_fd,
+                dst_dir_fd=lease_fd,
+            )
+            published_names.add(final_name)
+            name, mimetype, final_name = _normalize_detected_media(
                 attachment.name,
                 attachment.mimetype,
-                final_path,
+                partial_fd,
+                lease_fd,
+                final_name,
             )
-            published_paths.add(final_path)
-            final_path.chmod(0o600)
+            published_names.add(final_name)
+            os.fchmod(partial_fd, 0o600)
+            final_path = lease_dir / final_name
             snapshot = FileAttachment(
                 name=name,
                 mimetype=mimetype,
@@ -292,10 +325,15 @@ class InboundAttachmentMaterializer:
         except Exception:
             return _materialization_failure("download_failed", attachment.name, language)
         finally:
-            partial_path.unlink(missing_ok=True)
+            _unlink_at_quietly(lease_fd, partial_name)
             if not materialized:
-                for published_path in published_paths:
-                    published_path.unlink(missing_ok=True)
+                for published_name in published_names:
+                    _unlink_at_quietly(lease_fd, published_name)
+            if partial_fd is not None:
+                try:
+                    os.close(partial_fd)
+                except OSError:
+                    pass
 
 
 def leased_attachment_records(
@@ -334,6 +372,7 @@ def _supported_download_options(
     *,
     max_bytes: int | None,
     timeout_seconds: int,
+    target_fd: int,
 ) -> dict[str, Any]:
     """Pass optional bounds only to clients whose method contract accepts them."""
 
@@ -350,6 +389,8 @@ def _supported_download_options(
         options["max_bytes"] = max_bytes
     if accepts_kwargs or "timeout_seconds" in parameters:
         options["timeout_seconds"] = timeout_seconds
+    if accepts_kwargs or "target_fd" in parameters:
+        options["target_fd"] = target_fd
     return options
 
 
@@ -379,6 +420,76 @@ def _directory_open_flags() -> int:
         | int(getattr(os, "O_DIRECTORY", 0))
         | int(getattr(os, "O_CLOEXEC", 0))
     )
+
+
+def _file_create_flags() -> int:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise RuntimeError("attachment leases require no-follow filesystem support")
+    return (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_EXCL
+        | int(no_follow)
+        | int(getattr(os, "O_CLOEXEC", 0))
+    )
+
+
+def _descriptor_path(descriptor: int) -> str:
+    root = "/dev/fd" if Path("/dev/fd").is_dir() else "/proc/self/fd"
+    return f"{root}/{descriptor}"
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("attachment write made no progress")
+        view = view[written:]
+
+
+def _unlink_at_quietly(parent_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+
+
+def _verify_lease_directory_entry(state: _LeaseState) -> None:
+    expected = os.fstat(state.directory_fd)
+    observed = os.stat(
+        state.directory.name,
+        dir_fd=state.root_fd,
+        follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or observed.st_dev != expected.st_dev
+        or observed.st_ino != expected.st_ino
+    ):
+        raise OSError("attachment lease directory changed during materialization")
+
+
+def _remove_lease_directory(state: _LeaseState) -> None:
+    try:
+        try:
+            names = os.listdir(state.directory_fd)
+        except OSError:
+            names = []
+        for name in names:
+            try:
+                os.unlink(name, dir_fd=state.directory_fd)
+            except OSError:
+                pass
+        try:
+            _verify_lease_directory_entry(state)
+            os.rmdir(state.directory.name, dir_fd=state.root_fd)
+        except OSError:
+            pass
+    finally:
+        os.close(state.directory_fd)
+        os.close(state.root_fd)
 
 
 def _open_or_create_private_directory(directory: Path) -> int:
@@ -444,17 +555,28 @@ def _truncate_utf8(value: str, max_bytes: int) -> str:
     return encoded.decode("utf-8", errors="ignore")
 
 
-def _normalize_detected_media(name: str, mimetype: str, path: Path) -> tuple[str, str, Path]:
-    with path.open("rb") as file_obj:
-        sample = file_obj.read(AUDIO_SIGNATURE_SAMPLE_BYTES)
+def _normalize_detected_media(
+    name: str,
+    mimetype: str,
+    file_fd: int,
+    lease_fd: int,
+    filename: str,
+) -> tuple[str, str, str]:
+    os.lseek(file_fd, 0, os.SEEK_SET)
+    sample = os.read(file_fd, AUDIO_SIGNATURE_SAMPLE_BYTES)
     detected = _detect_image_mime(sample) or detect_audio_mime_from_sample(sample)
     if detected is None:
-        return _sanitize_filename(name), mimetype, path
+        return _sanitize_filename(name), mimetype, filename
     detected_mime, suffix = detected
     display = f"{Path(_sanitize_filename(name)).stem}{suffix}"
-    corrected = path.with_suffix(suffix)
-    if corrected != path:
-        os.replace(path, corrected)
+    corrected = str(Path(filename).with_suffix(suffix))
+    if corrected != filename:
+        os.rename(
+            filename,
+            corrected,
+            src_dir_fd=lease_fd,
+            dst_dir_fd=lease_fd,
+        )
     return display, detected_mime, corrected
 
 

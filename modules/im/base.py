@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from typing import Optional, Callable, Dict, Any, List, Tuple, Literal, cast
 from dataclasses import dataclass
 
+from .download_target import open_download_target
+
 logger = logging.getLogger(__name__)
 
 
@@ -448,6 +450,7 @@ class BaseIMClient(ABC):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         """Download a remote file directly to a local path.
 
@@ -460,10 +463,9 @@ class BaseIMClient(ABC):
         if content is None:
             return FileDownloadResult(False, "Download returned no content")
 
-        path = Path(target_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            path.write_bytes(content)
+            with open_download_target(target_path, target_fd=target_fd) as file_obj:
+                file_obj.write(content)
         except Exception as err:
             return FileDownloadResult(False, f"Failed to write downloaded file: {err}")
         return FileDownloadResult(True)

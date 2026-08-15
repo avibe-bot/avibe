@@ -23,7 +23,7 @@ class _Client:
 
 async def _materialize(
     home: Path,
-    entries: list[tuple[str, str, bytes, int | None]],
+    entries: list[tuple[str, object, bytes, int | None]],
 ):
     files = [
         FileAttachment(name=name, mimetype=mime, url=name, size=declared)
@@ -39,6 +39,28 @@ async def _materialize(
         ),
         _Client(payloads),
     )
+
+
+@pytest.mark.asyncio
+async def test_memory_selection_normalizes_missing_mime_without_losing_siblings(
+    tmp_path: Path,
+) -> None:
+    batch = await _materialize(
+        tmp_path / "avibe-home",
+        [
+            ("unknown.txt", None, b"text", 4),
+            ("valid.pdf", "application/pdf", b"%PDF-1.7\n", 9),
+        ],
+    )
+
+    selected = select_memory_attachments(batch.lease)
+
+    assert [item.name for item in selected.attachments] == [
+        "unknown.txt",
+        "valid.pdf",
+    ]
+    assert selected.skipped == ()
+    batch.lease.release()
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
+import core.handlers.inbound_attachments as inbound_attachment_module
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
 
@@ -48,6 +51,43 @@ class _OversizedClient:
         timeout_seconds=30,
     ):
         return FileDownloadResult(False, "native size detail", "file_too_large")
+
+
+class _DescriptorClient:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.target_fds: list[int] = []
+
+    async def download_file_to_path(
+        self,
+        file_info,
+        target_path,
+        max_bytes=None,
+        timeout_seconds=30,
+        target_fd=None,
+    ):
+        assert target_fd is not None
+        self.target_fds.append(target_fd)
+        os.write(target_fd, self.payload)
+        return FileDownloadResult(True)
+
+
+class _LeaseSwapClient(_DescriptorClient):
+    def __init__(self, payload: bytes, lease_root: Path, outside: Path) -> None:
+        super().__init__(payload)
+        self.lease_root = lease_root
+        self.outside = outside
+
+    async def download_file_to_path(self, *args, target_fd=None, **kwargs):
+        lease_dir = next(self.lease_root.iterdir())
+        moved = self.lease_root / f"{lease_dir.name}.moved"
+        lease_dir.rename(moved)
+        lease_dir.symlink_to(self.outside, target_is_directory=True)
+        return await super().download_file_to_path(
+            *args,
+            target_fd=target_fd,
+            **kwargs,
+        )
 
 
 @pytest.mark.asyncio
@@ -205,6 +245,54 @@ async def test_materializer_rejects_symlinked_attachment_root(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_materializer_keeps_download_writes_on_anchored_descriptor(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "avibe-home"
+    client = _DescriptorClient(b"anchored")
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref")],
+    )
+
+    batch = await InboundAttachmentMaterializer(effective_home=home).materialize(
+        context,
+        client,
+    )
+
+    assert len(client.target_fds) == 1
+    assert Path(batch.attachments[0].local_path or "").read_bytes() == b"anchored"
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_materializer_fails_closed_when_lease_directory_is_replaced(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "avibe-home"
+    lease_root = home / "attachments" / "im"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    client = _LeaseSwapClient(b"anchored", lease_root, outside)
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref")],
+    )
+
+    with pytest.raises(OSError, match="lease directory changed"):
+        await InboundAttachmentMaterializer(effective_home=home).materialize(
+            context,
+            client,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_materializer_preserves_typed_size_reason_and_localizes_display(
     tmp_path: Path,
 ) -> None:
@@ -249,14 +337,18 @@ async def test_materializer_removes_corrected_final_file_when_post_processing_fa
             FileAttachment("valid.txt", "text/plain", url="valid"),
         ],
     )
-    original_chmod = Path.chmod
+    original_fchmod = inbound_attachment_module.os.fchmod
+    private_file_calls = 0
 
-    def fail_corrected_chmod(path: Path, mode: int) -> None:
-        if path.suffix == ".png":
+    def fail_corrected_chmod(descriptor: int, mode: int) -> None:
+        nonlocal private_file_calls
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            private_file_calls += 1
+        if private_file_calls == 2:
             raise OSError("post-download chmod failed")
-        original_chmod(path, mode)
+        original_fchmod(descriptor, mode)
 
-    monkeypatch.setattr(Path, "chmod", fail_corrected_chmod)
+    monkeypatch.setattr(inbound_attachment_module.os, "fchmod", fail_corrected_chmod)
 
     batch = await InboundAttachmentMaterializer(effective_home=home).materialize(
         context,

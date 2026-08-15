@@ -21,6 +21,7 @@ from .base import (
 )
 from .formatters import FeishuFormatter
 from .message_facts import is_ordinary_feishu_text
+from .download_target import open_download_target
 from config.v2_config import LarkConfig
 from vibe.i18n import get_supported_languages, t as i18n_t
 from modules.agents.opencode.utils import (
@@ -1391,6 +1392,7 @@ class FeishuBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         message_id = file_info.get("message_id")
         file_key = file_info.get("file_key")
@@ -1408,7 +1410,7 @@ class FeishuBot(BaseIMClient):
                         if resp.status != 200:
                             return FileDownloadResult(False, f"Download failed with HTTP {resp.status}")
                         total = 0
-                        with open(target_path, "wb") as file_obj:
+                        with open_download_target(target_path, target_fd=target_fd) as file_obj:
                             async for chunk in resp.content.iter_chunked(64 * 1024):
                                 total += len(chunk)
                                 if max_bytes is not None and total > max_bytes:
@@ -1435,7 +1437,7 @@ class FeishuBot(BaseIMClient):
                         logger.error("Failed to download Feishu file: HTTP %s", resp.status)
                         return FileDownloadResult(False, f"Download failed with HTTP {resp.status}")
                     total = 0
-                    with open(target_path, "wb") as file_obj:
+                    with open_download_target(target_path, target_fd=target_fd) as file_obj:
                         async for chunk in resp.content.iter_chunked(64 * 1024):
                             total += len(chunk)
                             if max_bytes is not None and total > max_bytes:

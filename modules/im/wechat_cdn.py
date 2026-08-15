@@ -21,6 +21,8 @@ import aiohttp
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
+from modules.im.download_target import open_download_target
+
 from modules.im.wechat_api import (
     UPLOAD_MEDIA_FILE,
     UPLOAD_MEDIA_IMAGE,
@@ -446,14 +448,16 @@ async def download_and_decrypt_to_path(
     *,
     max_bytes: int | None = None,
     timeout_seconds: int = 60,
+    target_fd: int | None = None,
 ) -> int:
     """Stream, decrypt, unpad, and bound one CDN object directly to disk."""
 
     key = parse_aes_key(aes_key_b64)
     url = _build_cdn_download_url(cdn_base_url, encrypted_query_param)
     target = Path(target_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.unlink(missing_ok=True)
+    if target_fd is None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
     ciphertext_limit = aes_ecb_padded_size(max_bytes) if max_bytes is not None else None
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     cipher = Cipher(algorithms.AES(key), modes.ECB())
@@ -481,7 +485,11 @@ async def download_and_decrypt_to_path(
                     and content_length > ciphertext_limit
                 ):
                     raise ValueError("Downloaded file exceeds max_bytes")
-                with target.open("xb") as file_obj:
+                with open_download_target(
+                    target,
+                    target_fd=target_fd,
+                    exclusive_path=True,
+                ) as file_obj:
                     async for chunk in resp.content.iter_chunked(64 * 1024):
                         encrypted_total += len(chunk)
                         if ciphertext_limit is not None and encrypted_total > ciphertext_limit:
@@ -494,7 +502,8 @@ async def download_and_decrypt_to_path(
                     )
         return plaintext_total
     except BaseException:
-        target.unlink(missing_ok=True)
+        if target_fd is None:
+            target.unlink(missing_ok=True)
         raise
 
 
@@ -505,13 +514,15 @@ async def download_plain_to_path(
     *,
     max_bytes: int | None = None,
     timeout_seconds: int = 60,
+    target_fd: int | None = None,
 ) -> int:
     """Stream one unencrypted CDN object directly to a bounded local path."""
 
     url = _build_cdn_download_url(cdn_base_url, encrypted_query_param)
     target = Path(target_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.unlink(missing_ok=True)
+    if target_fd is None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     total = 0
     try:
@@ -522,7 +533,11 @@ async def download_plain_to_path(
                 content_length = _nonnegative_int(resp.headers.get("Content-Length"))
                 if max_bytes is not None and content_length is not None and content_length > max_bytes:
                     raise ValueError("Downloaded file exceeds max_bytes")
-                with target.open("xb") as file_obj:
+                with open_download_target(
+                    target,
+                    target_fd=target_fd,
+                    exclusive_path=True,
+                ) as file_obj:
                     async for chunk in resp.content.iter_chunked(64 * 1024):
                         total += len(chunk)
                         if max_bytes is not None and total > max_bytes:
@@ -530,7 +545,8 @@ async def download_plain_to_path(
                         file_obj.write(chunk)
         return total
     except BaseException:
-        target.unlink(missing_ok=True)
+        if target_fd is None:
+            target.unlink(missing_ok=True)
         raise
 
 

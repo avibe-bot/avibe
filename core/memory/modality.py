@@ -88,7 +88,7 @@ _TEXT_EXTENSIONS = frozenset({"txt", "md", "vtt", "csv", "tsv"})
 
 def classify_pinned_attachment(
     name: str,
-    mimetype: str,
+    mimetype: object,
     path: Path,
 ) -> tuple[MemoryContentKind, str] | None:
     """Classify one acquired file only when extension, MIME, and bytes agree."""
@@ -98,7 +98,11 @@ def classify_pinned_attachment(
         return None
     if Path(name).suffix.lstrip(".").lower() != extension:
         return None
-    normalized_mime = mimetype.lower().split(";", 1)[0].strip()
+    normalized_mime = (
+        mimetype.lower().split(";", 1)[0].strip()
+        if isinstance(mimetype, str) and mimetype.strip()
+        else "application/octet-stream"
+    )
     try:
         with path.open("rb") as file_obj:
             sample = file_obj.read(4096)
@@ -126,11 +130,7 @@ def classify_pinned_attachment(
         }:
             return None
         return "pdf", extension
-    if b"\x00" in sample:
-        return None
-    try:
-        codecs.getincrementaldecoder("utf-8")().decode(sample, final=False)
-    except UnicodeDecodeError:
+    if not _valid_utf8_text_file(path):
         return None
     if normalized_mime != "application/octet-stream" and not (
         normalized_mime.startswith("text/")
@@ -144,6 +144,20 @@ def classify_pinned_attachment(
     if extension in _TEXT_EXTENSIONS:
         return "doc", extension
     return None
+
+
+def _valid_utf8_text_file(path: Path) -> bool:
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        with path.open("rb") as file_obj:
+            while chunk := file_obj.read(64 * 1024):
+                if b"\x00" in chunk:
+                    return False
+                decoder.decode(chunk, final=False)
+        decoder.decode(b"", final=True)
+    except (OSError, UnicodeDecodeError):
+        return False
+    return True
 
 
 def _extension_aliases_match(expected: str, detected: str) -> bool:

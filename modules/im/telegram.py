@@ -1554,6 +1554,7 @@ class TelegramBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         """Resolve and stream a Telegram file without buffering it in memory."""
 
@@ -1578,20 +1579,27 @@ class TelegramBot(BaseIMClient):
                 return FileDownloadResult(False, "Telegram file metadata is invalid")
             if _telegram_size_exceeds(resolved.get("file_size"), max_bytes):
                 return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
+            download_options: Dict[str, Any] = {
+                "max_bytes": max_bytes,
+                "timeout_seconds": timeout_seconds,
+                "proxy_url": self._proxy_url,
+            }
+            if target_fd is not None:
+                download_options["target_fd"] = target_fd
             await telegram_api.download_file_to_path(
                 self.config.bot_token,
                 str(resolved["file_path"]),
                 target,
-                max_bytes=max_bytes,
-                timeout_seconds=timeout_seconds,
-                proxy_url=self._proxy_url,
+                **download_options,
             )
             return FileDownloadResult(True)
         except telegram_api.TelegramFileTooLargeError:
-            target.unlink(missing_ok=True)
+            if target_fd is None:
+                target.unlink(missing_ok=True)
             return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
         except Exception:
-            target.unlink(missing_ok=True)
+            if target_fd is None:
+                target.unlink(missing_ok=True)
             return FileDownloadResult(False, "Telegram file download failed")
 
     async def open_change_cwd_modal(self, trigger_id: Any, current_cwd: str, channel_id: str = None):

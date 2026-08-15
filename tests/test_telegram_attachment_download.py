@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -96,6 +97,35 @@ async def test_telegram_api_rejects_response_header_before_writing(
         )
 
     assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_telegram_api_writes_through_caller_owned_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchored = tmp_path / "anchored.bin"
+    decoy = tmp_path / "decoy.bin"
+    descriptor = os.open(anchored, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    response = _Response([b"anchored"])
+    monkeypatch.setattr(
+        telegram_api.aiohttp,
+        "ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+
+    try:
+        await telegram_api.download_file_to_path(
+            "token",
+            "documents/file.bin",
+            decoy,
+            target_fd=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+
+    assert anchored.read_bytes() == b"anchored"
+    assert not decoy.exists()
 
 
 @pytest.mark.asyncio

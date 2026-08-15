@@ -68,6 +68,12 @@ Lease files live below the fixed private
 unclaimed batch is removed after its final reference; ordinary Agent delivery
 adopts its existing local-file lifetime, while a retained Memory reference can
 finish pinning first. Empty and failed batches are never preserved by adoption.
+The materializer keeps no-follow root and lease descriptors open for the lease
+lifetime. It pre-creates each partial file with descriptor-relative
+`O_EXCL | O_NOFOLLOW`, passes a duplicate file descriptor to bounded platform
+writers, and performs normalization, publication, and cleanup relative to the
+verified lease descriptor. Replacing the directory entry during materialization
+fails closed and cannot redirect writes outside the private lease.
 
 The message handler materializes before scheduling Memory capture. Agent delivery
 and Memory retain independent lease references, so Agent cleanup, retry, or
@@ -84,7 +90,11 @@ not sufficient.
 `core/memory/im_attachments.py` accepts only shared-materializer leases. It checks
 declared size before retaining a Memory consumer and checks final size, MIME,
 extension, and magic after acquisition through the closed modality table. It
-produces immutable `CaptureAttachment` values for surviving files.
+produces immutable `CaptureAttachment` values for surviving files. Missing or
+non-string native MIME metadata normalizes to `application/octet-stream` at this
+shared boundary. Text-like formats stream their complete bounded file through
+incremental UTF-8 and NUL validation; checking only the leading magic sample is
+insufficient.
 
 `core/memory/attachments.py` accepts either the fixed Workbench upload root or a
 fixed leased-IM source handle. Both paths keep no-follow opens, owner and mode

@@ -9,6 +9,8 @@ from typing import Any, Optional
 import aiohttp
 from aiohttp_socks import ProxyConnector
 
+from .download_target import open_download_target
+
 
 class TelegramFileTooLargeError(ValueError):
     """The streamed Telegram file exceeded its configured byte bound."""
@@ -84,14 +86,16 @@ async def download_file_to_path(
     max_bytes: int | None = None,
     timeout_seconds: int = 60,
     proxy_url: Optional[str] = None,
+    target_fd: int | None = None,
 ) -> int:
     """Stream one Bot API file to disk with header and byte-count bounds."""
 
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     connector = ProxyConnector.from_url(proxy_url) if proxy_url else None
     target = Path(target_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.unlink(missing_ok=True)
+    if target_fd is None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
     try:
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             async with session.get(_file_url(bot_token, file_path)) as resp:
@@ -100,7 +104,11 @@ async def download_file_to_path(
                 if max_bytes is not None and content_length is not None and content_length > max_bytes:
                     raise TelegramFileTooLargeError("Downloaded file exceeds max_bytes")
                 total = 0
-                with target.open("xb") as file_obj:
+                with open_download_target(
+                    target,
+                    target_fd=target_fd,
+                    exclusive_path=True,
+                ) as file_obj:
                     async for chunk in resp.content.iter_chunked(64 * 1024):
                         total += len(chunk)
                         if max_bytes is not None and total > max_bytes:
@@ -108,7 +116,8 @@ async def download_file_to_path(
                         file_obj.write(chunk)
         return total
     except BaseException:
-        target.unlink(missing_ok=True)
+        if target_fd is None:
+            target.unlink(missing_ok=True)
         raise
 
 

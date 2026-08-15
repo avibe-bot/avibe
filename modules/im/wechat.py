@@ -315,6 +315,7 @@ class _WeChatCDN:
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
         proxy: Optional[str] = None,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         """Download and decrypt a CDN file to a local path."""
         cdn_info = file_info.get("cdn_info") or {}
@@ -336,7 +337,8 @@ class _WeChatCDN:
             return FileDownloadResult(False, "CDN download/decrypt failed")
 
         dest = Path(target_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        if target_fd is None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             if aes_key_b64:
@@ -347,6 +349,7 @@ class _WeChatCDN:
                     dest,
                     max_bytes=max_bytes,
                     timeout_seconds=timeout_seconds,
+                    target_fd=target_fd,
                 )
             else:
                 await _wechat_cdn_mod.download_plain_to_path(
@@ -355,10 +358,12 @@ class _WeChatCDN:
                     dest,
                     max_bytes=max_bytes,
                     timeout_seconds=timeout_seconds,
+                    target_fd=target_fd,
                 )
             return FileDownloadResult(True)
         except ValueError as exc:
-            dest.unlink(missing_ok=True)
+            if target_fd is None:
+                dest.unlink(missing_ok=True)
             logger.warning("WeChat CDN download failed: %s", type(exc).__name__)
             reason = (
                 "file_too_large"
@@ -367,7 +372,8 @@ class _WeChatCDN:
             )
             return FileDownloadResult(False, "CDN download/decrypt failed", reason)
         except Exception as exc:
-            dest.unlink(missing_ok=True)
+            if target_fd is None:
+                dest.unlink(missing_ok=True)
             logger.warning("WeChat CDN download failed: %s", type(exc).__name__)
             return FileDownloadResult(False, "CDN download/decrypt failed")
 
@@ -958,6 +964,7 @@ class WeChatBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         """Download a CDN file to a local path."""
         if _wechat_declared_size_exceeds(file_info, max_bytes):
@@ -971,6 +978,7 @@ class WeChatBot(BaseIMClient):
             max_bytes=max_bytes,
             timeout_seconds=timeout_seconds,
             proxy=self._proxy_url,
+            target_fd=target_fd,
         )
         if isinstance(result, FileDownloadResult):
             return result
