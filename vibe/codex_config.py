@@ -509,6 +509,33 @@ def read_codex_relay_marker(marker: object) -> Optional[Dict[str, str]]:
     return {"base_url": base_url.strip(), "provider_id": provider_id.strip()}
 
 
+def persist_codex_relay_marker(marker: Optional[Dict[str, str]]) -> bool:
+    """Durably record (or clear) the OAuth-transition relay marker in V2Config.
+
+    Split out so both OAuth write paths — the controller's
+    ``AgentAuthService._persist_backend_auth_mode`` and the Settings API
+    ``save_codex_auth`` — can persist a fresh capture BEFORE the
+    destructive ``apply_codex_auth(oauth)`` cleanup destroys the on-disk
+    relay evidence (#1450). A later V2Config failure in the owning flow
+    then cannot lose the capture. Returns ``True`` when the write
+    landed; ``False`` (never raises) so callers can degrade to "recovery
+    lost, OAuth proceeds".
+    """
+    from config.v2_config import CONFIG_LOCK, V2Config
+
+    try:
+        with CONFIG_LOCK:
+            try:
+                config = V2Config.load()
+            except FileNotFoundError:
+                config = V2Config.default()
+            config.agents.codex.oauth_relay_marker = marker
+            config.save()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def read_codex_api_key(home: Path | None = None) -> Optional[str]:
     """Return the API key currently stored in ``auth.json``, if any.
 

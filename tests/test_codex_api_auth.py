@@ -296,7 +296,12 @@ def test_get_codex_auth_uses_oauth_marker_when_disk_chain_empty(
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
     codex_home = tmp_path / ".codex"
     codex_home.mkdir(parents=True, exist_ok=True)
-    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    # Live OAuth credentials on disk (file store): the marker gate
+    # requires them.
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"id_token": "x"}, "auth_mode": "chatgpt"}),
+        encoding="utf-8",
+    )
     (codex_home / "config.toml").write_text(
         'cli_auth_credentials_store = "file"\nmodel = "gpt-5.4"\n', encoding="utf-8"
     )
@@ -458,3 +463,215 @@ def test_marker_ignored_when_credentials_may_live_in_keyring(
     assert result.get("ok") is True
     toml = (codex_home / "config.toml").read_text(encoding="utf-8")
     assert "https://stale.example/v1" not in toml
+
+
+def test_marker_ignored_after_external_logout_clears_tokens(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """#1453: ``codex logout`` during the OAuth window clears the tokens;
+    with no key and no tokens on disk the user has signed out of the
+    relay entirely, and the marker must surface nothing in either
+    consumer."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    # Signed out: no key, no tokens; file store still pinned.
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\nmodel = "gpt-5.4"\n',
+        encoding="utf-8",
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=lambda: None
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    state = api.get_codex_auth()
+    assert state["base_url"] is None
+
+    result = api.save_codex_auth({"auth_mode": "api_key", "api_key": "sk-official"})
+    assert result.get("ok") is True
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert "https://stale.example/v1" not in toml
+
+
+def test_save_codex_auth_oauth_captures_relay_marker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """#1449: an ``auth_mode="oauth"`` save through the Settings API
+    (the non-React client path) captures the live relay identity before
+    the cleanup destroys it, with controller-path retention semantics."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-relay"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        'model_provider = "OpenAI"\n'
+        'cli_auth_credentials_store = "file"\n'
+        "\n"
+        "[model_providers.OpenAI]\n"
+        'name = "OpenAI"\n'
+        'base_url = "https://relay.example/v1"\n'
+        'wire_api = "responses"\n',
+        encoding="utf-8",
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="api_key", api_key="sk-relay", base_url=None, oauth_relay_marker=None
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=lambda: None
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+    persisted: list[dict | None] = []
+    import vibe.codex_config as codex_config_module
+
+    monkeypatch.setattr(
+        codex_config_module,
+        "persist_codex_relay_marker",
+        lambda marker: persisted.append(marker) or True,
+    )
+
+    result = api.save_codex_auth({"auth_mode": "oauth"})
+    assert result.get("ok") is True
+
+    # Durable pre-persist fired before the cleanup…
+    assert persisted == [{"provider_id": "OpenAI", "base_url": "https://relay.example/v1"}]
+    # …and the owning V2Config write mirrors it.
+    assert fake_codex.oauth_relay_marker == {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
+    # The cleanup did run (pointer cleared).
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert not [line for line in toml.splitlines() if line.startswith("model_provider")]
+
+
+def test_save_codex_auth_oauth_official_key_transition_clears_marker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Retention semantics on the direct path: an OAuth save while the
+    disk shows an official API key with no relay clears the stale
+    marker."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-official"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\nmodel = "gpt-5.4"\n', encoding="utf-8"
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="api_key",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=lambda: None
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    result = api.save_codex_auth({"auth_mode": "oauth"})
+    assert result.get("ok") is True
+    assert fake_codex.oauth_relay_marker is None
+
+
+def test_save_codex_auth_keeps_live_provider_when_urls_match_marker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Same-URL provider swap: the user activates provider B (same relay
+    URL as the marker's A) during the OAuth window. The disk chain
+    supplies the URL, so the restore hint must NOT fire — B's pointer
+    and settings stay."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"id_token": "x"}, "auth_mode": "chatgpt"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        'model_provider = "ProviderB"\n'
+        'cli_auth_credentials_store = "file"\n'
+        "\n"
+        "[model_providers.ProviderB]\n"
+        'name = "B"\n'
+        'base_url = "https://relay.example/v1"\n'
+        'wire_api = "chat"\n'
+        "\n"
+        "[model_providers.OpenAI]\n"
+        'name = "OpenAI"\n'
+        'base_url = "https://relay.example/v1"\n'
+        'wire_api = "responses"\n',
+        encoding="utf-8",
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://relay.example/v1"},
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=lambda: None
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    result = api.save_codex_auth({"auth_mode": "api_key", "api_key": "sk-relay"})
+    assert result.get("ok") is True
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    pointer = [line for line in toml.splitlines() if line.startswith("model_provider")]
+    assert pointer == ['model_provider = "ProviderB"']
+
+
+def test_remove_backend_api_key_reports_v2_clear_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """#1451: when the post-removal V2Config save fails, the response
+    must say so instead of silently claiming a clean wipe."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-official"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text('model = "gpt-5.4"\n', encoding="utf-8")
+
+    def boom():
+        raise OSError("disk full")
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="api_key", api_key="sk-official", base_url=None, oauth_relay_marker=None
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=boom
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    result = api.remove_backend_api_key("codex")
+    assert result.get("ok") is True
+    assert result["notices"][0]["code"] == "v2_clear_failed"
+    assert "disk full" in result["notices"][0]["detail"]
+    # The disk key removal itself did happen.
+    auth = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
+    assert "OPENAI_API_KEY" not in auth
