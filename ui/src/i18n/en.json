@@ -1283,6 +1283,21 @@
           "refetch": "Refetch",
           "addModel": "Add model"
         },
+        "manage": {
+          "label": "Manage {{source}}",
+          "edit": "Edit source",
+          "remove": "Remove source"
+        },
+        "edit": {
+          "title": "Edit {{source}}",
+          "name": "Display name",
+          "baseUrl": "Base URL",
+          "hint": "The protocol stays fixed. Changing the Base URL can change available models and routes; you will review any impact before it is applied.",
+          "cancel": "Cancel",
+          "save": "Save",
+          "saving": "Saving…",
+          "fail": "The source was not saved"
+        },
         "refetch": {
           "added": "New",
           "removed_one": "This fetch removed {{count}} model: {{models}}",
@@ -1296,7 +1311,8 @@
           "refetch": "The fetch did not come back. The list below is the last one this page actually read",
           "tier": "The tier was not saved",
           "addModel": "The model was not added",
-          "removeModel": "The model was not removed"
+          "removeModel": "The model was not removed",
+          "deleteSource": "The source was not removed"
         },
         "retry": "Try again",
         "search": "Search model IDs",
@@ -1352,19 +1368,25 @@
           "refetch": "Refetch models from {{source}}",
           "removeModel": "Remove {{model}} from {{source}}",
           "saveRoute": "Save the route chain for {{menuModel}}",
-          "replaceKey": "Replace key for {{source}}"
+          "replaceKey": "Replace key for {{source}}",
+          "editSource": "Save changes to {{source}}?",
+          "deleteSource": "Remove {{source}}?"
         },
         "subtitle": {
           "refetch": "This refetch drops models from this source's inventory.",
           "removeModel": "This model disappears from this source's inventory.",
           "saveRoute": "This save leaves a configured model with no usable source",
-          "replaceKey": "The replacement changes this source's model inventory."
+          "replaceKey": "The replacement changes this source's model inventory.",
+          "editSource": "Changing the endpoint can change this source's model inventory and routes.",
+          "deleteSource": "This removes the source from every Agent and route that uses it."
         },
         "confirm": {
           "refetch": "Refetch anyway",
           "removeModel": "Remove anyway",
           "saveRoute": "Save anyway",
-          "replaceKey": "Replace anyway"
+          "replaceKey": "Replace anyway",
+          "editSource": "Save anyway",
+          "deleteSource": "Remove source"
         }
       },
       "repair": {

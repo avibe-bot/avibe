@@ -63,6 +63,15 @@ export type CredentialReplacement = {
   removed_hops: RouteHopRef[];
   interrupted: SupplyGap[];
 };
+export type SourcePatched = {
+  source: Source;
+  removed_hops: RouteHopRef[];
+  interrupted: SupplyGap[];
+};
+export type SourceDeleted = {
+  removed_hops: RouteHopRef[];
+  interrupted: SupplyGap[];
+};
 export type GuardConfirmation = {
   force: true;
   would_remove_hops: RouteHopRef[];
@@ -100,14 +109,14 @@ export type ModelsApi = {
   observeApiKeySource(draft: ApiKeySourceObservation, signal?: AbortSignal): Promise<SourceObservation>;
   createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated>;
   /** Rename / re-point a source (display_name, base_url). */
-  patchSource(id: string, patch: SourcePatch): Promise<Source>;
+  patchSource(id: string, patch: SourcePatch): Promise<SourcePatched>;
   /** Re-run discovery on a hub source; resolves with the updated source and count.
    *  Contractually ALSO the recovery test: run on a needs_action / error source
    *  it clears the blocker and returns the source to standby. v3 adds no second
    *  「recover」 endpoint, so this is the whole retry affordance. */
   refreshSource(id: string, confirmation?: GuardConfirmation): Promise<SourceRefresh>;
   /** Delete a source. A destructive retry echoes the server's exact guard plan. */
-  deleteSource(id: string, confirmation?: GuardConfirmation): Promise<void>;
+  deleteSource(id: string, confirmation?: GuardConfirmation): Promise<SourceDeleted>;
   /** Replace the credential of a hub-channel api_key source. The normal guarded
    *  mutation tail reports every route hop removed and model interrupted. */
   replaceCredential(id: string, body: CredentialReplace): Promise<CredentialReplacement>;
@@ -338,6 +347,28 @@ const credentialReplacement = (r: CredentialReplacementResponse): CredentialRepl
   interrupted: supplyGaps(r.interrupted),
 });
 
+type SourcePatchedResponse = {
+  source?: Source;
+  removed_hops?: RouteHopRef[];
+  interrupted?: SupplyGap[];
+} & Source;
+
+const sourcePatched = (r: SourcePatchedResponse): SourcePatched => ({
+  source: (r.source ?? r) as Source,
+  removed_hops: routeHopRefs(r.removed_hops),
+  interrupted: supplyGaps(r.interrupted),
+});
+
+type SourceDeletedResponse = {
+  removed_hops?: RouteHopRef[];
+  interrupted?: SupplyGap[];
+};
+
+const sourceDeleted = (r: SourceDeletedResponse): SourceDeleted => ({
+  removed_hops: routeHopRefs(r.removed_hops),
+  interrupted: supplyGaps(r.interrupted),
+});
+
 /** The oauth terminal envelope, unwrapped without discarding either tail. */
 export type OAuthResultResponse = { flow?: OAuthFlow } & OAuthFlow &
   AdoptionTail & {
@@ -387,15 +418,15 @@ const liveApi: ModelsApi = {
   // and no later read can put it back: `/agents` shows today's orders, not which
   // of them this commit changed.
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
-  patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
+  patchSource: (id, patch) => call<SourcePatchedResponse>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then(sourcePatched),
   refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
-  deleteSource: (id, confirmation) => call(
+  deleteSource: (id, confirmation) => call<SourceDeletedResponse>(
     `/api/models/sources/${encodeURIComponent(id)}${confirmation ? '?force=true' : ''}`,
     jsonInit('DELETE', confirmation ? {
       would_remove_hops: confirmation.would_remove_hops,
       would_interrupt: confirmation.would_interrupt,
     } : undefined),
-  ).then(() => undefined),
+  ).then(sourceDeleted),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
   // and carry no `contract_version` — the same closed-body rule as putAgentSources.
@@ -693,7 +724,7 @@ class MockStore {
       throw new ApiCallError('source_last_supplier', undefined, true, gaps);
     this.sources = remaining;
     // Orders and the rollup are recomputed on the next read (syncAgents).
-    return delay(undefined);
+    return delay({ removed_hops: [], interrupted: gaps });
   }
 
   replaceCredential(id: string, body: CredentialReplace) {
@@ -1273,7 +1304,7 @@ class MockStore {
     if (!source) throw new ApiCallError('source_not_found');
     if (typeof patch.display_name === 'string') source.display_name = patch.display_name;
     if ('base_url' in patch && source.kind === 'api_key') source.base_url = patch.base_url ?? null;
-    return delay(structuredClone(source), 300);
+    return delay({ source: structuredClone(source), removed_hops: [], interrupted: [] }, 300);
   }
 
   refreshSource(id: string, _confirmation?: GuardConfirmation) {

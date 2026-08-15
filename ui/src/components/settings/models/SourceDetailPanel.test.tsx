@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { createPendingWrites } from './asyncLifetime';
+import { MANAGE_DESTINATION, type ManageKind } from './manage';
 import { modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { GuardGapList } from './GuardGapList';
@@ -150,6 +151,127 @@ describe('SourceDetailPanel', () => {
     expect(screen.getByText(/^In use$|^使用中$/i)).toBeTruthy();
   });
 
+  // The capability set is discovered from its total destination Record. A new
+  // management kind therefore fails here until the rendered panel exposes a
+  // trigger carrying that exact destination.
+  it('gives every management capability a reachable declared destination', async () => {
+    const view = renderPanel();
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+
+    const declared = Object.keys(MANAGE_DESTINATION) as ManageKind[];
+    const triggers = [...view.container.ownerDocument.querySelectorAll<HTMLElement>('[data-manage-kind]')];
+    expect(new Set(triggers.map((trigger) => trigger.dataset.manageKind))).toEqual(new Set(declared));
+    for (const kind of declared) {
+      const trigger = triggers.find((candidate) => candidate.dataset.manageKind === kind);
+      expect(trigger?.dataset.manageDestination).toBe(MANAGE_DESTINATION[kind]);
+    }
+  });
+
+  it('edits the display name and endpoint through the source mutation queue', async () => {
+    const updated = { ...source, display_name: 'Relay key', base_url: 'https://relay.example/v2' };
+    const patch = vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
+      source: updated,
+      removed_hops: [],
+      interrupted: [],
+    });
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    const endpoint = screen.getByLabelText(/^Base URL$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Relay key');
+    await userEvent.clear(endpoint);
+    await userEvent.type(endpoint, 'https://relay.example/v2/');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledWith(source.id, {
+      display_name: 'Relay key',
+      base_url: 'https://relay.example/v2',
+    }));
+    expect(await screen.findByRole('heading', { name: 'Relay key' })).toBeTruthy();
+  });
+
+  it('echoes a non-empty server plan exactly when deleting a source', async () => {
+    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 2, source_id: source.id, model_id: 'model-a' }];
+    const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url.startsWith(`/api/models/sources/${source.id}`)) {
+        requests.push({ url, init });
+        if (requests.length === 1) {
+          return Response.json({ error: 'source_last_supplier', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
+        }
+        return Response.json({ removed_hops: hops, interrupted: gaps });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    expect(await screen.findAllByText(/claude-opus-4-6/)).toHaveLength(2);
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0].url).not.toContain('force=true');
+    expect(requests[0].init?.body).toBeUndefined();
+    expect(requests[1].url).toContain('?force=true');
+    expect(JSON.parse(String(requests[1].init?.body))).toEqual({
+      would_remove_hops: hops,
+      would_interrupt: gaps,
+    });
+    expect(await screen.findByTestId('source-gone')).toBeTruthy();
+  });
+
+  it('sends no force when deleting a source with an empty server plan', async () => {
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === `/api/models/sources/${source.id}`) {
+        requests.push({ url, init });
+        return Response.json({ removed_hops: [], interrupted: [] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+
+    expect(await screen.findByTestId('source-gone')).toBeTruthy();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe(`/api/models/sources/${source.id}`);
+    expect(requests[0].init?.body).toBeUndefined();
+  });
+
+  it('keeps a refused deletion visible and offers a retry', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === `/api/models/sources/${source.id}`) {
+        return Response.json({ error: 'engine_down' }, { status: 503 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+
+    expect(await screen.findByRole('heading', { name: source.display_name })).toBeTruthy();
+    const retry = await screen.findByRole('button', { name: /^Try again$|^重试$/i });
+    await userEvent.click(retry);
+    expect(await screen.findByRole('dialog', { name: /Remove Production key|移除 Production key/i })).toBeTruthy();
+  });
+
   it('omits native refetch because that channel has no stored discovery credential', () => {
     render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
@@ -237,8 +359,9 @@ describe('SourceDetailPanel', () => {
   it('orders every full-Source mutation family through the same Source queue', async () => {
     const writes = createPendingWrites(() => {});
     const started: string[] = [];
-    const gates = ['tier', 'refetch', 'add', 'remove'].map(() => deferred<void>());
-    const runs = ['tier', 'refetch', 'add', 'remove'].map((name, index) => writes.track(source.id, async () => {
+    const families = ['tier', 'refetch', 'add', 'remove', 'edit', 'delete'];
+    const gates = families.map(() => deferred<void>());
+    const runs = families.map((name, index) => writes.track(source.id, async () => {
       started.push(name);
       await gates[index].promise;
     }));
@@ -246,7 +369,7 @@ describe('SourceDetailPanel', () => {
     await waitFor(() => expect(started).toEqual(['tier']));
     for (let index = 0; index < gates.length; index += 1) {
       gates[index].resolve();
-      await waitFor(() => expect(started).toEqual(['tier', 'refetch', 'add', 'remove'].slice(0, index + 2)));
+      await waitFor(() => expect(started).toEqual(families.slice(0, index + 2)));
     }
     await Promise.all(runs);
   });
@@ -256,6 +379,8 @@ describe('SourceDetailPanel', () => {
     expect(detail).toMatch(/const refetch = \(confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const addManualModel = \(\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const remove = \(model: SuppliedModel, confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
+    expect(detail).toMatch(/const saveSource = \(patch: SourcePatch, confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
+    expect(detail).toMatch(/const deleteSource = \(confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const commit = async[\s\S]*?setSaving\(true\)[\s\S]*?trackMutation\(async \(latest, settlement\)[\s\S]*?tierMutationPayload\(latest/);
   });
 
