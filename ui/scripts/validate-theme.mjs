@@ -617,6 +617,22 @@ function isZeroLength(part) {
 // that is not provably a colour stays readable and gets classified.
 const CSSOM_SETTER = /\.setProperty\(\s*(?<quote>['"\x60])(?<property>[^'"\x60]*shadow[^'"\x60]*)\k<quote>\s*,/;
 
+// What counts as a shadow PROPERTY, written once. `box-shadow`, `text-shadow`
+// and `drop-shadow` all end in the word; `shadowPreset` and `shadowRoot` only
+// start with it and are not properties at all, and a `--*` declaration is a
+// custom property rather than a shadow one.
+//
+// This used to be spelled twice: the CSS declaration channel read `box-shadow`
+// and only it, while the completeness matcher read any `*shadow`. The comment on
+// SHADOW_MENTION already said "the two must narrow together" -- but saying so is
+// not a mechanism, and they diverged anyway, in the direction that fails correct
+// files: `text-shadow: var(--shadow-glow-md-mint)` was counted as a mention, read
+// by no channel, and reported as an unscanned channel, so a fully tokenized
+// declaration blocked validate:theme. Sharing the source is that discipline in
+// the form that cannot be forgotten, which is what CSSOM_SETTER is already doing
+// one definition down.
+const SHADOW_PROPERTY = `(?<![\\w-])(?!--)[A-Za-z-]*shadow(?![A-Za-z])`;
+
 const cssomArgument = (match) => valueArgument(match.input, match.index + match[0].length) ?? '';
 
 // A custom property assigned a bare colour contributes no shadow value: it tints
@@ -637,7 +653,10 @@ const SHADOW_CHANNELS = [
   // `shadow-[0_0_16px_-4px_var(--x)]`, including variants such as `hover:shadow-[…]`.
   { pattern: /shadow-\[([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
   // `[box-shadow:0_0_16px_-4px_var(--x)]` -- Tailwind's arbitrary *property*.
-  { pattern: /\[box-shadow\s*:([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
+  {
+    pattern: new RegExp(`\\[${SHADOW_PROPERTY}\\s*:([^\\]]*)\\]`, 'g'),
+    valuesOf: (match) => [match[1]],
+  },
   // `shadow-(--x)` and `drop-shadow-(--x)` -- Tailwind's custom-property
   // shorthand, which compiles to `box-shadow: var(--x)` and to the same inside
   // `drop-shadow()`. Parentheses instead of brackets is the whole difference
@@ -663,7 +682,10 @@ const SHADOW_CHANNELS = [
   // `.ts` files scanned alongside the CSS -- and a shadow value of its own never
   // contains one, so the quotes cost nothing to stop at and stop the closing one
   // from being read as part of the colour.
-  { pattern: /(?<!\[)box-shadow\s*:([^;}'"`]*)/g, valuesOf: (match) => [match[1]] },
+  {
+    pattern: new RegExp(`(?<!\\[)${SHADOW_PROPERTY}\\s*:([^;}'"\`]*)`, 'g'),
+    valuesOf: (match) => [match[1]],
+  },
   // `filter: drop-shadow(0 0 4px …)`. Matched at the FUNCTION rather than at the
   // property, because the property is not the thing there is only one of: a drop
   // shadow can arrive through `filter`, `-webkit-filter`, `backdrop-filter`, a
@@ -833,7 +855,7 @@ const NON_STRING_LITERAL =/^\s*(true|false|null|undefined|[+-]?\d+(\.\d+)?)\s*($
 // counting while the channel still read it would be scanned-but-unreported,
 // which is the silence these two exist to make impossible.
 const SHADOW_MENTION = new RegExp(
-  `(?<![\\w-])(?!--)[A-Za-z-]*shadow(?![A-Za-z])(?:['"]?\\s*\\]?\\s*[:=]|-?[([])|${CSSOM_SETTER.source}`,
+  `${SHADOW_PROPERTY}(?:['"]?\\s*\\]?\\s*[:=]|-?[([])|${CSSOM_SETTER.source}`,
   'gi',
 );
 
