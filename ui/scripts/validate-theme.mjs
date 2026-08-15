@@ -20,6 +20,7 @@ import {
   rendersAtAll,
   withoutNonRenderingText,
 } from './nonRenderingText.mjs';
+import { eachStylesheet } from './stylesheets.mjs';
 
 const html = fs.readFileSync('index.html', 'utf8');
 const css = fs.readFileSync('src/index.css', 'utf8');
@@ -913,63 +914,6 @@ const SHADOW_MENTIONS = [
   ),
   new RegExp(SHADOW_KEY, 'g'),
 ];
-
-// Every stretch of stylesheet text the project ships, parsed once each.
-//
-// `.css` was the wrong unit. It is a FILE EXTENSION, and the question this fold
-// asks is the same one the scan loop below asks about its call sites -- where in
-// this project is text CSS -- which `cssRangesIn` already answers and which no
-// extension can. A `<style>` body and a string handed to `insertRule` are
-// stylesheets that ship, so a token declared in one was invisible here while a
-// call site reading that token was scanned; the name resolved to nothing and the
-// gate reported correct CSS as unanchored. That is a false positive, which fails
-// somebody else's pull request over code that is right.
-//
-// One walk feeds all three folds below, where it used to be three reads and
-// three parses of every stylesheet for three different questions about the same
-// tree.
-function* eachStylesheet(root) {
-  for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
-    // A fixture stylesheet is not the token layer, by the same argument that
-    // keeps a test file out of the scan: it documents values rather than
-    // shipping them.
-    if (!rendersAtAll(relative)) continue;
-
-    const file = path.join(root, relative);
-    const source = fs.readFileSync(file, 'utf8');
-
-    // `origin` names the stretch, not just the file, because a `.tsx` file can
-    // hold several and a line number inside one of them counts from its own
-    // start. For the two `.css` files this project actually has, that is the
-    // path and nothing more.
-    const ranges = cssRangesIn(source, file);
-    for (const [start, end] of ranges) {
-      const text = source.slice(start, end);
-      const origin = ranges.length > 1 ? `${relative} (offset ${start})` : relative;
-
-      // A `.css` file is parsed unguarded on purpose, and `nonRenderingText.mjs`
-      // depends on that: text a stylesheet cannot parse is a broken stylesheet,
-      // and the gate should say so out loud. A stretch lifted out of TypeScript
-      // carries no such promise -- a template can interpolate a whole rule, and
-      // `` `${rules} .a {}` `` is CSS only after the substitution runs -- so one
-      // that will not parse is a stretch this fold cannot read, not a file that
-      // is wrong, and failing the build over it would be the same false positive
-      // one layer along. What it cannot read it also cannot scan, so the miss is
-      // symmetric; `src` has no such stretch today.
-      if (file.endsWith('.css')) {
-        yield [origin, postcss.parse(text)];
-        continue;
-      }
-      let sheet;
-      try {
-        sheet = postcss.parse(text);
-      } catch {
-        continue;
-      }
-      yield [origin, sheet];
-    }
-  }
-}
 
 // The token layer, in three answers that want one walk.
 //

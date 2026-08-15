@@ -8,6 +8,7 @@ import { intendedFiles } from './lintPolicy.mjs';
 import {
   cssBearingRangesIn,
   cssRangesIn,
+  CSS_BEARING_ATTRIBUTES,
   CSS_TEXT_SINKS,
   rendersAtAll,
   withoutNonRenderingText,
@@ -396,6 +397,44 @@ describe('cssBearingRangesIn', () => {
   ])('does not bear %s', (_label, source) => {
     expect(borne(source, 'probe.tsx')).toEqual([]);
   });
+
+  // Which attributes hand text to the style system, in both directions. Taking
+  // every attribute read `<div title="filter: drop-shadow(…)" />` -- a tooltip a
+  // screen reader speaks -- as CSS, and failed CI over text no parser is handed;
+  // matching `className` exactly would have swapped that for one miss per
+  // forwarding prop. The list is the single declaration, and this walks it, so a
+  // shape added without a case fails here instead of shipping unread.
+  const ATTRIBUTE_PROBES = {
+    '/(^|[a-z])[Cc]lass([Nn]ame)?$/': `const a = <div className="[filter:drop-shadow(${GLOW})]" />;`,
+    '/(^|[a-z])[Ss]tyle$/': `const a = <div style={{ filter: 'drop-shadow(${GLOW})' }} />;`,
+  };
+
+  it('bears every attribute shape it enumerates, and enumerates every one it bears', () => {
+    expect(Object.keys(ATTRIBUTE_PROBES).sort()).toEqual(CSS_BEARING_ATTRIBUTES.map(String).sort());
+
+    for (const [shape, source] of Object.entries(ATTRIBUTE_PROBES)) {
+      expect(borne(source, 'probe.tsx').join(''), `${shape} is enumerated but not read`).toContain('drop-shadow');
+    }
+  });
+
+  // A prop that forwards a class or a style is one whatever it is called, and
+  // React composition names them by suffix. These all ship in `src` today.
+  it.each([
+    'className', 'class', 'wrapperClassName', 'iconClassName', 'triggerClassName',
+    'labelClassName', 'rowClass', 'containerClass', 'style', 'wrapperStyle', 'bodyStyle',
+  ])('bears a value handed to %s', (prop) => {
+    expect(borne(`const a = <Tile ${prop}={'[filter:drop-shadow(${GLOW})]'} />;`, 'probe.tsx').join(''))
+      .toContain('drop-shadow');
+  });
+
+  // And the attributes that hold copy rather than style. Each is text a person
+  // reads or a machine speaks; each would have failed a correct pull request.
+  it.each(['title', 'aria-label', 'alt', 'placeholder', 'data-glow'])(
+    'does not bear copy handed to %s',
+    (attribute) => {
+      expect(borne(`const a = <div ${attribute}="filter: drop-shadow(${GLOW})" />;`, 'probe.tsx')).toEqual([]);
+    },
+  );
 
   it('reads a stylesheet whole, exactly as the narrower question does', () => {
     expect(cssBearingRangesIn('.a { color: red }', 'probe.css')).toEqual([[0, 17]]);

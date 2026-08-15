@@ -463,11 +463,40 @@ const DEFERS_ITS_BODY = new Set([
 // it one property over.
 const STYLE_TARGET = /(^|\.)style\.[A-Za-z][\w$]*$/;
 
+// Which attributes hand their text to the style system, which is a question
+// about the attribute's NAME and not about it being an attribute. Taking every
+// `JsxAttribute` was a false positive with a queue behind it: `<div title="filter:
+// drop-shadow(0 0 93px red)" />` is copy a screen reader speaks, `aria-label` and
+// `alt` and `placeholder` are the same, and each one would have failed CI over
+// text the browser never parses as CSS.
+//
+// Both entries are suffixes because React props compose. This codebase ships
+// `wrapperClassName`, `iconClassName`, `triggerClassName`, `rowClass`,
+// `containerClass`, `wrapperStyle` and `bodyStyle` alongside the plain ones, and
+// every one of them ends up on an element -- so matching `className` exactly
+// would have swapped this false positive for thirty misses. The suffix is the
+// naming convention itself, which is why it holds for the prop nobody has
+// written yet.
+const CSS_BEARING_ATTRIBUTES = [
+  // `className`, `class`, and every `…ClassName` / `…Class` prop that forwards
+  // one -- where a Tailwind arbitrary property such as
+  // `[filter:drop-shadow(…)]` lives.
+  /(^|[a-z])[Cc]lass([Nn]ame)?$/,
+  // `style`, and every `…Style` prop that forwards one -- where a style object's
+  // values live.
+  /(^|[a-z])[Ss]tyle$/,
+];
+
+const NAMES_A_STYLE_SINK = (attribute, tree) => {
+  const name = attribute.name?.getText(tree) ?? '';
+  return CSS_BEARING_ATTRIBUTES.some((shape) => shape.test(name));
+};
+
 const REACHES_A_RENDERER = (node, tree) => {
   for (let current = node; current.parent; current = current.parent) {
     const parent = current.parent;
     if (DEFERS_ITS_BODY.has(parent.kind)) return false;
-    if (parent.kind === ts.SyntaxKind.JsxAttribute) return true;
+    if (parent.kind === ts.SyntaxKind.JsxAttribute) return NAMES_A_STYLE_SINK(parent, tree);
     if (parent.kind === ts.SyntaxKind.BinaryExpression
       && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
       && current === parent.right
@@ -490,9 +519,9 @@ const REACHES_A_RENDERER = (node, tree) => {
 // property lives in a className and a style value lives in an object, and
 // neither is a stylesheet.
 //
-// So: a stylesheet, or a literal that reaches an attribute or a CSSOM property
-// without passing through a function body. What that still cannot see is the
-// same dataflow limit as everywhere else -- a class string assembled in a
+// So: a stylesheet, or a literal that reaches a style-sink attribute or a CSSOM
+// property without passing through a function body. What that still cannot see
+// is the same dataflow limit as everywhere else -- a class string assembled in a
 // variable, or a style value read out of a map -- recorded rather than guessed
 // at.
 //
@@ -607,6 +636,7 @@ export {
   blankTypeScriptComments,
   cssBearingRangesIn,
   cssRangesIn,
+  CSS_BEARING_ATTRIBUTES,
   CSS_TEXT_SINKS,
   parseSource,
   rendersAtAll,

@@ -9,6 +9,7 @@ import { customPropertiesIn } from './customProperties.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { typeScriptComments } from './nonRenderingText.mjs';
 import { GLOW_TOKEN } from './shadowLayer.mjs';
+import { eachStylesheet } from './stylesheets.mjs';
 import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // `validate:theme` already forces every glow in the tree to be a
@@ -34,6 +35,7 @@ import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 // instead of shipping.
 
 const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
+const SRC_ROOT = fileURLToPath(new URL('../src/', import.meta.url));
 const CSS = fs.readFileSync(new URL('../src/index.css', import.meta.url), 'utf8');
 
 // The roles that are deliberately not on the rule, each with the reason it is
@@ -82,9 +84,28 @@ const ROLE_BLUR = {
 const SPREAD_CAP = 12;
 const GLOW_ALPHA = 0.44;
 
-const rungs = [...CSS.matchAll(/^\s*--shadow-glow-(?<role>[a-z]+)-(?<accent>[a-z]+):\s*(?<value>[^;]+);/gm)].map(
-  (match) => ({ ...match.groups, token: `--shadow-glow-${match.groups.role}-${match.groups.accent}` })
-);
+// Over every stylesheet the validator reads, not `src/index.css` alone, and
+// with a parser rather than a line-anchored regex. Both halves of that were the
+// same gap: `collectTokenLayer()` sanctions `@theme` declarations from every
+// scanned stylesheet, so a component stylesheet could declare
+// `@theme { --shadow-glow-rogue-mint: 0 0 93px red }`, have a call site consume
+// it through `var(…)`, and have runtime validation trust it as managed while
+// nothing here ever checked its name, geometry, colour or role. The domain is
+// shared with the validator now (`eachStylesheet`), so the two cannot disagree
+// about which stylesheets exist any more than they can about what a managed
+// name is.
+const SHEETS = [...eachStylesheet(SRC_ROOT)];
+
+const RUNG_NAME = /^--shadow-glow-(?<role>[a-z]+)-(?<accent>[a-z]+)$/;
+
+const rungs = SHEETS.flatMap(([, sheet]) => {
+  const found = [];
+  sheet.walkDecls((decl) => {
+    const match = RUNG_NAME.exec(decl.prop);
+    if (match) found.push({ ...match.groups, token: decl.prop, value: decl.value });
+  });
+  return found;
+});
 
 // Every name the runtime validator will sanction, which is a wider set than the
 // one above can read. `validate:theme` accepts any `--shadow-glow-*` declared
@@ -107,15 +128,15 @@ const rungs = [...CSS.matchAll(/^\s*--shadow-glow-(?<role>[a-z]+)-(?<accent>[a-z
 // The set is therefore read the way the validator reads it -- `@theme` walked
 // with a parser, names matched with the validator's OWN pattern -- so the two
 // cannot disagree about what a managed name is, whatever it is spelled with.
-const MANAGED = (() => {
+const MANAGED = SHEETS.flatMap(([, sheet]) => {
   const names = [];
-  postcss.parse(CSS).walkAtRules('theme', (rule) => {
+  sheet.walkAtRules('theme', (rule) => {
     rule.walkDecls((decl) => {
       if (GLOW_TOKEN.test(decl.prop)) names.push(decl.prop);
     });
   });
   return names;
-})();
+});
 
 const sized = rungs.filter((rung) => !(rung.role in OFF_RULE));
 
