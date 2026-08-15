@@ -5,6 +5,7 @@ import json
 import logging
 import secrets
 import threading
+import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -38,6 +39,7 @@ from vibe.model_hub_runtime.client import (
     completed_handle,
     probe_models,
 )
+from vibe.model_hub_runtime.installer import InstallClaimTransition
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 from vibe.model_hub_runtime.supervisor import (
     EngineSupervisor,
@@ -53,7 +55,12 @@ _OAUTH_ENDPOINTS = {
 }
 _WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
 _INSTALL_ALREADY_RUNNING_REASON = "model_hub_engine_install_already_running"
-_INSTALL_RECOVERY_RETRY_SECONDS = 0.25
+_INSTALL_RECOVERY_TIMEOUT_REASON = "model_hub_engine_install_lock_timeout"
+_INSTALL_RECOVERY_ABANDONED_REASON = "model_hub_engine_install_abandoned"
+_INSTALL_RECOVERY_SCHEDULE_FAILED_REASON = "model_hub_engine_install_schedule_failed"
+_INSTALL_RECOVERY_WAIT_SECONDS = 30.0
+_INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
+_INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
 
 
 logger = logging.getLogger(__name__)
@@ -571,9 +578,11 @@ class CLIProxyEngineAdapter:
                 admission = asyncio.get_running_loop().create_future()
                 self._install_admission = admission
                 self._start_install_task_locked(
+                    generation=uuid.uuid4().hex,
                     expected_target=None,
                     not_installed=status,
                     admission=admission,
+                    claim_owned=False,
                 )
         assert admission is not None
         return await asyncio.shield(admission)
@@ -586,25 +595,49 @@ class CLIProxyEngineAdapter:
             install_state = await asyncio.to_thread(self.supervisor.installer.install_state)
             if not install_state or install_state.get("state") != "installing":
                 return await self.status()
-            self._start_install_task_locked(
-                expected_target=install_state["target"],
-                not_installed=None,
-                admission=None,
+            generation = uuid.uuid4().hex
+            claimed = await asyncio.to_thread(
+                self.supervisor.installer.transition_install_claim,
+                InstallClaimTransition.RESUME,
+                generation=generation,
+                previous_generation=install_state.get("generation"),
+                target=install_state["target"],
             )
+            if not claimed:
+                return await self.status()
+            try:
+                self._start_install_task_locked(
+                    generation=generation,
+                    expected_target=install_state["target"],
+                    not_installed=None,
+                    admission=None,
+                    claim_owned=True,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to schedule Model Hub runtime install recovery")
+                await self._abandon_install_claim(
+                    generation=generation,
+                    target=install_state["target"],
+                    reason=_INSTALL_RECOVERY_SCHEDULE_FAILED_REASON,
+                )
             return await self.status()
 
     def _start_install_task_locked(
         self,
         *,
+        generation: str,
         expected_target: Mapping[str, str] | None,
         not_installed: EngineStatus | None,
         admission: asyncio.Future[EngineStatus] | None,
+        claim_owned: bool,
     ) -> None:
         task = asyncio.create_task(
             self._run_installation(
+                generation=generation,
                 expected_target=expected_target,
                 not_installed=not_installed,
                 admission=admission,
+                claim_owned=claim_owned,
             ),
             name="model-hub-runtime-install",
         )
@@ -627,21 +660,31 @@ class CLIProxyEngineAdapter:
     async def _run_installation(
         self,
         *,
+        generation: str,
         expected_target: Mapping[str, str] | None,
         not_installed: EngineStatus | None,
         admission: asyncio.Future[EngineStatus] | None,
+        claim_owned: bool,
     ) -> None:
         loop = asyncio.get_running_loop()
+        recovery_deadline: float | None = None
+        recovery_delay = _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS
         claimed_target: dict[str, str] | None = (
             dict(expected_target) if expected_target is not None else None
         )
 
         def persist_claim(target: dict[str, str]) -> None:
-            nonlocal claimed_target
+            nonlocal claim_owned, claimed_target
             claimed_target = dict(target)
             if expected_target is not None:
                 return
-            self.supervisor.installer.mark_installing(target)
+            claim_owned = self.supervisor.installer.transition_install_claim(
+                InstallClaimTransition.CREATE,
+                generation=generation,
+                target=target,
+            )
+            if not claim_owned:
+                raise RuntimeError("Model Hub runtime install claim moved during admission")
             assert not_installed is not None
             assert admission is not None
             installing = replace(
@@ -669,28 +712,57 @@ class CLIProxyEngineAdapter:
                     ):
                         raise
                     if self._installation_stopping:
+                        await self._abandon_install_claim(
+                            generation=generation,
+                            target=claimed_target,
+                        )
                         return
-                    await asyncio.sleep(_INSTALL_RECOVERY_RETRY_SECONDS)
+                    now = loop.time()
+                    if recovery_deadline is None:
+                        recovery_deadline = now + _INSTALL_RECOVERY_WAIT_SECONDS
+                        logger.warning(
+                            "Model Hub runtime recovery waiting up to %.1fs for the shared install lock",
+                            _INSTALL_RECOVERY_WAIT_SECONDS,
+                        )
+                    remaining = recovery_deadline - now
+                    if remaining <= 0:
+                        logger.error(
+                            "Model Hub runtime recovery gave up waiting for the shared install lock"
+                        )
+                        raise EngineUnavailableError(
+                            "models.engine.install_failed",
+                            reason=_INSTALL_RECOVERY_TIMEOUT_REASON,
+                        )
+                    await asyncio.sleep(min(recovery_delay, remaining))
+                    recovery_delay = min(
+                        recovery_delay * 2,
+                        _INSTALL_RECOVERY_MAX_DELAY_SECONDS,
+                    )
             installed = await asyncio.to_thread(
                 self.supervisor.installer.resolve_engine_path,
             )
             if installed is None:
                 raise EngineUnavailableError("models.engine.install_failed")
-            await asyncio.to_thread(self.supervisor.note_installation_settled)
+            settled = await asyncio.to_thread(
+                self.supervisor.installer.transition_install_claim,
+                InstallClaimTransition.SETTLE_SUCCESS,
+                generation=generation,
+                target=claimed_target,
+            )
             self._install_owner_active = False
-            try:
-                await asyncio.to_thread(self.supervisor.installer.clear_install_state)
-            except Exception:  # noqa: BLE001
-                logger.exception("Failed to clear settled Model Hub runtime install claim")
+            if settled:
+                await asyncio.to_thread(self.supervisor.note_installation_settled)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             self._install_owner_active = False
             reason = self._install_failure_reason(exc)
-            if reason != _INSTALL_ALREADY_RUNNING_REASON:
+            if claim_owned:
                 try:
                     await asyncio.to_thread(
-                        self.supervisor.installer.mark_install_failed,
+                        self.supervisor.installer.transition_install_claim,
+                        InstallClaimTransition.SETTLE_FAILURE,
+                        generation=generation,
                         target=claimed_target,
                         reason=reason,
                     )
@@ -698,6 +770,25 @@ class CLIProxyEngineAdapter:
                     logger.exception("Failed to persist Model Hub runtime install failure")
             if admission is not None:
                 self._reject_install_admission(admission, exc)
+
+    async def _abandon_install_claim(
+        self,
+        *,
+        generation: str,
+        target: Mapping[str, str] | None,
+        reason: str = _INSTALL_RECOVERY_ABANDONED_REASON,
+    ) -> None:
+        self._install_owner_active = False
+        try:
+            await asyncio.to_thread(
+                self.supervisor.installer.transition_install_claim,
+                InstallClaimTransition.ABANDON,
+                generation=generation,
+                target=target,
+                reason=reason,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to abandon Model Hub runtime install claim")
 
     @staticmethod
     def _resolve_install_admission(
@@ -752,8 +843,12 @@ class CLIProxyEngineAdapter:
             return await self.status()
 
     async def start(self) -> EngineStatus:
-        await asyncio.to_thread(self.supervisor.ensure_running)
-        return await self.status()
+        async with self._installation_lock:
+            status = await self.status()
+            if status.health is EngineHealth.INSTALLING:
+                return status
+            await asyncio.to_thread(self.supervisor.ensure_running)
+            return await self.status()
 
     async def stop(self) -> None:
         async with self._installation_lock:

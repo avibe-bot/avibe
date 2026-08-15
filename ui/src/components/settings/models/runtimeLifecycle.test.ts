@@ -10,17 +10,18 @@ const asset = (platform: 'darwin-arm64' | 'linux-amd64') => ({
   sha256: 'a'.repeat(64),
 });
 
-const runtime = (
-  assets: RuntimeDependency['manifest']['assets'],
-): RuntimeDependency => ({
+const runtime = (resolution: 'resolved' | 'unresolved' | 'unsupported'): RuntimeDependency => ({
   contract_version: 5,
   host_platform: 'darwin-arm64',
-  manifest: {
-    name: 'cliproxyapi',
-    version: 'v1',
-    source_sha: 'b'.repeat(40),
-    assets,
-  },
+  manifest: resolution === 'unresolved'
+    ? { name: 'cliproxyapi', resolution, assets: [] }
+    : {
+      name: 'cliproxyapi',
+      resolution,
+      version: 'v1',
+      source_sha: 'b'.repeat(40),
+      assets: [asset(resolution === 'resolved' ? 'darwin-arm64' : 'linux-amd64')],
+    },
   status: {
     installed_version: null,
     verified: false,
@@ -33,11 +34,11 @@ const runtime = (
 
 describe('runtimeCanAttemptInstall', () => {
   it('keeps an uncached remote manifest eligible for server admission', () => {
-    expect(runtimeCanAttemptInstall(runtime([]))).toBe(true);
+    expect(runtimeCanAttemptInstall(runtime('unresolved'))).toBe(true);
   });
 
-  it('accepts an exact host asset and rejects a definitive mismatch', () => {
-    expect(runtimeCanAttemptInstall(runtime([asset('darwin-arm64')]))).toBe(true);
-    expect(runtimeCanAttemptInstall(runtime([asset('linux-amd64')]))).toBe(false);
+  it('accepts resolved admission and rejects explicit unsupported admission', () => {
+    expect(runtimeCanAttemptInstall(runtime('resolved'))).toBe(true);
+    expect(runtimeCanAttemptInstall(runtime('unsupported'))).toBe(false);
   });
 });

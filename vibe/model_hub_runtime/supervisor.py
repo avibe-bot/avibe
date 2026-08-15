@@ -107,6 +107,8 @@ class EngineSupervisor:
                 health = "ok" if self._healthy_locked() else "degraded"
             elif install_state and install_state.get("state") == "installing":
                 health = "installing"
+            elif install_state and install_state.get("state") == "not_installed":
+                health = "not_installed"
             elif installed:
                 health = "down" if self._start_attempted else "not_started"
             else:

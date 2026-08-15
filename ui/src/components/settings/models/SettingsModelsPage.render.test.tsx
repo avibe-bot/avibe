@@ -21,7 +21,7 @@ const directAgent = (backend: AgentBackend): AgentSupply => ({
 
 const runtime: RuntimeDependency = {
   contract_version: 5,
-  manifest: { name: 'cliproxyapi', version: '1', source_sha: 'a'.repeat(40), assets: [] },
+  manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1', source_sha: 'a'.repeat(40), assets: [] },
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
 

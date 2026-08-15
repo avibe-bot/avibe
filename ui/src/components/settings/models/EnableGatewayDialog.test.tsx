@@ -23,23 +23,25 @@ const runtime = (
   health: RuntimeDependency['status']['health'],
   withAsset = false,
   hostPlatform?: string,
-): RuntimeDependency => ({
-  contract_version: 5,
-  // #1326 runtime-dependency shape; host evidence is consumed only when present.
-  ...(hostPlatform === undefined ? {} : { host_platform: hostPlatform }),
-  manifest: {
-    name: 'cliproxyapi',
-    version: '1',
-    source_sha: 'a'.repeat(40),
-    assets: withAsset ? [{
+): RuntimeDependency => {
+  const assets = withAsset ? [{
       platform: 'darwin-arm64',
       url: 'https://example.invalid/runtime',
       size_bytes: 1,
       sha256: '0'.repeat(64),
-    }] : [],
-  },
-  status: { installed_version: health === 'not_installed' ? null : '1', verified: health !== 'not_installed', health },
-});
+    } as const] : [];
+  const resolution = !withAsset
+    ? 'unresolved' as const
+    : hostPlatform === 'linux-amd64' ? 'unsupported' as const : 'resolved' as const;
+  return {
+    contract_version: 5,
+    ...(hostPlatform === undefined ? {} : { host_platform: hostPlatform }),
+    manifest: resolution === 'unresolved'
+      ? { name: 'cliproxyapi', resolution, assets: [] }
+      : { name: 'cliproxyapi', resolution, version: '1', source_sha: 'a'.repeat(40), assets },
+    status: { installed_version: health === 'not_installed' ? null : '1', verified: health !== 'not_installed', health },
+  };
+};
 
 const renderDialog = (runtimeValue: RegionRead<RuntimeDependency>, props: Partial<React.ComponentProps<typeof EnableGatewayDialog>> = {}) => render(
   <I18nextProvider i18n={i18n}>
@@ -75,7 +77,7 @@ describe('EnableGatewayDialog', () => {
     expect(screen.getByRole('button', { name: 'Install and switch' })).toBeTruthy();
   });
 
-  it('shares the server-host installability predicate with the runtime pill', () => {
+  it('shares the server manifest resolution with the runtime pill', () => {
     renderDialog(readyRegion(runtime('not_installed', true, 'linux-amd64')));
 
     expect(screen.queryByRole('button', { name: 'Install and switch' })).toBeNull();

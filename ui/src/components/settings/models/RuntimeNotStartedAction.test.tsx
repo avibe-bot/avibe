@@ -20,23 +20,25 @@ const runtime = (
   health: RuntimeDependency['status']['health'],
   withAsset = false,
   hostPlatform?: string,
-): RuntimeDependency => ({
-  contract_version: 5,
-  // #1326 runtime-dependency shape: absent host keeps any server asset installable.
-  ...(hostPlatform === undefined ? {} : { host_platform: hostPlatform }),
-  manifest: {
-    name: 'cliproxyapi',
-    version: '1',
-    source_sha: 'sha',
-    assets: withAsset ? [{
+): RuntimeDependency => {
+  const assets = withAsset ? [{
       platform: 'darwin-arm64',
       url: 'https://example.invalid/runtime',
       size_bytes: 1,
       sha256: '0'.repeat(64),
-    }] : [],
-  },
-  status: { installed_version: '1', verified: true, listening: null, health, last_check: null },
-});
+    } as const] : [];
+  const resolution = !withAsset
+    ? 'unresolved' as const
+    : hostPlatform === 'linux-amd64' ? 'unsupported' as const : 'resolved' as const;
+  return {
+    contract_version: 5,
+    ...(hostPlatform === undefined ? {} : { host_platform: hostPlatform }),
+    manifest: resolution === 'unresolved'
+      ? { name: 'cliproxyapi', resolution, assets: [] }
+      : { name: 'cliproxyapi', resolution, version: '1', source_sha: 'a'.repeat(40), assets },
+    status: { installed_version: '1', verified: true, listening: null, health, last_check: null },
+  };
+};
 
 const renderPill = (
   health: RuntimeDependency['status']['health'],
@@ -84,7 +86,7 @@ describe('Model Hub runtime pill', () => {
     expect(renderPill('not_started')).toContain('<button');
   });
 
-  it('uses definitive host evidence without blocking an unresolved manifest', () => {
+  it('uses the server manifest resolution without re-deriving host support', () => {
     expect(renderPill('not_installed', { withAsset: true })).toContain(zh.settings.models.shell.notInstalled);
     expect(renderPill('not_installed', { withAsset: true })).toContain('<button');
     expect(renderPill('not_installed')).toContain(zh.settings.models.shell.notInstalled);

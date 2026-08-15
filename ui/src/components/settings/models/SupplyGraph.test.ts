@@ -8,7 +8,7 @@ import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types
 
 const runtime: RuntimeDependency = {
   contract_version: 5,
-  manifest: { name: 'cliproxyapi', version: '1.0.0', source_sha: 'fixture', assets: [] },
+  manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },
   status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
 };
 const buildSupplyRelations = (
