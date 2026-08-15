@@ -13,6 +13,7 @@ import pytest
 
 from config import paths
 from core.memory import attachments as attachment_module
+from core.memory import confined_filesystem as confined_filesystem_module
 from core.memory.attachments import (
     AttachmentPinStore,
     PinnedBundle,
@@ -3480,7 +3481,7 @@ def test_claimed_attachment_downgrade_rolls_back_caption_and_bundle_together(
     )
 
 
-@pytest.mark.parametrize("failure", ["decode", "revalidation"])
+@pytest.mark.parametrize("failure", ["decode", "missing", "tamper"])
 async def test_attachment_preflight_failure_retries_caption_as_text_only(
     tmp_path: Path,
     failure: str,
@@ -3502,6 +3503,8 @@ async def test_attachment_preflight_failure_retries_caption_as_text_only(
                 """,
                 (original.source_message_digest,),
             )
+    elif failure == "missing":
+        pinned_path.unlink()
     else:
         pinned_path.write_bytes(b"tampered after enqueue")
 
@@ -3622,9 +3625,11 @@ async def test_captionless_attachment_preflight_failure_always_makes_progress(
         )
 
 
+@pytest.mark.parametrize("failure_source", ["file-open", "directory-order"])
 async def test_transient_attachment_projection_failure_retries_original_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failure_source: str,
 ) -> None:
     store = _store(tmp_path)
     attachment_store, bundle, pinned_path = _pin_attachment_bundle()
@@ -3647,17 +3652,29 @@ async def test_transient_attachment_projection_failure_retries_original_bundle(
         now="2026-01-01T00:00:00.000Z",
     )
     assert claimed is not None
-    original_open = attachment_module.os.open
     failed = False
+    if failure_source == "file-open":
+        original_operation = attachment_module.os.open
 
-    def fail_once(*args, **kwargs):
-        nonlocal failed
-        if not failed:
-            failed = True
-            raise OSError(errno.EMFILE, "temporary descriptor exhaustion")
-        return original_open(*args, **kwargs)
+        def fail_once(*args, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError(errno.EMFILE, "temporary descriptor exhaustion")
+            return original_operation(*args, **kwargs)
 
-    monkeypatch.setattr(attachment_module.os, "open", fail_once)
+        monkeypatch.setattr(attachment_module.os, "open", fail_once)
+    else:
+        original_operation = confined_filesystem_module.sqlite3.connect
+
+        def fail_once(*args, **kwargs):
+            nonlocal failed
+            if not failed and args and args[0] == "":
+                failed = True
+                raise sqlite3.OperationalError("temporary ordering unavailable")
+            return original_operation(*args, **kwargs)
+
+        monkeypatch.setattr(confined_filesystem_module.sqlite3, "connect", fail_once)
     assert not await coordinator.deliver(claimed, lease_owner="worker")
 
     retryable = store.get_queue_row(original.source_message_digest)
@@ -3682,7 +3699,14 @@ async def test_transient_attachment_projection_failure_retries_original_bundle(
     assert pinned_path.exists()
     assert provider.captures == []
 
-    monkeypatch.setattr(attachment_module.os, "open", original_open)
+    if failure_source == "file-open":
+        monkeypatch.setattr(attachment_module.os, "open", original_operation)
+    else:
+        monkeypatch.setattr(
+            confined_filesystem_module.sqlite3,
+            "connect",
+            original_operation,
+        )
     current[0] += timedelta(seconds=30)
     retry = store.claim_due(
         lease_owner="retry-worker",

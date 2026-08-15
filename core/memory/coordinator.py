@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from core.memory.attachments import (
+    AttachmentBundleInvalidError,
     AttachmentPinError,
     AttachmentPinStore,
     decode_pinned_bundle,
@@ -535,7 +536,6 @@ class SessionFlushCoordinator:
                     lease_owner=lease_owner,
                     failure=failure,
                     retryable=False,
-                    downgrade_allowed=True,
                 )
                 return False
             try:
@@ -549,7 +549,6 @@ class SessionFlushCoordinator:
                     lease_owner=lease_owner,
                     failure=failure,
                     retryable=True,
-                    downgrade_allowed=not failure.retryable,
                 )
                 return False
         capture = ProviderCapture(
@@ -719,10 +718,9 @@ class SessionFlushCoordinator:
         lease_owner: str,
         failure: AttachmentPinError,
         retryable: bool,
-        downgrade_allowed: bool,
     ) -> None:
         bundle_id = None
-        if downgrade_allowed:
+        if isinstance(failure, AttachmentBundleInvalidError):
             bundle_id = await self._store_call(
                 self._store._downgrade_claimed_attachment_to_text,
                 row,

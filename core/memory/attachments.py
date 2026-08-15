@@ -68,16 +68,13 @@ def attachment_pin_root(effective_home: Path | str | None = None) -> Path:
 class AttachmentPinError(OSError):
     """A closed attachment admission or durable-storage failure."""
 
-    def __init__(
-        self,
-        error: MemoryErrorCode,
-        message: str,
-        *,
-        retryable: bool = False,
-    ) -> None:
+    def __init__(self, error: MemoryErrorCode, message: str) -> None:
         super().__init__(message)
         self.error = error
-        self.retryable = retryable
+
+
+class AttachmentBundleInvalidError(AttachmentPinError):
+    """Internal proof that retrying the same pinned bundle cannot make it valid."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,18 +164,18 @@ def decode_pinned_bundle(bundle_id: str, payload: str) -> PinnedBundle:
     try:
         value = json.loads(payload)
     except (TypeError, ValueError) as error:
-        raise AttachmentPinError(
+        raise AttachmentBundleInvalidError(
             "memory_store_unavailable",
             "pinned attachment manifest is invalid",
         ) from error
     if not isinstance(value, dict) or set(value) != {"version", "total_bytes", "attachments"}:
-        raise AttachmentPinError(
+        raise AttachmentBundleInvalidError(
             "memory_store_unavailable",
             "pinned attachment manifest is invalid",
         )
     items = value.get("attachments")
     if value.get("version") != 1 or not isinstance(items, list):
-        raise AttachmentPinError(
+        raise AttachmentBundleInvalidError(
             "memory_store_unavailable",
             "pinned attachment manifest is invalid",
         )
@@ -211,7 +208,7 @@ def decode_pinned_bundle(bundle_id: str, payload: str) -> PinnedBundle:
             total_bytes=value["total_bytes"],
         )
     except (KeyError, TypeError, ValueError) as error:
-        raise AttachmentPinError(
+        raise AttachmentBundleInvalidError(
             "memory_store_unavailable",
             "pinned attachment manifest is invalid",
         ) from error
@@ -375,7 +372,7 @@ class AttachmentPinStore:
                 total_bytes=bundle.total_bytes,
             )
         except (AttributeError, TypeError, ValueError) as error:
-            raise AttachmentPinError(
+            raise AttachmentBundleInvalidError(
                 "memory_store_unavailable",
                 "pinned attachment metadata is invalid",
             ) from error
@@ -390,7 +387,7 @@ class AttachmentPinStore:
                     for index, pinned in enumerate(checked.attachments)
                 )
                 if observed_files != expected_files:
-                    raise AttachmentPinError(
+                    raise AttachmentBundleInvalidError(
                         "memory_store_unavailable",
                         "attachment bundle does not match its manifest",
                     )
@@ -976,8 +973,17 @@ def _require_private_directory(info: os.stat_result, label: str) -> None:
 
 def _require_private_file(info: os.stat_result, label: str) -> None:
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
-        raise AttachmentPinError("memory_store_unavailable", f"{label} is not private")
-    _require_current_owner(info, label, storage=True)
+        raise AttachmentBundleInvalidError(
+            "memory_store_unavailable",
+            f"{label} is not private",
+        )
+    try:
+        _require_current_owner(info, label, storage=True)
+    except AttachmentPinError as error:
+        raise AttachmentBundleInvalidError(
+            error.error,
+            str(error),
+        ) from error
 
 
 def _require_safe_source_directory(info: os.stat_result) -> None:
@@ -1125,7 +1131,7 @@ def _verify_pinned_file(bundle_fd: int, filename: str, pinned: PinnedAttachment)
         before = os.fstat(descriptor)
         _require_private_file(before, "pinned attachment")
         if before.st_size != pinned.size_bytes:
-            raise AttachmentPinError(
+            raise AttachmentBundleInvalidError(
                 "memory_store_unavailable",
                 "pinned attachment has an unexpected size",
             )
@@ -1137,7 +1143,7 @@ def _verify_pinned_file(bundle_fd: int, filename: str, pinned: PinnedAttachment)
                 break
             read_bytes += len(chunk)
             if read_bytes > pinned.size_bytes:
-                raise AttachmentPinError(
+                raise AttachmentBundleInvalidError(
                     "memory_store_unavailable",
                     "pinned attachment has an unexpected size",
                 )
@@ -1148,7 +1154,7 @@ def _verify_pinned_file(bundle_fd: int, filename: str, pinned: PinnedAttachment)
             or digest.hexdigest() != pinned.sha256
             or not _same_source_file(before, after)
         ):
-            raise AttachmentPinError(
+            raise AttachmentBundleInvalidError(
                 "memory_store_unavailable",
                 "pinned attachment integrity check failed",
             )
@@ -1278,7 +1284,7 @@ def _validate_private_bundle(parent_fd: int, name: str) -> tuple[str, ...]:
             maximum=MAX_PINNED_ATTACHMENTS,
         )
         if not 1 <= len(filenames) <= MAX_PINNED_ATTACHMENTS:
-            raise AttachmentPinError(
+            raise AttachmentBundleInvalidError(
                 "memory_store_unavailable",
                 "attachment bundle has an invalid file count",
             )
@@ -1290,7 +1296,7 @@ def _validate_private_bundle(parent_fd: int, name: str) -> tuple[str, ...]:
                 or match.group(1) != f"{index:02d}"
                 or match.group(2) not in SUPPORTED_ATTACHMENT_EXTENSIONS
             ):
-                raise AttachmentPinError(
+                raise AttachmentBundleInvalidError(
                     "memory_store_unavailable",
                     "attachment bundle contains an unexpected file",
                 )
@@ -1300,13 +1306,13 @@ def _validate_private_bundle(parent_fd: int, name: str) -> tuple[str, ...]:
                 raise _storage_failure(error, "attachment bundle entry could not be inspected") from error
             _require_private_file(info, "pinned attachment")
             if info.st_size > MAX_PINNED_ATTACHMENT_BYTES:
-                raise AttachmentPinError(
+                raise AttachmentBundleInvalidError(
                     "memory_store_unavailable",
                     "attachment bundle contains an oversized file",
                 )
             total_bytes += info.st_size
             if total_bytes > MAX_PINNED_BUNDLE_BYTES:
-                raise AttachmentPinError(
+                raise AttachmentBundleInvalidError(
                     "memory_store_unavailable",
                     "attachment bundle exceeds its size limit",
                 )
@@ -1449,8 +1455,9 @@ def _storage_failure(error: OSError, message: str) -> AttachmentPinError:
         if error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
         else "memory_store_unavailable"
     )
-    return AttachmentPinError(
-        code,
-        message,
-        retryable=error.errno not in _DETERMINISTIC_STORAGE_ERRNOS,
+    failure_type = (
+        AttachmentBundleInvalidError
+        if error.errno in _DETERMINISTIC_STORAGE_ERRNOS
+        else AttachmentPinError
     )
+    return failure_type(code, message)

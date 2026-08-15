@@ -15,6 +15,7 @@ import pytest
 import core.memory.attachments as attachment_module
 import core.memory.confined_filesystem as confined_filesystem_module
 from core.memory.attachments import (
+    AttachmentBundleInvalidError,
     AttachmentPinError,
     AttachmentPinStore,
     PinnedAttachment,
@@ -349,6 +350,7 @@ def test_provider_projection_rejects_tampered_pinned_bytes(attachment_roots) -> 
         store.provider_attachments(bundle)
 
     _assert_pin_error(error, "memory_store_unavailable")
+    assert isinstance(error.value, AttachmentBundleInvalidError)
 
 
 def test_provider_projection_rejects_untracked_bundle_file(attachment_roots) -> None:
@@ -365,6 +367,7 @@ def test_provider_projection_rejects_untracked_bundle_file(attachment_roots) -> 
         store.provider_attachments(bundle)
 
     _assert_pin_error(error, "memory_store_unavailable")
+    assert isinstance(error.value, AttachmentBundleInvalidError)
 
 
 def test_reconcile_preserves_references_and_removes_releasing_orphans_and_staging(
@@ -424,6 +427,7 @@ def test_attachment_reads_translate_temporary_ordering_database_failure(
             store.reconcile({bundle.bundle_id}, set())
 
     _assert_pin_error(raised, "memory_store_unavailable")
+    assert not isinstance(raised.value, AttachmentBundleInvalidError)
     assert isinstance(
         raised.value.__cause__,
         confined_filesystem_module.ConfinedFilesystemError,
