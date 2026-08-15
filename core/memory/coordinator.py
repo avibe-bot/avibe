@@ -30,6 +30,7 @@ from core.memory.everos import (
     MemoryProviderPort,
     MemoryProviderSystemFailure,
     ProviderCapture,
+    attachment_add_rejection_proves_no_write,
 )
 from core.memory.store import (
     AmbiguousAdd,
@@ -615,6 +616,14 @@ class SessionFlushCoordinator:
             return False
 
         if isinstance(ack, AddRejected):
+            if attachment_add_rejection_proves_no_write(
+                capture,
+                ack,
+            ) and await self._downgrade_attachment_capture_to_text(
+                row,
+                lease_owner=lease_owner,
+            ):
+                return False
             await self._settle_failure(
                 row,
                 lease_owner=lease_owner,
@@ -719,25 +728,41 @@ class SessionFlushCoordinator:
         failure: AttachmentPinError,
         retryable: bool,
     ) -> None:
-        bundle_id = None
-        if isinstance(failure, AttachmentBundleInvalidError):
-            bundle_id = await self._store_call(
-                self._store._downgrade_claimed_attachment_to_text,
-                row,
-                lease_owner=lease_owner,
-                now=self._current_time(),
-            )
-        if bundle_id is None:
-            await self._settle_failure(
-                row,
-                lease_owner=lease_owner,
-                outcome=MessageFailure(
-                    error=failure.error,
-                    retryable=retryable,
-                ),
-            )
+        if isinstance(
+            failure,
+            AttachmentBundleInvalidError,
+        ) and await self._downgrade_attachment_capture_to_text(
+            row,
+            lease_owner=lease_owner,
+        ):
             return
+        await self._settle_failure(
+            row,
+            lease_owner=lease_owner,
+            outcome=MessageFailure(
+                error=failure.error,
+                retryable=retryable,
+            ),
+        )
+
+    async def _downgrade_attachment_capture_to_text(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+    ) -> bool:
+        """Commit text-only retry and contain its durable bundle cleanup intent."""
+
+        bundle_id = await self._store_call(
+            self._store.downgrade_claimed_attachment_to_text,
+            row,
+            lease_owner=lease_owner,
+            now=self._current_time(),
+        )
+        if bundle_id is None:
+            return False
         await self._release_bundle(bundle_id)
+        return True
 
     async def _settle_failure(
         self,

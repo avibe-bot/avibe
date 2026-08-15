@@ -11,9 +11,11 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from core.memory import artifact as memory_artifact
 from core.memory.everos import (
     _AGENTIC_ROUND_HEADER,
     _AGENTIC_TIMEOUT_HEADER,
+    _ATTACHMENT_ADD_REJECTION_CODES_VALIDATED_EVEROS_VERSION,
     AddAck,
     AddRejected,
     AgenticRecallTelemetry,
@@ -26,6 +28,7 @@ from core.memory.everos import (
     MemoryProviderSystemFailure,
     ProviderAttachment,
     ProviderCapture,
+    attachment_add_rejection_proves_no_write,
 )
 from core.memory.store import _provider_session_ref
 from core.memory.types import (
@@ -47,6 +50,16 @@ SESSION_REF = ProviderSessionRef(
     session_id="src--one--e1",
 )
 WIRE_SESSION_ID = "src--one--e1"
+
+
+def test_attachment_rejection_no_write_proof_matches_pinned_everos_version() -> None:
+    assert (
+        _ATTACHMENT_ADD_REJECTION_CODES_VALIDATED_EVEROS_VERSION
+        == memory_artifact.EVEROS_VERSION
+    ), (
+        "Revalidate that UNSUPPORTED_FORMAT and CAPABILITY_UNAVAILABLE still occur "
+        "before every durable /add write in the newly pinned EverOS version"
+    )
 
 
 def _sidecar_transport(handler):
@@ -379,6 +392,65 @@ def test_add_treats_missing_provider_configuration_as_terminal_rejection() -> No
         request_id=None,
         error_code="PROVIDER_NOT_CONFIGURED",
         server_fault=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_code", "expected"),
+    [
+        pytest.param(415, "UNSUPPORTED_FORMAT", True, id="unsupported-format"),
+        pytest.param(503, "CAPABILITY_UNAVAILABLE", True, id="capability-unavailable"),
+        pytest.param(400, "BAD_REQUEST", False, id="bad-request"),
+        pytest.param(404, "NOT_FOUND", False, id="not-found"),
+        pytest.param(409, "CONFLICT", False, id="conflict"),
+        pytest.param(422, "INVALID_INPUT", False, id="invalid-input"),
+        pytest.param(422, "EXTRACTION_EMPTY", False, id="extraction-empty"),
+        pytest.param(
+            422,
+            "PROVIDER_NOT_CONFIGURED",
+            False,
+            id="provider-not-configured",
+        ),
+        pytest.param(
+            503,
+            "EXTERNAL_SERVICE_UNAVAILABLE",
+            False,
+            id="external-service-unavailable",
+        ),
+        pytest.param(418, "FUTURE_REJECTION", False, id="unknown-code"),
+    ],
+)
+def test_attachment_add_rejection_requires_positive_no_write_proof(
+    status_code: int,
+    error_code: str,
+    expected: bool,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            json={"error": {"code": error_code}},
+        )
+
+    capture = ProviderCapture(
+        SESSION_REF,
+        "remember this attachment",
+        1,
+        attachments=(
+            ProviderAttachment(
+                kind="doc",
+                name="evidence.txt",
+                uri="file:///owned/evidence.txt",
+                ext="txt",
+            ),
+        ),
+    )
+    with _sidecar_transport(handler):
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).add(capture))
+
+    assert attachment_add_rejection_proves_no_write(capture, result) is expected
+    assert not attachment_add_rejection_proves_no_write(
+        ProviderCapture(SESSION_REF, "text only", 1),
+        result,
     )
 
 

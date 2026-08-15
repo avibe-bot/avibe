@@ -83,3 +83,10 @@ scenarios:
     layer: scenario
     delivery_slice: 6
     test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_claimed_attachment_preflight_failure_retries_caption_as_text_only
+  - id: MEMORY-IM-ATTACH-011
+    name: Provider attachment rejection retries its caption as text-only
+    status: covered
+    kind: degradation
+    layer: scenario
+    delivery_slice: 7
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_provider_attachment_rejection_retries_caption_as_text_only

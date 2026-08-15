@@ -11,6 +11,7 @@ import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
+from core.memory.observations import AddAck, AddRejected
 from core.memory.types import RecallItems, RecallPolicy, memory_item_payload
 from modules.im.base import FileAttachment
 from modules.im.message_facts import (
@@ -246,6 +247,41 @@ def test_claimed_attachment_preflight_failure_retries_caption_as_text_only(
     assert harness.provider.captures[0].attachments == ()
     assert harness.provider.observed_payloads == []
     assert harness.provider.call_log == []
+    assert harness.memory_bundle_entries == ()
+
+
+def test_provider_attachment_rejection_retries_caption_as_text_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-011."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    harness = MemoryIMAttachmentScenarioHarness(tmp_path)
+    harness.provider.add_results.extend(
+        (
+            AddRejected(
+                request_id="unsupported-attachment",
+                error_code="UNSUPPORTED_FORMAT",
+                server_fault=False,
+            ),
+            AddAck(request_id="caption-accepted", status="accumulated"),
+        )
+    )
+
+    asyncio.run(
+        harness.capture(
+            text="Keep this caption when the provider rejects the image",
+            payloads={"unsupported.png": ("image/png", PNG_BYTES)},
+        )
+    )
+
+    assert len(harness.provider.captures) == 2
+    assert harness.provider.captures[0].attachments
+    assert harness.provider.captures[1].text == (
+        "Keep this caption when the provider rejects the image"
+    )
+    assert harness.provider.captures[1].attachments == ()
     assert harness.memory_bundle_entries == ()
 
 
