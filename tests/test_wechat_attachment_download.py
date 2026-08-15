@@ -158,4 +158,31 @@ async def test_wechat_adapter_rejects_declared_plaintext_before_acquisition(
 
     assert result.success is False
     assert result.error == "File exceeds max_bytes"
+    assert result.failure_reason == "file_too_large"
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_wechat_adapter_preserves_streamed_plaintext_overflow_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = WeChatBot(WeChatConfig(bot_token="test-token"))
+
+    async def overflow(*_args, **_kwargs):
+        raise ValueError("Downloaded file exceeds max_bytes")
+
+    monkeypatch.setattr(wechat_cdn, "download_and_decrypt_to_path", overflow)
+
+    result = await bot.download_file_to_path(
+        {
+            "url": "opaque-query",
+            "cdn_info": {"aes_key": "MDEyMzQ1Njc4OWFiY2RlZg=="},
+        },
+        str(tmp_path / "wechat.bin"),
+        max_bytes=8,
+    )
+
+    assert result.success is False
+    assert result.failure_reason == "file_too_large"
+    assert not (tmp_path / "wechat.bin").exists()

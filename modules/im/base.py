@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Optional, Callable, Dict, Any, List, Tuple, cast
+from typing import Optional, Callable, Dict, Any, List, Tuple, Literal, cast
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ class FileDownloadResult:
 
     success: bool
     error: Optional[str] = None
+    failure_reason: Optional[Literal["file_too_large"]] = None
 
 
 @dataclass

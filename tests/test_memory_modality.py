@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -6,9 +7,36 @@ import pytest
 from core.memory.modality import (
     PINNED_UPSTREAM_EXCLUDED_EXTENSIONS,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
+    classify_pinned_attachment,
     pinned_modality_contract_matches,
     pinned_modality_contract_script,
 )
+
+
+def _write_private(path: Path, payload: bytes) -> Path:
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    return path
+
+
+def test_classifier_accepts_mpeg_2_5_mp3_frame_sync(tmp_path: Path) -> None:
+    path = _write_private(tmp_path / "voice.mp3", b"\xff\xe3\x18\x00payload")
+
+    assert classify_pinned_attachment("voice.mp3", "audio/mpeg", path) == (
+        "audio",
+        "mp3",
+    )
+
+
+def test_classifier_requires_an_audio_brand_for_m4a(tmp_path: Path) -> None:
+    video = _write_private(tmp_path / "clip.m4a", b"\x00\x00\x00\x18ftypisomvideo")
+    audio = _write_private(tmp_path / "voice.m4a", b"\x00\x00\x00\x18ftypM4A audio")
+
+    assert classify_pinned_attachment("clip.m4a", "audio/mp4", video) is None
+    assert classify_pinned_attachment("voice.m4a", "audio/mp4", audio) == (
+        "audio",
+        "m4a",
+    )
 
 
 def test_pinned_modality_contract_allows_exact_upstream_set_minus_exclusions() -> None:

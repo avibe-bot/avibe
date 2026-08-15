@@ -836,7 +836,11 @@ class DiscordBot(BaseIMClient):
                         return FileDownloadResult(False, f"Download failed with HTTP {response.status}")
                     content_length = response.headers.get("Content-Length")
                     if max_bytes is not None and content_length and int(content_length) > max_bytes:
-                        return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+                        return FileDownloadResult(
+                            False,
+                            f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                            "file_too_large",
+                        )
 
                     total_size = 0
                     with open(target_path, "wb") as file_obj:
@@ -844,7 +848,9 @@ class DiscordBot(BaseIMClient):
                             total_size += len(chunk)
                             if max_bytes is not None and total_size > max_bytes:
                                 return FileDownloadResult(
-                                    False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                    False,
+                                    f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                    "file_too_large",
                                 )
                             file_obj.write(chunk)
                     return FileDownloadResult(True)

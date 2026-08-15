@@ -39,6 +39,17 @@ class _LegacyPathClient:
         return FileDownloadResult(True)
 
 
+class _OversizedClient:
+    async def download_file_to_path(
+        self,
+        file_info,
+        target_path,
+        max_bytes=None,
+        timeout_seconds=30,
+    ):
+        return FileDownloadResult(False, "native size detail", "file_too_large")
+
+
 @pytest.mark.asyncio
 async def test_materializer_publishes_one_private_reference_counted_lease(tmp_path: Path) -> None:
     home = tmp_path / "avibe-home"
@@ -166,4 +177,52 @@ async def test_materializer_preserves_legacy_two_argument_path_clients(tmp_path:
 
     assert client.calls == 1
     assert batch.attachments[0].size == 6
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_materializer_rejects_symlinked_attachment_root(tmp_path: Path) -> None:
+    home = tmp_path / "avibe-home"
+    attachments = home / "attachments"
+    outside = tmp_path / "outside"
+    attachments.mkdir(parents=True)
+    outside.mkdir()
+    (attachments / "im").symlink_to(outside, target_is_directory=True)
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref", size=5)],
+    )
+
+    with pytest.raises(OSError):
+        await InboundAttachmentMaterializer(effective_home=home).materialize(
+            context,
+            _StubClient({"notes.txt": b"notes"}),
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_materializer_preserves_typed_size_reason_and_localizes_display(
+    tmp_path: Path,
+) -> None:
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="telegram",
+        files=[FileAttachment("large.pdf", "application/pdf", url="ref", size=20)],
+    )
+
+    batch = await InboundAttachmentMaterializer(effective_home=tmp_path / "home").materialize(
+        context,
+        _OversizedClient(),
+        max_bytes=10,
+        language="zh",
+    )
+
+    assert batch.errors == ("file_too_large",)
+    assert batch.display_errors == ("附件“large.pdf”超过附件大小限制。",)
+    assert "native size detail" not in repr(batch)
     batch.lease.release()

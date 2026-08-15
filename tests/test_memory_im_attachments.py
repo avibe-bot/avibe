@@ -110,6 +110,23 @@ async def test_memory_selection_enforces_eight_file_limit(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_memory_selection_counts_only_supported_survivors(tmp_path: Path) -> None:
+    home = tmp_path / "avibe-home"
+    entries = [
+        (f"video-{index}.mp4", "video/mp4", b"\x00\x00\x00\x18ftypmp42", 12)
+        for index in range(8)
+    ]
+    entries.append(("valid.pdf", "application/pdf", b"%PDF-1.7\n", 9))
+    batch = await _materialize(home, entries)
+
+    selected = select_memory_attachments(batch.lease)
+
+    assert [item.name for item in selected.attachments] == ["valid.pdf"]
+    assert selected.skipped == ("unsupported_type",) * 8
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
 async def test_pin_rejects_released_or_mismatched_im_lease(tmp_path: Path) -> None:
     first_home = tmp_path / "first-home"
     second_home = tmp_path / "second-home"

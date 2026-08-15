@@ -1413,7 +1413,9 @@ class FeishuBot(BaseIMClient):
                                 total += len(chunk)
                                 if max_bytes is not None and total > max_bytes:
                                     return FileDownloadResult(
-                                        False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                        False,
+                                        f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                        "file_too_large",
                                     )
                                 file_obj.write(chunk)
                         return FileDownloadResult(True)
@@ -1439,7 +1441,9 @@ class FeishuBot(BaseIMClient):
                             if max_bytes is not None and total > max_bytes:
                                 logger.warning("Feishu file exceeds max size, aborting")
                                 return FileDownloadResult(
-                                    False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                    False,
+                                    f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                    "file_too_large",
                                 )
                             file_obj.write(chunk)
                     return FileDownloadResult(True)

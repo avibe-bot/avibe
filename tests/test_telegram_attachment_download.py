@@ -112,6 +112,7 @@ async def test_telegram_adapter_checks_declared_size_before_bot_api(monkeypatch,
 
     assert result.success is False
     assert result.error == "File exceeds max_bytes"
+    assert result.failure_reason == "file_too_large"
     get_file.assert_not_awaited()
 
 

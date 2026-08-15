@@ -271,6 +271,11 @@
       "invalid_upload": "文件上传请求无效。",
       "upload_failed": "文件保存失败，请重试。"
     },
+    "attachmentDownload": {
+      "title": "附件下载错误",
+      "failed": "无法下载附件“{name}”。",
+      "tooLarge": "附件“{name}”超过附件大小限制。"
+    },
     "agentArchive": {
       "agent_builtin": {
         "message": "Agent `{agent}` 是内置 Agent，无法删除。",

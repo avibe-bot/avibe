@@ -1107,7 +1107,11 @@ class SlackBot(BaseIMClient):
         file_size = file_info.get("size")
         if max_bytes is not None and file_size and file_size > max_bytes:
             logger.warning(f"File too large ({file_size} bytes > {max_bytes}), skipping: {file_info.get('name')}")
-            return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+            return FileDownloadResult(
+                False,
+                f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                "file_too_large",
+            )
 
         try:
             headers = {"Authorization": f"Bearer {self.config.bot_token}"}
@@ -1121,7 +1125,11 @@ class SlackBot(BaseIMClient):
                     content_length = response.headers.get("Content-Length")
                     if max_bytes is not None and content_length and int(content_length) > max_bytes:
                         logger.warning(f"File too large ({content_length} bytes), skipping: {file_info.get('name')}")
-                        return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+                        return FileDownloadResult(
+                            False,
+                            f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                            "file_too_large",
+                        )
 
                     total_size = 0
                     with open(target_path, "wb") as file_obj:
@@ -1132,7 +1140,9 @@ class SlackBot(BaseIMClient):
                                     f"File exceeds max size during download, aborting: {file_info.get('name')}"
                                 )
                                 return FileDownloadResult(
-                                    False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                    False,
+                                    f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                    "file_too_large",
                                 )
                             file_obj.write(chunk)
                     return FileDownloadResult(True)

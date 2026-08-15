@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any
 from config import paths
 from core.audio_asr import AUDIO_SIGNATURE_SAMPLE_BYTES, detect_audio_mime_from_sample
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
+from vibe.i18n import t as i18n_t
 
 
 _MAX_FILENAME_BYTES = 200
@@ -125,12 +127,20 @@ class InboundAttachmentMaterializer:
         max_bytes: int | None = None,
         timeout_seconds: int = 30,
         max_concurrency: int = 1,
+        language: str = "en",
     ) -> MaterializedAttachmentBatch:
-        self._root.mkdir(parents=True, mode=0o700, exist_ok=True)
-        self._root.chmod(0o700)
+        root_fd = _open_or_create_private_directory(self._root)
         lease_id = secrets.token_hex(16)
         lease_dir = self._root / lease_id
-        lease_dir.mkdir(mode=0o700)
+        try:
+            os.mkdir(lease_id, mode=0o700, dir_fd=root_fd)
+            lease_fd = os.open(lease_id, _directory_open_flags(), dir_fd=root_fd)
+            try:
+                _make_private_directory(lease_fd, "attachment lease directory")
+            finally:
+                os.close(lease_fd)
+        finally:
+            os.close(root_fd)
         state = _LeaseState(self._root, lease_dir)
         lease = InboundAttachmentLease(state)
 
@@ -151,6 +161,7 @@ class InboundAttachmentMaterializer:
                     attachment,
                     max_bytes=max_bytes,
                     timeout_seconds=timeout_seconds,
+                    language=language,
                 )
 
         try:
@@ -192,6 +203,7 @@ class InboundAttachmentMaterializer:
         *,
         max_bytes: int | None,
         timeout_seconds: int,
+        language: str,
     ) -> tuple[FileAttachment, _LeasedAttachmentRecord | None] | _MaterializationFailure:
         if attachment.local_path and Path(attachment.local_path).is_file():
             size = attachment.size
@@ -231,31 +243,23 @@ class InboundAttachmentMaterializer:
                 if not isinstance(result, FileDownloadResult):
                     result = FileDownloadResult(bool(result))
                 if not result.success or not partial_path.is_file():
-                    detail = result.error or "Download failed"
-                    return _MaterializationFailure(
-                        "download_failed",
-                        f"Attachment '{attachment.name}' could not be downloaded: {detail}",
+                    reason = (
+                        "file_too_large"
+                        if result.failure_reason == "file_too_large"
+                        else "download_failed"
                     )
+                    return _materialization_failure(reason, attachment.name, language)
             else:
                 download = getattr(im_client, "download_file", None)
                 if not callable(download):
-                    return _MaterializationFailure(
-                        "download_failed",
-                        f"Attachment '{attachment.name}' could not be downloaded: No download method",
-                    )
+                    return _materialization_failure("download_failed", attachment.name, language)
                 content = await download(file_info)
                 if not content:
-                    return _MaterializationFailure(
-                        "download_failed",
-                        f"Attachment '{attachment.name}' could not be downloaded: Download returned no content",
-                    )
+                    return _materialization_failure("download_failed", attachment.name, language)
                 partial_path.write_bytes(content)
             size = partial_path.stat().st_size
             if max_bytes is not None and size > max_bytes:
-                return _MaterializationFailure(
-                    "file_too_large",
-                    f"Attachment '{attachment.name}' could not be downloaded: File exceeds size limit",
-                )
+                return _materialization_failure("file_too_large", attachment.name, language)
             partial_path.chmod(0o600)
             os.replace(partial_path, final_path)
             name, mimetype, final_path = _normalize_detected_media(
@@ -279,11 +283,8 @@ class InboundAttachmentMaterializer:
             )
         except asyncio.CancelledError:
             raise
-        except Exception as error:
-            return _MaterializationFailure(
-                "download_failed",
-                f"Attachment '{attachment.name}' could not be downloaded: {error}",
-            )
+        except Exception:
+            return _materialization_failure("download_failed", attachment.name, language)
         finally:
             partial_path.unlink(missing_ok=True)
 
@@ -341,6 +342,79 @@ def _supported_download_options(
     if accepts_kwargs or "timeout_seconds" in parameters:
         options["timeout_seconds"] = timeout_seconds
     return options
+
+
+def _materialization_failure(
+    reason: str,
+    attachment_name: str,
+    language: str,
+) -> _MaterializationFailure:
+    key = "tooLarge" if reason == "file_too_large" else "failed"
+    return _MaterializationFailure(
+        reason,
+        i18n_t(
+            f"error.attachmentDownload.{key}",
+            language,
+            name=attachment_name,
+        ),
+    )
+
+
+def _directory_open_flags() -> int:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise RuntimeError("attachment leases require no-follow filesystem support")
+    return (
+        os.O_RDONLY
+        | int(no_follow)
+        | int(getattr(os, "O_DIRECTORY", 0))
+        | int(getattr(os, "O_CLOEXEC", 0))
+    )
+
+
+def _open_or_create_private_directory(directory: Path) -> int:
+    """Create a private root while refusing symlinks in every path component."""
+
+    if not directory.is_absolute():
+        raise RuntimeError("attachment lease root must be absolute")
+    descriptor = os.open(directory.anchor, _directory_open_flags())
+    try:
+        for component in directory.parts[1:]:
+            try:
+                next_descriptor = os.open(
+                    component,
+                    _directory_open_flags(),
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                next_descriptor = os.open(
+                    component,
+                    _directory_open_flags(),
+                    dir_fd=descriptor,
+                )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        _make_private_directory(descriptor, "attachment lease root")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _make_private_directory(descriptor: int, label: str) -> None:
+    info = os.fstat(descriptor)
+    getuid = getattr(os, "getuid", None)
+    if not stat.S_ISDIR(info.st_mode) or (
+        callable(getuid) and info.st_uid != getuid()
+    ):
+        raise RuntimeError(f"{label} has unsafe ownership or type")
+    os.fchmod(descriptor, 0o700)
+    if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+        raise RuntimeError(f"{label} is not private")
 
 
 def _sanitize_filename(name: object) -> str:

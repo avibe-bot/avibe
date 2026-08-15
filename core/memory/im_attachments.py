@@ -41,10 +41,7 @@ def select_memory_attachments(
     selected: list[CaptureAttachment] = []
     skipped: list[AttachmentSkipReason] = []
     total = 0
-    for index, record in enumerate(records):
-        if index >= MAX_PINNED_ATTACHMENTS:
-            skipped.append("count_limit")
-            continue
+    for record in records:
         if (
             record.declared_size is not None
             and record.declared_size > MAX_PINNED_ATTACHMENT_BYTES
@@ -58,6 +55,9 @@ def select_memory_attachments(
         )
         if classification is None:
             skipped.append("unsupported_type")
+            continue
+        if len(selected) >= MAX_PINNED_ATTACHMENTS:
+            skipped.append("count_limit")
             continue
         if total + record.size > MAX_PINNED_BUNDLE_BYTES:
             skipped.append("bundle_too_large")
@@ -73,4 +73,3 @@ def select_memory_attachments(
         )
         total += record.size
     return MemoryAttachmentSelection(tuple(selected), tuple(skipped))
-

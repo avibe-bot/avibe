@@ -167,12 +167,17 @@ def _image_extension(data: bytes) -> str | None:
 def _audio_extension(data: bytes) -> str | None:
     if data.startswith(b"ID3"):
         return "mp3"
-    if len(data) >= 2 and data[0] == 0xFF and data[1] & 0xF0 == 0xF0:
-        return "aac" if data[1] & 0x06 == 0 else "mp3"
+    if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xF6) == 0xF0:
+        return "aac"
+    if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0 and (data[1] & 0x06) != 0:
+        return "mp3"
     if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WAVE":
         return "wav"
     if len(data) >= 12 and data[4:8] == b"ftyp":
-        return "m4a"
+        brands = data[8:64]
+        if data[8:12] in {b"M4A ", b"M4B "} or b"M4A " in brands or b"M4B " in brands:
+            return "m4a"
+        return None
     if data.startswith(b"#!AMR"):
         return "amr"
     if len(data) >= 12 and data.startswith(b"FORM") and data[8:12] in {b"AIFF", b"AIFC"}:

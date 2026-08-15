@@ -1565,7 +1565,7 @@ class TelegramBot(BaseIMClient):
         if not file_id:
             return FileDownloadResult(False, "Telegram file_id is required")
         if _telegram_size_exceeds(file_info.get("size"), max_bytes):
-            return FileDownloadResult(False, "File exceeds max_bytes")
+            return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
         target = Path(target_path)
         try:
             file_result = await telegram_api.get_file(
@@ -1577,7 +1577,7 @@ class TelegramBot(BaseIMClient):
             if not isinstance(resolved, dict) or not resolved.get("file_path"):
                 return FileDownloadResult(False, "Telegram file metadata is invalid")
             if _telegram_size_exceeds(resolved.get("file_size"), max_bytes):
-                return FileDownloadResult(False, "File exceeds max_bytes")
+                return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
             await telegram_api.download_file_to_path(
                 self.config.bot_token,
                 str(resolved["file_path"]),
@@ -1589,7 +1589,7 @@ class TelegramBot(BaseIMClient):
             return FileDownloadResult(True)
         except ValueError:
             target.unlink(missing_ok=True)
-            return FileDownloadResult(False, "File exceeds max_bytes")
+            return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
         except Exception:
             target.unlink(missing_ok=True)
             return FileDownloadResult(False, "Telegram file download failed")

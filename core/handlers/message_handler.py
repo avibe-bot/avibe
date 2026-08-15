@@ -198,6 +198,7 @@ class MessageHandler(BaseHandler):
         # async result is coming, so the ``finally`` releases any streaming SSE
         # waiter for this turn instead of leaving it open until the timeout.
         agent_dispatched = False
+        attachment_lease = None
         try:
             is_human = source == self.TURN_SOURCE_HUMAN
             durable_delivery_owned = bool(
@@ -702,10 +703,13 @@ class MessageHandler(BaseHandler):
                     if isinstance(attachment, FileAttachment)
                     and attachment.local_path
                 }
-                processed_files, attachment_errors = await self._process_file_attachments(
+                attachment_batch = await self._materialize_file_attachments(
                     context,
                     working_path,
                 )
+                attachment_lease = attachment_batch.lease
+                processed_files = list(attachment_batch.attachments) or None
+                attachment_errors = list(attachment_batch.display_errors)
                 if processed_files:
                     downloaded_attachment_paths = [
                         str(attachment.local_path)
@@ -737,6 +741,7 @@ class MessageHandler(BaseHandler):
                     vibe_agent=vibe_agent,
                     delivery_intent=delivery_intent,
                     downloaded_attachment_paths=downloaded_attachment_paths,
+                    attachment_lease=attachment_lease,
                     admission_context={
                         # The reaction target is not always the sender's own
                         # message (a quick reply reacts on its bot echo), and it
@@ -760,7 +765,13 @@ class MessageHandler(BaseHandler):
                     },
                 )
                 if admitted:
+                    attachment_lease = None
                     return None
+
+            if attachment_lease is not None:
+                attachment_lease.adopt()
+                attachment_lease.release()
+                attachment_lease = None
 
             if is_human:
                 # The concise status bubble (footer-only at turn start) is now
@@ -915,6 +926,8 @@ class MessageHandler(BaseHandler):
                 await self._emit_agent_dispatch_failure(context, request, e)
             return str(e)
         finally:
+            if attachment_lease is not None:
+                attachment_lease.release()
             release_lifecycle_admission = getattr(
                 turn_lifecycle_admission,
                 "release",
@@ -967,6 +980,7 @@ class MessageHandler(BaseHandler):
         delivery_intent: str,
         downloaded_attachment_paths: List[str],
         admission_context: dict[str, Any],
+        attachment_lease: Any = None,
     ) -> bool:
         """Transfer one IM input to its durable owner before native work."""
 
@@ -1084,11 +1098,17 @@ class MessageHandler(BaseHandler):
                             "native Delivery appeared after writer reservation"
                         )
         except Exception:
-            self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
+            if attachment_lease is not None:
+                attachment_lease.release()
+            else:
+                self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
             raise
 
         if duplicate_delivery_id is not None:
-            self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
+            if attachment_lease is not None:
+                attachment_lease.release()
+            else:
+                self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
             if duplicate_delivery_id:
                 payload = dict(context.platform_specific or {})
                 payload["delivery_id"] = duplicate_delivery_id
@@ -1097,6 +1117,9 @@ class MessageHandler(BaseHandler):
 
         if request is None:
             raise RuntimeError("Delivery reservation did not produce a request")
+        if attachment_lease is not None:
+            attachment_lease.adopt()
+            attachment_lease.release()
         result = await manager.deliver(request, context=context)
         payload = dict(context.platform_specific or {})
         payload["delivery_id"] = result.delivery_id
@@ -1742,23 +1765,32 @@ class MessageHandler(BaseHandler):
     ) -> Tuple[Optional[List[FileAttachment]], List[str]]:
         """Materialize native files once and preserve ordinary Agent ownership."""
 
+        batch = await self._materialize_file_attachments(context, working_path)
+        batch.lease.adopt()
+        batch.lease.release()
+        processed = list(batch.attachments)
+        return (processed if processed else None), list(batch.display_errors)
+
+    async def _materialize_file_attachments(
+        self,
+        context: MessageContext,
+        working_path: str,
+    ):
+        """Return an untransferred lease so admission decides final ownership."""
+
         from config.paths import get_attachments_dir
         from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 
         if not context.files:
-            return None, []
+            raise ValueError("attachment materialization requires input files")
         batch = await InboundAttachmentMaterializer(
             attachments_root=get_attachments_dir(),
         ).materialize(
             context,
             self._get_im_client(context),
+            language=self._get_lang(),
         )
-        # Ordinary Agent attachments remain durable as before. PR4 retains an
-        # independent Memory reference before this ownership transfer.
-        batch.lease.adopt()
-        batch.lease.release()
-        processed = list(batch.attachments)
-        return (processed if processed else None), list(batch.display_errors)
+        return batch
 
     @staticmethod
     def _cleanup_partial_attachment(path) -> None:
@@ -1769,12 +1801,16 @@ class MessageHandler(BaseHandler):
         except Exception as err:
             logger.debug("Failed to remove partial attachment %s: %s", path, err)
 
-    @staticmethod
-    def _append_attachment_errors(message: str, errors: List[str]) -> str:
+    def _append_attachment_errors(self, message: str, errors: List[str]) -> str:
         if not errors:
             return message
 
-        error_block = "\n".join(["[Attachment Download Errors]", *[f"- {error}" for error in errors]])
+        error_block = "\n".join(
+            [
+                f"[{self._t('error.attachmentDownload.title')}]",
+                *[f"- {error}" for error in errors],
+            ]
+        )
         if not message or not message.strip():
             return error_block
         return f"{message}\n\n{error_block}"

@@ -390,7 +390,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         handler._is_duplicate_human_delivery = Mock(return_value=True)
-        handler._process_file_attachments = AsyncMock()
+        handler._materialize_file_attachments = AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -407,9 +407,103 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_user_message(context, "review this")
 
-        handler._process_file_attachments.assert_not_awaited()
+        handler._materialize_file_attachments.assert_not_awaited()
         controller.session_turns.deliver.assert_not_awaited()
         self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_durable_attachment_lease_stays_active_until_admission_owns_it(self):
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="review this")
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                lease=lease,
+            )
+        )
+
+        async def admit(**kwargs):
+            self.assertIs(kwargs["attachment_lease"], lease)
+            lease.adopt.assert_not_called()
+            lease.release.assert_not_called()
+            lease.adopt()
+            lease.release()
+            return True
+
+        handler._admit_human_delivery = AsyncMock(side_effect=admit)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-attachment",
+            platform="slack",
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+        )
+
+        await handler.handle_user_message(context, "review this")
+
+        lease.adopt.assert_called_once_with()
+        lease.release.assert_called_once_with()
+
+    async def test_failed_durable_admission_releases_unowned_attachment_lease(self):
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="review this")
+        handler._emit_agent_dispatch_failure = AsyncMock()
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                lease=lease,
+            )
+        )
+        handler._admit_human_delivery = AsyncMock(
+            side_effect=RuntimeError("admission rejected")
+        )
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-rejected-attachment",
+            platform="slack",
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+        )
+
+        await handler.handle_user_message(context, "review this")
+
+        lease.adopt.assert_not_called()
+        lease.release.assert_called_once_with()
 
     async def test_inline_stop_uses_durable_empty_p0_owner(self):
         controller = _StubController(
@@ -1503,8 +1597,13 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         handler._build_current_time_line = lambda: "[Current Time: 2026-07-26 16:00:00 UTC+08:00]"
-        handler._process_file_attachments = AsyncMock(
-            return_value=([object()], ["report.pdf could not be downloaded"])
+        attachment_lease = Mock()
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(object(),),
+                display_errors=("report.pdf could not be downloaded",),
+                lease=attachment_lease,
+            )
         )
         handler._transcribe_audio_attachments = AsyncMock(
             return_value=[
