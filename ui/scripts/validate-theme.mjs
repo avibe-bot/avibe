@@ -5,7 +5,7 @@ import postcss from 'postcss';
 
 import { isLength, isZeroLength } from './cssLength.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
-import { withoutNonRenderingText } from './nonRenderingText.mjs';
+import { rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
 
 const html = fs.readFileSync('index.html', 'utf8');
 const css = fs.readFileSync('src/index.css', 'utf8');
@@ -1101,6 +1101,11 @@ function assertGlowsReadThroughTokens(root) {
   const tokens = { values: collectCustomProperties(root), managed: collectThemeDeclarations(root) };
 
   for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
+    // A test is not a page. Its strings document values rather than drawing
+    // them, and Vite never bundles the file, so scanning it turns this gate into
+    // one that fails a test for containing the string it is testing.
+    if (!rendersAtAll(relative)) continue;
+
     const file = path.join(root, relative);
     const raw = fs.readFileSync(file, 'utf8');
     const source = withoutNonRenderingText(raw, file);

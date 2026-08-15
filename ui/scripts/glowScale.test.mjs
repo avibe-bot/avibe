@@ -35,10 +35,28 @@ const CSS = fs.readFileSync(new URL('../src/index.css', import.meta.url), 'utf8'
 // off. This is a closed set -- the roles that exist -- not a list of exceptions
 // that grows when a value is inconvenient. A new role is on the rule unless it
 // is added here with a reason.
+//
+// A reason is not an assertion, and for three rounds this was only a reason.
+// Naming a role here removed it from every value check above, so the exception
+// meant "unchecked" rather than "checked differently": a wire token could be
+// changed to `0 0 32px -8px red`, a dot could grow a spread, the CTA alpha could
+// leave the value the owner set, and the suite stayed green -- and
+// `validate-theme.mjs` trusts these declarations too, so nothing else would have
+// caught it either. Each exception now carries the contract it is an exception
+// TO, so the escape from the general rule is itself a rule.
 const OFF_RULE = {
-  dot: 'a spreadless status dot, clamped to 0.9 because ours sit on lit panels',
-  wire: 'a drop-shadow() filter, which takes no spread at all',
-  cta: 'owner-set: themed blur (2026-08-14) and 0.6 alpha, not from design.pen',
+  dot: {
+    why: 'a spreadless status dot, clamped to 0.9 because ours sit on lit panels',
+    holds: /^0 0 \d+px rgba\(\d+, \d+, \d+, 0\.9\)$/,
+  },
+  wire: {
+    why: 'a drop-shadow() filter, which takes no spread at all',
+    holds: /^0 0 \d+px color-mix\(in srgb, var\(--[a-z]+\) \d+%, transparent\)$/,
+  },
+  cta: {
+    why: 'owner-set: themed blur (2026-08-14) and 0.6 alpha, not from design.pen',
+    holds: /^0 0 var\(--brand-glow-blur\) -4px rgba\(\d+, \d+, \d+, 0\.6\)$/,
+  },
 };
 
 const SPREAD_CAP = 12;
@@ -71,9 +89,15 @@ describe('the accent glow scale', () => {
     expect(Number(alpha[1])).toBe(GLOW_ALPHA);
   });
 
-  it.each(Object.entries(OFF_RULE))('states why %s is off the rule', (role, reason) => {
-    expect(reason.length).toBeGreaterThan(0);
+  it.each(Object.entries(OFF_RULE))('states why %s is off the rule', (role, { why }) => {
+    expect(why.length).toBeGreaterThan(0);
     expect(rungs.some((rung) => rung.role === role)).toBe(true);
+  });
+
+  // Every accent's token of an off-rule role, so a role is covered across the
+  // palette rather than at whichever accent happens to be first.
+  it.each(rungs.filter((rung) => rung.role in OFF_RULE))('$token holds its documented exception', ({ role, value }) => {
+    expect(value.trim(), OFF_RULE[role].why).toMatch(OFF_RULE[role].holds);
   });
 
   // The rule fixes the shape of a rung; it does not decide which blurs exist.

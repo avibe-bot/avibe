@@ -44,16 +44,40 @@ import ts from 'typescript';
 // renders that text into a pseudo-element and draws nothing.
 //
 // So the boundary is where the string sits, not that it is quoted. A prelude runs
-// from `@` to the `{` or `;` that ends it, which is one rule rather than a list of
-// at-rule names to keep extending. Keeping the quotes themselves means the parse
-// below still sees where the string was.
+// from `@` to the `{` or `;` that ends it. Keeping the quotes themselves means the
+// parse below still sees where the string was.
+//
+// Which prelude, though. Treating every at-rule alike was right about `@source`
+// and wrong about the rest, because a prelude does one of two opposite things:
+// it either GENERATES CSS from its contents, as `@source inline(…)` does, or it
+// TESTS a value and draws nothing, as `@supports (box-shadow: 0 0 93px red)`
+// does. The second was left intact and read as a declaration, so a feature query
+// -- the one construct in CSS whose entire purpose is to name a value without
+// applying it -- failed `validate:theme`.
+//
+// A condition is therefore blanked whole, not merely stripped of its strings,
+// and the exception list names generators rather than conditions. That polarity
+// is the point: an at-rule nobody has thought of yet is blanked, which risks a
+// miss, and the alternative risks failing correct CSS. `{` and `;` survive so
+// the block structure the scan reads afterwards is unchanged.
+const GENERATOR_AT_RULES = ['source'];
+
+const atRuleGenerates = (source, at) =>
+  GENERATOR_AT_RULES.some((name) => source.startsWith(name, at + 1));
+
 function blankCssComments(source) {
   let out = '';
   let quote = null;
   let index = 0;
   let prelude = false;
+  let condition = false;
   while (index < source.length) {
     const char = source[index];
+    if (condition && char !== '{' && char !== ';') {
+      out += char === '\n' ? char : ' ';
+      index += 1;
+      continue;
+    }
     if (quote) {
       if (char === '\\') {
         // A line continuation must keep its newline, or every line number after
@@ -78,8 +102,13 @@ function blankCssComments(source) {
       out += source.slice(index, stop).replace(/[^\n]/g, ' ');
       index = stop;
     } else {
-      if (char === '@') prelude = true;
-      else if (char === '{' || char === ';') prelude = false;
+      if (char === '@') {
+        prelude = atRuleGenerates(source, index);
+        condition = !prelude;
+      } else if (char === '{' || char === ';') {
+        prelude = false;
+        condition = false;
+      }
       out += char;
       index += 1;
     }
@@ -191,4 +220,18 @@ function withoutNonRenderingText(source, file) {
   return file.endsWith('.css') ? blankCssComments(source) : blankTypeScriptComments(source, file);
 }
 
-export { blankCssComments, blankTypeScriptComments, typeScriptComments, withoutNonRenderingText };
+// The same question at the granularity above bytes: a whole FILE can be text the
+// page never sees. A test never enters the bundle, so a fixture asserting on
+// `'box-shadow: 0 0 93px red'` documents a value rather than drawing one -- and
+// the scan failed on exactly that, which is a lint gate blocking a test for
+// containing the string it is testing.
+//
+// It lives here because "renders" already has a home, and answering it in the
+// scan's file loop instead is how this file's own lesson gets relearned: the
+// byte-level rule was inline and keyed off `.css` until that turned a rule about
+// rendering into a rule about suffixes. Two granularities, one module.
+const NON_RENDERING_FILES = /(^|\/)(__tests__|__mocks__)\/|\.(test|spec)\.[cm]?tsx?$/;
+
+const rendersAtAll = (file) => !NON_RENDERING_FILES.test(file.replaceAll('\\', '/'));
+
+export { blankCssComments, blankTypeScriptComments, rendersAtAll, typeScriptComments, withoutNonRenderingText };

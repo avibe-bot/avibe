@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { intendedFiles } from './lintPolicy.mjs';
-import { withoutNonRenderingText } from './nonRenderingText.mjs';
+import { rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
 
 // `validate:theme` reads whole source files with regular expressions, so the set
 // of bytes it treats as CSS is decided here and nowhere else. Ten review rounds
@@ -34,6 +34,11 @@ const NON_RENDERING = [
   // A pattern, not a value. Nothing assigns a regex literal to a style, so it
   // describes CSS in exactly the sense a comment does.
   ['a regular expression literal', 'probe.ts', `export const RE = /box-shadow: ${GLOW}/;\n`],
+  // A feature query names a value to ask whether the browser understands it.
+  // It is the one construct in CSS whose entire purpose is to write a
+  // declaration that does not apply.
+  ['an @supports condition', 'probe.css', `@supports (box-shadow: ${GLOW}) {\n  .a { color: red; }\n}\n`],
+  ['a @media condition', 'probe.css', '@media (min-width: 93px) {\n  .a { color: red; }\n}\n'],
   ['a CSS comment', 'probe.css', `/* box-shadow: ${GLOW} */\n.a { color: red; }\n`],
   ['a CSS string', 'probe.css', `.a { content: "box-shadow: ${GLOW}"; }\n`],
   ['a comment opener inside a CSS string', 'probe.css', `.a { content: "/* box-shadow: ${GLOW} */"; }\n`],
@@ -52,6 +57,9 @@ const RENDERING = [
   // slashes open one. A hand-rolled scanner reads `/ 2; const a = { boxShadow: '`
   // as a regex and erases the declaration after it.
   ['a division that is not a regex', 'probe.ts', `const n = 1 / 2; const a = { boxShadow: '${GLOW}' };\n`, GLOW],
+  // Blanking a condition must stop at the brace. The rule inside an @supports
+  // block renders exactly like any other rule.
+  ['a rule inside an @supports block', 'probe.css', `@supports (display: grid) {\n  .a { box-shadow: ${GLOW}; }\n}\n`, GLOW],
 ];
 
 describe('withoutNonRenderingText', () => {
@@ -109,6 +117,17 @@ describe('withoutNonRenderingText', () => {
     expect(withoutNonRenderingText(declaration, 'probe.css')).not.toContain('93px');
   });
 
+  // An at-rule prelude either generates CSS or tests it, and the two want
+  // opposite treatment. Getting `@source` right by keeping every prelude was
+  // what let a feature query through as a declaration.
+  it('keeps a generator prelude and blanks a condition', () => {
+    const generator = '@source inline("shadow-[0_0_93px_red]");\n';
+    const condition = '@supports (box-shadow: 0 0 93px red) {\n  .a { color: red; }\n}\n';
+
+    expect(withoutNonRenderingText(generator, 'probe.css')).toContain('93px');
+    expect(withoutNonRenderingText(condition, 'probe.css')).not.toContain('93px');
+  });
+
   it('is applied to every extension the scan reads', () => {
     const scan = fs.readFileSync(new URL('validate-theme.mjs', import.meta.url), 'utf8');
     const extensions = scan.match(/extensions:\s*\[([^\]]*)\]/g) ?? [];
@@ -121,5 +140,30 @@ describe('withoutNonRenderingText', () => {
       const probe = `probe${extension.slice(1, -1)}`;
       expect(withoutNonRenderingText('/* box-shadow: 0 0 93px red */\n', probe)).not.toContain('93px');
     }
+  });
+});
+
+// The same question one granularity up: a file the bundler never reaches draws
+// nothing, whatever it contains. A test asserting on `'box-shadow: 0 0 93px
+// red'` documents a value; scanning it turns the gate into one that fails a
+// test for containing the string it tests.
+describe('rendersAtAll', () => {
+  it.each([
+    'src/components/Dashboard.tsx',
+    'src/index.css',
+    'src/lib/testHelpers.ts',
+    'src/components/protest/Banner.tsx',
+  ])('scans %s', (file) => {
+    expect(rendersAtAll(file)).toBe(true);
+  });
+
+  it.each([
+    'src/components/settings/models/modelHubStylePolicy.test.ts',
+    'src/lib/agentGraph.test.tsx',
+    'src/lib/util.spec.ts',
+    'src/__tests__/Dashboard.tsx',
+    'src/__mocks__/server.ts',
+  ])('skips %s', (file) => {
+    expect(rendersAtAll(file)).toBe(false);
   });
 });
