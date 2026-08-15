@@ -78,6 +78,7 @@ class InboundTurnFacts:
     attachment_capture_status: object = None
     attachment_config_generation: object = None
     attachment_failures: object = None
+    attachment_selection: object = None
     memory_enabled: bool = False
 
 
@@ -198,7 +199,9 @@ class CaptureAdmission:
                 )
                 if status == "ready" and config_generation is not None:
                     try:
-                        selection = select_memory_attachments(facts.attachment_lease)  # type: ignore[arg-type]
+                        selection = facts.attachment_selection
+                        if selection is None:
+                            selection = select_memory_attachments(facts.attachment_lease)  # type: ignore[arg-type]
                     except Exception as error:
                         logger.warning(
                             "memory_attachment_selection_failed "

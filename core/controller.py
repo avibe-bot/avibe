@@ -51,6 +51,7 @@ from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.memory import CaptureReceipt, CaptureRequest, CaptureSkipped
+import core.memory.admission as memory_admission
 from core.memory.admission import (
     WORKBENCH_PLATFORM,
     CaptureAdmission,
@@ -2515,6 +2516,7 @@ class Controller:
         platform = CaptureAdmission.platform_of(facts)
         if admission.admits_attachment_turn(facts):
             status = "not_configured"
+            attachment_selection = None
             if (
                 platform == WORKBENCH_PLATFORM
                 or facts.attachment_config_generation is not None
@@ -2536,8 +2538,27 @@ class Controller:
                         "unavailable",
                     }:
                         status = observed_status
-            facts = replace(facts, attachment_capture_status=status)
-        request = await run_blocking(admission.decide, facts)
+            if status == "ready" and platform != WORKBENCH_PLATFORM:
+                try:
+                    attachment_selection = await run_blocking(
+                        memory_admission.select_memory_attachments,
+                        facts.attachment_lease,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "memory_attachment_selection_failed "
+                        "platform=%s count=%d error_type=%s",
+                        platform,
+                        len(facts.files or ()),
+                        type(error).__name__,
+                    )
+                    status = "unavailable"
+            facts = replace(
+                facts,
+                attachment_capture_status=status,
+                attachment_selection=attachment_selection,
+            )
+        request = admission.decide(facts)
         if not isinstance(request, CaptureRequest):
             return
 

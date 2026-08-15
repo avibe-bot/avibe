@@ -527,6 +527,16 @@ def test_attachment_selection_runs_off_event_loop(
 
     async def run() -> None:
         controller = _controller()
+        event_loop_thread = threading.get_ident()
+        binding_threads: list[int] = []
+        settings_store = controller.platform_settings_managers["slack"].get_store()
+        original_maybe_reload = settings_store.maybe_reload
+
+        def observe_settings_access() -> None:
+            binding_threads.append(threading.get_ident())
+            original_maybe_reload()
+
+        monkeypatch.setattr(settings_store, "maybe_reload", observe_settings_access)
         attachment = CaptureAttachment(
             kind="pdf",
             name="receipt.pdf",
@@ -561,7 +571,6 @@ def test_attachment_selection_runs_off_event_loop(
         )
         assert reservation is not None
 
-        event_loop_thread = threading.get_ident()
         asyncio.get_running_loop().call_later(0.05, release_selection.set)
         await asyncio.wait_for(
             controller.capture_user_memory(
@@ -574,6 +583,7 @@ def test_attachment_selection_runs_off_event_loop(
             timeout=2.0,
         )
 
+        assert binding_threads and set(binding_threads) == {event_loop_thread}
         assert selector_threads and selector_threads[0] != event_loop_thread
         assert released_by_event_loop == [True]
 
