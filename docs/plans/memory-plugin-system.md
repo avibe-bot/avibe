@@ -264,7 +264,7 @@ Important fixed guards are:
 | Memory attachment bundle | 8 files; 25 MiB/file; 100 MiB total; 16 KiB descriptor metadata |
 | Nonterminal queue | 500 rows |
 | Minimum free disk for capture | 512 MiB |
-| Terminal idempotency tombstones | 90 days, newest 100,000 rows |
+| Personal and Agent terminal idempotency tombstones | 90 days, newest 100,000 rows per queue |
 | Search query/results | 8 KiB query; 1-20 items; 64 KiB/item; 256 KiB total; 20 s |
 
 At a queue or disk guard, capture is skipped and an aggregate missed counter is
@@ -272,10 +272,10 @@ updated; normal chat still proceeds.
 
 ### Status and failure behavior
 
-Status uses the closed states `disabled`, `starting`, `ready`, `syncing`,
-`degraded`, `down`, `clearing`, and `error`. It includes pending, processing,
-awaiting-receipt, succeeded, unknown, distillation-failed, dead, and missed
-counters plus the latest sanitized processing observation.
+Status uses the closed states `disabled`, `disabling`, `starting`, `ready`,
+`syncing`, `degraded`, `down`, `clearing`, and `error`. It includes pending,
+processing, awaiting-receipt, succeeded, unknown, distillation-failed, dead, and
+missed counters plus the latest sanitized processing observation.
 
 Sidecar or endpoint outages pause new claims and trigger bounded
 supervision/backoff. Work not yet added remains pending; an ambiguous flush is
@@ -296,11 +296,15 @@ never logged or serialized as errors.
 ### Disable and re-enable
 
 Disabling Personal Memory closes user capture/content reads and stops its worker
-and chat sidecar. Disabling Agent Memory independently closes scanner admission,
-stops its worker and agent sidecar, and preserves already admitted rows/provider
-data. Every later enable advances the scanner to the current terminal-settlement
-high water, so work completed during opt-out is never imported. Neither toggle
-mode-flips or deletes the other root.
+and chat sidecar. Disabling Agent Memory independently snapshots a durable
+terminal high-water drain target, closes new provider claims, waits for any
+current bounded request to settle, and then stops its provider worker/sidecar.
+It leaves only the local scanner running until every enabled-period source
+through that target is enqueued or durably skipped, then stops the scanner.
+Drained rows remain pending without provider I/O. Every later enable first
+requires that drain to converge, advances past work completed during opt-out,
+and only then makes pending Agent rows claimable. Neither toggle mode-flips or
+deletes the other root.
 
 Changing only an API key is allowed without replacing the vector space.
 Changing the embedding endpoint or model while provider data exists is rejected.

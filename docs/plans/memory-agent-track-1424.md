@@ -45,10 +45,11 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    reports them but does not patch EverOS or file an upstream issue. Retrieval
    exposes skill freshness/maturity metadata, and status adds a conservative
    per-Agent skill-count hint; neither mitigation mutates provider state.
-9. Every disabled-to-enabled transition, Clear, and factory reset initializes
-   the scan cursor to the current terminal-settlement sequence high water mark
+9. Every disable snapshots and drains through its current terminal-settlement
+   sequence high water. Every disabled-to-enabled transition, Clear, and
+   factory reset initializes the scan cursor to the then-current high water
    before scanner admission opens. There is no historical, disabled-period, or
-   post-reset replay in v1; only turns settling after that explicit cutover are
+   post-reset replay in v1; only turns settling inside an enabled epoch are
    candidates.
 
 ## Product Contract
@@ -80,15 +81,28 @@ be sent to the configured Memory processing endpoints, that accepted processing
 may produce no case or skill, and that the feature inherits the documented
 EverOS 1.2.3 limitations. The source set is fixed to eligible completed Agent
 Turns, including interactive and Harness turns; v1 has no source-type selector.
+The disclosure also states that the exact backend dispatch and final result are
+trajectory content: user/Agent-authored identifiers and Avibe-injected time,
+source-Session, username, or user-id attribution lines present in those texts
+are retained locally and forwarded to the processing endpoints. They are never
+used as structural Memory owners, project selectors, or provider paths.
 
 Enabling requires the installed Memory runtime, complete processing endpoints,
 and at least one explicit project binding. Under the agent-capture lifecycle
 lock, every disabled-to-enabled operation snapshots the current committed
 terminal-sequence high water, persists it as the new scan cursor, rebuilds the
 opaque binding projection, and only then opens scanner admission. A disable
-closes scanner admission and waits for the current bounded scan transaction
-before it reports success. It preserves rows admitted before that cutover but
-never later imports turns settled while disabled. A failed start leaves the
+atomically records the current terminal high water as a durable drain target and
+closes the enable epoch and new Agent provider claims. Disable waits for any
+current bounded provider request to settle before stopping the worker and
+sidecar; after that worker-quiescence point, no provider write may start. The
+scanner meanwhile enters local-only
+`disabling` mode and durably enqueues/skips every source through the drain
+target. Only then does the scanner stop and status become `disabled`. Crash
+recovery resumes an unfinished drain. Rows enqueued during the drain remain
+pending without provider I/O and become claimable only after a later enable.
+Re-enable first requires that drain to converge, then advances the cursor past
+the disabled interval before opening a new epoch. A failed start leaves the
 agent-track projection unavailable without disabling Personal Memory or
 restarting the Avibe service.
 
@@ -104,6 +118,9 @@ row only when all of these invariants hold:
   one non-empty final `result_text`;
 - immutable `dispatch_text` and the final result are valid, nonempty UTF-8 text
   of at most 256 KiB each;
+- no accepted live-steer Delivery is linked to the Turn; v1 excludes steered
+  Turns because their accepted instruction text is not durably available after
+  materialization and cannot satisfy the exact two-message contract;
 - the session's `agent_id` resolves to a real `agents.id`; legacy name-only
   sessions fail closed, while later Agent disable/archive does not rewrite an
   already completed Turn's identity;
@@ -114,8 +131,8 @@ row only when all of these invariants hold:
 
 The property is deliberately positive. Every terminal shape not satisfying the
 complete invariant is skipped, including failed, canceled, stopped/restarted,
-silent, missing-result, malformed-evidence, oversized, and unbound turns.
-Admission logs only a closed reason and opaque source digest.
+silent, missing-result, malformed-evidence, oversized, accepted-steer, and
+unbound turns. Admission logs only a closed reason and opaque source digest.
 
 The v1 trajectory has exactly two ordered messages:
 
@@ -152,11 +169,15 @@ binding_key = "b-" + HMAC_SHA256(scope_key, "agent-project:" + normalized_workdi
 ```
 
 The raw Agent id, Agent name, workdir, Session id, Turn id, Run id, platform
-identity, and user principal are not written into the Memory database or
-provider paths. The source Turn id is reduced to a keyed digest for idempotency.
-The synthetic input actor is `i-` plus the first 32 hex characters of a separate
-HMAC domain over that source digest; it can never collide with `u-` or `a-`
-owners.
+identity, and user principal are never structural Memory columns, owner/filter
+values, or provider path components. The source Turn id is reduced to a keyed
+digest for idempotency. Because v1 deliberately preserves exact backend texts,
+those bytes may still contain user/Agent-authored identifiers or the disclosed
+Avibe-injected attribution lines. They remain bounded untrusted content and are
+scrubbed with the payload; no content parsing may promote them into identity or
+scope. The synthetic input actor is `i-` plus the first 32 hex characters of a
+separate HMAC domain over that source digest; it can never collide with `u-` or
+`a-` owners.
 
 One binding maps one `binding_key` to one project id. Project ids use the schema
 v3 write contract exactly: literal `default`, or a 1-63 byte lower-case named
@@ -198,14 +219,21 @@ prompt and `vibe memory search/list` contracts remain byte-for-byte unchanged by
 the new CLI examples and parser registration.
 
 Memory status also reports a content-free skill-count observation for each
-installed Agent across that Agent's explicitly bound projects. The monitor uses
-bounded `total_count` metadata, not skill bodies, and reports `normal` for 0-7,
-`approaching` for 8-10, and `risk` above 10. The hint says explicitly that this
-total is a conservative proxy: EverOS does not expose cluster membership, name
-sanitization collisions can occur at any count, and the stale-index risk applies
-when one upstream cluster exceeds 10. An unavailable count is `unknown` and
-degrades only Agent Memory status. Counts and hints never block capture,
-retrieval, or provider writes.
+installed Agent across that Agent's explicitly bound projects. An explicit
+status refresh may advance one durable, stable-order sampling cursor at most
+once per 60 seconds. One sampler batch issues at most 32 scoped `total_count`
+requests with concurrency at most two, caches only count/observed-at metadata,
+and resumes at the next Agent/project pair; status rendering never fans out its
+own provider reads. An Agent count is complete only after all of its current
+bound projects have been observed in the same sampling generation; otherwise it
+is `unknown` or explicitly stale. Removed Agents/bindings invalidate their cache.
+
+A complete count reports `normal` for 0-7, `approaching` for 8-10, and `risk`
+above 10. The hint says explicitly that this total is a conservative proxy:
+EverOS does not expose cluster membership, name sanitization collisions can
+occur at any count, and the stale-index risk applies when one upstream cluster
+exceeds 10. An unavailable count degrades only Agent Memory status. Counts and
+hints never block capture, retrieval, or provider writes.
 
 ## Isolation Architecture
 
@@ -311,6 +339,13 @@ bounded retry dead-letters and scrubs the row; infrastructure unavailability
 pauses claims without consuming a content retry. Agent rows never enter
 `manual_required` or the Personal Memory session-flush coordinator.
 
+Scrubbed `delivered` and `dead` rows are idempotency tombstones with the same
+bounded retention as Personal Memory: retain at most 90 days and, within that
+window, only the newest 100,000 closed Agent rows. Transactional compaction runs
+after settlement and from periodic store maintenance, deletes oldest excess
+tombstones, and never changes the scan cursor, enable/drain state, or aggregate
+missed counters.
+
 Each row uses its own deterministic provider session. The worker performs one
 two-message add and, when needed, one matching flush. Acknowledgement means only
 that EverOS accepted/processed the trajectory boundary; it does not prove a case
@@ -321,7 +356,8 @@ ambiguous agent write cannot fence user capture.
 ### Scanner cursor and project bindings
 
 `memory_agent_scan_state` is a singleton containing the last committed terminal
-sequence, enable epoch, durable missed counters, and scan/update timestamps. On
+sequence, enable epoch, optional drain-through sequence/state, durable missed
+counters, and scan/update timestamps. On
 every enable cutover the cursor advances to the primary store's current maximum
 before admission opens. Clear and factory-reset recovery apply the same cutover
 after deleting or recreating the Memory store: while the shared maintenance
@@ -445,9 +481,9 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every enable or destructive reset starts at the current high water. |
-| `MEMORY-AGENT-002` | Every eligible completed interactive or Harness Turn is represented once by its exact dispatch/result pair. |
-| `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; disable drains its enabled interval, and every enable or destructive reset starts at the correct high water. |
+| `MEMORY-AGENT-002` | Every eligible non-steered completed interactive or Harness Turn is represented once by its exact dispatch/result pair. |
+| `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant, including accepted live steers. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
 | `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output. |
 | `MEMORY-AGENT-006` | Malformed config, legacy Agent identity, and missing project binding fail closed. |
@@ -455,8 +491,9 @@ stable ids:
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
 | `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
-| `MEMORY-AGENT-011` | Queue/disk exhaustion skips durably without retaining text or degrading Personal Memory. |
-| `MEMORY-AGENT-012` | Skill retrieval exposes exact freshness/maturity metadata, and status reports non-blocking per-Agent count hints at 8 and 11 skills. |
+| `MEMORY-AGENT-011` | Queue/disk exhaustion skips durably, and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
+| `MEMORY-AGENT-012` | Skill retrieval exposes exact freshness/maturity metadata, while the request-budgeted status sampler reports non-blocking per-Agent count hints at 8 and 11 skills. |
+| `MEMORY-AGENT-013` | Opt-in disclosure models raw attribution bytes in exact trajectory content without allowing them to become Memory identity or scope. |
 
 Evidence layers are unit tests for config/identity/admission/store/worker/runtime,
 contract tests for provider/sidecar/internal API/CLI/UI, executable catalog

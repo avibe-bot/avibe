@@ -23,15 +23,29 @@ Agent Memory is a separate, off-by-default track for completed Agent Turns. When
 the owner explicitly enables it and binds a source workdir to `default` or a
 named Memory project, Avibe asynchronously sends the exact Agent dispatch text
 and successful final result to a dedicated EverOS agent-mode root. Interactive
-and Harness turns use the same admission rule. Failed, canceled, silent,
-legacy-Agent, oversized, malformed, callback, maintenance, and unbound turns are
-skipped without delaying or changing the Turn result.
+and Harness turns use the same admission rule. Accepted-live-steer, failed,
+canceled, silent, legacy-Agent, oversized, malformed, callback, maintenance, and
+unbound turns are skipped without delaying or changing the Turn result.
+
+Because the input is the exact backend dispatch, it can contain identifiers in
+user/Agent-authored text and Avibe-injected time, source-Session, username, or
+user-id attribution lines. Enabling Agent Memory discloses that those content
+bytes are retained locally and sent to the configured processing endpoints;
+they never become structural Memory ownership, scope, or provider paths.
 
 Each enable, Clear, and Reinitialize begins at the current completed-Turn high
 water. Turns completed before first enable, during a later disabled interval, or
 before a destructive reset are not backfilled. The owner's workdir/project
 bindings remain in Memory settings across Clear and Reinitialize; the reset
 runtime derives fresh opaque internal keys from them.
+
+Disable closes new Agent provider claims, waits for any current bounded provider
+request to settle, stops the sidecar, snapshots the current terminal high water,
+and keeps only the local scanner in `disabling` state until every enabled-period
+Turn through that target is enqueued or durably skipped. No new provider write
+starts after worker quiescence. Crash recovery resumes that drain; drained rows
+remain pending without provider I/O until a later enable, which also skips the
+completed opt-out interval.
 
 The existing Personal Memory root remains pinned to chat mode. Agent Memory has
 its own provider root, socket, lifecycle/health slot, scanner, and queue. An
@@ -41,7 +55,8 @@ Reinitialize, and embedding-identity rebuild operations intentionally share a
 maintenance fence and can pause both roles until the operation converges.
 The Agent queue independently caps nonterminal work at 500 rows and requires at
 least 512 MiB free before admission; guarded turns are counted without retaining
-their text.
+their text. Scrubbed terminal tombstones retain at most 90 days and the newest
+100,000 rows.
 
 Agent cases and skills are available only through explicit, scoped Agent Memory
 search/list operations in the CLI or owner Settings UI. Returned skill content
@@ -49,6 +64,8 @@ is untrusted text: Avibe does not install or execute it and never injects it int
 an Agent prompt. Each displayed skill includes its last-updated timestamp and
 maturity score. Memory status reports a non-blocking per-Agent skill-count hint:
 8-10 is approaching the upstream prompt limit and more than 10 is the risk zone.
+A global incremental sampler limits one refresh to 32 Agent/project count reads
+with concurrency two; incomplete observations are shown as unknown or stale.
 A successful add/flush means the trajectory was processed, not that EverOS
 necessarily produced a case or skill.
 
