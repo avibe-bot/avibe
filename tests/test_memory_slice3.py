@@ -7,6 +7,7 @@ import asyncio
 import gc
 import json
 import sys
+import threading
 import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -515,6 +516,66 @@ def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
 
         release_health.set()
         await asyncio.wait_for(capture, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_attachment_selection_runs_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-001."""
+
+    async def run() -> None:
+        controller = _controller()
+        attachment = CaptureAttachment(
+            kind="pdf",
+            name="receipt.pdf",
+            uri="file:///leased/receipt.pdf",
+            ext="pdf",
+        )
+        selector_threads: list[int] = []
+        release_selection = threading.Event()
+        released_by_event_loop: list[bool] = []
+
+        def select_attachments(_lease):
+            selector_threads.append(threading.get_ident())
+            released_by_event_loop.append(release_selection.wait(timeout=1.0))
+            return SimpleNamespace(attachments=(attachment,), skipped=())
+
+        monkeypatch.setattr(
+            "core.memory.admission.select_memory_attachments",
+            select_attachments,
+        )
+        context = _context("slack", ordinary=False)
+        context.files = [
+            FileAttachment(
+                name="receipt.pdf",
+                mimetype="application/pdf",
+                url="https://files.slack.test/private",
+            )
+        ]
+        context.is_ordinary_attachment = True
+        reservation = controller.reserve_memory_attachment_capture(
+            context,
+            "stable-session",
+        )
+        assert reservation is not None
+
+        event_loop_thread = threading.get_ident()
+        asyncio.get_running_loop().call_later(0.05, release_selection.set)
+        await asyncio.wait_for(
+            controller.capture_user_memory(
+                context,
+                "remember this",
+                "stable-session",
+                attachment_lease=object(),
+                attachment_reservation=reservation,
+            ),
+            timeout=2.0,
+        )
+
+        assert selector_threads and selector_threads[0] != event_loop_thread
+        assert released_by_event_loop == [True]
 
     asyncio.run(run())
 

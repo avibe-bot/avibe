@@ -2537,7 +2537,7 @@ class Controller:
                     }:
                         status = observed_status
             facts = replace(facts, attachment_capture_status=status)
-        request = admission.decide(facts)
+        request = await run_blocking(admission.decide, facts)
         if not isinstance(request, CaptureRequest):
             return
 
