@@ -8963,6 +8963,42 @@ def _session_runtime_projection(
     return projection
 
 
+def _active_unmaterialized_input(conn, session_id: str) -> dict[str, Any] | None:
+    """Project the active claimed Delivery as a temporary transcript row."""
+
+    from storage import message_deliveries
+
+    turn = message_deliveries.active_turn(conn, session_id)
+    if turn is None:
+        return None
+    delivery = message_deliveries.delivery_for_turn(conn, str(turn["id"]))
+    if (
+        delivery is None
+        or delivery.get("state") != "claimed"
+        or delivery.get("message_id")
+    ):
+        return None
+    payload = message_deliveries.public_delivery_payload(delivery)
+    payload.update(delivered_at=None, read_at=None)
+    return payload
+
+
+def _append_active_input(
+    messages_result: dict[str, Any],
+    active_input: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep a claimed input visible until native acceptance materializes it."""
+
+    if active_input is None:
+        return messages_result
+    current = list(messages_result.get("messages") or [])
+    if any(str(row.get("id") or "") == str(active_input["id"]) for row in current):
+        return messages_result
+    current.append(active_input)
+    current.sort(key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")))
+    return {**messages_result, "messages": current}
+
+
 @app.route("/api/sessions/<session_id>/bootstrap", methods=["GET"])
 async def sessions_bootstrap(session_id: str):
     """First-screen payload for the Workbench Chat page.
@@ -9002,6 +9038,10 @@ async def sessions_bootstrap(session_id: str):
             types=messages_service.TRANSCRIPT_TYPES,
             authorization_context=authorization_context,
             tail=True,
+        )
+        messages_result = _append_active_input(
+            messages_result,
+            _active_unmaterialized_input(conn, session_id),
         )
         from storage import message_deliveries
 
@@ -9698,6 +9738,13 @@ def sessions_messages_list(session_id: str):
             authorization_context=authorization_context,
             tail=tail,
         )
+        if tail and not any(
+            (after_id, before_id, around_id, around_native_id, around_turn_id, around_run_id)
+        ):
+            result = _append_active_input(
+                result,
+                _active_unmaterialized_input(conn, session_id),
+            )
     return jsonify(result)
 
 
@@ -11254,6 +11301,8 @@ async def sessions_cancel(session_id: str):
 
     from vibe import internal_client
 
+    logger.info("Workbench Stop requested for session=%s", session_id)
+
     try:
         result = await internal_client.cancel_dispatch(session_id)
     except internal_client.InternalServerUnavailable as exc:
@@ -11262,6 +11311,13 @@ async def sessions_cancel(session_id: str):
     body = result.get("body") or {}
     body.setdefault("ok", status == 200)
     body.setdefault("recovered_agent_status", False)
+    logger.info(
+        "Workbench Stop settled for session=%s status=%s outcome=%s code=%s",
+        session_id,
+        status,
+        body.get("status"),
+        body.get("code"),
+    )
     return jsonify(body), status
 
 

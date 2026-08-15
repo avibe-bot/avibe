@@ -175,6 +175,51 @@ def _settle_reserved_delivery(payload: dict, *, state: str) -> dict:
         return settled
 
 
+def _seed_claimed_delivery(
+    *,
+    scope_id: str,
+    session_id: str,
+    text: str,
+) -> dict:
+    """Create the pre-native-write state that must remain visible in Chat."""
+
+    with create_sqlite_engine().begin() as conn:
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_claimed_active",
+            session_id=session_id,
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                text=text,
+            ),
+            dispatch_text=text,
+        )
+        turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            initial_delivery_id=delivery["id"],
+            state="starting",
+            backend="opencode",
+        )
+        claimed = message_deliveries.open_start_attempt(
+            conn,
+            delivery["id"],
+            expected_version=int(delivery["version"]),
+            turn_id=turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+        )
+        assert claimed is not None
+        return claimed
+
+
 def _accepted_dispatch(session_id: str) -> AsyncMock:
     async def dispatch(payload: dict) -> dict:
         settled = _settle_reserved_delivery(payload, state="accepted")
@@ -1183,6 +1228,53 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert body["turn_state"]["background_activities"][0]["id"] == "task-1"
     assert body["turn_state"]["background_activities"][0]["label"] == "Waiting for turn"
     assert body["turn_state"]["connection"] == "connected"
+
+
+def test_claimed_active_input_survives_transcript_reload(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(
+        tmp_path,
+        agent_name="opencode-worker",
+        agent_backend="opencode",
+    )
+    claimed = _seed_claimed_delivery(
+        scope_id=scope_id,
+        session_id=session_id,
+        text="message waiting for native start",
+    )
+
+    turn_state = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"in_flight": True, "native_turn_started": False},
+        }
+    )
+    with (
+        patch("vibe.internal_client.turn_state", turn_state),
+        patch(
+            "vibe.api.get_vibe_agents",
+            return_value={"agents": [], "default_agent_name": None},
+        ),
+    ):
+        client = app.test_client()
+        messages_response = client.get(f"/api/sessions/{session_id}/messages?tail=1")
+        bootstrap_response = client.get(f"/api/sessions/{session_id}/bootstrap")
+
+    assert messages_response.status_code == 200
+    assert bootstrap_response.status_code == 200
+    for rows in (
+        messages_response.get_json()["messages"],
+        bootstrap_response.get_json()["messages"],
+    ):
+        assert [row["id"] for row in rows] == [claimed["id"]]
+        assert rows[0]["text"] == "message waiting for native start"
+        assert rows[0]["type"] == "user"
+
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(messages.c.id).where(messages.c.session_id == session_id)
+        ).scalar_one_or_none() is None
 
 
 def test_chat_bootstrap_filters_harness_activities_for_viewer(isolated_state, tmp_path):

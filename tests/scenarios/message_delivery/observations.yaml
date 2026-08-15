@@ -46,3 +46,17 @@ observations:
       - identify callback events by callee terminal Turn and callback Session
       - point every participating parent Run ledger to the shared callback Run
       - keep callbacks for different terminal Turns or callback Sessions independent
+  - id: OBS-MESSAGE-DELIVERY-005
+    source: live_local_diagnosis
+    related_scenarios:
+      - MESSAGE-DELIVERY-023
+      - MESSAGE-DELIVERY-024
+      - MESSAGE-DELIVERY-025
+    summary: A prewrite Web Stop left the OpenCode runtime gate owned while the replacement input vanished from the recovered transcript.
+    previous_assumption: The generic cancellation terminal tidy would always release the runtime gate quickly, and optimistic input rendering was sufficient until native acceptance.
+    observed_behavior: The first Turn stopped 134 milliseconds after admission before native write; its asynchronous terminal tidy retained the gate, the next Turn waited before entering OpenCode, and its claimed Delivery was absent after Chat reloaded from materialized Messages.
+    required_updates:
+      - release the runtime gate synchronously when the durable prewrite Stop owns terminalization
+      - prevent a send click burst from activating the destructive control rendered at the same pointer target
+      - project the active claimed Delivery into Workbench tail and bootstrap reads until native acceptance materializes it
+      - log Workbench Stop request and settlement boundaries for future source attribution

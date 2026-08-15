@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
-import { createRef, type ReactElement } from 'react';
+import { createRef, useState, type ReactElement } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -40,7 +40,10 @@ const providers = (ui: ReactElement) => (
   </I18nextProvider>
 );
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 beforeEach(() => uploadWorkbenchAttachment.mockReset());
 
 describe('Composer attachment retry', () => {
@@ -154,5 +157,39 @@ describe('Composer draft retry', () => {
       '',
       'survive navigation',
     ]);
+  });
+});
+
+describe('Composer Stop activation', () => {
+  it('does not let the send click burst hit the newly-rendered Stop control', async () => {
+    vi.useFakeTimers();
+    const onStop = vi.fn();
+
+    const Harness = () => {
+      const [busy, setBusy] = useState(false);
+      return (
+        <Composer
+          busy={busy}
+          onSend={() => {
+            setBusy(true);
+          }}
+          onStop={onStop}
+        />
+      );
+    };
+
+    render(providers(<Harness />));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'start' } });
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+    const stop = screen.getByLabelText(en.chat.compose.stop) as HTMLButtonElement;
+
+    expect(stop.disabled).toBe(true);
+    fireEvent.click(stop);
+    expect(onStop).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTime(400));
+    expect(stop.disabled).toBe(false);
+    fireEvent.click(stop);
+    expect(onStop).toHaveBeenCalledTimes(1);
   });
 });
