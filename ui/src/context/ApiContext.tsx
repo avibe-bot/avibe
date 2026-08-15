@@ -1850,11 +1850,13 @@ export type MemoryProcessingConfig = {
   llm: MemoryEndpointConfig;
   embedding: MemoryEndpointConfig;
   rerank?: MemoryEndpointConfig;
+  multimodal?: MemoryEndpointConfig;
 };
 
 export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
+  im_attachment_capture_available?: boolean;
   repair_available?: boolean;
   processing: MemoryProcessingConfig;
   rebuild_required?: boolean;
@@ -1862,8 +1864,9 @@ export type MemorySettings = {
   factory_reset_required?: boolean;
 };
 
-// Omitting a field keeps its current value; an explicit `api_key: null` clears it
-// (only accepted while Memory is disabled/clearing per the backend contract).
+// Omitting a field keeps its current value; an explicit `api_key: null` clears it.
+// Required keys can clear only while Memory is disabled; optional endpoints can
+// be removed while Memory stays enabled.
 export type MemoryEndpointPatch = {
   base_url?: string | null;
   model?: string | null;
@@ -1876,12 +1879,13 @@ export type MemorySettingsPatch = {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
     rerank?: MemoryEndpointPatch;
+    multimodal?: MemoryEndpointPatch;
   };
   confirm_rebuild?: boolean;
 };
 
 export type MemoryFailureDiagnostic = {
-  side?: 'embedding' | 'llm' | 'rerank';
+  side?: 'embedding' | 'llm' | 'rerank' | 'multimodal';
   http_status?: number | null;
   provider_error_code?: string | null;
   message?: string;
@@ -1911,6 +1915,9 @@ export type MemoryStatus = {
     disabled_features: string[];
     cascade: Record<string, unknown> | null;
     recorder: Record<string, unknown> | null;
+  };
+  attachment_capture?: {
+    status: 'ready' | 'not_configured' | 'unavailable';
   };
 };
 

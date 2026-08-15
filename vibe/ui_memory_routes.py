@@ -115,6 +115,12 @@ def _memory_settings_projection(memory: object) -> dict:
     return payload
 
 
+def _memory_im_attachment_capture_available() -> bool:
+    from core.memory.attachments import IM_ATTACHMENT_CAPTURE_AVAILABLE
+
+    return IM_ATTACHMENT_CAPTURE_AVAILABLE
+
+
 def _memory_repair_available() -> bool:
     from core.memory.artifact import get_memory_artifact_manager
 
@@ -130,6 +136,9 @@ def _memory_settings_payload() -> dict:
     memory = V2Config.load().memory
     payload = _memory_settings_projection(memory)
     payload["status"] = "ok"
+    payload["im_attachment_capture_available"] = (
+        _memory_im_attachment_capture_available()
+    )
     # Read-only projection while a durable rebuild marker is pending.
     payload["rebuild_required"] = memory.recovery_intent == "rebuild"
     payload["factory_reset_required"] = memory.recovery_intent == "factory_reset"
@@ -157,7 +166,7 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
     if not isinstance(confirm_rebuild, bool):
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
-    endpoints = ("llm", "embedding", "rerank")
+    endpoints = ("llm", "embedding", "rerank", "multimodal")
     for endpoint in endpoints:
         if endpoint in target["processing"]:
             target["processing"][endpoint].pop("has_api_key", None)
@@ -180,7 +189,7 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
                 {"base_url": None, "model": None, "api_key": None},
             ).update(endpoint_patch)
             if (
-                endpoint == "rerank"
+                endpoint in {"rerank", "multimodal"}
                 and set(endpoint_patch) == {"api_key"}
                 and endpoint_patch["api_key"] in {None, ""}
             ):
@@ -190,12 +199,13 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
                     "api_key": None,
                 }
 
-    explicit_key_clear = any(
+    explicit_required_key_clear = any(
         endpoint_patch.get("api_key") in {None, ""}
-        for endpoint_patch in (processing_patch or {}).values()
+        for endpoint, endpoint_patch in (processing_patch or {}).items()
+        if endpoint in {"llm", "embedding"}
         if isinstance(endpoint_patch, dict) and "api_key" in endpoint_patch
     )
-    if explicit_key_clear and target["enabled"]:
+    if explicit_required_key_clear and target["enabled"]:
         raise ValueError("memory_key_clear_while_enabled")
     return target, confirm_rebuild
 
@@ -238,6 +248,21 @@ def _memory_rerank_configuration_changed(current: V2Config, candidate: V2Config)
     return endpoint_values(current) != endpoint_values(candidate)
 
 
+def _memory_multimodal_configuration_changed(
+    current: V2Config,
+    candidate: V2Config,
+) -> bool:
+    """Return whether the IM attachment processing endpoint changed."""
+
+    def endpoint_values(config: V2Config) -> tuple[str | None, str | None, str | None]:
+        endpoint = config.memory.processing.multimodal
+        if endpoint is None:
+            return (None, None, None)
+        return (endpoint.base_url, endpoint.model, endpoint.api_key)
+
+    return endpoint_values(current) != endpoint_values(candidate)
+
+
 def _memory_preflight_required(candidate: V2Config) -> bool:
     """Require live admission unless a disabled candidate is still incomplete."""
 
@@ -255,7 +280,7 @@ def _memory_api_key_only_patch(patch_payload: object) -> bool:
     processing = patch_payload.get("processing")
     if not isinstance(processing, dict) or not processing:
         return False
-    if not set(processing).issubset({"llm", "embedding", "rerank"}):
+    if not set(processing).issubset({"llm", "embedding", "rerank", "multimodal"}):
         return False
     return all(
         isinstance(endpoint, dict) and set(endpoint) == {"api_key"}
@@ -278,7 +303,7 @@ def _memory_factory_reset_repair_patch(patch_payload: object) -> bool:
     processing = patch_payload.get("processing")
     if not isinstance(processing, dict) or not processing:
         return False
-    if not set(processing).issubset({"llm", "embedding", "rerank"}):
+    if not set(processing).issubset({"llm", "embedding", "rerank", "multimodal"}):
         return False
     return all(
         isinstance(endpoint, dict)
@@ -534,6 +559,7 @@ def _memory_repair_result(payload: dict, status_code: int) -> tuple[dict, int]:
         "memory_embedding_unavailable": 409,
         "memory_llm_unavailable": 409,
         "memory_rerank_unavailable": 409,
+        "memory_multimodal_unavailable": 409,
     }.get(error)
     if expected_status is None or expected_status != status_code:
         return protocol_failure, 503
@@ -693,6 +719,9 @@ async def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> d
 
     payload = _memory_settings_projection(memory)
     payload["status"] = "ok"
+    payload["im_attachment_capture_available"] = (
+        _memory_im_attachment_capture_available()
+    )
     payload["rebuild_required"] = getattr(memory, "recovery_intent", None) == "rebuild"
     payload["factory_reset_required"] = getattr(memory, "recovery_intent", None) == "factory_reset"
     payload["repair_available"] = (
@@ -741,6 +770,10 @@ async def _apply_memory_settings_patch(
             candidate = _memory_candidate_config(current, target_payload)
             identity_changed = _memory_embedding_configuration_changed(current, candidate)
             rerank_changed = _memory_rerank_configuration_changed(current, candidate)
+            multimodal_changed = _memory_multimodal_configuration_changed(
+                current,
+                candidate,
+            )
             pending_marker = current.memory.recovery_intent == "rebuild"
             pending_factory_reset = current.memory.recovery_intent == "factory_reset"
         except (TypeError, ValueError):
@@ -824,8 +857,15 @@ async def _apply_memory_settings_patch(
         rerank_preflight = (
             rerank_changed and candidate.memory.processing.rerank is not None
         )
+        multimodal_preflight = (
+            multimodal_changed and candidate.memory.processing.multimodal is not None
+        )
         if (
-            ((identity_changed and confirm_rebuild) or rerank_preflight)
+            (
+                (identity_changed and confirm_rebuild)
+                or rerank_preflight
+                or multimodal_preflight
+            )
             and _memory_preflight_required(candidate)
         ):
             from config.v2_config import memory_config_to_payload

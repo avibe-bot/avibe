@@ -138,6 +138,34 @@ def test_released_memory_config_without_rerank_loads_and_saves_without_shape_chu
     assert V2Config.load(tmp_path / "config.json").memory.processing.rerank is None
 
 
+def test_released_memory_config_without_multimodal_has_no_shape_churn(tmp_path) -> None:
+    """MEMORY-IM-ATTACH-003: legacy config remains opted out after round-trip."""
+
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": _complete_processing()})
+    )
+
+    assert config.memory.processing.multimodal is None
+    config.save(tmp_path / "config.json")
+
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert "multimodal" not in stored["memory"]["processing"]
+    assert V2Config.load(tmp_path / "config.json").memory.processing.multimodal is None
+
+
+def test_empty_multimodal_endpoint_normalizes_to_absent(tmp_path) -> None:
+    processing = _complete_processing()
+    processing["multimodal"] = {}
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+
+    assert config.memory.processing.multimodal is None
+    config.save(tmp_path / "config.json")
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert "multimodal" not in stored["memory"]["processing"]
+
+
 def test_disk_load_degrades_only_a_malformed_optional_rerank_section(tmp_path) -> None:
     processing = _complete_processing()
     processing["rerank"] = {
@@ -165,6 +193,36 @@ def test_disk_load_degrades_only_a_malformed_optional_rerank_section(tmp_path) -
     assert "rerank" in json.loads(config_path.read_text(encoding="utf-8"))["memory"]["processing"]
 
 
+def test_disk_load_degrades_only_a_malformed_optional_multimodal_section(tmp_path) -> None:
+    processing = _complete_processing()
+    processing["multimodal"] = {
+        "base_url": "https://vision.example.test/v1",
+        "model": "vision-model",
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            _payload(
+                {
+                    "enabled": True,
+                    "recovery_intent": "rebuild",
+                    "processing": processing,
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.enabled is True
+    assert loaded.memory.processing.llm.model == "chat"
+    assert loaded.memory.processing.embedding.model == "embed"
+    assert loaded.memory.processing.multimodal is None
+    assert loaded.memory.recovery_intent == "rebuild"
+    assert any("memory.multimodal" in warning for warning in loaded.load_warnings)
+
+
 def test_memory_rerank_round_trips_without_projecting_its_key(tmp_path) -> None:
     processing = _complete_processing()
     processing["rerank"] = {
@@ -186,6 +244,48 @@ def test_memory_rerank_round_trips_without_projecting_its_key(tmp_path) -> None:
         "api_key": None,
         "has_api_key": True,
     }
+
+
+def test_memory_multimodal_round_trips_without_projecting_its_key(tmp_path) -> None:
+    """MEMORY-IM-ATTACH-001: a complete endpoint is the explicit opt-in."""
+
+    processing = _complete_processing()
+    processing["multimodal"] = {
+        "base_url": "https://vision.example.test/v1",
+        "model": "vision-model",
+        "api_key": "vision-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+    config.save(tmp_path / "config.json")
+
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    projected = config_to_payload(config)["memory"]["processing"]["multimodal"]
+    assert stored["memory"]["processing"]["multimodal"]["api_key"] == "vision-secret"
+    assert projected == {
+        "base_url": "https://vision.example.test/v1",
+        "model": "vision-model",
+        "api_key": None,
+        "has_api_key": True,
+    }
+
+
+@pytest.mark.parametrize("missing", ["base_url", "model", "api_key"])
+def test_memory_config_rejects_partially_filled_multimodal(missing: str) -> None:
+    processing = _complete_processing()
+    multimodal = {
+        "base_url": "https://vision.example.test/v1",
+        "model": "vision-model",
+        "api_key": "vision-secret",
+    }
+    multimodal.pop(missing)
+    processing["multimodal"] = multimodal
+
+    with pytest.raises(ValueError, match="Memory multimodal endpoint must include"):
+        V2Config.from_payload(
+            _payload({"enabled": False, "processing": processing})
+        )
 
 
 @pytest.mark.parametrize("missing", ["base_url", "model", "api_key"])

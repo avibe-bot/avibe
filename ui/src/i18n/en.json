@@ -1633,6 +1633,7 @@
     "memory_embedding_unavailable": "The embedding provider is unavailable",
     "memory_llm_unavailable": "The LLM provider is unavailable",
     "memory_rerank_unavailable": "The reranking provider is unavailable",
+    "memory_multimodal_unavailable": "The attachment processing provider is unavailable",
     "provider_request_timed_out": "The provider request timed out.",
     "provider_response_too_large": "The provider response exceeded the safety limit.",
     "provider_unavailable": "The provider is unavailable.",
@@ -4418,6 +4419,10 @@
       "rerankHelp": "Memory uses this model to score search results for advanced recall. Enter a reranking base URL, model name, and API key to enable it.",
       "rerankHelpLabel": "About the reranking model",
       "rerankClearLabel": "Remove reranking endpoint",
+      "multimodalTitle": "IM attachment processing model (optional)",
+      "multimodalHelp": "When fully configured, eligible attachments from bound direct messages are sent to this OpenAI-compatible vision endpoint for Memory capture.",
+      "multimodalHelpLabel": "About IM attachment processing",
+      "multimodalClearLabel": "Disable IM attachment capture",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "Model",
@@ -4442,6 +4447,7 @@
         "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
+      "disclosureAttachment": "When the IM attachment processing endpoint is configured, eligible attachments from bound direct messages are also sent to that provider.",
       "clearKeyLabel": "Clear the saved key",
       "rebuildRequiredTitle": "Memory index rebuild required",
       "rebuildRequiredDescription": "Your embedding endpoint or model change is saved. The Memory engine can't restart until the rebuild finishes.",
@@ -4453,7 +4459,8 @@
       "rebuildCompleted": "Memory index rebuild completed.",
       "rebuildFailed": "Memory index rebuild failed.",
       "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local index. Your memories are kept.",
-      "rerankIdentityHint": "Leave all three fields empty to keep the standard Memory search tier."
+      "rerankIdentityHint": "Leave all three fields empty to keep the standard Memory search tier.",
+      "multimodalIdentityHint": "A complete base URL, model, and API key is the opt-in. Leave all three empty to keep IM attachment capture off."
     },
     "clear": {
       "button": "Clear Memory Data",

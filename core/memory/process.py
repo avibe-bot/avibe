@@ -39,7 +39,12 @@ from core.memory.confined_filesystem import (
     remove_anchored_entry,
     required_no_follow_flag,
 )
-from core.memory.everos import EverOSPort
+from core.memory.everos import (
+    EverOSPort,
+    MULTIMODAL_EXPLICIT_ENV,
+    PROCESSING_PROBE_MAX_DEADLINE_SECONDS,
+    processing_probe_deadline_seconds,
+)
 from core.memory.secret_scrubber import scrub_text
 from core.memory.types import MemoryErrorCode
 
@@ -77,6 +82,7 @@ async def _probe_stderr_tail(task: asyncio.Task[bytes] | None, *, settings: Ever
                     settings.llm_base_url,
                     settings.embedding_base_url,
                     settings.rerank_base_url,
+                    settings.multimodal_base_url,
                 ) if value
             ),
             exact_values=tuple(
@@ -84,6 +90,7 @@ async def _probe_stderr_tail(task: asyncio.Task[bytes] | None, *, settings: Ever
                     settings.llm_api_key,
                     settings.embedding_api_key,
                     settings.rerank_api_key,
+                    settings.multimodal_api_key,
                 ) if value
             ),
         )
@@ -101,7 +108,8 @@ _STOP_TIMEOUT_SECONDS = 10.0
 _HEALTHY_RESET_SECONDS = 5 * 60.0
 _RESTART_DELAYS_SECONDS = (1.0, 5.0, 30.0, 120.0)
 _MAX_CONSECUTIVE_FAILURES = 5
-_PROCESSING_PROBE_TIMEOUT_SECONDS = 20.0
+# Reconcile's transport budget must cover the worst derived probe-child deadline.
+_PROCESSING_PROBE_TIMEOUT_SECONDS = PROCESSING_PROBE_MAX_DEADLINE_SECONDS
 _PROCESSING_PROBE_STDERR_BYTES = 2048
 _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700
@@ -135,6 +143,9 @@ class EverOSProcessSettings:
     rerank_base_url: str | None = None
     rerank_model: str | None = None
     rerank_api_key: str | None = field(default=None, repr=False)
+    multimodal_base_url: str | None = None
+    multimodal_model: str | None = None
+    multimodal_api_key: str | None = field(default=None, repr=False)
     timezone: str | None = None
     call_log_db_path: Path | None = None
 
@@ -696,7 +707,10 @@ class EverOSProcess:
         stderr = getattr(probe, "stderr", None)
         stderr_task = asyncio.create_task(_drain_probe_stderr(stderr)) if stderr is not None else None
         try:
-            await asyncio.wait_for(probe.wait(), timeout=_PROCESSING_PROBE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(
+                probe.wait(),
+                timeout=_processing_probe_timeout_seconds(self._settings),
+            )
         except asyncio.TimeoutError:
             try:
                 await self._terminate_owned_tree(
@@ -2312,6 +2326,33 @@ def _settings_complete(settings: EverOSProcessSettings) -> bool:
     )
 
 
+def _processing_probe_timeout_seconds(settings: EverOSProcessSettings) -> float:
+    rerank = None
+    if _endpoint_settings_complete(
+        settings.rerank_base_url,
+        settings.rerank_model,
+        settings.rerank_api_key,
+    ):
+        rerank = (settings.rerank_base_url, settings.rerank_api_key)
+    multimodal = None
+    if _endpoint_settings_complete(
+        settings.multimodal_base_url,
+        settings.multimodal_model,
+        settings.multimodal_api_key,
+    ):
+        multimodal = (settings.multimodal_base_url, settings.multimodal_api_key)
+    return processing_probe_deadline_seconds(
+        llm=(settings.llm_base_url, settings.llm_api_key),
+        embedding=(settings.embedding_base_url, settings.embedding_api_key),
+        rerank=rerank,
+        multimodal=multimodal,
+    )
+
+
+def _endpoint_settings_complete(*values: str | None) -> bool:
+    return all(isinstance(value, str) and bool(value.strip()) for value in values)
+
+
 def _rebuild_settings_complete(settings: EverOSProcessSettings) -> bool:
     return all(
         isinstance(value, str) and bool(value.strip())
@@ -2381,6 +2422,7 @@ def _write_memory_child_config(
             "",
             "[multimodal]",
             f"file_uri_allow_dirs = [{_toml_string(str(attachments_root))}]",
+            "file_uri_max_bytes = 26214400",
             "",
         )
     )
@@ -2433,9 +2475,11 @@ def _memory_child_environment(
         "EVEROS_LLM__BASE_URL": settings.llm_base_url,
         "EVEROS_LLM__MODEL": settings.llm_model,
         "EVEROS_LLM__API_KEY": settings.llm_api_key,
-        "EVEROS_MULTIMODAL__BASE_URL": settings.llm_base_url,
-        "EVEROS_MULTIMODAL__MODEL": settings.llm_model,
-        "EVEROS_MULTIMODAL__API_KEY": settings.llm_api_key,
+        # Workbench keeps one compatibility cycle of implicit LLM inheritance.
+        # IM capture is gated separately by the explicit persisted endpoint.
+        "EVEROS_MULTIMODAL__BASE_URL": settings.multimodal_base_url or settings.llm_base_url,
+        "EVEROS_MULTIMODAL__MODEL": settings.multimodal_model or settings.llm_model,
+        "EVEROS_MULTIMODAL__API_KEY": settings.multimodal_api_key or settings.llm_api_key,
         "EVEROS_EMBEDDING__BASE_URL": settings.embedding_base_url,
         "EVEROS_EMBEDDING__MODEL": settings.embedding_model,
         "EVEROS_EMBEDDING__API_KEY": settings.embedding_api_key,
@@ -2444,6 +2488,15 @@ def _memory_child_environment(
         "EVEROS_RERANK__API_KEY": settings.rerank_api_key,
     }
     env.update({key: value for key, value in optional.items() if value is not None})
+    if all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (
+            settings.multimodal_base_url,
+            settings.multimodal_model,
+            settings.multimodal_api_key,
+        )
+    ):
+        env[MULTIMODAL_EXPLICIT_ENV] = "1"
     if settings.call_log_db_path is not None:
         env["AVIBE_MEMORY_CALL_LOG_DB"] = str(settings.call_log_db_path)
     if role is not None:
@@ -3459,6 +3512,13 @@ def _validate_generated_config(
     )
     if any(rerank_settings) and not all(rerank_settings):
         raise RuntimeError("Generated EverOS config received partial rerank settings")
+    multimodal_settings = (
+        settings.multimodal_base_url,
+        settings.multimodal_model,
+        settings.multimodal_api_key,
+    )
+    if any(multimodal_settings) and not all(multimodal_settings):
+        raise RuntimeError("Generated EverOS config received partial multimodal settings")
     if (
         everos.get("memory", {}).get("timezone") != timezone
         or everos.get("memorize", {}).get("mode") != "chat"
@@ -3467,6 +3527,8 @@ def _validate_generated_config(
         or everos.get("rerank", {}).get("model") != ""
         or everos.get("rerank", {}).get("base_url") != ""
         or "api_key" in everos.get("rerank", {})
+        or everos.get("multimodal", {}).get("file_uri_max_bytes") != 26214400
+        or "api_key" in everos.get("multimodal", {})
         or ome.get("strategies", {}).get("reflect_episodes", {}).get("enabled") is not False
         or ome.get("strategies", {}).get("extract_foresight", {}).get("enabled") is not False
     ):

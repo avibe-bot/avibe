@@ -56,9 +56,23 @@ _AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
 _SIDECAR_TIMEOUT_RESPONSE_MARGIN_SECONDS = 0.05
 _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
-_PROCESSING_TIMEOUT_SECONDS = 8.0
+PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS = 8.0
+PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS = 2.0
+PROCESSING_PROBE_MAX_ENDPOINTS = 4
+PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
+    PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS * PROCESSING_PROBE_MAX_ENDPOINTS
+    + PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS
+)
+_PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 5.0
 _PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
+_PREFLIGHT_IMAGE_DATA_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAYElEQVR42u3QAQ0AAAwC"
+    "IPuX1hzfIQLpcxEgQIAAAQIECBAgQIAAAQIECBAgQIAAAQIECBAgQIAAAQIECBAgQIAA"
+    "AQIECBAgQIAAAQIECBAgQIAAAQIECBAgQIAAAQLuG0bQw7Ko2TvAAAAAAElFTkSuQmCC"
+)
+MULTIMODAL_EXPLICIT_ENV = "AVIBE_MEMORY_MULTIMODAL_EXPLICIT"
 _PROFILE_QUERY = "profile"
 _MAX_LIST_PAGE_SIZE = 20
 _EVEROS_EXACT_SORT_WINDOW = 20_000
@@ -111,6 +125,40 @@ class ProviderCapture:
     attachments: tuple[CaptureAttachment, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ProcessingProbeSpec:
+    base_url: str | None
+    api_key: str | None
+    path: str
+    payload: dict[str, Any]
+    validator: Callable[[Any], bool]
+
+
+def processing_probe_deadline_seconds(
+    *,
+    llm: tuple[str | None, str | None],
+    embedding: tuple[str | None, str | None],
+    rerank: tuple[str | None, str | None] | None = None,
+    multimodal: tuple[str | None, str | None] | None = None,
+) -> float:
+    """Bound a probe child by the largest serialized provider group."""
+
+    group_sizes: dict[tuple[str, str], int] = {}
+    for pair in (llm, embedding, rerank, multimodal):
+        if pair is None:
+            continue
+        group = _processing_provider_group_key(*pair)
+        if group is None:
+            continue
+        group_sizes[group] = group_sizes.get(group, 0) + 1
+    largest_group = max(group_sizes.values(), default=1)
+    deadline = (
+        PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS * largest_group
+        + PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS
+    )
+    return min(deadline, PROCESSING_PROBE_MAX_DEADLINE_SECONDS)
+
+
 class MemoryProviderFailure(RuntimeError):
     """A redaction-safe failure already classified by the provider adapter."""
 
@@ -151,6 +199,7 @@ class MemoryPreflightFailure:
         "memory_embedding_unavailable",
         "memory_llm_unavailable",
         "memory_rerank_unavailable",
+        "memory_multimodal_unavailable",
     ]
     diagnostic: MemoryPreflightDiagnostic
 
@@ -187,6 +236,9 @@ class EverOSPort:
         rerank_base_url: str | None = None,
         rerank_model: str | None = None,
         rerank_api_key: str | None = None,
+        multimodal_base_url: str | None = None,
+        multimodal_model: str | None = None,
+        multimodal_api_key: str | None = None,
         processing_health_check: Callable[[], Awaitable[bool]] | None = None,
         sidecar_timeout_seconds: float = _SIDECAR_TIMEOUT_SECONDS,
         add_timeout_seconds: float = _ADD_TIMEOUT_SECONDS,
@@ -204,6 +256,9 @@ class EverOSPort:
         self._rerank_base_url = _normalized_endpoint_url(rerank_base_url)
         self._rerank_model = _optional_string(rerank_model)
         self._rerank_api_key = _optional_string(rerank_api_key)
+        self._multimodal_base_url = _normalized_endpoint_url(multimodal_base_url)
+        self._multimodal_model = _optional_string(multimodal_model)
+        self._multimodal_api_key = _optional_string(multimodal_api_key)
         self._processing_health_check = processing_health_check
         self._sidecar_timeout_seconds = _positive_timeout(sidecar_timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
         self._add_timeout_seconds = _positive_timeout(add_timeout_seconds, _ADD_TIMEOUT_SECONDS)
@@ -531,10 +586,11 @@ class EverOSPort:
         return dict(snapshot.recorder)
 
     async def processing_healthy(self) -> bool:
-        """Probe both configured model endpoints with fixed synthetic requests.
+        """Probe configured model endpoints with fixed synthetic requests.
 
         The worker may call this after ambiguous provider errors.  The lock keeps
         several queued rows from multiplying credential probes during an outage.
+        Matching provider credentials are serialized; independent groups overlap.
         """
 
         async with self._processing_lock:
@@ -545,33 +601,58 @@ class EverOSPort:
                     return False
             if not self._processing_configured():
                 return False
-            healthy = await self._probe_processing_endpoint(
-                base_url=self._llm_base_url,
-                api_key=self._llm_api_key,
-                path="chat/completions",
-                payload={
-                    "model": self._llm_model,
-                    "messages": [{"role": "user", "content": "Reply with OK."}],
-                    "max_tokens": 1,
-                    "temperature": 0,
-                },
-                validator=_valid_chat_probe_response,
-            ) and await self._probe_processing_endpoint(
-                base_url=self._embedding_base_url,
-                api_key=self._embedding_api_key,
-                path="embeddings",
-                payload={"model": self._embedding_model, "input": "memory health check"},
-                validator=_valid_embedding_probe_response,
+            probes = [
+                _ProcessingProbeSpec(
+                    base_url=self._llm_base_url,
+                    api_key=self._llm_api_key,
+                    path="chat/completions",
+                    payload={
+                        "model": self._llm_model,
+                        "messages": [{"role": "user", "content": "Reply with OK."}],
+                        "max_tokens": 1,
+                        "temperature": 0,
+                    },
+                    validator=_valid_chat_probe_response,
+                ),
+                _ProcessingProbeSpec(
+                    base_url=self._embedding_base_url,
+                    api_key=self._embedding_api_key,
+                    path="embeddings",
+                    payload={"model": self._embedding_model, "input": "memory health check"},
+                    validator=_valid_embedding_probe_response,
+                ),
+            ]
+            if self._rerank_configured():
+                probes.append(
+                    _ProcessingProbeSpec(
+                        base_url=self._rerank_base_url,
+                        api_key=self._rerank_api_key,
+                        path=self._rerank_model or "",
+                        payload={"queries": ["OK"], "documents": ["OK"]},
+                        validator=_valid_rerank_probe_response,
+                    )
+                )
+            if self._multimodal_configured():
+                probes.append(
+                    _ProcessingProbeSpec(
+                        base_url=self._multimodal_base_url,
+                        api_key=self._multimodal_api_key,
+                        path="chat/completions",
+                        payload=_multimodal_preflight_payload(self._multimodal_model),
+                        validator=_valid_chat_probe_response,
+                    )
+                )
+            groups: dict[tuple[str, str], list[_ProcessingProbeSpec]] = {}
+            for probe in probes:
+                group = _processing_provider_group_key(probe.base_url, probe.api_key)
+                if group is None:
+                    return False
+                groups.setdefault(group, []).append(probe)
+            results = await asyncio.gather(
+                *(self._run_processing_probe_group(group) for group in groups.values()),
+                return_exceptions=True,
             )
-            if not healthy or not self._rerank_configured():
-                return healthy
-            return await self._probe_processing_endpoint(
-                base_url=self._rerank_base_url,
-                api_key=self._rerank_api_key,
-                path=self._rerank_model or "",
-                payload={"queries": ["OK"], "documents": ["OK"]},
-                validator=_valid_rerank_probe_response,
-            )
+            return all(result is True for result in results)
 
     async def preflight(self) -> MemoryPreflightResult:
         """Run one bounded request for each configured processing endpoint."""
@@ -592,6 +673,17 @@ class EverOSPort:
                     self._rerank_model or "",
                     {"queries": ["OK"], "documents": ["OK"]},
                     _valid_rerank_probe_response,
+                )
+            )
+        if self._multimodal_configured():
+            checks.append(
+                (
+                    "multimodal",
+                    self._multimodal_base_url,
+                    self._multimodal_api_key,
+                    "chat/completions",
+                    _multimodal_preflight_payload(self._multimodal_model),
+                    _valid_chat_probe_response,
                 )
             )
         first_failure = None
@@ -646,6 +738,15 @@ class EverOSPort:
 
     def _rerank_configured(self) -> bool:
         return all((self._rerank_base_url, self._rerank_model, self._rerank_api_key))
+
+    def _multimodal_configured(self) -> bool:
+        return all(
+            (
+                self._multimodal_base_url,
+                self._multimodal_model,
+                self._multimodal_api_key,
+            )
+        )
 
     async def _search_data(
         self,
@@ -843,6 +944,25 @@ class EverOSPort:
             return False
         return bool(validator(value))
 
+    async def _run_processing_probe_group(
+        self,
+        probes: list[_ProcessingProbeSpec],
+    ) -> bool:
+        healthy = True
+        for probe in probes:
+            try:
+                result = await self._probe_processing_endpoint(
+                    base_url=probe.base_url,
+                    api_key=probe.api_key,
+                    path=probe.path,
+                    payload=probe.payload,
+                    validator=probe.validator,
+                )
+            except Exception:
+                result = False
+            healthy = healthy and result is True
+        return healthy
+
     async def _preflight_endpoint(
         self,
         side,
@@ -982,6 +1102,7 @@ class EverOSPort:
                 "llm": self._llm_model,
                 "embedding": self._embedding_model,
                 "rerank": self._rerank_model,
+                "multimodal": self._multimodal_model,
             }.get(side)
             self._preflight_call_recorder(
                 side=side,
@@ -1469,17 +1590,52 @@ def _valid_rerank_probe_response(value: Any) -> bool:
     )
 
 
+def _multimodal_preflight_payload(model: str | None) -> dict[str, Any]:
+    """Build a minimal synthetic vision request containing no user data."""
+
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Reply with OK."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _PREFLIGHT_IMAGE_DATA_URI},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 1,
+        "temperature": 0,
+    }
+
+
+def _processing_provider_group_key(
+    base_url: str | None,
+    api_key: str | None,
+) -> tuple[str, str] | None:
+    normalized_url = _normalized_endpoint_url(base_url)
+    credential_identity = _optional_string(api_key)
+    if normalized_url is None or credential_identity is None:
+        return None
+    return normalized_url, credential_identity
+
+
 def _preflight_error_name(
-    side: Literal["llm", "embedding", "rerank"],
+    side: Literal["llm", "embedding", "rerank", "multimodal"],
 ) -> Literal[
     "memory_llm_unavailable",
     "memory_embedding_unavailable",
     "memory_rerank_unavailable",
+    "memory_multimodal_unavailable",
 ]:
     return {
         "llm": "memory_llm_unavailable",
         "embedding": "memory_embedding_unavailable",
         "rerank": "memory_rerank_unavailable",
+        "multimodal": "memory_multimodal_unavailable",
     }[side]
 
 

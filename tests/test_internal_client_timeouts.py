@@ -15,6 +15,7 @@ from pathlib import Path
 
 from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
 from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
+from core.memory.everos import PROCESSING_PROBE_MAX_DEADLINE_SECONDS
 from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 from core.memory.processing_record import (
     PROCESSING_RECORD_TRANSPORT_MARGIN_SECONDS,
@@ -163,6 +164,7 @@ def _reconcile_lifecycle_budget_seconds() -> float:
 
 
 def test_reconcile_client_outlasts_every_bounded_lifecycle_step() -> None:
+    assert _PROCESSING_PROBE_TIMEOUT_SECONDS == PROCESSING_PROBE_MAX_DEADLINE_SECONDS
     assert MEMORY_RECONCILE_TIMEOUT_SECONDS > _reconcile_lifecycle_budget_seconds()
 
 

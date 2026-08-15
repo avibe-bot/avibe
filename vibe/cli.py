@@ -383,6 +383,11 @@ _MEMORY_CLI_SOURCE_STATE_I18N_KEYS = {
 _MEMORY_CLI_PROVIDER_STATE_I18N_KEYS = {
     "ok": "memory.cli.providerState.ok",
 }
+_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS = {
+    "ready": "memory.cli.attachmentCaptureState.ready",
+    "not_configured": "memory.cli.attachmentCaptureState.notConfigured",
+    "unavailable": "memory.cli.attachmentCaptureState.unavailable",
+}
 _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_disabled": "memory.cli.reason.memoryDisabled",
     "memory_invalid_input": "memory.cli.reason.invalidInput",
@@ -488,6 +493,21 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
                         else i18n_t("memory.cli.unknownVersion", language)
                     ),
                     state=provider_state_label,
+                )
+            )
+        attachment_capture = result.get("attachment_capture")
+        if isinstance(attachment_capture, dict):
+            attachment_state_label = _memory_cli_label(
+                attachment_capture.get("status"),
+                keys=_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS,
+                fallback_key="memory.cli.attachmentCaptureState.unknown",
+                language=language,
+            )
+            print(
+                i18n_t(
+                    "memory.cli.attachmentCapture",
+                    language,
+                    state=attachment_state_label,
                 )
             )
         reason = source.get("reason") if isinstance(source, dict) else None

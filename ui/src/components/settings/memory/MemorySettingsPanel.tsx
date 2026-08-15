@@ -175,6 +175,7 @@ export const MemorySettingsPanel: React.FC<{
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
   const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+  const [multimodalDraft, setMultimodalDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRebuildOpen, setConfirmRebuildOpen] = useState(false);
@@ -186,40 +187,55 @@ export const MemorySettingsPanel: React.FC<{
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
     setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+    setMultimodalDraft(draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   }, [settings]);
 
   const rebuildRequired = settings.rebuild_required === true;
   const factoryResetRequired = settings.factory_reset_required === true;
-  const canClearKeys = !enabledDraft;
+  const canClearRequiredKeys = !enabledDraft;
   const canClearMemory = maintenance?.can_clear === true;
   const busy = saving || rebuildBusy || repairBusy || mutationBusy;
 
   const buildPatch = (): MemorySettingsPatch => {
     const patch: MemorySettingsPatch = {};
     if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
-    // A key clear is accepted only while the resulting state stays disabled.
-    const allowClear = !enabledDraft;
-    const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
+    // Required keys can clear only while the resulting state stays disabled.
+    const allowRequiredClear = !enabledDraft;
+    const llmPatch = buildEndpointPatch(
+      llmDraft,
+      settings.processing.llm,
+      allowRequiredClear,
+    );
     // Identity fields stay editable even when data exists; rebuild confirmation
     // is the safety gate instead of a silent lock.
     const embeddingPatch = buildEndpointPatch(
       embeddingDraft,
       settings.processing.embedding,
-      allowClear,
+      allowRequiredClear,
       false,
     );
     const rerankPatch = buildEndpointPatch(
       rerankDraft,
       settings.processing.rerank ?? EMPTY_ENDPOINT,
-      allowClear,
+      true,
       false,
       true,
     );
-    if (llmPatch || embeddingPatch || rerankPatch) {
+    const multimodalPatch = settings.im_attachment_capture_available === true
+      ? buildEndpointPatch(
+        multimodalDraft,
+        settings.processing.multimodal ?? EMPTY_ENDPOINT,
+        true,
+        false,
+        true,
+      )
+      : null;
+    if (llmPatch || embeddingPatch || rerankPatch || multimodalPatch) {
       patch.processing = {};
       if (llmPatch) patch.processing.llm = llmPatch;
       if (embeddingPatch) patch.processing.embedding = embeddingPatch;
       if (rerankPatch) patch.processing.rerank = rerankPatch;
+      if (multimodalPatch) patch.processing.multimodal = multimodalPatch;
     }
     return patch;
   };
@@ -276,7 +292,8 @@ export const MemorySettingsPanel: React.FC<{
         const validationFailure =
           failure.error === 'memory_embedding_unavailable' ||
           failure.error === 'memory_llm_unavailable' ||
-          failure.error === 'memory_rerank_unavailable';
+          failure.error === 'memory_rerank_unavailable' ||
+          failure.error === 'memory_multimodal_unavailable';
         if (!validationFailure || failure.rebuild_required === true) {
           onReloadSettings();
           onReloadMaintenance();
@@ -392,7 +409,7 @@ export const MemorySettingsPanel: React.FC<{
         original={settings.processing.llm}
         onChange={setLlmDraft}
         disabled={busy}
-        canClearKey={canClearKeys}
+        canClearKey={canClearRequiredKeys}
       />
 
       <EndpointFields
@@ -404,7 +421,7 @@ export const MemorySettingsPanel: React.FC<{
         onChange={setEmbeddingDraft}
         disabled={busy}
         identityHint={t('memory.settings.embeddingIdentityHint')}
-        canClearKey={canClearKeys}
+        canClearKey={canClearRequiredKeys}
       />
 
       <EndpointFields
@@ -416,9 +433,24 @@ export const MemorySettingsPanel: React.FC<{
         onChange={setRerankDraft}
         disabled={busy}
         identityHint={t('memory.settings.rerankIdentityHint')}
-        canClearKey={canClearKeys}
+        canClearKey
         clearKeyLabel={t('memory.settings.rerankClearLabel')}
       />
+
+      {settings.im_attachment_capture_available === true ? (
+        <EndpointFields
+          title={t('memory.settings.multimodalTitle')}
+          help={t('memory.settings.multimodalHelp')}
+          helpLabel={t('memory.settings.multimodalHelpLabel')}
+          draft={multimodalDraft}
+          original={settings.processing.multimodal ?? EMPTY_ENDPOINT}
+          onChange={setMultimodalDraft}
+          disabled={busy}
+          identityHint={t('memory.settings.multimodalIdentityHint')}
+          canClearKey
+          clearKeyLabel={t('memory.settings.multimodalClearLabel')}
+        />
+      ) : null}
 
       {error ? (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
@@ -461,6 +493,12 @@ export const MemorySettingsPanel: React.FC<{
               {line}
             </li>
           ))}
+          {settings.im_attachment_capture_available === true ? (
+            <li className="flex gap-2 text-[11.5px] leading-snug text-muted">
+              <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
+              {t('memory.settings.disclosureAttachment')}
+            </li>
+          ) : null}
         </ul>
       </div>
 

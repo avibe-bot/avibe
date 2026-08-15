@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
+import struct
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1266,6 +1269,67 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
     assert all(request.headers["authorization"].startswith("Bearer ") for request in requests)
 
 
+def test_processing_health_serializes_identical_provider_credentials(monkeypatch) -> None:
+    provider = EverOSPort(
+        Path("/tmp/everos.sock"),
+        llm_base_url="https://shared.example.test/v1",
+        llm_model="chat-model",
+        llm_api_key="shared-secret",
+        embedding_base_url="https://shared.example.test/v1",
+        embedding_model="embedding-model",
+        embedding_api_key="embedding-secret",
+        rerank_base_url="https://rerank.example.test/v1/inference",
+        rerank_model="rerank-model",
+        rerank_api_key="shared-secret",
+        multimodal_base_url="https://shared.example.test/v1",
+        multimodal_model="vision-model",
+        multimodal_api_key="shared-secret",
+    )
+    first_wave_started = asyncio.Event()
+    release = asyncio.Event()
+    started: list[tuple[tuple[str, str], str]] = []
+    active_by_group: dict[tuple[str, str], int] = {}
+    max_active_by_group: dict[tuple[str, str], int] = {}
+    max_total_active = 0
+
+    async def probe(*, base_url, api_key, path, payload, **_kwargs) -> bool:
+        nonlocal max_total_active
+        group = (base_url, api_key)
+        name = payload.get("model") or path
+        active_by_group[group] = active_by_group.get(group, 0) + 1
+        max_active_by_group[group] = max(
+            max_active_by_group.get(group, 0),
+            active_by_group[group],
+        )
+        max_total_active = max(max_total_active, sum(active_by_group.values()))
+        started.append((group, name))
+        if len(started) == 3:
+            first_wave_started.set()
+        try:
+            await release.wait()
+            return True
+        finally:
+            active_by_group[group] -= 1
+
+    monkeypatch.setattr(provider, "_probe_processing_endpoint", probe)
+
+    async def run() -> bool:
+        task = asyncio.create_task(provider.processing_healthy())
+        await asyncio.wait_for(first_wave_started.wait(), timeout=1.0)
+        assert {name for _group, name in started} == {
+            "chat-model",
+            "embedding-model",
+            "rerank-model",
+        }
+        release.set()
+        return await task
+
+    assert asyncio.run(run()) is True
+    assert [name for _group, name in started].count("vision-model") == 1
+    assert max_total_active == 3
+    assert all(active == 1 for active in max_active_by_group.values())
+
+
 def test_processing_preflight_projects_sanitized_provider_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions"):
@@ -1338,6 +1402,115 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
     assert requests[-1].headers["authorization"] == "Bearer rerank-secret"
     assert recorded[-1]["model"] == "Qwen/Qwen3-Reranker-4B"
     assert "model" not in recorded[-1]["request"]
+
+
+def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
+    """MEMORY-IM-ATTACH-001: opt-in is admitted with synthetic image data only."""
+
+    requests: list[httpx.Request] = []
+    recorded: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "OK"}}]},
+        )
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            multimodal_base_url="https://vision.example.test/v1",
+            multimodal_model="vision-model",
+            multimodal_api_key="vision-secret",
+            preflight_call_recorder=lambda **kwargs: recorded.append(kwargs),
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests] == [
+        "/v1/chat/completions",
+        "/v1/embeddings",
+        "/v1/chat/completions",
+    ]
+    payload = json.loads(requests[-1].content)
+    assert payload["model"] == "vision-model"
+    assert payload["messages"][0]["content"][0] == {
+        "type": "text",
+        "text": "Reply with OK.",
+    }
+    image_url = payload["messages"][0]["content"][1]["image_url"]["url"]
+    prefix, encoded_image = image_url.split(",", 1)
+    assert prefix == "data:image/png;base64"
+    assert len(image_url) < 256
+    image_bytes = base64.b64decode(encoded_image, validate=True)
+    assert len(image_bytes) == 153
+    assert image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert struct.unpack(">II", image_bytes[16:24]) == (64, 64)
+    assert hashlib.sha256(image_bytes).hexdigest() == (
+        "da1cbcc0076a2b589fd4d5b79d7fd171d6dff91f4d708d8dec041f4a6e60734f"
+    )
+    assert requests[-1].headers["authorization"] == "Bearer vision-secret"
+    assert recorded[-1]["side"] == "multimodal"
+    assert recorded[-1]["model"] == "vision-model"
+
+
+def test_processing_preflight_returns_typed_multimodal_failure() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        if call_count == 3:
+            return httpx.Response(401, json={"error": {"code": "invalid_key"}})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "OK"}}]},
+        )
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            multimodal_base_url="https://vision.example.test/v1",
+            multimodal_model="vision-model",
+            multimodal_api_key="vision-secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert result.failure is not None
+    assert result.failure.error == "memory_multimodal_unavailable"
+    assert result.failure.diagnostic.side == "multimodal"
+    assert result.failure.diagnostic.http_status == 401
+    assert result.failure.diagnostic.provider_error_code == "invalid_key"
 
 
 def test_processing_preflight_returns_typed_rerank_failure() -> None:

@@ -1633,6 +1633,7 @@
     "memory_embedding_unavailable": "Embedding 提供商不可用",
     "memory_llm_unavailable": "LLM 提供商不可用",
     "memory_rerank_unavailable": "重排序服务商不可用",
+    "memory_multimodal_unavailable": "附件处理服务商不可用",
     "provider_request_timed_out": "提供商请求超时。",
     "provider_response_too_large": "提供商响应超过安全限制。",
     "provider_unavailable": "提供商不可用。",
@@ -4418,6 +4419,10 @@
       "rerankHelp": "记忆功能用这个模型为高级召回结果评分。填写重排序接口地址、模型名称和 API Key 后即可启用。",
       "rerankHelpLabel": "关于重排序模型",
       "rerankClearLabel": "移除重排序端点",
+      "multimodalTitle": "IM 附件处理模型（可选）",
+      "multimodalHelp": "完整配置后，已绑定私聊中的合规附件会发送到这个兼容 OpenAI 格式的视觉模型端点，用于记忆捕获。",
+      "multimodalHelpLabel": "关于 IM 附件处理",
+      "multimodalClearLabel": "关闭 IM 附件捕获",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "模型",
@@ -4442,6 +4447,7 @@
         "「清理记忆数据」会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、记忆条目和待处理的消息。它无法撤回已发送给模型接口的内容，也不会触碰原始聊天记录。",
         "不同平台的账号各自拥有独立的记忆，互不关联。"
       ],
+      "disclosureAttachment": "配置 IM 附件处理端点后，已绑定私聊中的合规附件也会发送给该服务商。",
       "clearKeyLabel": "清除已保存的密钥",
       "rebuildRequiredTitle": "需要重建记忆索引",
       "rebuildRequiredDescription": "向量模型接口地址或模型的更改已保存。索引重建完成前，无法重启记忆引擎。",
@@ -4453,7 +4459,8 @@
       "rebuildCompleted": "记忆索引重建完成。",
       "rebuildFailed": "记忆索引重建失败。",
       "embeddingIdentityHint": "更改向量模型接口地址或模型会重建本地索引，已有记忆不会丢失。",
-      "rerankIdentityHint": "三个字段全部留空时，记忆功能会继续使用标准搜索层级。"
+      "rerankIdentityHint": "三个字段全部留空时，记忆功能会继续使用标准搜索层级。",
+      "multimodalIdentityHint": "完整填写接口地址、模型和 API Key 即表示选择启用；三个字段全部留空时，IM 附件捕获保持关闭。"
     },
     "clear": {
       "button": "清理记忆数据",

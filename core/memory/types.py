@@ -42,6 +42,7 @@ MemoryErrorCode = Literal[
     "memory_embedding_unavailable",
     "memory_llm_unavailable",
     "memory_rerank_unavailable",
+    "memory_multimodal_unavailable",
     "memory_rebuild_root_busy",
     "memory_factory_reset_failed",
     "memory_repair_failed",
@@ -76,6 +77,7 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
         "memory_embedding_unavailable",
         "memory_llm_unavailable",
         "memory_rerank_unavailable",
+        "memory_multimodal_unavailable",
         "memory_rebuild_root_busy",
         "memory_factory_reset_failed",
         "memory_repair_failed",
@@ -92,7 +94,7 @@ def is_memory_error_code(value: object) -> bool:
 
 @dataclass(frozen=True)
 class MemoryPreflightDiagnostic:
-    side: Literal["embedding", "llm", "rerank"]
+    side: Literal["embedding", "llm", "rerank", "multimodal"]
     http_status: int | None = None
     provider_error_code: str | None = None
     message: str = "provider unavailable"

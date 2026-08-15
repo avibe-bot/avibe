@@ -32,6 +32,8 @@ from core.memory.types import (
 MAX_PINNED_ATTACHMENTS = 8
 MAX_PINNED_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_PINNED_BUNDLE_BYTES = 100 * 1024 * 1024
+# Delivery gate: PR4 flips this only after the IM admission/materialization path lands.
+IM_ATTACHMENT_CAPTURE_AVAILABLE = False
 
 _COPY_CHUNK_BYTES = 1024 * 1024
 _MAX_ATTACHMENT_NAME_BYTES = 512

@@ -712,6 +712,7 @@
       "error": "Memory {operation} failed: {code}",
       "status": "Memory source: {state}",
       "provider": "EverOS {version}: {state}",
+      "attachmentCapture": "IM attachment capture: {state}",
       "sourceReason": "Source reason: {reason}",
       "sourceState": {
         "available": "available",
@@ -721,6 +722,12 @@
       },
       "providerState": {
         "ok": "healthy",
+        "unknown": "unknown"
+      },
+      "attachmentCaptureState": {
+        "ready": "ready",
+        "notConfigured": "not configured",
+        "unavailable": "unavailable",
         "unknown": "unknown"
       },
       "unknownVersion": "unknown version",

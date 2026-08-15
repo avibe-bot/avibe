@@ -51,6 +51,7 @@ const endpoint = (baseUrl: string) => ({
 const legacySettings: MemorySettings = {
   status: 'ok',
   enabled: true,
+  im_attachment_capture_available: true,
   processing: {
     llm: endpoint('https://old.example.test/v1'),
     embedding: endpoint('https://embedding.example.test/v1'),
@@ -67,6 +68,7 @@ const emptyEndpoint = {
 const firstSetupSettings: MemorySettings = {
   status: 'ok',
   enabled: false,
+  im_attachment_capture_available: true,
   processing: {
     llm: emptyEndpoint,
     embedding: emptyEndpoint,
@@ -79,7 +81,28 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
-  it('renders the optional reranking endpoint for released settings without it', () => {
+  it('hides multimodal configuration until IM attachment capture is available', () => {
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, im_attachment_capture_available: false }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.queryByText('memory.settings.multimodalTitle')).toBeNull();
+    expect(screen.queryByText('memory.settings.disclosureAttachment')).toBeNull();
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(3);
+    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(3);
+  });
+
+  it('renders optional multimodal configuration once IM capture is available', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
@@ -95,8 +118,100 @@ describe('MemorySettingsPanel', () => {
     );
 
     expect(screen.getByText('memory.settings.rerankTitle')).not.toBeNull();
-    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(3);
-    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(3);
+    expect(screen.getByText('memory.settings.multimodalTitle')).not.toBeNull();
+    expect(screen.getByText('memory.settings.disclosureAttachment')).not.toBeNull();
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(4);
+    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(4);
+  });
+
+  it('submits a complete multimodal endpoint as the IM attachment opt-in', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...firstSetupSettings,
+      processing: {
+        ...firstSetupSettings.processing,
+        multimodal: endpoint('https://vision.example.test/v1'),
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={firstSetupSettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const baseUrls = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder');
+    const models = screen.getAllByPlaceholderText('memory.settings.modelPlaceholder');
+    const keys = screen.getAllByPlaceholderText('memory.settings.apiKeyPlaceholder');
+    await user.type(baseUrls[3], 'https://vision.example.test/v1');
+    await user.type(models[3], 'vision-model');
+    await user.type(keys[3], 'vision-secret');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      processing: {
+        multimodal: {
+          base_url: 'https://vision.example.test/v1',
+          model: 'vision-model',
+          api_key: 'vision-secret',
+        },
+      },
+    }));
+  });
+
+  it('clears the complete multimodal endpoint to disable IM attachment capture', async () => {
+    const configured: MemorySettings = {
+      ...legacySettings,
+      processing: {
+        ...legacySettings.processing,
+        rerank: {
+          ...endpoint('https://rerank.example.test/v1/inference'),
+          model: 'rerank-model',
+          has_api_key: true,
+        },
+        multimodal: {
+          ...endpoint('https://vision.example.test/v1'),
+          model: 'vision-model',
+          has_api_key: true,
+        },
+      },
+    };
+    api.saveMemorySettings.mockResolvedValue(legacySettings);
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={configured}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.getByRole('checkbox', {
+      name: 'memory.settings.rerankClearLabel',
+    })).not.toBeNull();
+    await user.click(screen.getByRole('checkbox', {
+      name: 'memory.settings.multimodalClearLabel',
+    }));
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      processing: {
+        multimodal: { api_key: null, base_url: null, model: null },
+      },
+    }));
   });
 
   it('locks settings mutations while the page owns another mutation', () => {
