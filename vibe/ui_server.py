@@ -2973,17 +2973,25 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     local_request = _websocket_is_local_request(websocket, remote_config)
     remote_identity = None
     remote_payload = None
+    remote_session_cookie = None
+    remote_request_host = None
     authorization_context = None
     if not local_request:
+        from vibe import remote_access
+
+        remote_session_cookie = getattr(websocket, "cookies", {}).get(
+            remote_access.SESSION_COOKIE_NAME
+        )
+        remote_request_host = _websocket_normalized_host(websocket)
         remote_identity, resolution = await _remote_access_websocket_authorization(
             websocket,
             remote_config,
         )
         if resolution is None or not resolution.current:
-            await websocket.close(
-                code=_authorization_websocket_close_code(
-                    resolution.state if resolution is not None else "invalid_identity"
-                )
+            await _close_websocket_for_authorization(
+                websocket,
+                resolution.state if resolution is not None else "invalid_identity",
+                subprotocol="vite-hmr",
             )
             return
         remote_payload = resolution.payload
@@ -3052,6 +3060,8 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
                 remote_config,
                 remote_identity,
                 remote_payload,
+                session_cookie=remote_session_cookie,
+                request_host=remote_request_host,
             )
         )
         if remote_config is not None and remote_identity is not None and remote_payload is not None
@@ -3142,16 +3152,23 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     local_request = _websocket_is_local_request(websocket, config)
     remote_identity = None
     remote_payload = None
+    remote_session_cookie = None
+    remote_request_host = None
     if not local_request:
+        from vibe import remote_access
+
+        remote_session_cookie = getattr(websocket, "cookies", {}).get(
+            remote_access.SESSION_COOKIE_NAME
+        )
+        remote_request_host = _websocket_normalized_host(websocket)
         remote_identity, resolution = await _remote_access_websocket_authorization(
             websocket,
             config,
         )
         if resolution is None or not resolution.current:
-            await websocket.close(
-                code=_authorization_websocket_close_code(
-                    resolution.state if resolution is not None else "invalid_identity"
-                )
+            await _close_websocket_for_authorization(
+                websocket,
+                resolution.state if resolution is not None else "invalid_identity",
             )
             return
         remote_payload = resolution.payload
@@ -3195,6 +3212,8 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
                     config,
                     remote_identity,
                     remote_payload,
+                    session_cookie=remote_session_cookie,
+                    request_host=remote_request_host,
                 )
             )
             if config is not None and remote_identity is not None and remote_payload is not None
@@ -3403,6 +3422,9 @@ async def _wait_for_remote_session_authorization_loss(
     config: V2Config,
     identity: Mapping[str, Any],
     payload: Mapping[str, Any] | None = None,
+    *,
+    session_cookie: str | None,
+    request_host: str | None,
 ) -> str:
     """Return the terminal state for one accepted remote socket."""
 
@@ -3414,13 +3436,11 @@ async def _wait_for_remote_session_authorization_loss(
     initial_context = context_from_session_payload(payload)
     while True:
         await asyncio.sleep(_AUTHORIZATION_REVISION_RECHECK_SECONDS)
-        try:
-            live_config = await asyncio.to_thread(V2Config.load)
-        except Exception:
-            live_config = config
-        resolution = await remote_access.resolve_current_authorization_async(
-            live_config,
+        resolution = await _live_remote_authorization_resolution(
+            config,
             identity,
+            session_cookie=session_cookie,
+            request_host=request_host,
         )
         if resolution.state != "current" or resolution.payload is None:
             return resolution.state
@@ -3469,6 +3489,19 @@ def _authorization_websocket_close_code(state: str) -> int:
     return _AUTHORIZATION_LOGIN_REQUIRED_WEBSOCKET_CLOSE_CODE
 
 
+async def _close_websocket_for_authorization(
+    websocket: Any,
+    state: str,
+    *,
+    subprotocol: str | None = None,
+) -> None:
+    if subprotocol is None:
+        await websocket.accept()
+    else:
+        await websocket.accept(subprotocol=subprotocol)
+    await websocket.close(code=_authorization_websocket_close_code(state))
+
+
 def _remote_authorization_sse_frame(state: str) -> str:
     error = {
         "revoked": "remote_access_revoked",
@@ -3485,23 +3518,70 @@ async def _remote_stream_authorization_state(
     config: V2Config,
     identity: Mapping[str, Any],
     initial_payload: Mapping[str, Any],
+    *,
+    session_cookie: str | None,
+    request_host: str | None,
 ) -> str:
-    from vibe import remote_access
     from vibe.authorization import context_from_session_payload
 
-    try:
-        live_config = await asyncio.to_thread(V2Config.load)
-    except Exception:
-        live_config = config
-    resolution = await remote_access.resolve_current_authorization_async(
-        live_config,
+    resolution = await _live_remote_authorization_resolution(
+        config,
         identity,
+        session_cookie=session_cookie,
+        request_host=request_host,
     )
     if not resolution.current or resolution.payload is None:
         return resolution.state
     if context_from_session_payload(resolution.payload) != context_from_session_payload(initial_payload):
         return "changed"
     return "current"
+
+
+async def _live_remote_authorization_resolution(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    *,
+    session_cookie: str | None,
+    request_host: str | None,
+):
+    """Revalidate the accepted remote session before refreshing its authority."""
+
+    from vibe import remote_access
+
+    try:
+        live_config = await asyncio.to_thread(V2Config.load)
+    except Exception:
+        logger.warning("live remote authorization config reload failed", exc_info=True)
+        return remote_access.AuthorizationResolution(
+            "unavailable",
+            reason="remote_access_config_unavailable",
+        )
+
+    cloud = live_config.remote_access.vibe_cloud
+    if not cloud.enabled or not cloud.session_secret:
+        return remote_access.AuthorizationResolution(
+            "invalid_identity",
+            reason=(
+                "remote_access_disabled"
+                if not cloud.enabled
+                else "remote_access_session_secret_missing"
+            ),
+        )
+    if not request_host or not _remote_access_host_allowed(live_config, request_host):
+        return remote_access.AuthorizationResolution(
+            "invalid_identity",
+            reason="remote_access_host_mismatch",
+        )
+    live_identity = remote_access.parse_session_identity(live_config, session_cookie)
+    if live_identity is None or live_identity != dict(identity):
+        return remote_access.AuthorizationResolution(
+            "invalid_identity",
+            reason="identity_invalid",
+        )
+    return await remote_access.resolve_current_authorization_async(
+        live_config,
+        live_identity,
+    )
 
 
 async def _remote_access_websocket_authorization(
@@ -3527,9 +3607,10 @@ async def _remote_access_websocket_authorization(
                 else "remote_access_session_secret_missing"
             ),
         )
+    cookie_value = websocket.cookies.get(remote_access.SESSION_COOKIE_NAME)
     identity = remote_access.parse_session_identity(
         config,
-        websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        cookie_value,
     )
     if identity is None:
         return None, remote_access.AuthorizationResolution(
@@ -11921,6 +12002,13 @@ async def workbench_events():
     remote_session_identity = getattr(g, "remote_session_identity", None)
     remote_session_payload = getattr(g, "remote_session_payload", None)
     remote_config = _load_remote_access_config() if remote_session_payload is not None else None
+    remote_session_cookie = None
+    remote_request_host = None
+    if remote_session_payload is not None:
+        from vibe import remote_access
+
+        remote_session_cookie = request.cookies.get(remote_access.SESSION_COOKIE_NAME)
+        remote_request_host = _effective_normalized_host()
 
     async def authorization_state() -> str:
         if remote_session_payload is None:
@@ -11931,6 +12019,8 @@ async def workbench_events():
             remote_config,
             remote_session_identity,
             remote_session_payload,
+            session_cookie=remote_session_cookie,
+            request_host=remote_request_host,
         )
 
     async def generate():
@@ -13650,6 +13740,8 @@ async def _show_events_stream(
     authorization_context: Any = None,
     remote_session_identity: Mapping[str, Any] | None = None,
     remote_session_payload: Mapping[str, Any] | None = None,
+    remote_session_cookie: str | None = None,
+    remote_request_host: str | None = None,
     remote_config: V2Config | None = None,
 ):
     import asyncio
@@ -13671,6 +13763,8 @@ async def _show_events_stream(
             remote_config,
             identity,
             remote_session_payload,
+            session_cookie=remote_session_cookie,
+            request_host=remote_request_host,
         )
 
     async def generate():
@@ -13814,6 +13908,14 @@ async def _show_events_response(
     # Resolve the projection before the SSE generator loses request context.
     authorization_context = None if public else getattr(g, "authorization_context", None)
     remote = not public and _is_remote_show_page_request()
+    remote_session_payload = None if public else getattr(g, "remote_session_payload", None)
+    remote_session_cookie = None
+    remote_request_host = None
+    if remote_session_payload is not None:
+        from vibe import remote_access
+
+        remote_session_cookie = request.cookies.get(remote_access.SESSION_COOKIE_NAME)
+        remote_request_host = _effective_normalized_host()
     if request.method == "GET":
         if request.args.get("stream") == "1":
             return await _show_events_stream(
@@ -13826,12 +13928,12 @@ async def _show_events_response(
                 remote_session_identity=(
                     None if public else getattr(g, "remote_session_identity", None)
                 ),
-                remote_session_payload=(
-                    None if public else getattr(g, "remote_session_payload", None)
-                ),
+                remote_session_payload=remote_session_payload,
+                remote_session_cookie=remote_session_cookie,
+                remote_request_host=remote_request_host,
                 remote_config=(
                     None
-                    if public or getattr(g, "remote_session_payload", None) is None
+                    if remote_session_payload is None
                     else _load_remote_access_config()
                 ),
             )

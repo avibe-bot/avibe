@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from config import paths
 from core.show_pages import (
@@ -5860,15 +5861,15 @@ def test_private_show_page_hmr_websocket_requires_remote_session(monkeypatch, tm
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
 
-    try:
-        with app.test_client().websocket_connect(
-            "wss://alex.avibe.bot/show/ses123/__vite_hmr",
-            headers={"host": "alex.avibe.bot"},
-            subprotocols=["vite-hmr"],
-        ):
-            raise AssertionError("websocket should not connect")
-    except Exception as exc:
-        assert getattr(exc, "code", None) == ui_server._AUTHORIZATION_LOGIN_REQUIRED_WEBSOCKET_CLOSE_CODE
+    with app.test_client().websocket_connect(
+        "wss://alex.avibe.bot/show/ses123/__vite_hmr",
+        headers={"host": "alex.avibe.bot"},
+        subprotocols=["vite-hmr"],
+    ) as websocket:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            websocket.receive_text()
+
+    assert exc.value.code == ui_server._AUTHORIZATION_LOGIN_REQUIRED_WEBSOCKET_CLOSE_CODE
 
 
 def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp_path):
@@ -5901,6 +5902,8 @@ def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailabl
     tmp_path,
 ):
     class RecordingWebSocket:
+        headers = {"host": "alex.avibe.bot"}
+
         def __init__(self):
             self.calls = []
 
@@ -5997,6 +6000,8 @@ def test_remote_org_show_page_hmr_closes_when_resource_access_is_revoked(
     from vibe.sse_broker import broker
 
     class RecordingWebSocket:
+        headers = {"host": "alex.avibe.bot"}
+
         def __init__(self):
             self.calls = []
 

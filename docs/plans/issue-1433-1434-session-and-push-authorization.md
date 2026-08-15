@@ -12,15 +12,37 @@ Implementation snapshot (2026-08-15):
   isolation, and `AUTH-SETUP-402` / `AUTH-SETUP-403` coverage are implemented
   on `fix-issue-1433-seamless-authorization`.
 - The branch is rebased onto `origin/master` at `5822a49e`, including upstream
-  PR #1441 as unchanged base behavior. Post-rebase evidence is 833 related
-  Python tests and all 2,758 frontend tests passing, plus Ruff and the production
-  UI build.
+  PR #1441 as unchanged base behavior. Current evidence is 834 related Python
+  tests and all 2,759 frontend tests passing, plus Ruff and the production UI
+  build.
 - Upstream `master` independently merged PR #1441 for #1434 while this work was
   in progress. Rebase and compatibility review must keep that existing Push
   delivery change out of the #1433 diff, then identify any remaining #1434
   gaps in a separate follow-up.
 - Incus and real iOS PWA checks remain integration evidence after backend #229
   is deployed; this branch must not merge before that deployment is verified.
+
+Review circuit-breaker decision (2026-08-15):
+
+- Codex findings-bearing heads were `ad8c339743` (6 findings), `298691f973`
+  (2 findings), and `8b8f24b2f5` (3 findings). The third head triggered a
+  whole-model review before further edits.
+- The remaining transport finding class came from treating current authority as
+  the complete live-session gate. A live SSE or WebSocket must first revalidate
+  the accepted entry proof against the latest config: remote access is enabled,
+  the original host is still configured, and the original cookie still parses
+  to the same identity under the current session secret. Only then may it call
+  the shared current-authorization resolver. One helper owns this check for all
+  private SSE and WebSocket loops.
+- The unavailable cold-load finding belongs to the existing frontend recovery
+  state machine, not a new retry mechanism. AuthGuard reports the initial state
+  to `remoteAuth`, which owns the bounded probe and manual retry timer.
+- Application WebSocket close codes are observable only after the handshake is
+  accepted. Initial Terminal and Show Runtime authorization failures therefore
+  accept and immediately close without starting either protected service; other
+  origin and generic policy rejections retain their existing handshake behavior.
+- This review decision does not expand #1434 Push delivery, persistence, or
+  backend contracts.
 
 - [#1433](https://github.com/avibe-bot/avibe/issues/1433): restore the Personal
   session experience and separate Personal/Organization authorization policy.

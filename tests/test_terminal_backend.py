@@ -1473,6 +1473,7 @@ def test_remote_terminal_websocket_closes_when_authorization_becomes_unavailable
     monkeypatch.setattr(ui_server, "get_terminal_service", lambda: BlockingTerminalService())
     websocket = _RecordingWebSocket()
     websocket.client = None
+    websocket.headers = {"host": "alex.avibe.bot"}
     websocket.query_params = {}
 
     asyncio.run(ui_server.terminal_websocket(websocket, "test"))

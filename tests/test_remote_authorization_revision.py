@@ -676,7 +676,11 @@ def test_browser_logout_invalidates_http_sse_and_websocket(monkeypatch, tmp_path
     monkeypatch.setattr(ui_server, "_AUTHORIZATION_REVISION_RECHECK_SECONDS", 0.001)
 
     async def exercise() -> None:
-        with app.test_request_context("/api/events"):
+        with app.test_request_context(
+            "/api/events",
+            base_url="https://alex.avibe.bot",
+            headers={"Cookie": f"{remote_access.SESSION_COOKIE_NAME}={cookie}"},
+        ):
             g.authorization_context = context_from_session_payload(payload)
             g.remote_session_identity = identity
             g.remote_session_payload = payload
@@ -690,7 +694,13 @@ def test_browser_logout_invalidates_http_sse_and_websocket(monkeypatch, tmp_path
             finally:
                 await iterator.aclose()
         outcome = await asyncio.wait_for(
-            ui_server._wait_for_remote_session_authorization_loss(config, identity, payload),
+            ui_server._wait_for_remote_session_authorization_loss(
+                config,
+                identity,
+                payload,
+                session_cookie=cookie,
+                request_host="alex.avibe.bot",
+            ),
             timeout=1,
         )
         assert outcome == "invalid_identity"
@@ -1011,7 +1021,11 @@ def test_workbench_and_show_sse_end_after_revision_change(monkeypatch, tmp_path)
     )
 
     async def exercise() -> None:
-        with app.test_request_context("/api/events"):
+        with app.test_request_context(
+            "/api/events",
+            base_url="https://alex.avibe.bot",
+            headers={"Cookie": f"{remote_access.SESSION_COOKIE_NAME}={cookie}"},
+        ):
             g.authorization_context = context
             g.remote_session_identity = identity
             g.remote_session_payload = payload
@@ -1035,6 +1049,8 @@ def test_workbench_and_show_sse_end_after_revision_change(monkeypatch, tmp_path)
             authorization_context=context,
             remote_session_identity=identity,
             remote_session_payload=payload,
+            remote_session_cookie=cookie,
+            remote_request_host="alex.avibe.bot",
             remote_config=config,
         )
         show_iterator = show_response.body_iterator.__aiter__()
@@ -1073,11 +1089,19 @@ def test_websocket_reconnect_and_active_waiter_recheck_revision(monkeypatch, tmp
     )
 
     payload = ui_server._remote_access_websocket_session_payload(websocket, config)
+    identity = remote_access.parse_session_identity(config, cookie)
     assert payload is not None
+    assert identity is not None
 
     async def exercise() -> None:
         waiter = asyncio.create_task(
-            ui_server._wait_for_remote_session_authorization_loss(config, payload)
+            ui_server._wait_for_remote_session_authorization_loss(
+                config,
+                identity,
+                payload,
+                session_cookie=cookie,
+                request_host="alex.avibe.bot",
+            )
         )
         await asyncio.sleep(0)
         remote_access._replace_authorization_revision(config, 42)
@@ -1115,17 +1139,77 @@ def test_remote_websocket_authorization_rejects_disabled_cloud(monkeypatch, tmp_
     assert resolution.reason == "remote_access_disabled"
 
 
-def test_terminal_websocket_rejects_stale_remote_session_before_accept(
+def test_live_remote_authorization_rechecks_the_remote_entry_gate(
     monkeypatch,
     tmp_path,
 ):
-    """I1057-AC4: a stale remote terminal request is never accepted."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path)
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    monkeypatch.setattr(
+        remote_access,
+        "resolve_current_authorization_async",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid live session reached the authorization resolver")
+        ),
+    )
+
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    disabled = asyncio.run(
+        ui_server._live_remote_authorization_resolution(
+            config,
+            identity,
+            session_cookie=cookie,
+            request_host="alex.avibe.bot",
+        )
+    )
+    assert disabled.state == "invalid_identity"
+    assert disabled.reason == "remote_access_disabled"
+
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.session_secret = "rotated-session-secret"
+    config.save()
+    rotated = asyncio.run(
+        ui_server._live_remote_authorization_resolution(
+            config,
+            identity,
+            session_cookie=cookie,
+            request_host="alex.avibe.bot",
+        )
+    )
+    assert rotated.state == "invalid_identity"
+    assert rotated.reason == "identity_invalid"
+
+    config.remote_access.vibe_cloud.session_secret = "session-secret"
+    config.remote_access.vibe_cloud.public_url = "https://other.avibe.bot"
+    config.save()
+    moved = asyncio.run(
+        ui_server._live_remote_authorization_resolution(
+            config,
+            identity,
+            session_cookie=cookie,
+            request_host="alex.avibe.bot",
+        )
+    )
+    assert moved.state == "invalid_identity"
+    assert moved.reason == "remote_access_host_mismatch"
+
+
+def test_terminal_websocket_reports_stale_remote_session_after_accept(
+    monkeypatch,
+    tmp_path,
+):
+    """I1057-AC4: no terminal service starts before a state-specific close."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _paired_config(tmp_path)
 
     class RecordingWebSocket:
         client = None
+        headers = {"host": "alex.avibe.bot"}
         query_params = {}
 
         def __init__(self):
@@ -1160,6 +1244,7 @@ def test_terminal_websocket_rejects_stale_remote_session_before_accept(
     asyncio.run(ui_server.terminal_websocket(websocket, "test"))
 
     assert websocket.calls == [
+        ("accept", None),
         ("close", ui_server._AUTHORIZATION_UNAVAILABLE_WEBSOCKET_CLOSE_CODE),
     ]
 

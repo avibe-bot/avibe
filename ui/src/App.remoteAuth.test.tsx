@@ -6,7 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { AuthGuard } from './App';
 import { DENIED_INSTANCE_CAPABILITIES } from './lib/sessionInfo';
-import { REMOTE_AUTH_STATE_EVENT } from './lib/remoteAuth';
+import { reportRemoteAuthorizationState, REMOTE_AUTH_STATE_EVENT } from './lib/remoteAuth';
 
 vi.hoisted(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
@@ -35,8 +35,10 @@ vi.mock('react-i18next', () => ({
 }));
 
 afterEach(() => {
+  reportRemoteAuthorizationState('current');
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe('AuthGuard remote authorization recovery', () => {
@@ -75,5 +77,52 @@ describe('AuthGuard remote authorization recovery', () => {
 
     await waitFor(() => expect(api.getAuthSession).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('protected shell')).toBeTruthy();
+  });
+
+  it('automatically probes again after an unavailable cold load', async () => {
+    vi.useFakeTimers();
+    api.getAuthSession
+      .mockResolvedValueOnce({
+        remote: true,
+        authenticated: true,
+        email: 'member@example.com',
+        instance_kind: 'organization',
+        authorization_state: 'unavailable',
+      })
+      .mockResolvedValue({
+        remote: true,
+        authenticated: true,
+        email: 'member@example.com',
+        instance_kind: 'organization',
+        instance_role: 'viewer',
+        capabilities: {
+          ...DENIED_INSTANCE_CAPABILITIES,
+          can_read_instance: true,
+        },
+        authorization_state: 'current',
+      });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({
+        remote: true,
+        authenticated: true,
+        authorization_state: 'current',
+      }),
+    }));
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AuthGuard><div>protected shell</div></AuthGuard>
+      </MemoryRouter>,
+    );
+    await act(async () => undefined);
+    expect(screen.getByText('remoteAuthorization.unavailable.body')).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    await act(async () => undefined);
+
+    expect(api.getAuthSession).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('protected shell')).toBeTruthy();
   });
 });

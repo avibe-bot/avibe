@@ -389,6 +389,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && session.authorization_state === 'unavailable'
             ) {
                 setGuardStatus('authorization-unavailable');
+                reportRemoteAuthorizationState('unavailable');
                 return null;
             }
             if (
@@ -443,6 +444,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && authCheck.session.authorization_state === 'unavailable'
             ) {
                 setGuardStatus('authorization-unavailable');
+                reportRemoteAuthorizationState('unavailable');
                 return;
             }
             if (authCheck && !authCheck.checkSetup) {
