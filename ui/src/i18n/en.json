@@ -2057,7 +2057,8 @@
         "testTitle": "Avibe",
         "testBody": "Notifications are ready.",
         "testSent": "Test notification sent",
-        "testFailed": "Test notification failed"
+        "testFailed": "Test notification failed",
+        "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
       }
     },
     "modules": {

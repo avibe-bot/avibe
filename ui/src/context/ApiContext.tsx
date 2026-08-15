@@ -2469,12 +2469,38 @@ export type OpencodeMutationResult = {
   };
 };
 
+export type WebPushNormalDeliveryOwner = {
+  policy?: string;
+  disposition?: string | null;
+  reason?: string;
+};
+
+export type WebPushNormalDeliveryRecent = {
+  at?: string;
+  message_id?: string | null;
+  session_id?: string | null;
+  owners?: Record<string, WebPushNormalDeliveryOwner>;
+  disposition?: string | null;
+};
+
+/** Normal-path authorization evaluation shared by the test/status surface. */
+export type WebPushNormalDelivery = {
+  user_key?: string;
+  policy?: string;
+  authorized?: boolean | null;
+  disposition?: string | null;
+  reason?: string;
+  revision_state?: string;
+  recent_deliveries?: WebPushNormalDeliveryRecent[];
+};
+
 export type WebPushStatus = {
   ok: boolean;
   configured: boolean;
   public_key: string;
   subscription_count: number;
   current_subscription_enabled?: boolean;
+  normal_delivery?: WebPushNormalDelivery;
 };
 
 export type WebPushStatusPayload = {
@@ -2503,6 +2529,7 @@ export type WebPushTestResult = {
   sent?: number;
   failed?: number;
   error?: string;
+  normal_delivery?: WebPushNormalDelivery;
 };
 
 // Error thrown by the JSON helpers below when a request fails. Carries the
