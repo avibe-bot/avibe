@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { parseSource, withoutNonRenderingText } from './nonRenderingText.mjs';
-import { SHADOW_KEY, propertyExpression, valueArgument } from './styleWrite.mjs';
+import { SHADOW_KEY, isStyleWrite, propertyExpression, valueArgument } from './styleWrite.mjs';
 
 // Both halves of this module produced a false positive in one review round, and
 // both were the same mistake in different clothes: the scan decided what a span
@@ -33,7 +33,14 @@ const WRITES = [
   // only ever appear quoted -- and quoted, they are style writes like any other.
   ['a hyphenated object key', "const s = { 'box-shadow': '0 0 8px red' };"],
   ['a hyphenated CSSOM key', "el.style['box-shadow'] = '0 0 8px red';"],
+  // A vendor-prefixed property has TWO camel spellings, and deriving one of
+  // them was not a missing entry in a list -- it was half a property. CSSOM
+  // defines the attribute with the prefix lowercased, `element.style
+  // .webkitBoxShadow`; the capitalised `WebkitBoxShadow` is the IDL alias that
+  // React's style objects use. Both are real, and a case-blind matcher upstream
+  // hid the gap by matching either one against whichever was listed.
   ['a vendor-prefixed property', "const s = { WebkitBoxShadow: '0 0 8px red' };"],
+  ['a vendor-prefixed CSSOM property', "el.style.webkitBoxShadow = '0 0 8px red';"],
   ['a CSSOM member assignment', "el.style.boxShadow = '0 0 8px red';"],
   ['a CSSOM bracket assignment', "el.style['boxShadow'] = '0 0 8px red';"],
   ['a CSSOM assignment with spaces', "el.style . boxShadow = '0 0 8px red';"],
@@ -54,6 +61,12 @@ const NOT_WRITES = [
   // The finding before it, which moving the word to the tail did fix.
   ['a variable whose name starts with the word', "const shadowPreset = 'compact';"],
   ['a shadow root property', 'const root = el.shadowRoot;'],
+  // JavaScript folds no case, so these two address no CSS property and draw
+  // nothing whatever they are nested in. They are here because the completeness
+  // matcher used to measure them case-blind and report a file with no CSS in it
+  // -- the same rule read as CSS's rule, in a language that does not have it.
+  ['a key that only misspells the property\'s case', 'const s = { BOXSHADOW: \'compact\' };'],
+  ['a CSSOM member that only misspells the property\'s case', "el.style.boxshadow = 'x';"],
   // CSS, not JavaScript. Accepting the hyphenated names BARE here handed every
   // stylesheet declaration in the tree to a channel that reads JS expressions,
   // which returned nothing -- four correct declarations reported as values the
@@ -98,6 +111,64 @@ describe('SHADOW_KEY', () => {
   it('requires a quote around a name JavaScript cannot spell bare', () => {
     expect("const s = { 'box-shadow': x };".match(key())).not.toBeNull();
     expect('.a { box-shadow: x; }'.match(key())).toBeNull();
+  });
+});
+
+describe('isStyleWrite', () => {
+  // Asked exactly the way the scan asks it: the key regex over the blanked
+  // text, the tree of the file as written.
+  const at = (source, file = 'probe.tsx') => {
+    const match = new RegExp(SHADOW_KEY, 'g').exec(withoutNonRenderingText(source, file));
+
+    expect(match, `no shadow key in ${source}`).not.toBeNull();
+
+    return isStyleWrite(match.index, parseSource(source, file));
+  };
+
+  // The two constructs that put a value on a CSS property in JavaScript. This
+  // list is closed by the language, not by whoever last thought about it, which
+  // is what makes the rejecting half below affordable.
+  it.each([
+    ['an object literal property', "const s = { boxShadow: '0 0 8px red' };"],
+    ['a quoted object literal property', "const s = { 'box-shadow': '0 0 8px red' };"],
+    ['an inline style prop', "<div style={{ boxShadow: '0 0 8px red' }} />"],
+    ['a CSSOM member assignment', "el.style.boxShadow = '0 0 8px red';"],
+    ['a CSSOM bracket assignment', "el.style['box-shadow'] = '0 0 8px red';"],
+  ])('reads %s as a style write', (_label, source) => expect(at(source)).toBe(true));
+
+  // A colon is the most overloaded character in TypeScript, and `SHADOW_KEY`
+  // locates a key by the punctuation after it. These three spell a real CSS
+  // property followed by a colon and are byte-identical at the key, so the
+  // regex claimed all of them; the first two then found no shadow string and
+  // failed `validate:theme` as unreadable, for constructs that never reach a
+  // browser at all -- one is erased before the file runs, the other reads a
+  // value rather than writing one.
+  it.each([
+    ['a type member', 'interface Props { boxShadow: string }'],
+    ['a destructuring binding', 'const { boxShadow: current } = style;'],
+    ['a type annotation on a declaration', 'const boxShadow: string = compute();'],
+    // The fourth thing a colon makes, reached by the same match and rejected by
+    // the same rule -- listed because the accept side is closed by the language
+    // rather than by this list, so a construct nobody enumerated is already
+    // answered.
+    ['a labelled statement', "boxShadow: draw('0 0 8px red');"],
+  ])('leaves %s alone', (_label, source) => expect(at(source)).toBe(false));
+
+  // The rule, not the spellings above it: what makes a style write is the
+  // assignment, and `=` is a prefix of two operators that do not assign. The
+  // lookbehind in `STYLE_ASSIGNMENT` has already required the `.style` target,
+  // so this is the half it cannot see -- where the name appears versus what is
+  // being done with it, which is the question only the parser can answer.
+  it('claims an assignment through .style, not a comparison with one', () => {
+    expect(at('el.style.boxShadow = value;')).toBe(true);
+    expect(at("if (el.style.boxShadow === '0 0 8px red') return;")).toBe(false);
+  });
+
+  // CSS has no tree, so it gets no answer rather than a guess. Nothing in a
+  // stylesheet should reach here -- the key regex hands CSS to the declaration
+  // channel -- and this is the second lock on that door.
+  it('reads nothing without a tree', () => {
+    expect(isStyleWrite(0, null)).toBe(false);
   });
 });
 

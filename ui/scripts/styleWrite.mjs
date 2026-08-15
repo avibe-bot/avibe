@@ -1,4 +1,7 @@
-// Where a style write starts, and where its value ends.
+import ts from 'typescript';
+
+// Where a style write starts, whether it is one at all, and where its value
+// ends.
 //
 // Two questions the scan asks of JavaScript, both of which it used to answer by
 // reading the bytes around a match, and both of which produced a false positive
@@ -60,18 +63,25 @@ const SHADOW_PROPERTIES = ['box-shadow', 'text-shadow', '-webkit-box-shadow', '-
 
 // Every spelling of each, because the same property is written three ways
 // depending on where it is: `box-shadow` in a stylesheet or in
-// `element.style['box-shadow']`, `boxShadow` in a style object, and
-// `WebkitBoxShadow` for the vendor-prefixed pair, whose JS name capitalises the
-// prefix rather than dropping it. Sorted longest-first so `box-shadow` cannot
-// match as the tail of `-webkit-box-shadow` and leave the prefix outside the
-// match.
+// `element.style['box-shadow']`, `boxShadow` in a style object, and -- for the
+// vendor-prefixed pair -- TWO camel spellings rather than one. CSSOM defines the
+// attribute with the prefix lowercased, `element.style.webkitBoxShadow`, while
+// the capitalised `WebkitBoxShadow` is the IDL alias that React's style objects
+// use. Deriving only the capitalised one was not a missing spelling in a list,
+// it was half a property: `el.style.webkitBoxShadow = 'var(--shadow-glow-md-
+// mint)'` -- a correct, fully tokenised write -- failed `validate:theme`,
+// because the completeness matcher counted a mention that the channel could not
+// claim.
+//
+// Sorted longest-first so `box-shadow` cannot match as the tail of
+// `-webkit-box-shadow` and leave the prefix outside the match.
 const camel = (property) => property.replace(/^-/, '').replace(/-(\w)/g, (_, next) => next.toUpperCase());
 const capitalised = (name) => name[0].toUpperCase() + name.slice(1);
 
 const IDENTIFIER_NAMES = [
-  ...new Set(SHADOW_PROPERTIES.map((property) => {
+  ...new Set(SHADOW_PROPERTIES.flatMap((property) => {
     const js = camel(property);
-    return property.startsWith('-') ? capitalised(js) : js;
+    return property.startsWith('-') ? [js, capitalised(js)] : [js];
   })),
 ];
 
@@ -106,6 +116,66 @@ const JS_SHADOW_KEY = String.raw`(?<![\w-])(?:(?:${IDENTIFIER_NAMES.join('|')})(
 // are one channel to everything downstream, and this is the only place that
 // knows they are written differently.
 const SHADOW_KEY = `${JS_SHADOW_KEY}:|${STYLE_ASSIGNMENT}${JS_SHADOW_KEY}=`;
+
+// Whether the key found at `index` is a style write at all.
+//
+// `SHADOW_KEY` locates a key by the punctuation after it, and a colon is the
+// most overloaded character in TypeScript. `interface Props { boxShadow: string
+// }` declares a TYPE, `const { boxShadow: current } = style` DESTRUCTURES one,
+// and both spell a real CSS property followed by a colon -- so both were read as
+// rendered assignments, found no shadow string, and failed `validate:theme` as
+// unreadable. Neither reaches a browser: one is erased before the file runs, the
+// other reads a value rather than writing one.
+//
+// The rule this restates is the module's own, at the top of this file: a style
+// write is a property in an OBJECT LITERAL, or an assignment through
+// `element.style`. That was always the intent; the regex was an approximation of
+// it built from the characters nearby, and every round of this review has found
+// another construct those characters cannot tell apart. The parser has already
+// read the file and knows which one this is.
+//
+// The accept list is closed by the language rather than by whoever last thought
+// about it: those two constructs are how a CSS property gets a value in
+// JavaScript. Anything else -- a type member, a binding, a class field, a label
+// -- is not a style write, which keeps the residual risk on the MISS side that
+// this module has already settled, and off the side that fails a correct pull
+// request.
+function isStyleWrite(index, tree) {
+  if (!tree) return false;
+
+  // The innermost node containing the key. Containing rather than starting at:
+  // for a quoted key the match begins INSIDE the string literal, one character
+  // past the node's own start.
+  let key = null;
+  const visit = (node) => {
+    if (node.getStart(tree) > index || node.getEnd() <= index) return;
+    key = node;
+    node.getChildren(tree).forEach(visit);
+  };
+  visit(tree);
+
+  while (key && !ts.isIdentifier(key) && !ts.isStringLiteralLike(key)) key = key.parent;
+  const parent = key?.parent;
+  if (!parent) return false;
+
+  // `{ boxShadow: value }` -- and the name position specifically, so a style
+  // object held as the VALUE of some other key is not claimed by its own key.
+  if (ts.isPropertyAssignment(parent)) return parent.name === key;
+
+  // `el.style.boxShadow = value` and `el.style['box-shadow'] = value`. The
+  // lookbehind in STYLE_ASSIGNMENT has already required the `.style` target;
+  // this requires the assignment itself, so a READ of the same property is not a
+  // write.
+  if (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) {
+    const assignment = parent.parent;
+    return Boolean(assignment)
+      && ts.isBinaryExpression(assignment)
+      && assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && assignment.left === parent;
+  }
+
+  return false;
+}
 
 // The expression beginning at `start`, ending at the first terminator that is
 // not nested inside a call, a bracket or a string. Null when it never
@@ -209,6 +279,7 @@ export {
   SHADOW_PROPERTIES,
   SHADOW_PROPERTY_NAMES,
   STYLE_ASSIGNMENT,
+  isStyleWrite,
   propertyExpression,
   valueArgument,
 };

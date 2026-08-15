@@ -40,7 +40,7 @@ const section = (opening, closing) => {
 };
 
 const channels = () => section('const SHADOW_CHANNELS = [', '\n];');
-const mention = () => section('const SHADOW_MENTION = ', '\n);');
+const mention = () => section('const SHADOW_MENTIONS = [', '\n];');
 
 // One entry per channel: the text from its `pattern:` to the next channel's.
 // That span carries the pattern together with the `valuesOf` and
@@ -97,6 +97,27 @@ describe('the shadow channels and the completeness matcher', () => {
     for (const channel of css) expect(channel).toContain('PROPERTY_FLAGS');
   });
 
+  // And the same fact for the other language, which is why that `i` cannot be
+  // one flag over the whole matcher. CSS folds case; JavaScript does not, so
+  // `BOXSHADOW` and `boxshadow` are keys that address no CSS property and draw
+  // nothing at all. Measuring them case-blind reported two names the channel
+  // could not claim -- a false positive on code with no CSS in it -- and hid
+  // that the real CSSOM spelling `webkitBoxShadow` was missing from the property
+  // list, by matching its capitalised alias case-blind instead.
+  //
+  // Asserted as the shared EXPRESSION rather than as two flags that agree
+  // today: the JS half of the measurement is the JS channel's pattern, written
+  // the same way in both places, so neither can gain an `i` without the other.
+  // That is the same discipline the test below applies to the key itself, one
+  // level down -- a copy that has to be edited twice is a copy that will be
+  // edited once.
+  it('measures JavaScript keys case-sensitively, because JavaScript is', () => {
+    const jsPattern = "new RegExp(SHADOW_KEY, 'g')";
+
+    expect(mention()).toContain(jsPattern);
+    expect(channels()).toContain(jsPattern);
+  });
+
   // What makes that `i` safe. One set of channels reads three languages, so a
   // case-insensitive CSS property name also matches the camelCase JS key -- and
   // reading a JS expression with CSS's terminators stops at the first quote,
@@ -143,8 +164,22 @@ describe('the shadow channels and the completeness matcher', () => {
   // whole key, so there is no composition left to keep in step: they are one
   // regex, and a spelling the channel gains is a spelling the measurement gains
   // in the same edit.
+  // The fifth quantity, after the property name, the flags, the key and the
+  // case rules: WHERE a match begins. A channel may legitimately claim less
+  // text than the mention points at -- `drop-shadow-[…]` is read for what is
+  // inside the brackets, so the claim starts at `shadow-[` while the mention
+  // starts at `drop-` -- and comparing start offsets called that unscanned,
+  // failing a correct, fully tokenized utility. Two spans that cover the same
+  // text is what "some channel read this" actually means.
+  it('counts a mention as claimed when a channel read the same text', () => {
+    const loop = section('for (const pattern of SHADOW_MENTIONS) {', '\n    }');
+
+    expect(loop).toContain('from < end && to > start');
+    expect(loop).not.toContain('mention.index >= start');
+  });
+
   it('measures a style write with the very key the channel reads it by', () => {
-    expect(mention()).toContain('${SHADOW_KEY}');
+    expect(mention()).toContain('SHADOW_KEY');
 
     const inline = eachChannel().find((channel) =>
       channel.trimStart().startsWith('new RegExp(SHADOW_KEY')

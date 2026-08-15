@@ -3,8 +3,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import postcss from 'postcss';
 
-import { isLength, isZeroLength } from './cssLength.mjs';
-import { SHADOW_KEY, propertyExpression, valueArgument } from './styleWrite.mjs';
+import { COLOUR, glowOffencesInValue } from './shadowLayer.mjs';
+import { SHADOW_KEY, isStyleWrite, propertyExpression, valueArgument } from './styleWrite.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { colourRegistrationsIn, customPropertiesIn } from './customProperties.mjs';
 import { parseSource, rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
@@ -483,40 +483,10 @@ function assertAccentAliasesKeepTheirTokenName(source) {
 
 assertAccentAliasesKeepTheirTokenName(css);
 
-// A glow is a shadow layer drawn at the element's own position: both offsets
-// zero, a blur, and an accent colour. Written as a literal it is invisible to
-// every assertion in this file -- which is how 72 of them accumulated 52
-// distinct spellings of the same four shapes, and how the eight card washes
-// came to retype `--shadow-mint-card`'s value and so keep the dark frame's
-// neon on a white page. A token cannot drift that way: it is one value, it is
-// read against design.pen, and light re-anchors it in one place. So a glow
-// names a token, and this asserts the property rather than listing the
-// spellings, because the next literal will be a spelling nobody listed.
-//
-// Only the glow layer is held to it. An offset shadow is directional light,
-// not a glow, and `0 0 0 2px` is a ring -- no blur, nothing to colour-manage.
-// Top-level split, blind to anything inside parentheses. Layers are separated
-// by commas in every syntax below; the parts of one layer are separated by
-// spaces in CSS and by `_` in a Tailwind arbitrary value, so one splitter reads
-// either and no channel needs its own normalisation step.
-function splitTopLevel(value, isSeparator) {
-  const parts = [];
-  let depth = 0;
-  let start = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    if (value[i] === '(') depth += 1;
-    else if (value[i] === ')') depth -= 1;
-    else if (depth === 0 && isSeparator(value[i])) {
-      parts.push(value.slice(start, i));
-      start = i + 1;
-    }
-  }
-  parts.push(value.slice(start));
-  return parts.filter((part) => part !== '');
-}
-
-const shadowLayers = (value) => splitTopLevel(value, (char) => char === ',');
-const layerParts = (layer) => splitTopLevel(layer, (char) => char === '_' || /\s/.test(char));
+// What a glow is, and why a literal one cannot be allowed, is stated in
+// `shadowLayer.mjs` -- along with the classifier that answers it. That rule is
+// the one this file exists to enforce; what stays here is everything about
+// WHERE a value can come from, which is the other half of the gate.
 
 // A glow layer has exactly one legal spelling: a reference to a --shadow-glow-*
 // token, as the whole layer. Not "a managed colour with any geometry" -- that
@@ -743,13 +713,25 @@ const SHADOW_CHANNELS = [
     // answers it where the answer lives, at the assignment target, and is shared
     // with SHADOW_MENTION so the two cannot drift apart.
     pattern: new RegExp(SHADOW_KEY, 'g'),
-    valuesOf: (match, tree) => stringLiterals(styleExpression(match, tree)),
-    // A CSS shadow is a string, so a bare non-string literal is provably not
-    // one: `scrollbar: { useShadows: false }` is a Monaco flag, not a shadow.
-    // This is deliberately narrower than "no string literal here" -- that is the
-    // `boxShadow: glow` case, where an identifier could hold anything and the
-    // value stays unreadable rather than becoming innocent.
-    provablyNotAShadow: (match, tree) => NON_STRING_LITERAL.test(styleExpression(match, tree)),
+    valuesOf: (match, tree) => (isStyleWrite(match.index, tree)
+      ? stringLiterals(styleExpression(match, tree))
+      : []),
+    // Two ways to be provably not a shadow, and they answer different questions.
+    //
+    // `isStyleWrite` asks whether this is a style write AT ALL. The pattern
+    // finds a key by the punctuation after it, and a colon in TypeScript also
+    // makes a type member and a destructuring binding -- `interface Props {
+    // boxShadow: string }` and `const { boxShadow: current } = style` were both
+    // claimed as rendered assignments and then failed as unreadable, for two
+    // constructs that never reach a browser.
+    //
+    // NON_STRING_LITERAL asks, of a real style write, whether its value can be
+    // a CSS shadow: a CSS shadow is a string, so `scrollbar: { useShadows:
+    // false }` is a Monaco flag. That one is deliberately narrower than "no
+    // string literal here" -- `boxShadow: glow` is an identifier that could hold
+    // anything, and stays unreadable rather than becoming innocent.
+    provablyNotAShadow: (match, tree) => !isStyleWrite(match.index, tree)
+      || NON_STRING_LITERAL.test(styleExpression(match, tree)),
   },
   // `el.style.setProperty('box-shadow', '0 0 93px red')`. Read through the
   // shared CSSOM_SETTER source rather than a pattern of its own, because the
@@ -859,13 +841,34 @@ const NON_STRING_LITERAL =/^\s*(true|false|null|undefined|[+-]?\d+(\.\d+)?)\s*($
 // opposite sides of that line while they are the same string. Three rounds of
 // widening these in lockstep by hand ended in a drift anyway; a copy that has to
 // be edited twice is a copy that will be edited once.
-const SHADOW_MENTION = new RegExp(
-  `${CSS_SHADOW_PROPERTY}\\s*:`
-  + `|${SHADOW_PROPERTY}-?[([]`
-  + `|${SHADOW_KEY}`
-  + `|${CSSOM_SETTER.source}`,
-  'gi',
-);
+// Two patterns rather than one, because case sensitivity is a property of the
+// LANGUAGE and not of this matcher. CSS folds the case of a property name --
+// `BOX-SHADOW: red` renders -- so the CSS half must be case-insensitive or it
+// misses. JavaScript does not fold anything: `boxShadow` and `BOXSHADOW` are two
+// different keys, and only one of them is a CSS property.
+//
+// One `i` flag over both halves therefore claimed to measure what the channel
+// checks and did not, in the one direction that costs a pull request. The JS
+// channel matches case-sensitively, as it must; the mention matcher counted
+// `const o = { BOXSHADOW: 'compact' }` and `el.style.boxshadow = x` all the same
+// -- names that address no CSS property and draw nothing -- and reported them as
+// spellings no channel reads. It also hid the finding underneath: the real
+// CSSOM spelling `webkitBoxShadow` was missing from the property list, and the
+// `i` flag had been papering over its absence by matching the capitalised alias
+// case-blind.
+//
+// So the JS half is the channel's own pattern, flags included, which is what
+// makes the promise above -- that a mention and a channel cannot land on
+// opposite sides of the line -- true rather than nearly true.
+const SHADOW_MENTIONS = [
+  new RegExp(
+    `${CSS_SHADOW_PROPERTY}\\s*:`
+    + `|${SHADOW_PROPERTY}-?[([]`
+    + `|${CSSOM_SETTER.source}`,
+    'gi',
+  ),
+  new RegExp(SHADOW_KEY, 'g'),
+];
 
 // Every custom property declared anywhere in the scanned stylesheets, name to
 // the set of values it is given. A name is collected once per distinct value
@@ -925,160 +928,6 @@ function collectThemeDeclarations(root) {
   return values;
 }
 
-const CSS_WIDE_KEYWORDS = new Set(['none', 'inherit', 'initial', 'unset', 'revert', 'revert-layer']);
-const GLOW_TOKEN = /^--shadow-glow-/;
-const VAR_REFERENCE = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([\s\S]*))?\)$/;
-// A length this scan can read is a literal. These two spell the ways one can
-// arrive without being readable: computed, or named. Neither is rejected for
-// being exotic -- they are rejected because a glow is what they might be.
-const MATH_FUNCTION = /\b(calc|min|max|clamp)\s*\(/;
-const INDIRECT = /\bvar\s*\(/;
-const MAX_INDIRECTION = 8;
-
-// What a colour LOOKS like, which is a different question from what a blur does
-// not look like -- and the difference is the sixth round of this file. The blur
-// slot used to be tested by elimination: not a length, not a `var()`, therefore
-// harmless. `0 0 ${blur}px red` is neither of those two things and is also a
-// glow, so it walked out through the bottom of the test. That is the same
-// implicit accept the layer-level default was inverted to close; it had simply
-// survived one level further down, inside the branch that does the inverting.
-//
-// A bare identifier counts because a <length> always carries a digit, so a name
-// with none provably is not one. The function list is an enumeration and would
-// be a liability on the reject side; here it sits on the ACCEPT side, where a
-// colour syntax missing from it costs a spurious failure and a one-line fix
-// rather than a glow that ships. Order matters: `color-mix(…, var(--x) …)` is a
-// colour that happens to contain a name, so this is asked before INDIRECT.
-const COLOUR = new RegExp(
-  '^(#[0-9A-Fa-f]{3,8}'
-  + '|[A-Za-z][A-Za-z0-9-]*'
-  + '|(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\\([\\s\\S]*\\))$',
-  'i',
-);
-
-// The classification is DENY BY DEFAULT, and that is the whole point of it.
-// Three review rounds each found another spelling that fell past a check built
-// to recognise glows and reject them -- an unlisted colour syntax, an unread
-// input channel, hand-picked geometry behind a managed colour -- because
-// anything the parser failed to recognise landed in an implicit "accept". A
-// fourth then found the cheapest fall-through of all: `shadow-[var(--anything)]`
-// is a single part, so it had no offsets to test and was waved through, which
-// let `--rogue-glow: 0 0 93px var(--mint)` ship a hand-drawn glow behind a name.
-// Widening the recogniser a fourth time would just relocate the gap, so the
-// default is inverted instead: every layer must land in a form named here, and
-// a layer this scan cannot classify FAILS asking to be made legible. A name is
-// not taken at face value either -- indirection is resolved and the same test
-// runs on what it resolves to, so a glow cannot hide one alias deeper.
-// `!important` is a property of the DECLARATION, not of any layer in it, so it
-// is dropped here rather than in the six channels that would each have to
-// remember. This is the fact round ten already established -- `setProperty('box-
-// shadow', 'none', 'important')` had swept the priority up as a second layer --
-// taught to the branch that had not heard it: written in CSS instead of in
-// CSSOM, `box-shadow: var(--shadow-glow-md-mint) !important` parsed `!important`
-// as a layer part and failed correct, fully tokenized CSS. A guard that rejects
-// the very spelling it is asking for is worse than one that misses.
-const IMPORTANT = /\s*!\s*important\s*$/i;
-
-function glowOffencesInValue(value, tokens, seen = new Set(), depth = 0) {
-  return shadowLayers(value.replace(IMPORTANT, '')).flatMap((layer) =>
-    glowOffencesInLayer(layer, tokens, seen, depth)
-  );
-}
-
-function glowOffencesInLayer(layer, tokens, seen, depth) {
-  const parts = layerParts(layer);
-  if (parts[0] === 'inset') parts.shift();
-  const shown = layer.trim();
-
-  if (parts.length === 1) {
-    const only = parts[0];
-    if (CSS_WIDE_KEYWORDS.has(only.toLowerCase())) return [];
-    const reference = only.match(VAR_REFERENCE);
-    if (!reference) return [`${shown} -- not a length triple, a keyword or a var() this scan can read`];
-    const [, name, fallback] = reference;
-    if (depth >= MAX_INDIRECTION) return [`${shown} -- indirection deeper than ${MAX_INDIRECTION} hops`];
-    if (seen.has(name)) return [];
-    const declared = tokens.values.get(name);
-    if (!declared) return [`${shown} -- ${name} is declared in no scanned stylesheet, so its value cannot be checked`];
-    const next = new Set(seen).add(name);
-    // The sanctioned home for a shadow literal, and the only stop condition
-    // here: a managed glow token is read against design.pen and re-anchored for
-    // light in one place, which is exactly what a call site cannot do. It stops
-    // the recursion, not the check -- the name still has to exist, and a
-    // fallback beside it is a second value that renders whenever it does not,
-    // so the fallback is classified even when the token it guards is managed.
-    //
-    // Managed is a PLACE, not a prefix. This used to stop on the name matching
-    // `--shadow-glow-`, which let anything satisfy the check by naming itself
-    // after the thing being checked: `--shadow-glow-rogue: 0 0 93px red`
-    // declared in any component stylesheet was resolved, found, and then
-    // deliberately discarded unread. Requiring the declaration to live in an
-    // `@theme` block asks the question the prefix was standing in for, because
-    // that block is what design.pen is read against -- and a name that only
-    // looks managed now falls through to the ordinary classification, where its
-    // geometry is judged like any other literal.
-    //
-    // The sanction attaches to the DECLARATION, not to the name: subtracting
-    // the `@theme` values from everything collected for this name leaves
-    // exactly the declarations made somewhere else, and those are classified.
-    // A token declared only in `@theme` subtracts to nothing and stops the
-    // recursion as before; a managed name redeclared in a component stylesheet
-    // keeps the override in the list, which is what the cascade does too.
-    const sanctioned = GLOW_TOKEN.test(name) ? tokens.managed.get(name) : undefined;
-    const resolved = sanctioned ? [...declared].filter((value) => !sanctioned.has(value)) : [...declared];
-    const deeper = [...resolved, ...(fallback ? [fallback] : [])]
-      .flatMap((declaredValue) => glowOffencesInValue(declaredValue, tokens, next, depth + 1));
-    return deeper.map((offence) => `${offence}  <- reached through ${shown}`);
-  }
-
-  // CSS lets the colour lead instead of trail, so move a leading non-length to
-  // the back and let the offsets line up. This used to exempt a leading `var()`,
-  // which quietly reopened the same hole from the other end: `var(--mint) 0 0
-  // 93px` kept its colour in the offset slot and drew whatever geometry it liked.
-  if (!isLength(parts[0])) parts.push(parts.shift());
-
-  // A multi-part layer passes only if it can be shown NOT to be a glow. That is
-  // the same inversion the single-part branch makes, and this branch was left
-  // out of it -- the check still asked "is this a glow" and accepted silence as
-  // a no. `calc(0px) calc(0px) 93px red` is what that costs: both offsets
-  // compute to zero, neither is the literal `0` a zero-test looks for, so the
-  // question answers no and a hand-drawn glow ships. Asked the other way round,
-  // an offset this scan cannot evaluate has no innocent answer to give.
-  if (parts.some((part) => MATH_FUNCTION.test(part))) {
-    return [`${shown} -- a computed length cannot be evaluated here, so this cannot be shown not to be a glow`];
-  }
-  const [x, y, third] = parts;
-  if (!isLength(x ?? '') || !isLength(y ?? '')) {
-    return [`${shown} -- the offsets are not plain lengths, so this cannot be shown not to be a glow`];
-  }
-  // A non-zero offset is directional light whatever the blur does, and that is
-  // provable from the offset alone.
-  if (!isZeroLength(x) || !isZeroLength(y)) return [];
-  // Both offsets are zero, so the third part decides, and it has to prove itself
-  // the same way the layer does. Absent means there is no blur part at all; a
-  // colour means the same thing, since a layer whose third part is its colour
-  // skipped the blur -- that is the ring-spacer shape. A name is not an answer:
-  // it could hold any radius, so it is unprovable rather than innocent. Anything
-  // else is unreadable and fails, which is the point -- this branch used to end
-  // in a bare `return []`, and every spelling that reached it was accepted for
-  // no better reason than that the two tests above had not recognised it.
-  if (third === undefined) return [];
-  if (isLength(third)) return isZeroLength(third) ? [] : [shown];
-  if (COLOUR.test(third)) return [];
-  // A name is unprovable only while it could be a length. `@property --tint
-  // { syntax: "<color>" }` removes that possibility at the source: the browser
-  // rejects a length assigned to it, so the slot holds a colour and the layer
-  // has no blur part at all -- the same ring-spacer shape the line above already
-  // accepts, written with a registered name instead of a literal. Asking the
-  // registration is what turns "could be any radius" from a fact about the
-  // spelling into a fact about the value.
-  const registered = third.match(VAR_REFERENCE);
-  if (registered && tokens.colours.has(registered[1]) && !registered[2]) return [];
-  if (INDIRECT.test(third)) {
-    return [`${shown} -- a name in the blur slot could be any radius, so this cannot be shown not to be a glow`];
-  }
-  return [`${shown} -- the blur slot is neither a length nor a colour this scan can read, so this cannot be shown not to be a glow`];
-}
 
 // Token definitions (`--shadow-glow-cta-mint: …`) name none of the channel
 // spellings and so are never scanned as call sites, which is the point: the
@@ -1139,10 +988,29 @@ function assertGlowsReadThroughTokens(root) {
       }
     }
 
-    for (const mention of source.matchAll(SHADOW_MENTION)) {
-      if (!claimed.some(([start, end]) => mention.index >= start && mention.index < end)) {
-        unscanned.push(`${file}:${source.slice(0, mention.index).split('\n').length}: ${
-          source.slice(mention.index, mention.index + 60).split('\n')[0]}`);
+    // A mention is claimed when some channel READ THE SAME TEXT, which is an
+    // overlap of two spans and not the containment of one offset in the other.
+    //
+    // The two matchers now share the property name, the flags, the style key and
+    // the case rules -- four rounds, each closing one quantity they had spelled
+    // twice. This is the fifth and last: WHERE the match begins. A channel is
+    // free to claim less text than the mention points at, because a utility's
+    // prefix carries no value -- `drop-shadow-[var(--shadow-glow-wire-mint)]` is
+    // read for what is inside the brackets, so the claim starts at `shadow-[`
+    // while the mention starts at `drop-`. Comparing start offsets called that
+    // unscanned and failed a correct, fully tokenized utility; comparing spans
+    // asks the question the measurement was always for.
+    //
+    // Overlap cannot loosen the check, because the mention list does not check
+    // anything -- the channels do. Its only job is to make a channel's gaps
+    // loud, and a channel that read this text has no gap here.
+    for (const pattern of SHADOW_MENTIONS) {
+      for (const mention of source.matchAll(pattern)) {
+        const [from, to] = [mention.index, mention.index + mention[0].length];
+        if (!claimed.some(([start, end]) => from < end && to > start)) {
+          unscanned.push(`${file}:${source.slice(0, mention.index).split('\n').length}: ${
+            source.slice(mention.index, mention.index + 60).split('\n')[0]}`);
+        }
       }
     }
   }
