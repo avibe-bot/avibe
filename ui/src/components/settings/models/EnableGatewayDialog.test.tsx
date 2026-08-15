@@ -69,6 +69,12 @@ describe('EnableGatewayDialog', () => {
     expect(screen.getByRole('button', { name: 'Install and switch' })).toBeTruthy();
   });
 
+  it('keeps installation reachable while a remote manifest is uncached', () => {
+    renderDialog(readyRegion(runtime('not_installed')));
+
+    expect(screen.getByRole('button', { name: 'Install and switch' })).toBeTruthy();
+  });
+
   it('shares the server-host installability predicate with the runtime pill', () => {
     renderDialog(readyRegion(runtime('not_installed', true, 'linux-amd64')));
 

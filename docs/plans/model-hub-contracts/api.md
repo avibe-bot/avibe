@@ -984,9 +984,12 @@ when emitted.
 
 Every runtime response carries `host_platform`, and every status carries `error_key`.
 The server detects the Avibe host; clients never substitute the browser platform.
-Installation is supported exactly when one `manifest.assets[].platform` equals
-`host_platform`. An unsupported host leaves `health: "not_installed"`; the install
-route fails before download with HTTP 422 and
+For a resolved, non-empty manifest, installation is supported exactly when one
+`manifest.assets[].platform` equals `host_platform`. An empty asset inventory means
+the configured manifest is not locally available yet, not that the host is known to
+be unsupported; clients keep installation reachable and the install route performs
+the authoritative network-backed admission. An unsupported host leaves
+`health: "not_installed"`; the install route fails before download with HTTP 422 and
 `error: "runtime_platform_unsupported"`; the next status read remains truthful with
 `error_key: null`.
 
@@ -1008,13 +1011,15 @@ carrier for the persisted failure; raw downloader or verifier text remains only 
 scrubbed logs. `/start` never performs installation.
 
 On service bootstrap, persisted `installing` with no worker owned by the reconstructed
-process is an orphaned install, never a live-job proof. Before runtime endpoints become
-ready, the server first verifies the pinned target: a complete manifest-matching binary
-settles directly at `not_started`; otherwise it discards only uncommitted staging,
-atomically claims the singleton install lease, and restarts the pinned installation
-from scratch while retaining `installing`. Failure to claim or schedule that recovery
-settles at `not_installed` with the same closed `error_key`. Thus a page reload observes
-a live owned job, while a service restart cannot strand the state permanently.
+process is an orphaned install, never a live-job proof. Recovery re-resolves the pinned
+target through the shared installer and verifies its exact identity before archive
+access. A complete manifest-matching binary settles directly at `not_started`; otherwise
+the owned recovery continues the pinned installation while retaining `installing`.
+A transient collision with the shared install file lock keeps that owner live and
+retrying until the lock is available or service shutdown transfers recovery to the next
+process. Terminal recovery failure settles at `not_installed` with the same closed
+`error_key`. Thus a page reload observes a live owned job, while a service restart cannot
+strand the state permanently.
 
 ## Error codes
 

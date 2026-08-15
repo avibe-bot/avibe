@@ -34,6 +34,7 @@ from core.handlers.model_hub.classification import (
 )
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import SSE_MAX_FRAME_BYTES, SSE_MAX_LINE_BYTES
+from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
@@ -1979,6 +1980,100 @@ def test_orphaned_install_state_is_reclaimed_before_runtime_status(
 
         assert installer.ensure_calls == 1
         assert installer.expected_target == RUNTIME_INSTALL_TARGET
+        assert installer.install_state() is None
+
+    asyncio.run(run())
+
+
+def test_recovery_retries_a_transient_shared_install_lock_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class RetryingInstaller(EngineRuntimeManager):
+        def __init__(self, runtime_dir: Path) -> None:
+            super().__init__(runtime_dir=runtime_dir, offline=True)
+            self.ensure_calls = 0
+            self.first_collision = threading.Event()
+            self.second_attempt = threading.Event()
+            self.release = threading.Event()
+            self.binary = runtime_dir / "installed-engine"
+
+        def ensure(
+            self,
+            *,
+            force: bool = False,
+            expected_target=None,
+            on_resolved=None,
+        ):
+            del force
+            self.ensure_calls += 1
+            assert expected_target == RUNTIME_INSTALL_TARGET
+            if self.ensure_calls == 1:
+                self.first_collision.set()
+                return {
+                    "ok": False,
+                    "changed": False,
+                    "reason": "model_hub_engine_install_already_running",
+                    "skipped": True,
+                }
+            self.second_attempt.set()
+            assert self.release.wait(timeout=2)
+            assert on_resolved is not None
+            on_resolved(RUNTIME_INSTALL_TARGET)
+            self.binary.parent.mkdir(parents=True, exist_ok=True)
+            self.binary.write_bytes(b"verified fixture")
+            return {
+                "ok": True,
+                "changed": True,
+                "path": str(self.binary),
+                "install_dir": str(self.binary.parent),
+                "version": "v7.2.95",
+            }
+
+        def resolve_engine_path(self):
+            return self.binary if self.binary.is_file() else None
+
+        def status(self):
+            installed = self.resolve_engine_path() is not None
+            return {
+                "installed": installed,
+                "version": "v7.2.95" if installed else None,
+                "install_dir": str(self.binary.parent),
+                "platform": self.host_platform(),
+                "reason": None,
+            }
+
+    async def run() -> None:
+        monkeypatch.setattr(
+            runtime_adapter_module,
+            "_INSTALL_RECOVERY_RETRY_SECONDS",
+            0,
+        )
+        installer = RetryingInstaller(tmp_path / "runtime")
+        installer.mark_installing(RUNTIME_INSTALL_TARGET)
+        adapter = CLIProxyEngineAdapter(
+            supervisor=EngineSupervisor(
+                installer=installer,
+                state_store=EngineStateStore(tmp_path / "state"),
+            )
+        )
+
+        recovered = await adapter.recover_installation()
+
+        assert recovered.health is EngineHealth.INSTALLING
+        assert await asyncio.to_thread(installer.first_collision.wait, 2)
+        assert await asyncio.to_thread(installer.second_attempt.wait, 2)
+        assert (await adapter.status()).health is EngineHealth.INSTALLING
+        installer.release.set()
+        for _ in range(100):
+            settled = await adapter.status()
+            if settled.health is EngineHealth.NOT_STARTED:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("installation recovery did not retry")
+
+        assert installer.ensure_calls == 2
         assert installer.install_state() is None
 
     asyncio.run(run())

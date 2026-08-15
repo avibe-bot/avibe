@@ -50,7 +50,7 @@ import {
   unreadRegion,
   type RegionRead,
 } from './regionRead';
-import { freshRuntimeProjection, pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { freshRuntimeProjection, pollRuntimeStatus, runtimeCanAttemptInstall, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { backendVisual } from './vendorMeta';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
@@ -162,7 +162,7 @@ export const RuntimePill: React.FC<{
   const { runtime, authoritative } = projection;
   const health = runtime.status.health;
   const unread = read.kind === 'degraded' && read.cause === 'read_failed';
-  const canInstall = health === 'not_installed' && runtimeHasInstallAsset(runtime);
+  const canInstall = health === 'not_installed' && runtimeCanAttemptInstall(runtime);
   const allDirect = authoritative && !starting && health === 'ok' && directCount !== undefined && directCount > 0;
   const key = unread
     ? 'unread'

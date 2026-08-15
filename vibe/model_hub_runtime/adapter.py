@@ -52,6 +52,8 @@ _OAUTH_ENDPOINTS = {
     "codex": ("/codex-auth-url", "codex", "codex"),
 }
 _WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
+_INSTALL_ALREADY_RUNNING_REASON = "model_hub_engine_install_already_running"
+_INSTALL_RECOVERY_RETRY_SECONDS = 0.25
 
 
 logger = logging.getLogger(__name__)
@@ -653,10 +655,22 @@ class CLIProxyEngineAdapter:
             loop.call_soon_threadsafe(self._resolve_install_admission, admission, installing)
 
         try:
-            await self.ensure_installed(
-                expected_target=expected_target,
-                on_resolved=persist_claim,
-            )
+            while True:
+                try:
+                    await self.ensure_installed(
+                        expected_target=expected_target,
+                        on_resolved=persist_claim,
+                    )
+                    break
+                except EngineUnavailableError as exc:
+                    if (
+                        expected_target is None
+                        or exc.reason != _INSTALL_ALREADY_RUNNING_REASON
+                    ):
+                        raise
+                    if self._installation_stopping:
+                        return
+                    await asyncio.sleep(_INSTALL_RECOVERY_RETRY_SECONDS)
             installed = await asyncio.to_thread(
                 self.supervisor.installer.resolve_engine_path,
             )
@@ -673,7 +687,7 @@ class CLIProxyEngineAdapter:
         except Exception as exc:  # noqa: BLE001
             self._install_owner_active = False
             reason = self._install_failure_reason(exc)
-            if reason != "model_hub_engine_install_already_running":
+            if reason != _INSTALL_ALREADY_RUNNING_REASON:
                 try:
                     await asyncio.to_thread(
                         self.supervisor.installer.mark_install_failed,

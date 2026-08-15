@@ -84,11 +84,11 @@ describe('Model Hub runtime pill', () => {
     expect(renderPill('not_started')).toContain('<button');
   });
 
-  it('uses server host evidence when present and keeps absent-host installation available', () => {
+  it('uses definitive host evidence without blocking an unresolved manifest', () => {
     expect(renderPill('not_installed', { withAsset: true })).toContain(zh.settings.models.shell.notInstalled);
     expect(renderPill('not_installed', { withAsset: true })).toContain('<button');
-    expect(renderPill('not_installed')).toContain(zh.settings.models.shell.unsupported);
-    expect(renderPill('not_installed')).not.toContain('<button');
+    expect(renderPill('not_installed')).toContain(zh.settings.models.shell.notInstalled);
+    expect(renderPill('not_installed')).toContain('<button');
     expect(renderPill('not_installed', { withAsset: true, hostPlatform: 'linux-amd64' })).toContain(zh.settings.models.shell.unsupported);
     expect(renderPill('not_installed', { withAsset: true, hostPlatform: 'linux-amd64' })).not.toContain('<button');
   });

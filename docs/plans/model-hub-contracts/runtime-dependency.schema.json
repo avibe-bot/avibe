@@ -11,7 +11,7 @@
     "host_platform": {
       "type": "string",
       "pattern": "^[a-z0-9]+(?:-[a-z0-9_]+)+$",
-      "description": "Server-authoritative platform key for the Avibe host, never the browser device. Installation is supported exactly when manifest.assets contains an exact platform match. OPTIONAL in the reusable schema and REQUIRED on runtime API payloads."
+      "description": "Server-authoritative platform key for the Avibe host, never the browser device. A non-empty manifest definitively supports installation exactly when manifest.assets contains an exact platform match; an empty inventory is unknown until server admission resolves an uncached configured manifest. OPTIONAL in the reusable schema and REQUIRED on runtime API payloads."
     },
     "manifest": {
       "type": "object",
@@ -23,6 +23,7 @@
         "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "assets": {
           "type": "array",
+          "description": "Resolved pinned assets. An empty array means the configured manifest is not locally available and is not definitive evidence of an unsupported host.",
           "items": {
             "type": "object",
             "required": ["platform", "url", "size_bytes", "sha256"],
