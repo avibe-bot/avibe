@@ -49,12 +49,15 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    reports them but does not patch EverOS or file an upstream issue. Retrieval
    exposes skill freshness/maturity metadata, and status adds a conservative
    per-Agent skill-count hint; neither mitigation mutates provider state.
-9. Every enable, disable, Clear, and factory-reset capture cutover records its
-   terminal-settlement high water and recovery intent atomically in the primary
-   state writer transaction. The Memory scan state is an idempotent projection
-   of that cutover. There is no historical, disabled-period, or post-reset
-   replay in v1; only turns settling inside a committed enabled epoch are
-   candidates.
+9. Every settings capture/binding cutover first records its terminal-settlement
+   high water and prepared recovery intent atomically in the primary state
+   writer transaction, before the V2 config replacement. Recovery commits that
+   exact boundary only when the persisted config has the intent's desired
+   digest, or cancels it when the prior digest remains. Clear and factory reset
+   retain their documented primary-state destructive-recovery cutover. The
+   Memory scan state is an idempotent projection of those records. There is no
+   historical, disabled-period, or post-reset replay in v1; only turns settling
+   inside a committed enabled epoch are candidates.
 
 ## Product Contract
 
@@ -95,15 +98,21 @@ for later-settling Turns, while already-settled backlog through its committed
 cutover remains eligible under the old project.
 
 Enabling requires the installed Memory runtime, complete processing endpoints,
-and at least one explicit project binding. Enable/disable Settings writes first
-persist the desired V2 config. Under the agent-capture lifecycle lock, one
-serialized primary state transaction then reads terminal high water `H` and
-inserts a singleton `memory_agent_capture_cutover` intent with a new capture
-epoch, desired enabled state, config digest, and `H`. Terminal settlement cannot
-interleave between that read and intent commit.
+and at least one explicit project binding. Under the agent-capture lifecycle
+lock, an enable/disable Settings write first uses one serialized primary state
+transaction to read terminal high water `H` and insert a singleton prepared
+`memory_agent_capture_cutover` intent with a new capture epoch, prior and desired
+config digests, desired enabled state, and `H`. Terminal settlement cannot
+interleave between that read and intent commit. The scanner is fenced, then the
+desired V2 config is atomically replaced and the prepared intent is promoted to
+committed. The cutover is conditionally sequence-effective at the prepared
+intent's `H`: Turns above `H` use the desired state if the config replacement
+succeeds, or the prior state if it fails.
 
-Normal Agent scanner admission is fenced while a capture intent exists; only
-idempotent cutover projection and the bounded disable drain may run. Enable
+Normal Agent scanner admission is fenced while a capture intent exists. A
+prepared intent permits no projection or drain; after config persistence,
+committed intent handling permits only idempotent cutover projection and the
+bounded disable drain. Enable
 projects an open epoch and cursor `H`, rebuilds opaque bindings, starts the role
 runtime, and only then clears the intent and opens scanner admission. Disable
 first closes new provider claims in the controller, commits its disabled intent,
@@ -114,16 +123,21 @@ worker quiescence no provider write may start. The scanner runs local-only in
 then stops and clears the intent. Rows enqueued by the drain remain pending
 without provider I/O and become claimable only after a later enable.
 
-If Avibe stops after config commit but before an intent, recovery creates the
-intent with a conservative recovery-time `H`. Once an intent exists, recovery
-always reuses its exact epoch and `H`; Memory projection/drain and intent cleanup
-are idempotent. Re-enable requires an earlier disable drain to converge, then
-its own enabled cutover skips the completed opt-out interval. Clear/factory
-reset record the same primary-state intent immediately before recreating scan
-state, after destructive deletion is complete. Turn settlement performs no
-Memory/config I/O and never waits for projection or drain work. A failed start
-leaves only Agent Memory unavailable without disabling Personal Memory or
-restarting Avibe.
+If V2 config persistence fails, the still-prior digest authorizes cancellation
+of the prepared intent, any claims closed for a proposed disable reopen, and
+scanner work resumes under the prior epoch, including Turns above `H`. After a
+crash, recovery compares the persisted digest: the
+prior digest cancels the intent, the exact desired digest promotes and projects
+the intent's original epoch and `H`, and any third digest fences Agent Memory as
+degraded for explicit repair. Recovery never invents a later high water. Thus a
+disable that reached config commit cannot extend its old enabled epoch to
+restart time. Memory projection/drain and intent cleanup are idempotent.
+Re-enable requires an earlier disable drain to converge, then its own enabled
+cutover skips the completed opt-out interval. Clear/factory reset record the
+same primary-state intent immediately before recreating scan state, after
+destructive deletion is complete. Turn settlement performs no Memory/config I/O
+and never waits for projection or drain work. A failed start leaves only Agent
+Memory unavailable without disabling Personal Memory or restarting Avibe.
 
 ### Admission
 
@@ -237,13 +251,18 @@ vibe memory agent search <query> [--project <slug>] [--kind case|skill|all] [--l
 vibe memory agent list [--project <slug>] [--kind case|skill] [--page N] [--limit 1..20] [--json]
 ```
 
-The CLI accepts an Avibe-injected Session id through the existing trusted
-context, resolves that Session's immutable Agent and explicit project binding,
-and accepts no raw `agent_id`, Agent selector, workdir, provider filter, or
-cross-project `all`. Omitting `--project` uses that binding; an explicit value
-must equal it. The owner Settings UI may select an installed Agent and one exact
-bound project. It may search and list `agent_case` and `agent_skill` with the
-same per-kind and response-size bounds.
+The CLI requires an Avibe-injected current Session id and current Turn id through
+the existing trusted context. It validates that the Turn belongs to that Session
+and derives the owner only from the Turn's immutable `executing_agent_id`
+snapshot, including explicit Harness/CLI Agent overrides; mutable Session routing
+is never retrieval identity. It accepts no caller-supplied Turn id, raw
+`agent_id`, Agent selector, workdir, provider filter, or cross-project `all`.
+Omitting `--project` uses the Session workdir's current explicit binding. An
+explicit value must be either that binding or an exact project retained in this
+executing Agent's read-only project catalog; without either, access fails closed.
+The owner Settings UI may select an installed Agent and one exact current or
+cataloged historical project. It may search and list `agent_case` and
+`agent_skill` with the same per-kind and response-size bounds.
 
 Results are provider-neutral records labelled `case` or `skill`. Every skill in
 human-readable, JSON, and UI search/list output includes its `updated_at` as a
@@ -261,14 +280,17 @@ prompt and `vibe memory search/list` contracts remain byte-for-byte unchanged by
 the new CLI examples and parser registration.
 
 Memory status also reports a content-free skill-count observation for each
-installed Agent across that Agent's explicitly bound projects. An explicit
+installed Agent across that Agent's current and cataloged historical projects.
+An explicit
 status refresh may advance one durable, stable-order sampling cursor at most
 once per 60 seconds. One sampler batch issues at most 32 scoped `total_count`
 requests with concurrency at most two, caches only count/observed-at metadata,
 and resumes at the next Agent/project pair; status rendering never fans out its
 own provider reads. An Agent count is complete only after all of its current
-bound projects have been observed in the same sampling generation; otherwise it
-is `unknown` or explicitly stale. Removed Agents/bindings invalidate their cache.
+retrievable projects have been observed in the same sampling generation;
+otherwise it is `unknown` or explicitly stale. Removed Agents invalidate their
+cache; binding removal keeps observations through the retained project catalog
+entry.
 
 A complete count reports `normal` for 0-7, `approaching` for 8-10, and `risk`
 above 10. The hint says explicitly that this total is a conservative proxy:
@@ -296,7 +318,10 @@ root. Validation accepts only the role's expected value. EverOS's upstream
 default of `agent` is never relied upon.
 
 The roles share the immutable installed EverOS artifact and environment-only
-endpoint credentials. They do not share provider roots, sockets, process
+endpoint credentials. Consequently the remote LLM/embedding service's account
+quota, concurrency allowance, and rate limits are an explicit external resource
+coupling: Agent traffic can throttle Personal traffic even though failures and
+state remain role-local. They do not share provider roots, sockets, process
 records, root sentinels, provider-root locks, supervisors, health snapshots,
 call-log ownership slots, or worker queues. All ownership records include the
 role plus exact root/socket pair so a stale chat record can never identify an
@@ -390,9 +415,10 @@ for every new field and are not backfilled.
 
 The primary state schema also adds bounded singleton
 `memory_agent_capture_cutover` and `memory_agent_binding_cutover` recovery
-records used below. Each contains only its kind/digest/epoch, terminal high
-water, state, and timestamps; normalized workdirs and project ids remain in V2
-config, while opaque epochs remain in the Memory store.
+records used below. Each contains only its kind, prior/desired config digests,
+epoch, terminal high water, closed `prepared | committed` phase, state, and
+timestamps; normalized workdirs and project ids remain in V2 config, while
+opaque epochs remain in the Memory store.
 
 ### Agent trajectory outbox
 
@@ -456,13 +482,24 @@ remains the authoritative desired owner setting. The projection also stores its
 `applied_config_digest`; historical epochs exist only to finish committed
 scanner work.
 
+`memory_agent_project_catalog` is a conservative read-only retrieval directory
+keyed by opaque `agent_id` plus exact `project_id`. The enqueue transaction
+creates or refreshes an entry before provider data can exist. Binding removal and
+closed-epoch compaction never delete it, so later-delivered queued output and
+existing provider cases/skills remain discoverable after the last binding is
+removed or reassigned. Entries contain no workdir or raw Agent id and disappear
+only with the Agent root's Clear/factory reset, or a future explicit
+provider-data deletion contract. A catalog entry does not claim that EverOS
+produced output.
+
 Under the agent-capture lifecycle lock, every add, reassignment, or removal first
-persists the desired V2 config atomically. It then uses one serialized primary
-state transaction to read the current committed terminal high water `H` and
-insert a singleton `memory_agent_binding_cutover` intent containing the desired
-config digest and `H`. Terminal settlement cannot interleave between that read
-and intent commit, but it performs no Memory/config I/O and never waits for
-projection work.
+uses one serialized primary state transaction to read the current committed
+terminal high water `H` and insert a prepared singleton
+`memory_agent_binding_cutover` intent containing the prior/desired config digests
+and `H`. Terminal settlement cannot interleave between that read and intent
+commit. The scanner is then fenced, V2 config is atomically replaced, and the
+intent is promoted to committed; terminal settlement performs no Memory/config
+I/O and never waits for projection work.
 
 When one Settings save changes both `enabled` and bindings, that same primary
 writer transaction records the capture and binding intents at one shared `H`.
@@ -473,18 +510,18 @@ While an intent exists, Agent scanner admission is fenced. One idempotent Memory
 transaction appends/closes the opaque epochs at the intent's exact `H` and
 advances `applied_config_digest`; only then may recovery clear the primary-state
 intent and reopen the scanner. The binding becomes sequence-effective at the
-intent commit, and the Settings save reports success only after projection
-converges. A Turn settled before that commit is at or below `H` and uses the old
-mapping; a later Turn is above `H` and uses the new mapping when scanning resumes.
+prepared intent's `H` only if the desired config commit succeeds, and the
+Settings save reports success only after projection converges. A Turn at or
+below `H` uses the old mapping; a later Turn uses the new mapping after a
+successful save, or the old mapping after a failed save cancels the intent.
 
-If Avibe stops after config commit but before the cutover intent, startup sees
-the digest mismatch and creates the intent with a new recovery-time high water.
-If it stops after the intent, recovery reuses that exact `H`; if projection
-already committed, matching digests make intent cleanup idempotent. Until
-convergence status reports binding reconcile as degraded and only the Agent
-scanner is fenced. If config persistence fails, no intent is created and the
-projection is unchanged. A crash therefore cannot backdate the new binding or
-block the Agent hot path.
+If config persistence fails, the prior digest cancels the prepared intent and
+leaves the projection unchanged. After a crash, the prior digest cancels it, the
+desired digest promotes it and reuses the exact original `H`, and any third
+digest leaves only Agent Memory fenced and degraded. If projection already
+committed, matching digests make intent cleanup idempotent. Recovery never
+creates a cutover at restart time. A crash therefore cannot backdate the new
+binding, extend a disabled epoch, or block the Agent hot path.
 
 An added mapping is effective only for `terminal_sequence > H`. Reassignment
 closes the old epoch through `H` and opens the new project after `H`; removal
@@ -495,7 +532,7 @@ with a `NULL` through-sequence meaning open. It therefore drains backlog through
 the old project without admitting opt-in or reassignment history to the new
 project. Closed epochs remain until the committed scanner cursor reaches their
 cutover, then compact; immutable queued/provider rows keep their original
-project.
+project and the read-only catalog keeps that project retrievable.
 
 Settings writes friendly normalized workdir/project pairs only to V2 config;
 reconcile derives opaque keys with the current Memory scope key. Reads expose
@@ -549,7 +586,11 @@ responses, or credentials. Agent recorder failure degrades only the agent role.
 - The chat root stays available when the agent root is down, and user capture
   remains governed exclusively by the existing human-input admission.
 - These isolation guarantees cover ordinary scanning, processing, retrieval,
-  and role-reconcile failures. Explicit Clear, factory reset, and
+  and role-reconcile failures in Avibe-owned state and processes. The shared
+  remote processing credentials do not provide quota isolation: Agent load can
+  consume account concurrency/rate/quota and throttle Personal requests. Agent
+  work remains bounded and backs off on throttling, but Avibe cannot partition
+  an endpoint provider's account budget. Explicit Clear, factory reset, and
   embedding-identity rebuild intentionally use the shared maintenance fence and
   can pause both roles until their idempotent operation converges.
 - Retrieval failure returns a closed Agent Memory error and never falls back to
@@ -605,15 +646,15 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; primary-state capture intents make enable/disable/reset cutovers crash-atomic with Turn settlement, and Clear accepts either never-created role as absent. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; pre-config primary-state capture intents make enable/disable/reset cutovers crash-atomic with Turn settlement without recovery-time boundary drift, and Clear accepts either never-created role as absent. |
 | `MEMORY-AGENT-002` | Every semantically eligible non-steered completed interactive or Harness Turn not durably declined by a specified resource guard is represented once by its exact post-transformation backend-dispatch/result pair. |
 | `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks and accepted live steers are excluded. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
-| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; the Turn snapshots its executing Agent without blocking hard deletion, and crash-safe post-config binding cutovers keep backlog in the project effective at settlement. |
+| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; capture and trusted-Turn CLI retrieval use the immutable executing Agent without blocking hard deletion, and crash-safe prepared binding cutovers keep backlog in the project effective at settlement. |
 | `MEMORY-AGENT-006` | Malformed config, missing/pre-migration identity/source/final-dispatch snapshots, and missing project binding fail closed. |
-| `MEMORY-AGENT-007` | Agent-sidecar outage leaves chat and Personal Memory healthy. |
+| `MEMORY-AGENT-007` | Agent-sidecar/local pipeline outage leaves chat and Personal Memory healthy; shared remote endpoint throttling is reported as an external quota coupling without cross-role state corruption. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
-| `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths. |
+| `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths; a read-only per-Agent project catalog keeps removed-binding output reachable. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
 | `MEMORY-AGENT-011` | Queue/disk exhaustion skips durably, and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
 | `MEMORY-AGENT-012` | Skill retrieval exposes exact freshness/maturity metadata, while the request-budgeted status sampler reports non-blocking per-Agent count hints at 8 and 11 skills. |

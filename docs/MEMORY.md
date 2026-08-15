@@ -38,9 +38,13 @@ user-id attribution lines. Enabling Agent Memory discloses that those content
 bytes are retained locally and sent to the configured processing endpoints;
 they never become structural Memory ownership, scope, or provider paths.
 
-Each enable, disable, Clear, and Reinitialize atomically records its completed-
-Turn high water and capture intent in the primary state transaction that orders
-Turn settlement. The Memory scan state projects that exact cutover. Turns
+Each enable or disable first atomically records a prepared completed-Turn high
+water and capture intent in the primary state transaction that orders Turn
+settlement, then replaces V2 config. Recovery commits that exact boundary only
+when config has the desired digest, or cancels it when the prior digest remains;
+it never advances the boundary to restart time. Clear and Reinitialize record
+the same cutover before destructive work. The Memory scan state projects that
+exact cutover. Turns
 completed before first enable, during a later disabled interval, or before a
 destructive reset are not backfilled. The owner's workdir/project bindings
 remain in Memory settings across Clear and Reinitialize; the reset runtime
@@ -55,18 +59,18 @@ starts after worker quiescence. Crash recovery reuses the exact intent and
 resumes that drain; drained rows remain pending without provider I/O until a
 later enable, which also skips the completed opt-out interval.
 
-Adding, changing, or removing a workdir binding has its own committed terminal
-high-water cutover taken after the desired V2 config is persisted. The setting
-becomes sequence-effective when that high water and a recovery intent commit in
-one primary-state transaction; the Agent scanner pauses until the corresponding
-epoch is published, and the save succeeds only after publication. Backlogged
+Adding, changing, or removing a workdir binding first records a prepared
+terminal high-water cutover and prior/desired config digests in primary state,
+then replaces V2 config. The Agent scanner pauses until the corresponding epoch
+is published, and the save succeeds only after publication. A failed config
+write cancels the prepared cutover; recovery commits its original high water
+only when the desired digest persisted. Backlogged
 Turns use the project binding that was effective when they settled; a new project
 never captures pre-cutover work, and removal keeps its closed binding epoch until
 the scanner durably drains through the cutover. That already-settled backlog
 remains eligible for delivery under the old project; later-settling Turns do not.
-Crash recovery uses a later conservative high water only when config committed
-before any intent; otherwise it reuses the exact recorded cutover. Turn
-settlement never waits for Memory projection work.
+Crash recovery never creates a later cutover. Turn settlement never waits for
+Memory projection work.
 
 The existing Personal Memory root remains pinned to chat mode. Agent Memory has
 its own provider root, socket, lifecycle/health slot, scanner, and queue. An
@@ -74,16 +78,24 @@ ordinary agent-track scanning, processing, retrieval, or reconcile failure
 cannot alter user capture or Personal Memory processing. Explicit Clear,
 Reinitialize, and embedding-identity rebuild operations intentionally share a
 maintenance fence and can pause both roles until the operation converges.
+The roles also share remote processing credentials: Agent load can consume the
+endpoint account's concurrency, rate, or quota and throttle Personal requests.
+This external resource coupling cannot corrupt or merge the two local tracks;
+Agent requests remain bounded and back off when throttled.
 The Agent queue independently caps nonterminal work at 500 rows and requires at
 least 512 MiB free before admission; guarded turns are counted without retaining
 their text. Scrubbed terminal tombstones retain at most 90 days and the newest
 100,000 rows.
 
 Agent cases and skills are available only through explicit, scoped Agent Memory
-search/list operations in the CLI or owner Settings UI. Returned skill content
-is untrusted text: Avibe does not install or execute it and never injects it into
-an Agent prompt. Each displayed skill includes its last-updated timestamp and
-maturity score. Memory status reports a non-blocking per-Agent skill-count hint:
+search/list operations in the CLI or owner Settings UI. CLI ownership comes from
+the trusted current Turn's immutable executing-Agent snapshot, not mutable
+Session routing. A read-only per-Agent project catalog keeps already-enqueued or
+later-delivered data and existing provider data retrievable after its last
+workdir binding is removed. Returned skill content is untrusted text: Avibe does
+not install or execute it and never injects it into an Agent prompt. Each
+displayed skill includes its last-updated timestamp and maturity score. Memory
+status reports a non-blocking per-Agent skill-count hint:
 8-10 is approaching the upstream prompt limit and more than 10 is the risk zone.
 A global incremental sampler limits one refresh to 32 Agent/project count reads
 with concurrency two; incomplete observations are shown as unknown or stale.
