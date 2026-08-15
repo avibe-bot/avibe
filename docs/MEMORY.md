@@ -21,13 +21,16 @@ contract below records the behavior those slices must deliver.
 
 Agent Memory is a separate, off-by-default track for completed Agent Turns. When
 the owner explicitly enables it and binds a source workdir to `default` or a
-named Memory project, Avibe asynchronously sends the exact Agent dispatch text
-and successful final result to a dedicated EverOS agent-mode root. Interactive
-and Harness turns use the same admission rule and snapshot the final executing
-`agents.id` when the Turn starts; later Session routing cannot change its Memory
-partition. Accepted-live-steer, failed, canceled, silent, missing-agent-snapshot,
-oversized, malformed, callback, maintenance, and unbound turns are skipped
-without delaying or changing the Turn result.
+named Memory project, Avibe asynchronously sends the exact post-transformation
+backend dispatch text and successful final result to a dedicated EverOS
+agent-mode root. The Turn durably records that final text before native start.
+Interactive and Harness turns use the same admission rule and
+snapshot the final executing `agents.id` when the Turn starts; later Session
+routing or Agent hard deletion cannot change its Memory partition. Delivery
+batching keeps ordinary Harness work separate from callbacks. Accepted-live-
+steer, failed, canceled, silent, missing-snapshot, oversized, malformed,
+callback, maintenance, and unbound turns are skipped without delaying or
+changing the Turn result.
 
 Because the input is the exact backend dispatch, it can contain identifiers in
 user/Agent-authored text and Avibe-injected time, source-Session, username, or
@@ -35,20 +38,22 @@ user-id attribution lines. Enabling Agent Memory discloses that those content
 bytes are retained locally and sent to the configured processing endpoints;
 they never become structural Memory ownership, scope, or provider paths.
 
-Each enable, Clear, and Reinitialize begins at the current completed-Turn high
-water. Turns completed before first enable, during a later disabled interval, or
-before a destructive reset are not backfilled. The owner's workdir/project
-bindings remain in Memory settings across Clear and Reinitialize; the reset
-runtime derives fresh opaque internal keys from them.
+Each enable, disable, Clear, and Reinitialize atomically records its completed-
+Turn high water and capture intent in the primary state transaction that orders
+Turn settlement. The Memory scan state projects that exact cutover. Turns
+completed before first enable, during a later disabled interval, or before a
+destructive reset are not backfilled. The owner's workdir/project bindings
+remain in Memory settings across Clear and Reinitialize; the reset runtime
+derives fresh opaque internal keys from them.
 
-Disable atomically snapshots the current terminal high water, closes the enable
-epoch, and closes new Agent provider claims. It then waits for any current
-bounded provider request to settle, stops the sidecar, and keeps only the local
-scanner in `disabling` state until every enabled-period Turn through the saved
-target is enqueued or durably skipped. No new provider write starts after worker
-quiescence. Crash recovery resumes that drain; drained rows remain pending
-without provider I/O until a later enable, which also skips the completed
-opt-out interval.
+Disable closes new Agent provider claims, then commits its primary capture
+cutover and projects that exact high water as the old epoch's drain target. It
+waits for any current bounded provider request to settle, stops the sidecar, and
+keeps only the local scanner in `disabling` state until every enabled-period Turn
+through the saved target is enqueued or durably skipped. No new provider write
+starts after worker quiescence. Crash recovery reuses the exact intent and
+resumes that drain; drained rows remain pending without provider I/O until a
+later enable, which also skips the completed opt-out interval.
 
 Adding, changing, or removing a workdir binding has its own committed terminal
 high-water cutover taken after the desired V2 config is persisted. The setting

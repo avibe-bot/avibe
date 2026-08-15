@@ -118,8 +118,10 @@ This principal model and the capture table above govern Personal Memory only.
 Opt-in Agent Memory reads completed `session_turns` after settlement, admits
 interactive and Harness turns under a separate positive contract, and partitions
 output by an opaque HMAC derived from the Turn's immutable executing `agents.id`
-snapshot plus an explicit new-style Memory project binding. It does not infer
-identity from mutable Session routing or create/read a Personal Memory principal.
+snapshot plus an explicit new-style Memory project binding. Turn creation also
+freezes a homogeneous source class, and native start durably records the exact
+post-transformation backend text before dispatch. It does not infer identity
+from mutable Session routing or create/read a Personal Memory principal.
 
 The local Settings page always reads `avibe:local`. Authenticated remote
 Workbench users and IM users access only their own principal through an eligible
@@ -225,9 +227,10 @@ runtime/memory/                  # downloaded immutable runtimes and active poin
 Schema v3 introduced the durable Personal Memory project catalog. Schema v4
 adds separate Agent trajectory, scan-cursor, and sequence-versioned opaque
 project-binding tables; the primary state schema also adds nullable immutable
-executing-Agent and commit-order snapshots to `session_turns` plus a bounded
-binding-cutover recovery record. It does not overload `memory_capture_queue` or
-rewrite schema-v3 user rows.
+executing-Agent/source-class/final-dispatch and commit-order snapshots to
+`session_turns`, a matching immutable source class on `message_deliveries`, plus
+bounded capture/binding cutover recovery records. It does not overload
+`memory_capture_queue` or rewrite schema-v3 user rows.
 
 The root sentinel binds a random `provider_root_id`, provider id, root format,
 and artifact fingerprint. Clear treats a fully absent, never-created role as a
@@ -301,15 +304,17 @@ never logged or serialized as errors.
 ### Disable and re-enable
 
 Disabling Personal Memory closes user capture/content reads and stops its worker
-and chat sidecar. Disabling Agent Memory independently snapshots a durable
-terminal high-water drain target, closes new provider claims, waits for any
-current bounded request to settle, and then stops its provider worker/sidecar.
-It leaves only the local scanner running until every enabled-period source
-through that target is enqueued or durably skipped, then stops the scanner.
-Drained rows remain pending without provider I/O. Every later enable first
-requires that drain to converge, advances past work completed during opt-out,
-and only then makes pending Agent rows claimable. Neither toggle mode-flips or
-deletes the other root.
+and chat sidecar. Disabling Agent Memory independently closes new provider
+claims, then atomically records its capture epoch/high water in the same primary
+state writer transaction that orders terminal Turns. The Agent scan state
+projects that exact drain target. Disable waits for any current bounded request
+to settle, stops its provider worker/sidecar, and leaves only the local scanner
+running until every enabled-period source through the target is enqueued or
+durably skipped. Drained rows remain pending without provider I/O. Every later
+enable uses the same primary-state cutover protocol, first requires that drain
+to converge, advances past work completed during opt-out, and only then makes
+pending Agent rows claimable. Neither toggle mode-flips or deletes the other
+root.
 
 Changing only an API key is allowed without replacing the vector space.
 Changing the embedding endpoint or model while provider data exists is rejected.
