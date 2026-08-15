@@ -64,8 +64,11 @@ restart without reading `memory.sqlite` or inventing an epoch. The Memory scan
 state projects that exact cutover. Turns
 completed before first enable, during a later disabled interval, or before a
 destructive reset are not backfilled. The owner's workdir/project bindings
-remain in Memory settings across Clear and Reinitialize; the reset runtime
-derives fresh opaque internal keys from them.
+remain in Memory settings across Clear and Reinitialize. Clear reconstructs open
+project epochs for the preserved current opaque binding keys/generations after
+its high water and before reopening admission. Reinitialize derives fresh opaque
+keys/generations from the new scope key and likewise publishes their epochs
+before an enabled scanner starts.
 
 If the Agent role fails to start after enable commits, the desired enabled
 setting and exact recovery intent remain in degraded state, while dispatch
@@ -134,7 +137,10 @@ any Turn with a separate image, attachment, audio, file, or other out-of-band
 input is excluded without copying its path, metadata, or bytes. Disabled,
 transitioning, unbound, attachment-bearing, oversized, and over-budget dispatches
 retain only a closed shape/omission reason, consume no snapshot budget, and still
-execute normally. Admitted primary snapshots are scrubbed after durable
+execute normally. A snapshot transaction failure rolls back the optional Memory
+payload and reservation, records only a best-effort sanitized diagnostic, and
+still dispatches the finalized in-memory request; that Turn is not a Memory
+candidate. Admitted primary snapshots are scrubbed after durable
 enqueue/skip, disabled settlement, abandonment, Clear, or Reinitialize;
 destructive operations include snapshots of Turns still in flight.
 
@@ -143,7 +149,10 @@ search/list operations in the CLI or owner Settings UI. The CLI carries only its
 session-stable locator. Immediately before each recognized command, the backend
 tool callback resolves exactly one native-started nonterminal Turn and injects a
 30-second, one-use controller capability bound to that Turn, its immutable
-executing Agent, and the normalized request. Cached Claude clients use per-call
+executing Agent, its immutable owner-Workbench authorization, and the normalized
+request. Only trusted local or authenticated remote owner Workbench ingress can
+receive that authorization; IM, shared-scope, Harness, ambiguous, and
+pre-migration Turns fail closed. Cached Claude clients use per-call
 `updated_input`, not spawn-time environment. Missing, stale, reused, or ambiguous
 context fails closed with no static-Session fallback. Mutable Session routing is
 never identity. A read-only per-Agent project catalog keeps already-enqueued or
@@ -294,6 +303,9 @@ call-log database is corrupt. Clear Memory Data records a durable intent marker,
 removes the Personal and Agent Memory queues, each existing owned role root,
 role-owned call logs, and pinned attachments through their idempotent deletion
 primitives. A never-created, fully absent Personal or Agent root is a safe no-op.
+Before Agent snapshot admission reopens, Clear reconstructs every binding
+preserved in V2 config as an open project epoch effective after the fixed Clear
+high water; it cannot leave the primary admission set without matching epochs.
 Clear is irreversible; it does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs or

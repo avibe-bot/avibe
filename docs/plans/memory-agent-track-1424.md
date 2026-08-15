@@ -39,11 +39,13 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    Agent names, and user principals are never agent owners.
 5. Agent/project retrieval is explicit, lazy, inert, and bounded. Agent Memory
    is never injected into a prompt, installed as a Codex/Claude skill, or
-   executed.
-6. The first version contains only the exact final backend dispatch text,
+   executed. CLI retrieval additionally requires an owner-authorized Workbench
+   Turn; an IM/shared-scope Turn is never sufficient retrieval authority.
+6. An admitted candidate contains only the exact final backend dispatch text,
    durably snapshotted after all transformations and before native dispatch,
-   plus the terminal result. It does not parse formatted event streams into
-   synthetic tool calls.
+   plus the terminal result. Snapshot failure omits only the Memory candidate
+   and never blocks the native request. V1 does not parse formatted event streams
+   into synthetic tool calls.
 7. Enabling the track does not create a project binding. The owner must bind a
    source workdir to either the exact `default` project or an existing/new-style
    named Memory project. Missing bindings fail closed. Binding additions,
@@ -245,13 +247,18 @@ before its first binding is never admitted retroactively.
 Disabled/transitioning epochs, missing/transitioning bindings, out-of-band
 attachment input, oversized text, or an exhausted snapshot budget record only a
 closed omission reason, input-shape marker, and small counter; they never retain
-text, attachment paths/bytes, or consume the snapshot budget or block native
-dispatch. A successful config transition cannot retroactively
-admit an in-flight Turn that omitted its snapshot. Persistence failure for a
-snapshot that was admitted still fails closed before native start, because the
-candidate could otherwise diverge from the adapter input. Backend-native
-acceptance can therefore never precede the durable exact input used by an
-Agent-Memory candidate.
+text, attachment paths/bytes, consume the snapshot budget, or block native
+dispatch. A successful config transition cannot retroactively admit an in-flight
+Turn that omitted its snapshot. If the optional snapshot transaction fails, it
+rolls back its reservation and payload atomically and native dispatch proceeds
+with the already-finalized in-memory input. A separate best-effort content-free
+write may record `snapshot_persist_failed`; failure of that diagnostic write is
+observable only through a sanitized health counter. Such a Turn is not an
+Agent-Memory candidate, and an automatic native retry follows the ordinary Agent
+retry contract rather than attempting to reconstruct Memory input. Thus
+backend-native acceptance can precede snapshot persistence only for an omitted
+Turn; every admitted Agent-Memory candidate still has durable exact input before
+native acceptance.
 
 The property is deliberately positive. Every terminal shape not satisfying the
 complete invariant is skipped, including failed, canceled, stopped/restarted,
@@ -337,11 +344,22 @@ vibe memory agent list [--project <slug>] [--kind case|skill] [--page N] [--limi
 ```
 
 The CLI's session-stable environment provides only an Avibe Session locator; it
-is never sufficient authorization and carries no Turn id. Immediately before a
-recognized `vibe memory agent` tool invocation, an Avibe-owned backend callback
-asks the controller to resolve exactly one native-started, nonterminal active
-Turn for that Session and mint a random one-use capability bound to the Session,
-logical/native Turn, executing Agent snapshot, closed search/list command class,
+is never sufficient authorization and carries no Turn id. At initial Delivery
+claim, trusted ingress snapshots the closed
+`agent_memory_retrieval_authority = owner_workbench | none` value on the Turn.
+Only a local owner Workbench request or an authenticated remote owner Workbench
+request receives `owner_workbench`; every IM transport, shared scope, Harness
+trigger, unauthenticated request, pre-migration row, or ambiguous provenance
+receives `none`. This authorization snapshot contains no raw user identity and
+cannot be upgraded by later routing, prompt text, Agent tool arguments, or
+Session mutation.
+
+Immediately before a recognized `vibe memory agent` tool invocation, an
+Avibe-owned backend callback asks the controller to resolve exactly one
+native-started, nonterminal active Turn for that Session. It mints a random
+one-use capability only when that immutable Turn has `owner_workbench`, binding
+the token to the Session, logical/native Turn, executing Agent snapshot,
+retrieval-authority snapshot, closed search/list command class,
 parser-normalized argv/request digest, and a 30-second expiry. The callback
 injects it only into that child invocation. The recognizer uses a shell parser
 and accepts one standalone simple command with allowlisted CLI flags; shell
@@ -357,11 +375,13 @@ session-bound closure and uses the SDK's `updated_input` result to inject a fres
 capability for each matching Bash call. It does not rely on or refresh the
 client's spawn-time environment. Codex and OpenCode use the equivalent
 per-invocation adapter hook. If a backend cannot provide the hook, the token is
-missing/expired/reused, or active Turn resolution is zero/ambiguous/terminal,
+missing/expired/reused, active Turn resolution is zero/ambiguous/terminal, or
+the Turn lacks owner-Workbench authority,
 the command returns `memory_turn_context_unavailable`; there is no fallback to a
 static Session lookup, caller-supplied Turn id, prompt text, or mutable Session
 routing. Explicit Harness/CLI Agent overrides are already reflected in the
-capability's immutable executing-Agent snapshot. The command also accepts no raw
+capability's immutable executing-Agent snapshot but do not confer retrieval
+authority. The command also accepts no raw
 `agent_id`, Agent selector, workdir, provider filter, or cross-project `all`.
 Omitting `--project` uses the Session workdir's current explicit binding. An
 explicit value must be either that binding or an exact project retained in this
@@ -495,6 +515,8 @@ primary Avibe state schema:
   selected by the final execution route, deliberately without a foreign key;
 - `source_class TEXT`, constrained on new writes to `interactive`,
   `harness_request`, `callback`, `maintenance`, or `agent_callback`;
+- `agent_memory_retrieval_authority TEXT`, constrained on new writes to the
+  content-free `owner_workbench` or `none` ingress authorization snapshot;
 - `backend_input_shape TEXT`, constrained on new writes to `text_only` or
   `out_of_band_attachment` and derived from the final native request rather
   than transport transcript metadata;
@@ -509,7 +531,8 @@ primary Avibe state schema:
 - `backend_dispatch_capture_epoch INTEGER` and
   `backend_dispatch_omission_reason TEXT`, the admitted epoch or a closed
   `disabled | transition | unbound | out_of_band_attachment | oversized |
-  budget | binding_cutover | destructive_reset` reason, never both; and
+  budget | binding_cutover | snapshot_persist_failed | destructive_reset`
+  reason, never both; and
 - `terminal_sequence INTEGER`, with a unique partial index.
 
 The shared `MessageHandler`/dispatch boundary creates the same durable Delivery
@@ -523,7 +546,9 @@ existing durable path.
 The initial Delivery claim/Turn creation transaction snapshots
 `executing_agent_id` from the resolved execution route, including an explicit
 Harness/task override, after validating that id against the live Agent catalog.
-It also snapshots the homogeneous Delivery `source_class`. These fields are
+It also snapshots the homogeneous Delivery `source_class` and the closed
+content-free `agent_memory_retrieval_authority` derived from trusted ingress.
+These fields are
 observational for Memory: inability to resolve a stable Agent id/source class
 does not block the Turn, but leaves the field `NULL` and makes that Turn
 ineligible for Agent Memory. The Agent snapshot is not referentially constrained,
@@ -546,7 +571,11 @@ committed explicit opaque binding key, enforces the per-row 256 KiB bound,
 reserves bytes, and compares-and-sets the admitted
 text/digest/shape/binding-key/binding-epoch/capture-epoch. The adapter receives
 that exact stored text without additional native input. A retry must reuse it and
-a conflicting second value fails closed; Memory never derives candidate input
+a conflicting second value makes only Memory fail closed; native execution still
+uses its already-finalized in-memory input. If this optional persistence
+transaction fails, it rolls back the reservation and payload together, attempts
+a separate content-free `snapshot_persist_failed` diagnostic, and proceeds with
+native dispatch without a Memory candidate. Memory never derives candidate input
 from the earlier raw `dispatch_text`. When no snapshot is admitted, the same
 transaction writes only the closed shape/omission reason and the adapter
 proceeds with its in-memory native input. Unbound content and out-of-band
@@ -782,10 +811,15 @@ project and the read-only catalog keeps that project retrievable.
 
 Settings writes friendly normalized workdir/project pairs only to V2 config;
 reconcile derives opaque keys with the current Memory scope key. Reads expose
-the current config labels, never by reversing an opaque key. Clear may remove
-all epochs; factory reset creates a new Memory scope key and rebuilds current
-bindings with an effective-after cutover at the new high water before an enabled
-scanner starts.
+the current config labels, never by reversing an opaque key. Clear deletes the
+old Agent-root epochs and catalog, then reconstructs one open epoch for every
+binding preserved in V2 config using its current primary admission key and
+generation, effective only after the Clear high water. The rebuild and scanner
+cursor commit before the Clear intent is removed or snapshot admission reopens.
+Factory reset instead creates a new Memory scope key, derives fresh opaque keys
+and generations, and rebuilds current bindings with an effective-after cutover
+at its new high water before an enabled scanner starts. Neither operation can
+leave the preserved primary admission set without matching project epochs.
 
 ## Provider and Sidecar Contracts
 
@@ -823,7 +857,8 @@ responses, or credentials. Agent recorder failure degrades only the agent role.
 
 ## Failure and Degradation
 
-- Scanning, enqueue, add, flush, and retrieval are outside Agent hot paths.
+- Scanning, enqueue, add, flush, retrieval, and dispatch-snapshot persistence
+  are optional to the Agent hot path; failure cannot suppress native dispatch.
 - A malformed agent config, missing binding, missing immutable Agent id,
   unavailable sidecar, provider error, or queue problem produces one sanitized
   agent-track status/skip/failure and leaves the completed Turn unchanged.
@@ -898,15 +933,15 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every Personal/Agent/endpoint Memory config writer uses one controller transaction with monotonic revision/digest conflict detection through cutover cleanup; the durable current-capture projection preserves exact enabled epoch admission across controller restart; Agent-only enablement keeps navigation/recovery visible and forbids shared-credential clearing; a failed Agent-role start retains a fenced retryable intent without snapshot admission; destructive reset atomically scrubs terminal and in-flight snapshots at its fixed high water; and Clear accepts either never-created role as absent. |
-| `MEMORY-AGENT-002` | Every semantically eligible non-steered completed Workbench, Slack, Discord, Telegram, Feishu/Lark, WeChat, or Harness Turn not durably declined by a specified snapshot/queue/disk guard is represented once by its exact post-transformation backend-dispatch/result pair. |
-| `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks; accepted live steers are excluded; the revision-matched opaque primary admission set makes an unbound or binding-transition Turn retain no dispatch text or budget; a remove/reassign scrubs old-generation Turns settling after its high water so re-add cannot revive them; and any final native request with an out-of-band attachment fails closed without retaining attachment metadata or bytes. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every Personal/Agent/endpoint Memory config writer uses one controller transaction with monotonic revision/digest conflict detection through cutover cleanup; the durable current-capture projection preserves exact enabled epoch admission across controller restart; Agent-only enablement keeps navigation/recovery visible and forbids shared-credential clearing; a failed Agent-role start retains a fenced retryable intent without snapshot admission; destructive reset atomically scrubs terminal and in-flight snapshots at its fixed high water; Clear accepts either never-created role as absent and rebuilds every preserved binding epoch before reopening admission. |
+| `MEMORY-AGENT-002` | Every semantically eligible non-steered completed Workbench, Slack, Discord, Telegram, Feishu/Lark, WeChat, or Harness Turn whose dispatch snapshot committed and was not durably declined by a later queue/disk guard is represented once by its exact post-transformation backend-dispatch/result pair. |
+| `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks; accepted live steers are excluded; the revision-matched opaque primary admission set makes an unbound or binding-transition Turn retain no dispatch text or budget; snapshot persistence failure rolls back only the Memory candidate and never blocks native dispatch; a remove/reassign scrubs old-generation Turns settling after its high water so re-add cannot revive them; and any final native request with an out-of-band attachment fails closed without retaining attachment metadata or bytes. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once; persisted prior/desired config revisions plus digests detect third-state and ABA edits during capture or binding recovery. |
-| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; capture and controller-resolved active-Turn CLI retrieval use the immutable executing Agent without blocking hard deletion; deleted owners remain UI-retrievable; and crash-safe generation-bearing binding cutovers preserve settled backlog while invalidating in-flight old generations. |
+| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; capture and controller-resolved active-Turn CLI retrieval use the immutable executing Agent without blocking hard deletion; CLI capability minting additionally requires immutable owner-Workbench authority so a second IM/shared-scope user cannot retrieve the first user's Agent Memory; deleted owners remain UI-retrievable; and crash-safe generation-bearing binding cutovers preserve settled backlog while invalidating in-flight old generations. |
 | `MEMORY-AGENT-006` | Malformed config, missing/pre-migration identity/source/final-dispatch snapshots, and missing project binding fail closed. |
 | `MEMORY-AGENT-007` | Agent-sidecar/local pipeline outage leaves chat and Personal Memory healthy; dual-root embedding rebuild preserves and fences both roots through partial failure; shared remote endpoint throttling and effective-home capacity exhaustion are reported as explicit resource couplings without cross-role state mixing. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
-| `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths; each adapter injects a request-bound one-use active-Turn capability, cached Claude sessions refresh it through per-call `updated_input` without an environment Turn id, and missing/reused/expired/ambiguous/terminal context fails closed; a read-only per-Agent project catalog keeps removed-binding output reachable. |
+| `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths; each adapter injects a request-bound one-use active-Turn capability only for trusted owner-Workbench ingress, cached Claude sessions refresh it through per-call `updated_input` without an environment Turn id, and IM/shared/Harness plus missing/reused/expired/ambiguous/terminal context fails closed; a read-only per-Agent project catalog keeps removed-binding output reachable. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
 | `MEMORY-AGENT-011` | Per-row/global primary snapshot guards plus queue/disk exhaustion skip durably; primary copies, including active nonterminal snapshots, are scrubbed after disposition/reset; queue payloads are scrubbed immediately after a durable add receipt and before flush; ambiguous post-submission Agent adds dead-letter without replay; and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
 | `MEMORY-AGENT-012` | Skill retrieval exposes exact freshness/maturity metadata, while the request-budgeted status sampler reports non-blocking per-Agent count hints at 8 and 11 skills. |
