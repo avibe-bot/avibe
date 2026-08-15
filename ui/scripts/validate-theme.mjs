@@ -575,6 +575,24 @@ const SHADOW_CHANNELS = [
   { pattern: /shadow-\[([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
   // `[box-shadow:0_0_16px_-4px_var(--x)]` -- Tailwind's arbitrary *property*.
   { pattern: /\[box-shadow\s*:([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
+  // `shadow-(--x)` and `drop-shadow-(--x)` -- Tailwind's custom-property
+  // shorthand, which compiles to `box-shadow: var(--x)` and to the same inside
+  // `drop-shadow()`. Parentheses instead of brackets is the whole difference
+  // from the arbitrary-value form above, and it is enough to park a glow in:
+  // `--rogue-glow: 0 0 93px red` rendered through `shadow-(--rogue-glow)` was
+  // read by no channel. The name is handed on as a `var()` so it resolves
+  // through exactly the same indirection as every other reference -- this
+  // channel translates a spelling, it does not get its own idea of what a glow
+  // is.
+  {
+    pattern: /(?<![\w-])(?:drop-)?shadow-\(([^)]*)\)/g,
+    valuesOf: (match) => [CUSTOM_PROPERTY.test(match[1].trim()) ? `var(${match[1].trim()})` : ''],
+    // `shadow-(color:--x)` sets the shadow COLOUR and carries no geometry, so it
+    // cannot draw a glow by itself; the geometry it tints still has to come from
+    // a utility this scan reads. Anything else inside the parentheses is a form
+    // this scan cannot follow, and stays unreadable rather than accepted.
+    provablyNotAShadow: (match) => match[1].trim().startsWith('color:'),
+  },
   // `box-shadow: 0 0 16px -4px var(--x);` in a stylesheet. The lookbehind hands
   // the arbitrary-property spelling to the channel above rather than matching it
   // twice, once with a stray `]` glued to the colour. A declaration also ends at
@@ -636,7 +654,8 @@ function balancedArgument(source, openIndex) {
 // capture is closing syntax" it turned on how the surrounding JSX happened to be
 // spelled, and it has to close the value instead, so that `false || glow` -- a
 // literal followed by something that could hold anything -- stays unreadable.
-const NON_STRING_LITERAL = /^\s*(true|false|null|undefined|[+-]?\d+(\.\d+)?)\s*($|[,;}\])])/;
+const CUSTOM_PROPERTY = /^--[A-Za-z0-9_-]+$/;
+const NON_STRING_LITERAL =/^\s*(true|false|null|undefined|[+-]?\d+(\.\d+)?)\s*($|[,;}\])])/;
 
 // A CSS comment renders nothing, so a shadow spelled inside one is prose ABOUT a
 // glow, not a glow. Blanking comment bodies -- preserving length and line breaks
@@ -709,7 +728,15 @@ function blankCssComments(source) {
 // read the quote as the end of the mention, so `el.style['boxShadow'] = '0 0
 // 93px red'` was not scanned AND not reported -- the exact silent gap this line
 // exists to close, reopened by the punctuation rather than by the word.
-const SHADOW_MENTION = /(?<![\w-])(?!--)[A-Za-z-]*shadow[A-Za-z]*(?:['"]?\s*\]?\s*[:=]|\(|-\[)/gi;
+//
+// What follows the word is an OPENING DELIMITER or an ASSIGNMENT, which is the
+// grammar of "this name is about to be given a value" -- not a list of the three
+// spellings that grammar happened to take. Written as a list it read `(`, `-[`
+// and `:`/`=`, and Tailwind's `shadow-(--x)` shorthand fell between them: the
+// `-(` is neither of the first two, so a glow parked in `--rogue-glow` and used
+// as `shadow-(--rogue-glow)` was, once again, not scanned and not reported. The
+// enumeration had moved out of the word and into the punctuation after it.
+const SHADOW_MENTION = /(?<![\w-])(?!--)[A-Za-z-]*shadow[A-Za-z]*(?:['"]?\s*\]?\s*[:=]|-?[([])/gi;
 
 // Every custom property declared anywhere in the scanned stylesheets, name to
 // the set of values it is given. A name is collected once per distinct value
