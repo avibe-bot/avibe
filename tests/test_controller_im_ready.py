@@ -30,6 +30,9 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
         recover_persisted_agent_run_queue=AsyncMock(return_value=[]),
     )
     controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
+    controller.model_hub_service = SimpleNamespace(
+        reconcile_runtime_installation=AsyncMock()
+    )
     controller._get_idle_cleanup_timeouts = Mock(return_value=(0, 0))
     controller.cleanup_task = None
     controller._delivery_recovery_complete = asyncio.Event()
@@ -50,6 +53,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller.session_turns.recover_persisted_agent_run_queue.assert_awaited_once_with()
     controller.scheduled_task_service.recover_processing_requests.assert_called_once_with()
     controller.runtime_work_supervisor.activate.assert_awaited_once_with()
+    controller.model_hub_service.reconcile_runtime_installation.assert_awaited_once_with()
     assert controller._delivery_recovery_complete.is_set()
 
 

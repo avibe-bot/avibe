@@ -1043,7 +1043,14 @@ class _FixtureInstaller:
         return result
 
     def status(self):
-        return {"installed": True, "version": "v7.2.95"}
+        return {
+            "installed": True,
+            "version": "v7.2.95",
+            "install_dir": str(self.install_dir),
+        }
+
+    def resolve_engine_path(self):
+        return self.binary
 
     def contract_manifest(self):
         return {
@@ -1114,8 +1121,12 @@ def test_supervisor_status_distinguishes_all_runtime_health_states(
 
 def test_supervisor_failed_first_install_reports_down(tmp_path: Path) -> None:
     installer = SimpleNamespace(
-        ensure=lambda: {"ok": False, "reason": "fixture_install_failed"},
-        status=lambda: {"installed": False, "version": None},
+        resolve_engine_path=lambda: None,
+        status=lambda: {
+            "installed": False,
+            "version": None,
+            "reason": "fixture_install_failed",
+        },
         contract_manifest=lambda: {"name": "cliproxyapi", "version": "v7.2.95", "assets": []},
     )
     supervisor = EngineSupervisor(
@@ -1535,6 +1546,228 @@ def test_adapter_applies_changed_install_to_running_engine(
         assert status.installed_version == "v7.2.95"
         assert status.verified is True
         assert supervisor.restarts == expected_restarts
+
+    asyncio.run(run())
+
+
+def test_runtime_install_state_survives_adapter_reload_and_settles_once(
+    tmp_path: Path,
+) -> None:
+    class BlockingInstaller(EngineRuntimeManager):
+        def __init__(self, runtime_dir: Path) -> None:
+            super().__init__(runtime_dir=runtime_dir, offline=True)
+            self.release = threading.Event()
+            self.started = threading.Event()
+            self.ensure_calls = 0
+            self.binary = runtime_dir / "installed-engine"
+
+        def ensure(self, *, force: bool = False):
+            del force
+            self.ensure_calls += 1
+            self.started.set()
+            assert self.release.wait(timeout=2)
+            self.binary.parent.mkdir(parents=True, exist_ok=True)
+            self.binary.write_bytes(b"verified fixture")
+            return {
+                "ok": True,
+                "changed": True,
+                "path": str(self.binary),
+                "install_dir": str(self.binary.parent),
+                "version": "v7.2.95",
+            }
+
+        def resolve_engine_path(self):
+            return self.binary if self.binary.is_file() else None
+
+        def status(self):
+            installed = self.resolve_engine_path() is not None
+            return {
+                "installed": installed,
+                "version": "v7.2.95" if installed else None,
+                "install_dir": str(self.binary.parent),
+                "platform": self.host_platform(),
+                "reason": None,
+            }
+
+    async def run() -> None:
+        runtime_dir = tmp_path / "runtime"
+        installer = BlockingInstaller(runtime_dir)
+        supervisor = EngineSupervisor(
+            installer=installer,
+            state_store=EngineStateStore(tmp_path / "state"),
+        )
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor)
+
+        started = await adapter.install()
+        await asyncio.to_thread(installer.started.wait, 2)
+        repeated = await adapter.install()
+
+        reloaded_installer = BlockingInstaller(runtime_dir)
+        reloaded = CLIProxyEngineAdapter(
+            supervisor=EngineSupervisor(
+                installer=reloaded_installer,
+                state_store=EngineStateStore(tmp_path / "reloaded-state"),
+            )
+        )
+        reloaded_status = await reloaded.status()
+
+        assert started.health is EngineHealth.INSTALLING
+        assert repeated.health is EngineHealth.INSTALLING
+        assert reloaded_status.health is EngineHealth.INSTALLING
+        assert installer.ensure_calls == 1
+
+        installer.release.set()
+        for _ in range(100):
+            settled = await adapter.status()
+            if settled.health is EngineHealth.NOT_STARTED:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("installation did not settle")
+
+        assert settled.verified is True
+        assert settled.error_key is None
+        assert reloaded_installer.install_state() is None
+
+    asyncio.run(run())
+
+
+def test_orphaned_install_state_is_reclaimed_before_runtime_status(
+    tmp_path: Path,
+) -> None:
+    class RecoveringInstaller(EngineRuntimeManager):
+        def __init__(self, runtime_dir: Path) -> None:
+            super().__init__(runtime_dir=runtime_dir, offline=True)
+            self.ensure_calls = 0
+            self.binary = runtime_dir / "installed-engine"
+
+        def ensure(self, *, force: bool = False):
+            del force
+            self.ensure_calls += 1
+            self.binary.parent.mkdir(parents=True, exist_ok=True)
+            self.binary.write_bytes(b"verified fixture")
+            return {
+                "ok": True,
+                "changed": True,
+                "path": str(self.binary),
+                "install_dir": str(self.binary.parent),
+                "version": "v7.2.95",
+            }
+
+        def resolve_engine_path(self):
+            return self.binary if self.binary.is_file() else None
+
+        def status(self):
+            installed = self.resolve_engine_path() is not None
+            return {
+                "installed": installed,
+                "version": "v7.2.95" if installed else None,
+                "install_dir": str(self.binary.parent),
+                "platform": self.host_platform(),
+                "reason": None,
+            }
+
+    async def run() -> None:
+        installer = RecoveringInstaller(tmp_path / "runtime")
+        assert installer.mark_installing() is True
+        (installer.runtime_dir / "install-orphan").mkdir(parents=True)
+        adapter = CLIProxyEngineAdapter(
+            supervisor=EngineSupervisor(
+                installer=installer,
+                state_store=EngineStateStore(tmp_path / "state"),
+            )
+        )
+
+        recovering = await adapter.recover_installation()
+
+        assert recovering.health in {
+            EngineHealth.INSTALLING,
+            EngineHealth.NOT_STARTED,
+        }
+        for _ in range(100):
+            settled = await adapter.status()
+            if settled.health is EngineHealth.NOT_STARTED:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("orphaned installation did not recover")
+
+        assert installer.ensure_calls == 1
+        assert not (installer.runtime_dir / "install-orphan").exists()
+        assert installer.install_state() is None
+
+    asyncio.run(run())
+
+
+def test_runtime_install_failure_persists_closed_error_key(tmp_path: Path) -> None:
+    class FailedInstaller(EngineRuntimeManager):
+        def __init__(self, runtime_dir: Path) -> None:
+            super().__init__(runtime_dir=runtime_dir, offline=True)
+            self.ensure_calls = 0
+
+        def ensure(self, *, force: bool = False):
+            del force
+            self.ensure_calls += 1
+            return {"ok": False, "changed": False, "reason": "fixture-secret"}
+
+    async def run() -> None:
+        installer = FailedInstaller(tmp_path / "runtime")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=EngineSupervisor(
+                installer=installer,
+                state_store=EngineStateStore(tmp_path / "state"),
+            )
+        )
+
+        started = await adapter.install()
+        assert started.health is EngineHealth.INSTALLING
+
+        for _ in range(100):
+            settled = await adapter.status()
+            if settled.health is EngineHealth.NOT_INSTALLED:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("failed installation did not settle")
+
+        reloaded = FailedInstaller(tmp_path / "runtime").install_state()
+        assert installer.ensure_calls == 1
+        assert settled.error_key == "settings.models.install.fail.detail"
+        assert reloaded is not None
+        assert reloaded["state"] == "not_installed"
+        assert reloaded["error_key"] == "settings.models.install.fail.detail"
+
+    asyncio.run(run())
+
+
+def test_orphaned_install_claim_failure_settles_closed_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+        assert installer.mark_installing() is True
+        monkeypatch.setattr(installer, "discard_install_staging", lambda: False)
+
+        def unexpected_ensure(**_kwargs):
+            raise AssertionError("unclaimed recovery must not start installation")
+
+        monkeypatch.setattr(installer, "ensure", unexpected_ensure)
+        adapter = CLIProxyEngineAdapter(
+            supervisor=EngineSupervisor(
+                installer=installer,
+                state_store=EngineStateStore(tmp_path / "state"),
+            )
+        )
+
+        settled = await adapter.recover_installation()
+
+        assert settled.health is EngineHealth.NOT_INSTALLED
+        assert settled.error_key == "settings.models.install.fail.detail"
+        persisted = installer.install_state()
+        assert persisted is not None
+        assert persisted["state"] == "not_installed"
+        assert persisted["error_key"] == "settings.models.install.fail.detail"
 
     asyncio.run(run())
 
@@ -3455,11 +3688,15 @@ def test_oauth_terminal_uncertainty_never_claims_cleanup(tmp_path: Path) -> None
 
 def test_supervisor_fails_closed_with_direct_mode_escape(tmp_path: Path) -> None:
     class FailedInstaller:
-        def ensure(self):
-            return {"ok": False, "reason": "model_hub_engine_archive_checksum_mismatch"}
+        def resolve_engine_path(self):
+            return None
 
         def status(self):
-            return {"installed": False, "version": None}
+            return {
+                "installed": False,
+                "version": None,
+                "reason": "model_hub_engine_archive_checksum_mismatch",
+            }
 
         def contract_manifest(self):
             return {

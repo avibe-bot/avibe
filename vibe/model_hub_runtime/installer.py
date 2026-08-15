@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
+import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +32,8 @@ _ENGINE_PLATFORM_MAP = {
     "linux-arm64": "linux-arm64",
 }
 _ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
+_INSTALL_STATE_SCHEMA_VERSION = 1
+_INSTALL_FAILURE_KEY = "settings.models.install.fail.detail"
 _ENGINE_SPEC = ManagedRuntimeSpec(
     runtime_id="model_hub_engine",
     manifest_resource="model_hub_runtime/cliproxyapi_manifest.json",
@@ -36,6 +42,9 @@ _ENGINE_SPEC = ManagedRuntimeSpec(
     archives_field="assets",
     archive_size_field="size_bytes",
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class EngineRuntimeManager(ManagedRuntimeManager):
@@ -59,6 +68,113 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             offline=(env_flag_enabled("VIBE_MODEL_HUB_ENGINE_OFFLINE") if offline is None else offline),
         )
         self._verified_binary_cache: tuple[tuple[object, ...], Path] | None = None
+        self._install_state_lock = threading.RLock()
+
+    @property
+    def install_state_path(self) -> Path:
+        return self.runtime_dir / "install-state.json"
+
+    def host_platform(self) -> str:
+        platform_tag = managed_runtime.runtime_platform_tag()
+        return _ENGINE_PLATFORM_MAP.get(platform_tag, platform_tag)
+
+    def platform_supported(self) -> bool:
+        return self._install_target() is not None
+
+    def install_state(self) -> dict[str, Any] | None:
+        with self._install_state_lock:
+            try:
+                payload = json.loads(self.install_state_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return None
+            except (OSError, ValueError, TypeError):
+                logger.warning("Ignoring invalid Model Hub runtime install state")
+                return None
+            if not isinstance(payload, dict) or payload.get("schema_version") != _INSTALL_STATE_SCHEMA_VERSION:
+                logger.warning("Ignoring unsupported Model Hub runtime install state")
+                return None
+            state = payload.get("state")
+            error_key = payload.get("error_key")
+            if state not in {"installing", "not_installed"}:
+                logger.warning("Ignoring invalid Model Hub runtime install state")
+                return None
+            if error_key not in {None, _INSTALL_FAILURE_KEY}:
+                logger.warning("Ignoring invalid Model Hub runtime install state")
+                return None
+            if state == "installing" and error_key is not None:
+                logger.warning("Ignoring contradictory Model Hub runtime install state")
+                return None
+            return payload
+
+    def mark_installing(self) -> bool:
+        target = self._install_target()
+        if target is None:
+            return False
+        with self._install_state_lock:
+            managed_runtime.write_json_atomic(
+                self.install_state_path,
+                {
+                    "schema_version": _INSTALL_STATE_SCHEMA_VERSION,
+                    "state": "installing",
+                    "error_key": None,
+                    "target": target,
+                },
+            )
+        return True
+
+    def mark_install_failed(self) -> None:
+        with self._install_state_lock:
+            current = self.install_state() or {}
+            target = current.get("target") or self._install_target()
+            managed_runtime.write_json_atomic(
+                self.install_state_path,
+                {
+                    "schema_version": _INSTALL_STATE_SCHEMA_VERSION,
+                    "state": "not_installed",
+                    "error_key": _INSTALL_FAILURE_KEY,
+                    "target": target,
+                },
+            )
+
+    def clear_install_state(self) -> None:
+        with self._install_state_lock:
+            try:
+                self.install_state_path.unlink()
+            except FileNotFoundError:
+                return
+
+    def discard_install_staging(self) -> bool:
+        """Remove only uncommitted staging left by an interrupted install."""
+
+        try:
+            file_lock = self._acquire_mutation_lock()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to claim Model Hub runtime install recovery")
+            return False
+        if file_lock is None:
+            return False
+        try:
+            for staging_dir in self.runtime_dir.glob("install-*"):
+                if staging_dir.is_dir():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+            return True
+        finally:
+            self._release_mutation_lock(file_lock)
+
+    def _install_target(self) -> dict[str, Any] | None:
+        manifest = self._load_manifest(allow_network=False)
+        if manifest is None or not self._manifest_installable(manifest):
+            return None
+        archive = self._manifest_archive_for_platform(manifest)
+        if archive is None or archive.platform != self.host_platform():
+            return None
+        return {
+            "manifest_sha256": manifest.digest,
+            "runtime_version": manifest.runtime_version,
+            "platform": archive.platform,
+            "archive_sha256": archive.sha256,
+            "binary_sha256": archive.binary_sha256,
+        }
 
     def resolve_engine_path(self) -> Path | None:
         return self.resolve_binary()

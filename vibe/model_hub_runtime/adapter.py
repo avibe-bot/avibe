@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import threading
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
+    RuntimePlatformUnsupportedError,
     SOURCE_PROTOCOLS,
     SourceObservation,
     SourceBinding,
@@ -50,6 +52,9 @@ _OAUTH_ENDPOINTS = {
     "codex": ("/codex-auth-url", "codex", "codex"),
 }
 _WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
+
+
+logger = logging.getLogger(__name__)
 
 
 class _ProtocolProof(Enum):
@@ -535,9 +540,74 @@ class CLIProxyEngineAdapter:
         self.supervisor = supervisor or get_engine_supervisor()
         self.state_store = state_store or self.supervisor.state_store
         self._routing_lock = asyncio.Lock()
+        self._installation_lock = asyncio.Lock()
+        self._install_task: asyncio.Task[None] | None = None
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
         self._oauth_lock = threading.RLock()
+
+    async def install(self) -> EngineStatus:
+        await self.recover_installation()
+        async with self._installation_lock:
+            status = await self.status()
+            if status.health is not EngineHealth.NOT_INSTALLED:
+                return status
+            supported = await asyncio.to_thread(self.supervisor.installer.platform_supported)
+            if not supported:
+                raise RuntimePlatformUnsupportedError
+            claimed = await asyncio.to_thread(self.supervisor.installer.mark_installing)
+            if not claimed:
+                raise RuntimePlatformUnsupportedError
+            installing = await self.status()
+            self._start_install_task_locked()
+            return installing
+
+    async def recover_installation(self) -> EngineStatus:
+        async with self._installation_lock:
+            install_state = await asyncio.to_thread(self.supervisor.installer.install_state)
+            if not install_state or install_state.get("state") != "installing":
+                return await self.status()
+            if self._install_task is not None and not self._install_task.done():
+                return await self.status()
+            installed = await asyncio.to_thread(self.supervisor.installer.resolve_engine_path)
+            if installed is not None:
+                await asyncio.to_thread(self.supervisor.installer.clear_install_state)
+                return await self.status()
+            claimed = await asyncio.to_thread(self.supervisor.installer.discard_install_staging)
+            if not claimed:
+                await asyncio.to_thread(self.supervisor.installer.mark_install_failed)
+                return await self.status()
+            self._start_install_task_locked()
+            return await self.status()
+
+    def _start_install_task_locked(self) -> None:
+        task = asyncio.create_task(
+            self._run_installation(),
+            name="model-hub-runtime-install",
+        )
+        self._install_task = task
+        task.add_done_callback(self._installation_done)
+
+    def _installation_done(self, task: asyncio.Task[None]) -> None:
+        if self._install_task is task:
+            self._install_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("Model Hub runtime install task failed")
+
+    async def _run_installation(self) -> None:
+        try:
+            status = await self.ensure_installed()
+            if not status.verified:
+                raise EngineUnavailableError("models.engine.install_failed")
+            await asyncio.to_thread(self.supervisor.installer.clear_install_state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            await asyncio.to_thread(self.supervisor.installer.mark_install_failed)
 
     async def ensure_installed(self) -> EngineStatus:
         async with self._routing_lock:
@@ -567,6 +637,8 @@ class CLIProxyEngineAdapter:
             listen_host="127.0.0.1",
             listen_port=listening.get("port"),
             last_check_iso=status.get("last_check"),
+            host_platform=raw.get("host_platform"),
+            error_key=status.get("error_key"),
         )
 
     async def gateway_token(self) -> str:

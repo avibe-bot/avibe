@@ -1503,6 +1503,15 @@ class Controller:
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
 
+        model_hub_service = getattr(self, "model_hub_service", None)
+        reconcile_model_hub = getattr(
+            model_hub_service,
+            "reconcile_runtime_installation",
+            None,
+        )
+        if callable(reconcile_model_hub):
+            await reconcile_model_hub()
+
         recover_deliveries = getattr(
             self.session_turns,
             "recover_durable_delivery_state",
