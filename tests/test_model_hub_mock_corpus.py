@@ -71,7 +71,12 @@ def test_mh_mock_replay_001_corpus_is_server_generated_and_keyed_by_full_state()
             "sensitive_placeholder",
             "volatile_fields",
             "volatile_placeholder",
-            "eligibility",
+        }
+        assert set(item["recording"]) == {
+            "command",
+            "request",
+            "proven_transitions",
+            "unproven_reason",
         }
         assert item["request_identity"]["sensitive_placeholder"] == (
             generator.SENSITIVE_PLACEHOLDER
@@ -82,10 +87,12 @@ def test_mh_mock_replay_001_corpus_is_server_generated_and_keyed_by_full_state()
         if item["dispatch"] == "unrecordable":
             assert item["recording"]["command"] is None
             assert item["reachability"]["kind"] == "unrecordable"
-            assert "#1462" in item["reachability"]["reason"]
+            assert item["reachability"]["reason"]
+            assert item["recording"]["proven_transitions"] == []
             continue
         assert item["dispatch"] == "authoritative_server"
         assert item["recording"]["command"] == generator.GENERATOR_COMMAND
+        assert len(item["recording"]["proven_transitions"]) == 1
         if item["reachability"]["kind"] == "seed":
             assert item["reachability"]["prerequisites"] == []
         else:
@@ -125,7 +132,7 @@ def test_mh_mock_replay_001_fixture_world_rejects_unregistered_access():
         seed["fixture_world"],
     )
     with pytest.raises(generator.UnregisteredFixtureAccess):
-        runtime.adapter.status()
+        runtime.adapter.unregistered_callback()
     with generator.sealed_execution(runtime):
         with pytest.raises(generator.UnregisteredFixtureAccess):
             open(ROOT / "pyproject.toml", encoding="utf-8")
@@ -135,11 +142,11 @@ def test_mh_mock_replay_001_fixture_world_rejects_unregistered_access():
             generator.service_module.uuid.uuid4()
 
 
-def test_mh_mock_replay_001_record_miss_extends_a_known_sequence(
+def test_mh_mock_replay_001_record_miss_rejects_an_unproven_concrete_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The advertised command can extend a non-seed state and reuse its prefix."""
+    """A reachable state alone cannot advertise an unexecuted request."""
 
     generator = _generator_module()
     seed = json.loads(generator.SEED_PATH.read_text(encoding="utf-8"))
@@ -167,19 +174,18 @@ def test_mh_mock_replay_001_record_miss_extends_a_known_sequence(
     sequences_path.write_text(generator._render(sequence_spec), encoding="utf-8")
     monkeypatch.setattr(generator, "SEQUENCES_PATH", sequences_path)
 
-    generator._record_miss(
-        transition_id,
-        request_token,
-        sequence_spec,
-        corpus,
-        traces,
-    )
-    extended = json.loads(sequences_path.read_text(encoding="utf-8"))
-    regenerated, _ = asyncio.run(generator._generate(seed, extended))
-
-    assert len(regenerated["sequences"]) == 6
-    assert len(regenerated["transitions"]) == 12
-    assert regenerated["transitions"][-1]["key"]["request"] == key_body["request"]
+    with pytest.raises(
+        ValueError,
+        match="add the action path to scripts/model_hub_mock_sequences.json",
+    ):
+        generator._record_miss(
+            transition_id,
+            request_token,
+            sequence_spec,
+            corpus,
+            traces,
+        )
+    assert json.loads(sequences_path.read_text(encoding="utf-8")) == sequence_spec
 
 
 def test_mh_mock_replay_001_operation_registry_is_total_and_reachable():
@@ -188,13 +194,9 @@ def test_mh_mock_replay_001_operation_registry_is_total_and_reachable():
     generator = _generator_module()
     seed = json.loads(generator.SEED_PATH.read_text(encoding="utf-8"))
     assert generator.OPERATION_REGISTRY
+    proofs = asyncio.run(generator._validate_operation_registry(seed))
     for operation, spec in generator.OPERATION_REGISTRY.items():
         assert spec.recording_probe["operation"] == operation
-        assert spec.request_identity.eligibility.kind in {
-            "always",
-            "observation_fixture",
-            "unrecordable",
-        }
         assert not (
             set(spec.request_identity.sensitive_fields)
             & set(spec.request_identity.volatile_fields)
@@ -202,14 +204,14 @@ def test_mh_mock_replay_001_operation_registry_is_total_and_reachable():
         if spec.reachability.kind == "unrecordable":
             assert spec.handler is None
             assert spec.reachability.reason
+            assert proofs[operation]["transitions"] == []
         else:
             assert callable(spec.handler)
             assert spec.reachability.kind in {"seed", "sequence"}
             assert (spec.reachability.kind == "seed") != bool(
                 spec.reachability.prerequisites
             )
-
-    asyncio.run(generator._validate_operation_registry(seed))
+            assert len(proofs[operation]["transitions"]) == 1
 
 
 def test_mh_mock_replay_001_request_identity_redacts_sensitive_and_volatile_fields():
@@ -251,6 +253,10 @@ def test_mh_mock_replay_001_request_identity_redacts_sensitive_and_volatile_fiel
             second = json.loads(json.dumps(spec.recording_probe))
             replace(first, path, f"volatile-a-{index}")
             replace(second, path, f"volatile-b-{index}")
-            assert generator._canonical_request(first) == generator._canonical_request(
-                second
+            assert generator._canonical_request(first) == (
+                generator._canonical_request(second)
+            )
+            aliases = generator.VolatileAliases()
+            assert generator._canonical_request(first, aliases) != (
+                generator._canonical_request(second, aliases)
             )

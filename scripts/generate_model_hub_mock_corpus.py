@@ -14,8 +14,11 @@ import io
 import json
 import os
 import re
+import shlex
 import socket
+import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -1354,6 +1357,53 @@ async def _validate_operation_registry(
 
     proofs: dict[str, dict[str, Any]] = {}
     for operation, spec in OPERATION_REGISTRY.items():
+        for index, path in enumerate(spec.request_identity.volatile_fields):
+            first = copy.deepcopy(spec.recording_probe)
+            second = copy.deepcopy(spec.recording_probe)
+            _replace_field(first, path, f"volatile-a-{operation}-{index}")
+            _replace_field(second, path, f"volatile-b-{operation}-{index}")
+            pre = {
+                "model_hub_config_sha256": "a" * 64,
+                "fixture_world_sha256": "b" * 64,
+            }
+            first_run_id = _sha256(
+                {
+                    "version": 2,
+                    "pre": pre,
+                    "request": _canonical_request(first),
+                }
+            )
+            second_run_id = _sha256(
+                {
+                    "version": 2,
+                    "pre": pre,
+                    "request": _canonical_request(second),
+                }
+            )
+            if first_run_id != second_run_id:
+                raise RuntimeError(
+                    f"{operation} volatile identity is not stable across runs"
+                )
+            aliases = VolatileAliases()
+            first_sequence_id = _sha256(
+                {
+                    "version": 2,
+                    "pre": pre,
+                    "request": _canonical_request(first, aliases),
+                }
+            )
+            second_sequence_id = _sha256(
+                {
+                    "version": 2,
+                    "pre": pre,
+                    "request": _canonical_request(second, aliases),
+                }
+            )
+            if first_sequence_id == second_sequence_id:
+                raise RuntimeError(
+                    f"{operation} volatile identity collapses distinct sequence values"
+                )
+
         if spec.reachability.kind == "unrecordable":
             if spec.handler is not None or not spec.reachability.reason:
                 raise RuntimeError(f"{operation} has an invalid unrecordable declaration")
@@ -1540,7 +1590,9 @@ async def _generate(
                 ),
                 "recording": {
                     "command": (
-                        GENERATOR_COMMAND if spec.handler is not None else None
+                        GENERATOR_COMMAND
+                        if registry_proofs[operation]["transitions"]
+                        else None
                     ),
                     "request": registry_proofs[operation]["request"],
                     "proven_transitions": registry_proofs[operation][
@@ -1548,7 +1600,9 @@ async def _generate(
                     ],
                     "unproven_reason": (
                         spec.reachability.reason
-                        or "this exact pre-state and request have no generator execution proof"
+                        or "this exact pre-state and request have no generator execution proof; "
+                        "add the action path to scripts/model_hub_mock_sequences.json and run "
+                        f"{GENERATOR_COMMAND}"
                     ),
                 },
                 "reachability": {
@@ -1663,6 +1717,81 @@ def _record_miss(
     SEQUENCES_PATH.write_text(_render(sequence_spec), encoding="utf-8")
 
 
+def _verify_advertised_commands(
+    seed: dict[str, Any],
+    sequence_spec: dict[str, Any],
+    corpus: dict[str, Any],
+) -> None:
+    """Run every exact recovery command that the generated registry advertises."""
+
+    registrations = {
+        item["operation"]: item for item in corpus["operation_registry"]
+    }
+    with tempfile.TemporaryDirectory(prefix="model-hub-record-check-") as temp:
+        root = Path(temp)
+        for entry in corpus["operation_registry"]:
+            command = entry["recording"]["command"]
+            if command is None:
+                if entry["recording"]["proven_transitions"]:
+                    raise RuntimeError(
+                        f"{entry['operation']} hides an execution-proven command"
+                    )
+                continue
+
+            operation_root = root / entry["operation"]
+            operation_root.mkdir()
+            seed_path = operation_root / "seed.json"
+            sequences_path = operation_root / "sequences.json"
+            output_path = operation_root / "corpus.json"
+            seed_path.write_text(_render(seed), encoding="utf-8")
+            sequences_path.write_text(_render(sequence_spec), encoding="utf-8")
+            recovery_path = [
+                *entry["reachability"]["prerequisites"],
+                entry["recording"]["request"],
+            ]
+            for request in recovery_path:
+                request_entry = registrations[request["operation"]]
+                proofs = request_entry["recording"]["proven_transitions"]
+                if len(proofs) != 1:
+                    raise RuntimeError(
+                        f"{request['operation']} must have one concrete recovery proof"
+                    )
+                proof = proofs[0]
+                exact_command = [
+                    *shlex.split(request_entry["recording"]["command"]),
+                    "--record-miss",
+                    proof["id"],
+                    "--request-token",
+                    proof["request_token"],
+                ]
+                result = subprocess.run(
+                    exact_command,
+                    cwd=ROOT,
+                    env={
+                        **os.environ,
+                        "MODEL_HUB_MOCK_SEED_PATH": str(seed_path),
+                        "MODEL_HUB_MOCK_SEQUENCES_PATH": str(sequences_path),
+                        "MODEL_HUB_MOCK_OUTPUT_PATH": str(output_path),
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"advertised recovery command failed for {entry['operation']}: "
+                        f"{result.stderr.strip()}"
+                    )
+                recorded = json.loads(output_path.read_text(encoding="utf-8"))
+                if not any(
+                    transition["key"]["id"] == proof["id"]
+                    for transition in recorded["transitions"]
+                ):
+                    raise RuntimeError(
+                        f"advertised recovery command did not record {proof['id']}"
+                    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
@@ -1696,6 +1825,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
+        _verify_advertised_commands(seed, sequence_spec, corpus)
         return 0
     OUTPUT_PATH.write_text(rendered, encoding="utf-8")
     output_label = (

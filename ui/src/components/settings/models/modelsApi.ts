@@ -449,21 +449,21 @@ const executeModelHubCall = async <Result>(
   type Outcome =
     | { kind: 'success'; value: unknown }
     | { kind: 'error'; error: unknown };
+  let removeAbortListener: () => void = () => {};
+  const aborted = signal
+    ? new Promise<never>((_resolve, reject) => {
+        const onAbort = () => reject(abortReason(signal));
+        signal.addEventListener('abort', onAbort, { once: true });
+        removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+      })
+    : null;
   const outcome = invoke()
-    .then<Outcome>(
+    .then<Outcome, Outcome>(
       (value) => ({ kind: 'success', value }),
       (error) => ({ kind: 'error', error }),
     );
-  let removeAbortListener = () => undefined;
-  const settled = signal
-    ? await Promise.race([
-        outcome,
-        new Promise<never>((_resolve, reject) => {
-          const onAbort = () => reject(abortReason(signal));
-          signal.addEventListener('abort', onAbort, { once: true });
-          removeAbortListener = () => signal.removeEventListener('abort', onAbort);
-        }),
-      ]).finally(() => removeAbortListener())
+  const settled = aborted
+    ? await Promise.race([outcome, aborted]).finally(() => removeAbortListener())
     : await outcome;
 
   if (signal?.aborted) throw abortReason(signal);

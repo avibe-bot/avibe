@@ -134,16 +134,6 @@ const canonicalJson = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
-const base64Url = (value: string): string => {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return globalThis.btoa(binary)
-    .replaceAll('+', '-')
-    .replaceAll('/', '_')
-    .replace(/=+$/, '');
-};
-
 const sha256 = async (value: string): Promise<string> => {
   const digest = await globalThis.crypto.subtle.digest(
     'SHA-256',
@@ -287,9 +277,9 @@ export class MockStore {
   private reads: RecordedReads;
   private configHash: string;
   private fixtureWorldHash: string;
-  private fixtureWorld: unknown;
   private readonly transitions: Map<string, RecordedTransition>;
   private readonly registrations: Map<ModelHubOperation, OperationRegistration>;
+  private readonly volatileAliases = new VolatileAliases();
   private readonly events = buildMockEvents();
   private readonly runtime = buildMockRuntime();
 
@@ -300,7 +290,6 @@ export class MockStore {
     this.reads = clone(corpus.seed.reads);
     this.configHash = corpus.seed.model_hub_config_sha256;
     this.fixtureWorldHash = corpus.seed.fixture_world_sha256;
-    this.fixtureWorld = clone(corpus.seed.fixture_world);
     this.transitions = new Map(
       corpus.transitions.map((transition) => [transition.key.id, transition]),
     );
@@ -328,7 +317,11 @@ export class MockStore {
         'no operation registry entry exists',
       );
     }
-    const normalized = canonicalRequest(request, registration.request_identity);
+    const normalized = canonicalRequest(
+      request,
+      registration.request_identity,
+      this.volatileAliases,
+    );
     const input = {
       version: 2,
       pre: {
@@ -341,55 +334,61 @@ export class MockStore {
     return {
       id: await sha256(rendered),
       request: normalized,
-      requestToken: base64Url(rendered),
       registration,
     };
   }
 
-  private async replay<T>(request: RecordedRequest): Promise<T> {
-    const key = await this.transitionKey(request);
-    const transition = this.transitions.get(key.id);
-    if (!transition) {
-      const eligibility = recordingEligibility(
-        key.registration,
-        key.request,
-        this.fixtureWorld,
-      );
-      const generatorCommand = key.registration.recording.command && eligibility.recordable
-        ? `${key.registration.recording.command} --record-miss ${key.id} --request-token ${key.requestToken}`
-        : null;
-      throw new UncontractedMockTransitionError(
-        key.id,
-        request.operation,
-        generatorCommand,
-        key.request,
-        eligibility.reason ?? key.registration.reachability.reason,
-      );
-    }
+  private replay<T>(request: RecordedRequest, signal?: AbortSignal): Promise<T> {
+    let transition: RecordedTransition | undefined;
+    return modelHubOperationRegistry[request.operation].execute(
+      async () => {
+        const key = await this.transitionKey(request);
+        transition = this.transitions.get(key.id);
+        if (!transition) {
+          const proof = key.registration.recording.proven_transitions.find(
+            (candidate) => candidate.id === key.id,
+          );
+          const generatorCommand = key.registration.recording.command && proof
+            ? `${key.registration.recording.command} --record-miss ${key.id} --request-token ${proof.request_token}`
+            : null;
+          throw new UncontractedMockTransitionError(
+            key.id,
+            request.operation,
+            generatorCommand,
+            key.request,
+            proof
+              ? null
+              : key.registration.recording.unproven_reason,
+          );
+        }
 
-    this.reads = clone(transition.post.reads);
-    this.configHash = transition.post.model_hub_config_sha256;
-    this.fixtureWorldHash = transition.post.fixture_world_sha256;
-    this.fixtureWorld = clone(transition.post.fixture_world);
-
-    if (transition.outcome.kind === 'error') {
-      const data = transition.outcome.data;
-      throw new ApiCallError(
-        transition.outcome.error,
-        transition.outcome.detail,
-        true,
-        supplyGaps(data.would_interrupt),
-        supplyGaps(data.interrupted_pairs),
-        routeHopRefs(data.would_remove_hops),
-        transition.outcome.status,
-        typeof data.observation === 'object' && data.observation !== null
-          ? data.observation as SourceObservation
-          : undefined,
-      );
-    }
-    return modelHubOperationRegistry[request.operation].responseTransform(
-      clone(transition.outcome.value),
-    ) as T;
+        if (transition.outcome.kind === 'error') {
+          const data = transition.outcome.data;
+          throw new ApiCallError(
+            transition.outcome.error,
+            transition.outcome.detail,
+            true,
+            supplyGaps(data.would_interrupt),
+            supplyGaps(data.interrupted_pairs),
+            routeHopRefs(data.would_remove_hops),
+            transition.outcome.status,
+            typeof data.observation === 'object' && data.observation !== null
+              ? data.observation as SourceObservation
+              : undefined,
+          );
+        }
+        return clone(transition.outcome.value);
+      },
+      {
+        signal,
+        commit: () => {
+          if (!transition) return;
+          this.reads = clone(transition.post.reads);
+          this.configHash = transition.post.model_hub_config_sha256;
+          this.fixtureWorldHash = transition.post.fixture_world_sha256;
+        },
+      },
+    ) as Promise<T>;
   }
 
   listSources(): Promise<Source[]> {
@@ -448,13 +447,13 @@ export class MockStore {
 
   observeApiKeySource(
     draft: ApiKeySourceObservation,
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<SourceObservation> {
     return this.replay(normalizedRequest(
       'observeApiKeySource',
       {},
       { present: true, value: draft },
-    ));
+    ), signal);
   }
 
   createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated> {

@@ -9,7 +9,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import mockCorpusJson from './mock-only/modelHubMockCorpus.json';
 import { ApiCallError, modelHubOperationRegistry } from './modelsApi';
@@ -208,21 +208,25 @@ describe('Model Hub mock replay boundary', () => {
       expect(entry.request_identity.strategy, entry.operation).toBe('all_except_declared');
       expect(Array.isArray(entry.request_identity.sensitive_fields), entry.operation).toBe(true);
       expect(Array.isArray(entry.request_identity.volatile_fields), entry.operation).toBe(true);
-      expect(entry.request_identity.eligibility.kind, entry.operation).toBeTruthy();
       expect(
         typeof modelHubOperationRegistry[entry.operation].responseTransform,
+        entry.operation,
+      ).toBe('function');
+      expect(
+        typeof modelHubOperationRegistry[entry.operation].execute,
         entry.operation,
       ).toBe('function');
       if (entry.dispatch === 'unrecordable') {
         expect(entry.recording.command, entry.operation).toBeNull();
         expect(entry.reachability.kind, entry.operation).toBe('unrecordable');
-        expect(entry.reachability.reason, entry.operation).toContain('#1462');
-        expect(entry.request_identity.eligibility.kind, entry.operation).toBe('unrecordable');
+        expect(entry.reachability.reason, entry.operation).toBeTruthy();
+        expect(entry.recording.proven_transitions, entry.operation).toEqual([]);
         continue;
       }
       expect(entry.recording.command, entry.operation).toBe(
         'python3 scripts/generate_model_hub_mock_corpus.py',
       );
+      expect(entry.recording.proven_transitions, entry.operation).toHaveLength(1);
       expect(
         entry.reachability.kind === 'seed'
           ? entry.reachability.prerequisites
@@ -260,7 +264,7 @@ describe('Model Hub mock replay boundary', () => {
           const error = missing.kind === 'error' ? missing.error : null;
           expect(error, entry.operation).toBeInstanceOf(UncontractedMockTransitionError);
           expect((error as UncontractedMockTransitionError).generatorCommand).toBeNull();
-          expect((error as UncontractedMockTransitionError).recordingReason).toContain('#1462');
+          expect((error as UncontractedMockTransitionError).recordingReason).toBeTruthy();
           continue;
         }
         const operationRoot = join(tempRoot, entry.operation);
@@ -349,7 +353,7 @@ describe('Model Hub mock replay boundary', () => {
     }
   }, 180_000);
 
-  it('derives secret redaction, volatile aliases, and request eligibility from the registry', async () => {
+  it('derives secret redaction, volatile aliases, and recording proofs from the registry', async () => {
     const corpus = mockCorpusJson as unknown as MockCorpus;
     type RegistryEntry = MockCorpus['operation_registry'][number];
     type Request = RegistryEntry['recording']['request'];
@@ -399,23 +403,72 @@ describe('Model Hub mock replay boundary', () => {
           (await transitionKey(new MockStore(corpus), first)).id,
           entry.operation,
         ).toBe((await transitionKey(new MockStore(corpus), second)).id);
+        const sequenceStore = new MockStore(corpus);
+        expect(
+          (await transitionKey(sequenceStore, first)).id,
+          entry.operation,
+        ).not.toBe((await transitionKey(sequenceStore, second)).id);
       }
 
-      if (entry.request_identity.eligibility.kind === 'observation_fixture') {
-        const request = structuredClone(entry.recording.request);
-        setField(request, ['body', 'value', 'base_url'], 'https://unregistered.example/v1');
-        let failure: UncontractedMockTransitionError | null = null;
-        try {
-          await replay(new MockStore(corpus), request);
-        } catch (error) {
-          if (error instanceof UncontractedMockTransitionError) failure = error;
-          else throw error;
-        }
-        expect(failure?.generatorCommand, entry.operation).toBeNull();
-        expect(failure?.recordingReason, entry.operation).toContain(
-          'registered observation fixture',
-        );
+      const unproven = structuredClone(entry.recording.request);
+      unproven.path.__unproven = entry.operation;
+      let failure: UncontractedMockTransitionError | null = null;
+      try {
+        await replay(new MockStore(corpus), unproven);
+      } catch (error) {
+        if (error instanceof UncontractedMockTransitionError) failure = error;
+        else throw error;
       }
+      expect(failure, entry.operation).not.toBeNull();
+      expect(failure?.generatorCommand, entry.operation).toBeNull();
+      expect(failure?.recordingReason, entry.operation).toContain(
+        'no generator execution proof',
+      );
     }
+  });
+
+  it('shares one cancellation contract across every live and replay operation', async () => {
+    for (const [operation, contract] of Object.entries(modelHubOperationRegistry)) {
+      const alreadyAborted = new AbortController();
+      const beforeStart = new DOMException(`${operation}:before`, 'AbortError');
+      alreadyAborted.abort(beforeStart);
+      const neverInvoked = vi.fn(async () => ({}));
+      await expect(contract.execute(neverInvoked, {
+        signal: alreadyAborted.signal,
+      })).rejects.toBe(beforeStart);
+      expect(neverInvoked, operation).not.toHaveBeenCalled();
+
+      const controller = new AbortController();
+      const commit = vi.fn();
+      let settle: ((value: unknown) => void) | undefined;
+      const pending = contract.execute(
+        () => new Promise((resolve) => {
+          settle = resolve;
+        }),
+        { signal: controller.signal, commit },
+      );
+      const whilePending = new DOMException(`${operation}:pending`, 'AbortError');
+      controller.abort(whilePending);
+      await expect(pending).rejects.toBe(whilePending);
+      settle?.({});
+      await Promise.resolve();
+      expect(commit, operation).not.toHaveBeenCalled();
+    }
+
+    const corpus = mockCorpusJson as unknown as MockCorpus;
+    const observation = corpus.operation_registry.find(
+      (entry) => entry.operation === 'observeApiKeySource',
+    );
+    expect(observation).toBeDefined();
+    const controller = new AbortController();
+    const reason = new DOMException('dialog closed', 'AbortError');
+    controller.abort(reason);
+    const draft = observation?.recording.request.body.present
+      ? observation.recording.request.body.value
+      : null;
+    await expect(new MockStore(corpus).observeApiKeySource(
+      draft as Parameters<MockStore['observeApiKeySource']>[0],
+      controller.signal,
+    )).rejects.toBe(reason);
   });
 });

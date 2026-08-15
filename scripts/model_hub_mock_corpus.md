@@ -24,7 +24,8 @@ recorded path to the missing pre-state, appends the action to
 `model_hub_mock_sequences.json`, and regenerates the corpus. Review both files.
 The transition id is a SHA-256 digest. A separate request token carries only the
 canonical request: sensitive fields are replaced by `<sensitive>` and volatile
-per-call fields by `<volatile>` before either value is built. The error prints
+per-call fields receive stable first-appearance aliases such as `<volatile:1>`
+before either value is built. The error prints
 that redacted canonical request for inspection. If a concrete request needs
 fixture content that is not registered, or the server has no dispatch for the
 operation, the error names the reason instead of advertising a command that
@@ -32,19 +33,22 @@ cannot produce server evidence.
 The generator's operation registry owns the authoritative service dispatch,
 recording command and probe, and explicit reachability (`seed` or a declared
 prerequisite sequence). Its fifth facet, request identity, declares the
-identity-bearing remainder, sensitive and volatile field paths, and per-request
-recording eligibility. Generation executes every declared path in the sealed
-fixture world; an operation without a path, or a prerequisite that cannot run,
-fails before a corpus can be written. The mock's advertised set and request
-canonicalization are generated from those same entries.
+identity-bearing remainder plus sensitive and volatile field paths. Generation
+executes every declared path in the sealed fixture world and records the exact
+transition ids that succeeded. Only those execution-proven ids can advertise a
+recovery command. `--check` runs every advertised command against isolated files
+and verifies that it records the promised transition. The mock's advertised set
+and request canonicalization are generated from those same entries.
 
 The corpus keeps the raw service result. The TypeScript operation registry owns
-one response transform per `ModelsApi` operation, and both `LiveApi` and
-`MockStore` call that same function. The contract test starts from each
+one response transform and call-settlement contract per `ModelsApi` operation,
+and both `LiveApi` and `MockStore` use them. The shared call contract owns abort
+handling and commits replay state only after a non-aborted call settles. The
+contract test starts from each
 registered reachability path, runs the exact command copied from the thrown
 error, then verifies the transition replays through the shared transform. A new
-operation cannot silently omit dispatch, recovery, reachability, or response
-normalization, and request identity.
+operation cannot silently omit dispatch, recovery, reachability, response
+normalization, cancellation, or request identity.
 
 Production imports only the live client. Hermetic callers opt into
 `mock-only/modelsApi.mockEntry.ts`, which lazily loads the replay engine and
@@ -58,8 +62,9 @@ needs it, while the enforcement boundary is complete: unregistered collaborator,
 network, filesystem, clock, or id access fails generation.
 
 The local dynamic event feed and static runtime-status card remain display
-fixtures. They do not classify observations, choose targets, validate writes,
-compute guards, prune routes, or derive supply. Every such policy-bearing entry
-point goes through the transition corpus, including entry points with no record
-yet; those fail with a recording command or an explicit missing-server-dispatch
-error instead of falling back to TypeScript.
+fixtures. Runtime installation now replays the authoritative route added by
+#1462. The display fixtures do not classify observations, choose targets,
+validate writes, compute guards, prune routes, or derive supply. Every such
+policy-bearing entry point goes through the transition corpus, including entry
+points with no record yet; those fail with an execution-proven recording command
+or an explicit unproven-request reason instead of falling back to TypeScript.
