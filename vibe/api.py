@@ -9581,6 +9581,12 @@ def remove_backend_api_key(backend: str) -> dict:
                 # OAuth), the OAuth credentials would still be routed
                 # to the api-key-only relay and silently 401.
                 target.base_url = None
+                # Remove key is an explicit OAuth choice — the relay
+                # marker goes with it, or a later refresh would
+                # repopulate the abandoned relay and reroute a freshly
+                # entered official key to it (Codex-only field).
+                if backend == "codex":
+                    target.oauth_relay_marker = None
                 # User explicitly chose OAuth by clicking Remove key —
                 # mark the flag so legacy env-var fallback in
                 # ``build_claude_subprocess_env`` is bypassed and the

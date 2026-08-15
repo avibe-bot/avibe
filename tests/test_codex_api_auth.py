@@ -378,3 +378,35 @@ def test_remove_codex_api_key_blocks_recovery_before_external_mutation(monkeypat
         "message": "Config was loaded with recovery warnings; repair the backed-up config before changing backend credentials",
     }
     assert applied == []
+
+
+def test_remove_backend_api_key_clears_codex_relay_marker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Remove key is an explicit OAuth choice: the relay marker must go
+    with the key, or the next Settings refresh repopulates the abandoned
+    relay and a freshly entered official key gets rerouted to it."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-official"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text('model = "gpt-5.4"\n', encoding="utf-8")
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="api_key",
+        api_key="sk-official",
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+    fake_agents = types.SimpleNamespace(codex=fake_codex)
+    fake_config = types.SimpleNamespace(agents=fake_agents, save=lambda: None)
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    result = api.remove_backend_api_key("codex")
+    assert result.get("ok") is True
+    assert fake_codex.api_key is None
+    assert fake_codex.oauth_relay_marker is None
