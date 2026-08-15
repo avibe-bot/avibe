@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import gc
+import sqlite3
 import threading
 from collections import deque
 from datetime import UTC, datetime, timedelta
@@ -10,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from config import paths
+from core.memory import attachments as attachment_module
+from core.memory import confined_filesystem as confined_filesystem_module
 from core.memory.attachments import (
     AttachmentPinStore,
     PinnedBundle,
@@ -150,6 +154,7 @@ def _enqueue_attachment_bundle(
     bundle: PinnedBundle,
     *,
     source: str,
+    payload_text: str = "remember the attachment",
 ) -> QueueRow:
     result = store.enqueue_request(
         source_message_id=source,
@@ -157,7 +162,7 @@ def _enqueue_attachment_bundle(
         principal_id=PRINCIPAL,
         project_ref=PROJECT,
         provenance="user_input",
-        payload_text="remember the attachment",
+        payload_text=payload_text,
         payload_attachments=encode_pinned_bundle(bundle),
         attachment_bundle_id=bundle.bundle_id,
         attachment_bundle_relative_path=bundle.relative_path,
@@ -3336,7 +3341,469 @@ async def test_cancelled_add_after_provider_entry_remains_ambiguous(tmp_path: Pa
 
 
 
-async def test_attachment_preflight_failure_is_bounded_without_session_fence(
+def test_claimed_attachment_downgrade_is_atomic_and_lease_fenced(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _attachment_store, bundle, _pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source="atomic-text-downgrade",
+    )
+    stale = store.claim_due(
+        lease_owner="first-worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert stale is not None
+
+    assert (
+        store._downgrade_claimed_attachment_to_text(
+            stale,
+            lease_owner="wrong-worker",
+            now=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        )
+        is None
+    )
+    assert store.return_unsubmitted_claim(stale, lease_owner="first-worker")
+    current = store.claim_due(
+        lease_owner="second-worker",
+        now="2026-01-01T00:00:02.000Z",
+    )
+    assert current is not None
+    assert current.lease_token == stale.lease_token + 1
+    assert (
+        store._downgrade_claimed_attachment_to_text(
+            stale,
+            lease_owner="second-worker",
+            now=datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC),
+        )
+        is None
+    )
+
+    assert (
+        store._downgrade_claimed_attachment_to_text(
+            current,
+            lease_owner="second-worker",
+            now=datetime(2026, 1, 1, 0, 0, 4, tzinfo=UTC),
+        )
+        == bundle.bundle_id
+    )
+    downgraded = store.get_queue_row(original.source_message_digest)
+    assert downgraded is not None
+    assert (
+        downgraded.source_message_digest,
+        downgraded.created_at,
+        downgraded.payload_text,
+        downgraded.state,
+        downgraded.attempts,
+        downgraded.payload_attachments,
+        downgraded.attachment_bundle_id,
+        downgraded.lease_owner,
+        downgraded.lease_at,
+    ) == (
+        original.source_message_digest,
+        original.created_at,
+        "remember the attachment",
+        "pending",
+        0,
+        None,
+        None,
+        None,
+        None,
+    )
+    assert store.attachment_bundle_sets() == (
+        frozenset(),
+        frozenset({bundle.bundle_id}),
+    )
+    assert (
+        store._downgrade_claimed_attachment_to_text(
+            current,
+            lease_owner="second-worker",
+            now=datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC),
+        )
+        is None
+    )
+
+
+def test_claimed_attachment_downgrade_rolls_back_caption_and_bundle_together(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _attachment_store, bundle, _pinned_path = _pin_attachment_bundle()
+    _enqueue_attachment_bundle(store, bundle, source="rollback-text-downgrade")
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER fail_attachment_release
+            BEFORE UPDATE OF state ON memory_attachment_bundle
+            WHEN NEW.state = 'releasing'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced release failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced release failure"):
+        store._downgrade_claimed_attachment_to_text(
+            claimed,
+            lease_owner="worker",
+            now=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        )
+
+    preserved = store.get_queue_row(claimed.source_message_digest)
+    assert preserved is not None
+    assert (
+        preserved.state,
+        preserved.payload_text,
+        preserved.payload_attachments,
+        preserved.attachment_bundle_id,
+        preserved.lease_owner,
+        preserved.lease_token,
+        preserved.attempts,
+    ) == (
+        "processing",
+        claimed.payload_text,
+        claimed.payload_attachments,
+        bundle.bundle_id,
+        "worker",
+        claimed.lease_token,
+        0,
+    )
+    assert store.attachment_bundle_sets() == (
+        frozenset({bundle.bundle_id}),
+        frozenset(),
+    )
+
+
+@pytest.mark.parametrize("failure", ["decode", "missing", "tamper"])
+async def test_attachment_preflight_failure_retries_caption_as_text_only(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source=f"{failure}-text-downgrade",
+    )
+    if failure == "decode":
+        with sqlite3.connect(store.path) as conn:
+            conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET payload_attachments = '{}'
+                WHERE source_message_digest = ?
+                """,
+                (original.source_message_digest,),
+            )
+    elif failure == "missing":
+        pinned_path.unlink()
+    else:
+        pinned_path.write_bytes(b"tampered after enqueue")
+
+    provider = FakeMemoryProvider()
+    releases: list[str] = []
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+        release_attachment=releases.append,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    downgraded = store.get_queue_row(original.source_message_digest)
+    assert downgraded is not None
+    assert (
+        downgraded.source_message_digest,
+        downgraded.created_at,
+        downgraded.payload_text,
+        downgraded.state,
+        downgraded.attempts,
+        downgraded.payload_attachments,
+        downgraded.attachment_bundle_id,
+    ) == (
+        original.source_message_digest,
+        original.created_at,
+        "remember the attachment",
+        "pending",
+        0,
+        None,
+        None,
+    )
+    assert releases == [bundle.bundle_id]
+    assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+    assert not pinned_path.exists()
+    assert provider.captures == []
+
+    retry = store.claim_due(
+        lease_owner="retry-worker",
+        now="2026-01-01T00:00:01.000Z",
+    )
+    assert retry is not None
+    assert retry.source_message_digest == original.source_message_digest
+    assert await coordinator.deliver(retry, lease_owner="retry-worker")
+    assert len(provider.captures) == 1
+    assert provider.captures[0].text == "remember the attachment"
+    assert provider.captures[0].attachments == ()
+    assert releases == [bundle.bundle_id]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_state"),
+    [("decode", "dead"), ("revalidation", "pending")],
+)
+async def test_captionless_attachment_preflight_failure_always_makes_progress(
+    tmp_path: Path,
+    failure: str,
+    expected_state: str,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source=f"captionless-{failure}-failure",
+        payload_text="",
+    )
+    if failure == "decode":
+        with sqlite3.connect(store.path) as conn:
+            conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET payload_attachments = '{}'
+                WHERE source_message_digest = ?
+                """,
+                (original.source_message_digest,),
+            )
+    else:
+        pinned_path.write_bytes(b"tampered after enqueue")
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=FakeMemoryProvider(),
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    terminal = store.get_queue_row(original.source_message_digest)
+    assert terminal is not None
+    assert (terminal.state, terminal.attempts) == (expected_state, 1)
+    if failure == "decode":
+        assert (
+            terminal.payload_text,
+            terminal.payload_attachments,
+            terminal.attachment_bundle_id,
+        ) == (None, None, None)
+        assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+    else:
+        assert terminal.payload_text == ""
+        assert terminal.payload_attachments == original.payload_attachments
+        assert terminal.attachment_bundle_id == bundle.bundle_id
+        assert store.attachment_bundle_sets() == (
+            frozenset({bundle.bundle_id}),
+            frozenset(),
+        )
+
+
+@pytest.mark.parametrize("failure_source", ["file-open", "directory-order"])
+async def test_transient_attachment_projection_failure_retries_original_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_source: str,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source="transient-projection-failure",
+    )
+    provider = FakeMemoryProvider()
+    current = [datetime(2026, 1, 1, tzinfo=UTC)]
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        now=lambda: current[0],
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    failed = False
+    if failure_source == "file-open":
+        original_operation = attachment_module.os.open
+
+        def fail_once(*args, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError(errno.EMFILE, "temporary descriptor exhaustion")
+            return original_operation(*args, **kwargs)
+
+        monkeypatch.setattr(attachment_module.os, "open", fail_once)
+    else:
+        original_operation = confined_filesystem_module.sqlite3.connect
+
+        def fail_once(*args, **kwargs):
+            nonlocal failed
+            if not failed and args and args[0] == "":
+                failed = True
+                raise sqlite3.OperationalError("temporary ordering unavailable")
+            return original_operation(*args, **kwargs)
+
+        monkeypatch.setattr(confined_filesystem_module.sqlite3, "connect", fail_once)
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    retryable = store.get_queue_row(original.source_message_digest)
+    assert retryable is not None
+    assert (
+        retryable.state,
+        retryable.attempts,
+        retryable.payload_text,
+        retryable.payload_attachments,
+        retryable.attachment_bundle_id,
+    ) == (
+        "pending",
+        1,
+        "remember the attachment",
+        original.payload_attachments,
+        bundle.bundle_id,
+    )
+    assert store.attachment_bundle_sets() == (
+        frozenset({bundle.bundle_id}),
+        frozenset(),
+    )
+    assert pinned_path.exists()
+    assert provider.captures == []
+
+    if failure_source == "file-open":
+        monkeypatch.setattr(attachment_module.os, "open", original_operation)
+    else:
+        monkeypatch.setattr(
+            confined_filesystem_module.sqlite3,
+            "connect",
+            original_operation,
+        )
+    current[0] += timedelta(seconds=30)
+    retry = store.claim_due(
+        lease_owner="retry-worker",
+        now="2026-01-01T00:00:30.000Z",
+    )
+    assert retry is not None
+    assert await coordinator.deliver(retry, lease_owner="retry-worker")
+    assert len(provider.captures) == 1
+    assert provider.captures[0].attachments
+
+
+async def test_cancel_after_downgrade_leaves_releasing_bundle_for_boot_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source="cancelled-text-downgrade",
+    )
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET payload_attachments = '{}'
+            WHERE source_message_digest = ?
+            """,
+            (original.source_message_digest,),
+        )
+
+    release_entered = threading.Event()
+    release_continue = threading.Event()
+    release_finished = threading.Event()
+    original_release = attachment_store.release
+
+    def blocked_release(bundle_id: str) -> None:
+        release_entered.set()
+        release_continue.wait(timeout=2)
+        original_release(bundle_id)
+        release_finished.set()
+
+    monkeypatch.setattr(attachment_store, "release", blocked_release)
+    provider = FakeMemoryProvider()
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    delivery = asyncio.create_task(coordinator.deliver(claimed, lease_owner="worker"))
+    assert await asyncio.to_thread(release_entered.wait, 1)
+
+    committed = store.get_queue_row(original.source_message_digest)
+    assert committed is not None
+    assert (
+        committed.state,
+        committed.payload_text,
+        committed.payload_attachments,
+        committed.attachment_bundle_id,
+        committed.attempts,
+    ) == ("pending", "remember the attachment", None, None, 0)
+    assert store.attachment_bundle_sets() == (
+        frozenset(),
+        frozenset({bundle.bundle_id}),
+    )
+
+    delivery.cancel()
+    release_continue.set()
+    with pytest.raises(asyncio.CancelledError):
+        await delivery
+    assert await asyncio.to_thread(release_finished.wait, 1)
+    assert provider.captures == []
+    assert store.attachment_bundle_sets() == (
+        frozenset(),
+        frozenset({bundle.bundle_id}),
+    )
+
+    monkeypatch.setattr(attachment_store, "release", original_release)
+    restarted = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    await restarted.recover(lease_owner="next-boot")
+    assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+    assert not pinned_path.exists()
+
+
+async def test_attachment_preflight_downgrade_survives_deferred_bundle_release(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -3349,44 +3816,52 @@ async def test_attachment_preflight_failure_is_bounded_without_session_fence(
     pinned_path.chmod(0o644)
 
     provider = FakeMemoryProvider()
-    current = [datetime(2026, 1, 1, tzinfo=UTC)]
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
         enabled=lambda: True,
-        now=lambda: current[0],
+        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
         attachment_store=attachment_store,
     )
     await coordinator.recover(lease_owner="initial-boot")
     await _run_processing_actions(coordinator)
 
-    for expected_attempts, delay in ((1, 30), (2, 120), (3, 0)):
-        claimed = store.claim_due(
-            lease_owner=f"worker-{expected_attempts}",
-            now=current[0].isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-        )
-        assert claimed is not None
-        assert not await coordinator.deliver(
-            claimed,
-            lease_owner=f"worker-{expected_attempts}",
-        )
-        queued = store.list_queue_rows()[0]
-        assert queued.attempts == expected_attempts
-        expected_state = "dead" if expected_attempts == 3 else "pending"
-        assert queued.state == expected_state
-        session_state = store.get_session_flush_state(row.provider_session_ref)
-        assert session_state is not None and session_state.state == "idle"
-        current[0] += timedelta(seconds=delay)
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+    queued = store.list_queue_rows()[0]
+    assert (
+        queued.state,
+        queued.attempts,
+        queued.payload_text,
+        queued.payload_attachments,
+        queued.attachment_bundle_id,
+    ) == ("pending", 0, "remember the attachment", None, None)
+    session_state = store.get_session_flush_state(row.provider_session_ref)
+    assert session_state is not None and session_state.state == "idle"
 
     assert store.attachment_bundle_sets() == (
         frozenset(),
         frozenset({bundle.bundle_id}),
     )
+    retry = store.claim_due(
+        lease_owner="retry-worker",
+        now="2026-01-01T00:00:01.000Z",
+    )
+    assert retry is not None
+    assert await coordinator.deliver(retry, lease_owner="retry-worker")
+    assert len(provider.captures) == 1
+    assert provider.captures[0].text == "remember the attachment"
+    assert provider.captures[0].attachments == ()
+
     restarted = SessionFlushCoordinator(
         store=store,
         provider=provider,
         enabled=lambda: True,
-        now=lambda: current[0],
+        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
         attachment_store=attachment_store,
     )
     await restarted.recover(lease_owner="restarted-worker")
@@ -3395,6 +3870,10 @@ async def test_attachment_preflight_failure_is_bounded_without_session_fence(
         frozenset(),
         frozenset({bundle.bundle_id}),
     )
+    pinned_path.chmod(0o600)
+    await restarted.recover(lease_owner="repaired-worker")
+    assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+    assert not pinned_path.exists()
 
     later = _enqueue(
         store,
@@ -3409,11 +3888,12 @@ async def test_attachment_preflight_failure_is_bounded_without_session_fence(
     for expected in (later, unrelated):
         claimed = store.claim_due(
             lease_owner="later-worker",
-            now=current[0].isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            now="2026-01-01T00:00:02.000Z",
         )
         assert claimed is not None
         assert await restarted.deliver(claimed, lease_owner="later-worker")
     assert [capture.text for capture in provider.captures] == [
+        "remember the attachment",
         later.payload_text,
         unrelated.payload_text,
     ]

@@ -1602,6 +1602,76 @@ class MemoryStore:
             ).fetchone()
         return current is not None
 
+    def _downgrade_claimed_attachment_to_text(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> str | None:
+        """Atomically return one exact attachment claim as text-only work."""
+
+        now_iso = _iso_from_datetime(now)
+        with self._transaction() as conn:
+            current = conn.execute(
+                """
+                SELECT q.payload_text, q.attachment_bundle_id
+                FROM memory_capture_queue AS q
+                JOIN memory_attachment_bundle AS bundle
+                  ON bundle.bundle_id = q.attachment_bundle_id
+                WHERE q.source_message_digest = ? AND q.epoch = ?
+                  AND q.state = 'processing' AND q.lease_owner = ?
+                  AND q.lease_token = ? AND q.payload_attachments IS NOT NULL
+                  AND q.attachment_bundle_id IS NOT NULL
+                  AND bundle.state = 'pinned'
+                """,
+                (
+                    row.source_message_digest,
+                    row.epoch,
+                    lease_owner,
+                    row.lease_token,
+                ),
+            ).fetchone()
+            if current is None:
+                return None
+            payload_text = current["payload_text"]
+            if not isinstance(payload_text, str) or not payload_text.strip():
+                return None
+            bundle_id = str(current["attachment_bundle_id"])
+            updated = conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET state = 'pending', payload_attachments = NULL,
+                    attachment_bundle_id = NULL, lease_owner = NULL,
+                    lease_at = NULL
+                WHERE source_message_digest = ? AND epoch = ?
+                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
+                  AND payload_attachments IS NOT NULL AND attachment_bundle_id = ?
+                """,
+                (
+                    row.source_message_digest,
+                    row.epoch,
+                    lease_owner,
+                    row.lease_token,
+                    bundle_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                return None
+            releasing = conn.execute(
+                """
+                UPDATE memory_attachment_bundle
+                SET state = 'releasing', updated_at = ?
+                WHERE bundle_id = ? AND state = 'pinned'
+                """,
+                (now_iso, bundle_id),
+            )
+            if releasing.rowcount != 1:
+                raise RuntimeError("Memory attachment release intent was lost")
+            # The same commit records cleanup intent, so cancellation or a crash
+            # leaves boot reconciliation a durable bundle to finish releasing.
+            return bundle_id
+
     def settle(
         self,
         row: QueueRow,
