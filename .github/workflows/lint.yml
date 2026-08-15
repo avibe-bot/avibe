@@ -41,15 +41,6 @@ jobs:
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
 
-      - name: Build UI assets
-        working-directory: ui
-        run: |
-          npm ci
-          npm run validate:theme
-          npm run lint
-          npm test
-          npm run build
-
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
@@ -57,6 +48,25 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             uv.lock
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          enable-cache: true
+          save-cache: false
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Build UI assets
+        working-directory: ui
+        run: |
+          uv sync --frozen --no-install-project --no-dev
+          source ../.venv/bin/activate
+          npm ci
+          npm run validate:theme
+          npm run lint
+          npm test
+          npm run build
 
       - name: Build package artifact
         env:
