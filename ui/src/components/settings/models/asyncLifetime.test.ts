@@ -63,6 +63,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   agentsWithEcho,
+  classifyModelHubFailure,
   classifyOAuthFailure,
   createFlowAuthority,
   createLatestAsyncAuthority,
@@ -754,24 +755,25 @@ describe('flow authority', () => {
   });
 });
 
-describe('OAuth failure classification', () => {
+describe('Model Hub failure classification', () => {
   const named = (code: string) => ({ serverNamed: true, code });
 
   it('keeps transport failures and engine outages inconclusive', () => {
-    expect(classifyOAuthFailure(null)).toBe('inconclusive');
-    expect(classifyOAuthFailure({ serverNamed: false, code: 'bad_response' })).toBe('inconclusive');
-    expect(classifyOAuthFailure(named('engine_down'))).toBe('inconclusive');
-    expect(classifyOAuthFailure(named('modelHub.errors.engine_down'))).toBe('inconclusive');
+    expect(classifyModelHubFailure(null)).toBe('inconclusive');
+    expect(classifyModelHubFailure({ serverNamed: false, code: 'bad_response' })).toBe('inconclusive');
+    expect(classifyModelHubFailure(named('engine_down'))).toBe('inconclusive');
+    expect(classifyModelHubFailure(named('modelHub.errors.engine_down'))).toBe('inconclusive');
   });
 
   it.each(['source_not_found', 'flow_settled', 'already_connected'])(
     'treats %s as an authoritative terminal',
     (code) => {
-      expect(classifyOAuthFailure(named(code))).toBe('authoritative-terminal');
+      expect(classifyModelHubFailure(named(code))).toBe('authoritative-terminal');
     },
   );
 
   it('defaults other server-named failures to retryable provider failures', () => {
+    expect(classifyModelHubFailure(named('discovery_failed'))).toBe('retryable-provider');
     expect(classifyOAuthFailure(named('discovery_failed'))).toBe('retryable-provider');
   });
 

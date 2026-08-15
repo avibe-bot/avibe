@@ -3997,7 +3997,20 @@ async def model_hub_sources_delete(source_id):
 
     try:
         force = str(request.args.get("force") or "").lower() in _TRUE_BOOL_STRINGS
-        result = await _model_hub_service().delete_source(source_id, force=force)
+        payload = request.json
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or set(payload) - {
+            "would_remove_hops",
+            "would_interrupt",
+        }:
+            raise ModelHubError("invalid_source_order")
+        result = await _model_hub_service().delete_source(
+            source_id,
+            force=force,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
+        )
         return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -4011,11 +4024,17 @@ async def model_hub_sources_refresh(source_id):
         payload = request.json
         if payload is None:
             payload = {}
-        if not isinstance(payload, dict) or set(payload) - {"force"}:
+        if not isinstance(payload, dict) or set(payload) - {
+            "force",
+            "would_remove_hops",
+            "would_interrupt",
+        }:
             raise ModelHubError("invalid_source_order")
         result = await _model_hub_service().refresh_source(
             source_id,
             force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
         )
         return _model_hub_success(**result)
     except ModelHubError as exc:
@@ -4128,6 +4147,8 @@ async def model_hub_source_models_delete(source_id, model_id):
             source_id,
             model_id,
             force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
         )
         return _model_hub_success(**result)
     except ModelHubError as exc:

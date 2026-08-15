@@ -3,13 +3,16 @@ import { useTranslation } from "react-i18next";
 
 import type { SupplyGap } from "./types";
 
-export const GuardGapList: React.FC<{ gaps: SupplyGap[] }> = ({ gaps }) => {
+export const GuardGapList: React.FC<{ gaps: SupplyGap[]; labelKey?: string }> = ({
+  gaps,
+  labelKey = "settings.models.guard.gap.label",
+}) => {
   const { t, i18n } = useTranslation();
   if (gaps.length === 0) return null;
   return (
     <>
       <div className="model-hub-guard-label">
-        <p>{t("settings.models.guard.gap.label")}</p>
+        <p>{t(labelKey)}</p>
         <span>
           {t("settings.models.gateway.modelCount", { count: gaps.length })}
         </span>

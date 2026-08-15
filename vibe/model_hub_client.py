@@ -103,11 +103,41 @@ class ModelHubRemoteService:
             {"source_id": source_id, "reauth": payload},
         )
 
-    async def delete_source(self, source_id: str, *, force: bool = False) -> dict:
-        return await _rpc("delete_source", {"source_id": source_id, "force": force})
+    async def delete_source(
+        self,
+        source_id: str,
+        *,
+        force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
+    ) -> dict:
+        return await _rpc(
+            "delete_source",
+            {
+                "source_id": source_id,
+                "force": force,
+                "would_remove_hops": confirmed_remove_hops,
+                "would_interrupt": confirmed_interruptions,
+            },
+        )
 
-    async def refresh_source(self, source_id: str, *, force: bool = False) -> dict:
-        return await _rpc("refresh_source", {"source_id": source_id, "force": force})
+    async def refresh_source(
+        self,
+        source_id: str,
+        *,
+        force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
+    ) -> dict:
+        return await _rpc(
+            "refresh_source",
+            {
+                "source_id": source_id,
+                "force": force,
+                "would_remove_hops": confirmed_remove_hops,
+                "would_interrupt": confirmed_interruptions,
+            },
+        )
 
     def list_agents(self) -> list[dict]:
         return _rpc_sync("list_agents")
@@ -156,10 +186,18 @@ class ModelHubRemoteService:
         model_id: object,
         *,
         force: bool = False,
+        confirmed_remove_hops: object = None,
+        confirmed_interruptions: object = None,
     ) -> dict:
         return await _rpc(
             "delete_custom_model",
-            {"source_id": source_id, "model_id": model_id, "force": force},
+            {
+                "source_id": source_id,
+                "model_id": model_id,
+                "force": force,
+                "would_remove_hops": confirmed_remove_hops,
+                "would_interrupt": confirmed_interruptions,
+            },
         )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:

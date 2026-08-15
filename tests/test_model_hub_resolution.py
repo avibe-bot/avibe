@@ -1963,7 +1963,7 @@ def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):
     ]
 
 
-def test_manual_model_delete_rejects_a_new_gap(tmp_path):
+def test_manual_model_delete_requires_the_exact_guard_plan(tmp_path):
     menu_model = "claude-opus-4-6"
     source = _source("src_manual003")
     source.models.append(ModelHubModelConfig(id="manual-model", provenance="manual"))
@@ -1978,6 +1978,26 @@ def test_manual_model_delete_rejects_a_new_gap(tmp_path):
 
     assert exc.value.code == "source_model_in_route_chain"
     assert store.load().to_payload() == config.to_payload()
+    with pytest.raises(ModelHubError) as unconfirmed:
+        asyncio.run(
+            service.delete_custom_model(
+                source.id,
+                "manual-model",
+                force=True,
+            )
+        )
+    assert unconfirmed.value.data == exc.value.data
+    result = asyncio.run(
+        service.delete_custom_model(
+            source.id,
+            "manual-model",
+            force=True,
+            confirmed_remove_hops=exc.value.data["would_remove_hops"],
+            confirmed_interruptions=exc.value.data["would_interrupt"],
+        )
+    )
+    assert result["removed_hops"] == exc.value.data["would_remove_hops"]
+    assert store.load().agents["claude"].routes[menu_model].hops == ()
 
 
 def test_delete_unused_source_ignores_preexisting_unrelated_gap(tmp_path):
@@ -2041,7 +2061,18 @@ def test_delete_source_reports_and_then_prunes_exact_hops(tmp_path):
         asyncio.run(service.delete_source(source.id))
     assert exc.value.code == "source_in_route_chain"
     assert exc.value.data["would_remove_hops"][0]["model_id"] == menu_model
-    result = asyncio.run(service.delete_source(source.id, force=True))
+    with pytest.raises(ModelHubError) as unconfirmed:
+        asyncio.run(service.delete_source(source.id, force=True))
+    assert unconfirmed.value.code == exc.value.code
+    assert unconfirmed.value.data == exc.value.data
+    result = asyncio.run(
+        service.delete_source(
+            source.id,
+            force=True,
+            confirmed_remove_hops=exc.value.data["would_remove_hops"],
+            confirmed_interruptions=exc.value.data["would_interrupt"],
+        )
+    )
     assert result["removed_hops"]
     assert store.load().sources == []
     assert store.load().agents["claude"].routes[menu_model].hops == ()
@@ -2056,7 +2087,14 @@ def test_refresh_source_uses_guarded_success_shape(tmp_path):
     with pytest.raises(ModelHubError) as exc:
         asyncio.run(service.refresh_source(source.id))
     assert exc.value.code == "source_model_in_route_chain"
-    result = asyncio.run(service.refresh_source(source.id, force=True))
+    result = asyncio.run(
+        service.refresh_source(
+            source.id,
+            force=True,
+            confirmed_remove_hops=exc.value.data["would_remove_hops"],
+            confirmed_interruptions=exc.value.data["would_interrupt"],
+        )
+    )
     assert set(result) == {"source", "removed_hops", "interrupted"}
     assert result["removed_hops"][0]["model_id"] == menu_model
     assert store.load().agents["claude"].routes[menu_model].hops == ()
@@ -2094,30 +2132,51 @@ def test_inventory_mutations_share_the_successful_discovery_finalizer(
     service, store, _ = _service(tmp_path, config, adapter)
     before = store.load().to_payload()
 
-    if operation == "refresh":
-        mutation = service.refresh_source(source.id, force=True)
-    elif operation == "base_url":
-        mutation = service.patch_source(
+    def mutation(confirmation=None):
+        confirmation = confirmation or {}
+        if operation == "refresh":
+            return service.refresh_source(source.id, **confirmation)
+        if operation == "base_url":
+            return service.patch_source(
+                source.id,
+                {
+                    "base_url": "https://new-relay.example/v1",
+                    **confirmation,
+                },
+            )
+        return service.replace_credential(
             source.id,
-            {
-                "base_url": "https://new-relay.example/v1",
-                "force": True,
-            },
-        )
-    else:
-        mutation = service.replace_credential(
-            source.id,
-            {"key": "replacement-key", "force": True},
+            {"key": "replacement-key", **confirmation},
         )
 
     if inventory_case == "failure":
         with pytest.raises(ModelHubError) as exc:
-            asyncio.run(mutation)
+            asyncio.run(mutation())
         assert exc.value.code == "discovery_failed"
         assert store.load().to_payload() == before
         return
 
-    result = asyncio.run(mutation)
+    if inventory_case == "empty":
+        with pytest.raises(ModelHubError) as refusal:
+            asyncio.run(mutation())
+        confirmed = {
+            "force": True,
+            "would_remove_hops": refusal.value.data["would_remove_hops"],
+            "would_interrupt": refusal.value.data["would_interrupt"],
+        }
+        if operation == "refresh":
+            confirmed = {
+                "force": True,
+                "confirmed_remove_hops": refusal.value.data[
+                    "would_remove_hops"
+                ],
+                "confirmed_interruptions": refusal.value.data[
+                    "would_interrupt"
+                ],
+            }
+        result = asyncio.run(mutation(confirmed))
+    else:
+        result = asyncio.run(mutation())
     persisted = store.load().sources[0]
     assert result["source"] == persisted.to_payload()
     assert persisted.state == ModelHubSourceStateConfig(status="standby")

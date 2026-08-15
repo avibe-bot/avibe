@@ -1339,21 +1339,32 @@
           "subject": "{{backend}} · {{menuModel}}",
           "agents": "Agents pinned to it: {{agents}}"
         },
+        "result": {
+          "label": "Removed hops",
+          "gapLabel": "Models left with no source",
+          "hint": {
+            "safe": "These models still have another source available.",
+            "interrupt": "Some models now have no usable source."
+          }
+        },
         "cancel": "Cancel",
         "title": {
           "refetch": "Refetch models from {{source}}",
           "removeModel": "Remove {{model}} from {{source}}",
-          "saveRoute": "Save the route chain for {{menuModel}}"
+          "saveRoute": "Save the route chain for {{menuModel}}",
+          "replaceKey": "Replace key for {{source}}"
         },
         "subtitle": {
           "refetch": "This refetch drops models from this source's inventory.",
           "removeModel": "This model disappears from this source's inventory.",
-          "saveRoute": "This save leaves a configured model with no usable source"
+          "saveRoute": "This save leaves a configured model with no usable source",
+          "replaceKey": "The replacement changes this source's model inventory."
         },
         "confirm": {
           "refetch": "Refetch anyway",
           "removeModel": "Remove anyway",
-          "saveRoute": "Save anyway"
+          "saveRoute": "Save anyway",
+          "replaceKey": "Replace anyway"
         }
       },
       "repair": {

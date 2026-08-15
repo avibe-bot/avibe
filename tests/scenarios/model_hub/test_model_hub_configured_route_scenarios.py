@@ -302,7 +302,14 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
         asyncio.run(service.delete_source(doomed.id))
     assert refusal.value.code == "source_in_route_chain"
 
-    result = asyncio.run(service.delete_source(doomed.id, force=True))
+    result = asyncio.run(
+        service.delete_source(
+            doomed.id,
+            force=True,
+            confirmed_remove_hops=refusal.value.data["would_remove_hops"],
+            confirmed_interruptions=refusal.value.data["would_interrupt"],
+        )
+    )
     assert result["removed_hops"]
     assert doomed.id not in {item.id for item in store.load().sources}
     for backend, menu_model in (
@@ -340,13 +347,23 @@ def test_mh_supply_gap_001_empty_chain_remains_visible_after_inventory_loss(
     )
     service = service_for(tmp_path, store, adapter)
 
-    result = asyncio.run(service.refresh_source(supplied.id, force=True))
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(service.refresh_source(supplied.id))
+    result = asyncio.run(
+        service.refresh_source(
+            supplied.id,
+            force=True,
+            confirmed_remove_hops=refusal.value.data["would_remove_hops"],
+            confirmed_interruptions=refusal.value.data["would_interrupt"],
+        )
+    )
     assert result["removed_hops"] == [
         {
             "backend": "claude",
             "menu_model": menu_model,
             "source_id": supplied.id,
             "model_id": menu_model,
+            "position": 1,
         }
     ]
     model_supply = next(
