@@ -1,0 +1,212 @@
+{
+  "config": {
+    "sources": [
+      {
+        "id": "src_claudepro1",
+        "created_at": "2026-07-16T08:00:00+00:00",
+        "last_discovered_at": "2026-08-15T05:00:00+00:00",
+        "kind": "subscription",
+        "vendor": "anthropic",
+        "display_name": "Claude Pro subscription",
+        "protocol": "anthropic",
+        "base_url": null,
+        "supply_channel": "native_cli",
+        "billing": "monthly",
+        "state": {"status": "active", "retry_at": null, "detail_key": null},
+        "usage": {"cycle_used_pct": 62, "month_spend_cents": null, "currency": null, "projected_exhaust_at": null},
+        "models": [
+          {"id": "claude-opus-4-6", "display_name": "Opus 4.6", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T05:00:00+00:00"},
+          {"id": "claude-sonnet-4-6", "display_name": "Sonnet 4.6", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T05:00:00+00:00"},
+          {"id": "claude-haiku-4-5", "display_name": "Haiku 4.5", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T05:00:00+00:00"}
+        ],
+        "credential_ref": null,
+        "account_label": "me@gmail.com",
+        "masked_credential": null
+      },
+      {
+        "id": "src_chatgptplus",
+        "created_at": "2026-07-26T08:00:00+00:00",
+        "last_discovered_at": "2026-08-15T05:00:00+00:00",
+        "kind": "subscription",
+        "vendor": "openai",
+        "display_name": "ChatGPT Plus subscription",
+        "protocol": "openai_responses",
+        "base_url": null,
+        "supply_channel": "native_cli",
+        "billing": "monthly",
+        "state": {"status": "active", "retry_at": null, "detail_key": null},
+        "usage": {"cycle_used_pct": 31, "month_spend_cents": null, "currency": null, "projected_exhaust_at": null},
+        "models": [
+          {"id": "gpt-5.6-sol", "display_name": "GPT-5.6 Sol", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T05:00:00+00:00"},
+          {"id": "gpt-5.6-terra", "display_name": "GPT-5.6 Terra", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T05:00:00+00:00"}
+        ],
+        "credential_ref": null,
+        "account_label": "me@gmail.com",
+        "masked_credential": null
+      },
+      {
+        "id": "src_anthkey01",
+        "created_at": "2026-08-05T08:00:00+00:00",
+        "last_discovered_at": "2026-08-15T02:00:00+00:00",
+        "kind": "api_key",
+        "vendor": "anthropic",
+        "display_name": "Anthropic API Key",
+        "protocol": "anthropic",
+        "base_url": null,
+        "supply_channel": "hub",
+        "billing": "metered",
+        "state": {"status": "standby", "retry_at": null, "detail_key": null},
+        "usage": {"cycle_used_pct": null, "month_spend_cents": 1240, "currency": "USD", "projected_exhaust_at": null},
+        "models": [
+          {"id": "claude-opus-4-6", "display_name": "Opus 4.6", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T02:00:00+00:00"},
+          {"id": "claude-sonnet-4-6", "display_name": "Sonnet 4.6", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T02:00:00+00:00"},
+          {"id": "claude-haiku-4-5", "display_name": "Haiku 4.5", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T02:00:00+00:00"}
+        ],
+        "credential_ref": "cred_anth01",
+        "account_label": null,
+        "masked_credential": "sk-ant-...8f2A"
+      },
+      {
+        "id": "src_zhipukey01",
+        "created_at": "2026-08-11T08:00:00+00:00",
+        "last_discovered_at": "2026-08-15T02:00:00+00:00",
+        "kind": "api_key",
+        "vendor": "zhipuai",
+        "display_name": "Zhipu API Key",
+        "protocol": "openai_chat",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "supply_channel": "hub",
+        "billing": "metered",
+        "state": {"status": "standby", "retry_at": null, "detail_key": null},
+        "usage": {"cycle_used_pct": null, "month_spend_cents": 210, "currency": "USD", "projected_exhaust_at": null},
+        "models": [
+          {"id": "glm-5.2", "display_name": "GLM 5.2", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T02:00:00+00:00"},
+          {"id": "glm-5.2-air", "display_name": "GLM 5.2 Air", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T02:00:00+00:00"},
+          {"id": "glm-5-flash", "display_name": "GLM 5 Flash", "origin": "discovered", "reasoning_efforts": [], "discovered_at": "2026-08-15T02:00:00+00:00"},
+          {"id": "glm-5.2-pro", "display_name": "GLM 5.2 Pro", "origin": "manual", "reasoning_efforts": [], "discovered_at": null}
+        ],
+        "credential_ref": "cred_zhipu01",
+        "account_label": null,
+        "masked_credential": "glm-...c31b"
+      },
+      {
+        "id": "src_relay9c1x",
+        "created_at": "2026-08-09T08:00:00+00:00",
+        "last_discovered_at": null,
+        "kind": "api_key",
+        "vendor": "custom",
+        "display_name": "relay.example",
+        "protocol": "openai_chat",
+        "base_url": "https://relay.example/v1",
+        "supply_channel": "hub",
+        "billing": "metered",
+        "state": {"status": "cooldown", "retry_at": "2026-08-15T08:47:00+00:00", "detail_key": "models.source.cooldown.server_error"},
+        "usage": {"cycle_used_pct": null, "month_spend_cents": 320, "currency": "USD", "projected_exhaust_at": null},
+        "models": [
+          {"id": "glm-5.2-air", "display_name": "GLM 5.2 Air", "origin": "manual", "reasoning_efforts": [], "discovered_at": null}
+        ],
+        "credential_ref": "cred_relay01",
+        "account_label": null,
+        "masked_credential": "key ...9c1"
+      }
+    ],
+    "agents": {
+      "claude": {
+        "backend": "claude",
+        "mode": "hub",
+        "menu_kind": "fixed",
+        "sources": {"order": ["src_claudepro1", "src_anthkey01", "src_relay9c1x"]},
+        "routes": {
+          "claude-fable-5": {"hops": []},
+          "claude-opus-5": {"hops": []},
+          "claude-opus-4-8": {"hops": []},
+          "claude-opus-4-7": {"hops": []},
+          "claude-opus-4-6": {"hops": [{"source_id": "src_claudepro1", "model_id": "claude-opus-4-6"}, {"source_id": "src_anthkey01", "model_id": "claude-opus-4-6"}]},
+          "claude-sonnet-5": {"hops": []},
+          "claude-sonnet-4-6": {"hops": [{"source_id": "src_claudepro1", "model_id": "claude-sonnet-4-6"}, {"source_id": "src_anthkey01", "model_id": "claude-sonnet-4-6"}]},
+          "claude-haiku-4-5": {"hops": []},
+          "claude-opus-4-5": {"hops": []},
+          "claude-sonnet-4-5": {"hops": []},
+          "claude-opus-4": {"hops": []},
+          "claude-sonnet-4": {"hops": []},
+          "claude-haiku-4": {"hops": []},
+          "opus": {"hops": []},
+          "sonnet": {"hops": []},
+          "haiku": {"hops": []},
+          "opus[1m]": {"hops": []},
+          "sonnet[1m]": {"hops": []}
+        },
+        "menu": null
+      },
+      "codex": {
+        "backend": "codex",
+        "mode": "hub",
+        "menu_kind": "fixed",
+        "sources": {"order": ["src_chatgptplus", "src_anthkey01", "src_relay9c1x", "src_zhipukey01"]},
+        "routes": {
+          "gpt-5.6-sol": {"hops": [{"source_id": "src_chatgptplus", "model_id": "gpt-5.6-sol"}]},
+          "gpt-5.6-terra": {"hops": [{"source_id": "src_chatgptplus", "model_id": "gpt-5.6-terra"}]},
+          "gpt-5.6-luna": {"hops": []},
+          "gpt-5.5": {"hops": []},
+          "gpt-5.4": {"hops": []},
+          "gpt-5.4-mini": {"hops": []},
+          "gpt-5.2": {"hops": []}
+        },
+        "menu": null
+      },
+      "opencode": {
+        "backend": "opencode",
+        "mode": "direct",
+        "menu_kind": "open",
+        "sources": {"order": ["src_anthkey01", "src_relay9c1x", "src_zhipukey01"]},
+        "routes": {
+          "anthropic/claude-opus-4-6": {"hops": []},
+          "anthropic/claude-sonnet-4-6": {"hops": []},
+          "zhipuai/glm-5.2": {"hops": []},
+          "zhipuai/glm-5.2-air": {"hops": []},
+          "zhipuai/glm-5-flash": {"hops": []}
+        },
+        "menu": {"view": "featured", "checked": ["anthropic/claude-opus-4-6", "anthropic/claude-sonnet-4-6", "zhipuai/glm-5.2", "zhipuai/glm-5.2-air", "zhipuai/glm-5-flash"]}
+      }
+    }
+  },
+  "fixture_world": {
+    "version": 1,
+    "clock": {"now": "2026-08-15T08:00:00+00:00", "source_ids": ["src_recorded0001", "src_recorded0002"], "cursor": 0},
+    "agent_facts": {
+      "requested_model": {"claude": "claude-opus-4-6", "codex": "gpt-5.6-sol", "opencode": ""},
+      "selected_agent": {"claude": null, "codex": "codex", "opencode": null},
+      "named_agents": {
+        "claude": [["claude", "claude-opus-4-6"], ["pm", "claude-opus-4-6"]],
+        "codex": [["codex", "gpt-5.6-sol"]],
+        "opencode": [["opencode", null]]
+      },
+      "cli_present": {"claude": true, "codex": true, "opencode": true},
+      "native_source_ready": {"claude": true, "codex": true, "opencode": true},
+      "builtin_model_ids": {
+        "claude": ["claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-5", "claude-sonnet-4-5", "claude-opus-4", "claude-sonnet-4", "claude-haiku-4", "opus", "sonnet", "haiku", "opus[1m]", "sonnet[1m]"],
+        "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2"],
+        "opencode": []
+      }
+    },
+    "adapter": {
+      "credential_cursor": 0,
+      "retargeted": [],
+      "discoveries": [],
+      "synced_bindings": [],
+      "revoked": [],
+      "discovery_script": {
+        "anthropic|anthropic|https://retarget-src_anthkey01.example/v1": ["anthropic-model-1"]
+      }
+    },
+    "revocations": [],
+    "service": {
+      "source_create_nonces": [],
+      "next_settlement_generation": 0,
+      "latest_source_attempt_generation": {},
+      "engine_synced": false,
+      "engine_preparation_failed": false
+    },
+    "unregistered": ["events", "oauth", "migration", "runtime", "provenance"]
+  }
+}

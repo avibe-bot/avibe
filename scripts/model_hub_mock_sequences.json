@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "sequences": [
+    {
+      "id": "delete-claude-subscription",
+      "actions": [
+        {"operation": "deleteSource", "path": {"id": "src_claudepro1"}, "query": {}, "body": {"present": false}},
+        {"operation": "deleteSource", "confirm_previous_guard": true}
+      ]
+    },
+    {
+      "id": "delete-anthropic-key",
+      "actions": [
+        {"operation": "deleteSource", "path": {"id": "src_anthkey01"}, "query": {}, "body": {"present": false}},
+        {"operation": "deleteSource", "confirm_previous_guard": true}
+      ]
+    },
+    {
+      "id": "delete-chatgpt-subscription",
+      "actions": [
+        {"operation": "deleteSource", "path": {"id": "src_chatgptplus"}, "query": {}, "body": {"present": false}},
+        {"operation": "deleteSource", "confirm_previous_guard": true}
+      ]
+    },
+    {
+      "id": "retarget-anthropic-key",
+      "actions": [
+        {"operation": "patchSource", "path": {"id": "src_anthkey01"}, "query": {}, "body": {"present": true, "value": {"base_url": "https://retarget-src_anthkey01.example/v1"}}},
+        {"operation": "patchSource", "confirm_previous_guard": true}
+      ]
+    },
+    {
+      "id": "reorder-then-delete-regression",
+      "actions": [
+        {"operation": "putAgentSources", "path": {"backend": "claude"}, "query": {}, "body": {"present": true, "value": {"order": ["src_anthkey01", "src_claudepro1", "src_relay9c1x"]}}},
+        {"operation": "deleteSource", "path": {"id": "src_claudepro1"}, "query": {}, "body": {"present": false}},
+        {"operation": "deleteSource", "confirm_previous_guard": true}
+      ]
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 // Model Hub API client. Presents ONE typed surface to the UI; internally it
-// either serves in-memory fixtures for hermetic visual tests or calls the frozen
+// either replays server-recorded fixtures for hermetic tests or calls the frozen
 // `/api/models/*` REST endpoints (live mode). Components never
 // branch on the mode — flip `MODELS_API_MODE` in featureFlags.ts to switch.
 //
@@ -8,25 +8,13 @@
 // plain domain objects.
 import { apiFetch, isApiFetchDeadlineAbort, withApiDeadline } from '@/lib/apiFetch';
 import { MODELS_API_MODE } from './featureFlags';
-import {
-  buildMockAgents,
-  buildMockEvents,
-  buildMockMigration,
-  buildMockRuntime,
-  buildMockSources,
-  mockDiscoveredCount,
-  mockEligibility,
-  mockRecommendedOrder,
-} from './mockData';
-import { canReauth, canReplaceKey, wasBlocked } from './repair';
-import { validateRouteDraft } from './routeChainDraft';
-import { isUnhealthy } from './supply';
+import mockCorpusJson from './modelHubMockCorpus.json';
+import { buildMockEvents, buildMockRuntime } from './mockData';
 import type {
-  AdoptedBy,
   AddedTo,
+  AdoptedBy,
   AgentBackend,
   AgentChain,
-  AgentChainLink,
   AgentChainMutation,
   AgentChainPut,
   AgentMenu,
@@ -51,8 +39,6 @@ import type {
   SupplyChannel,
   SupplyGap,
 } from './types';
-import { equalHopIdentity } from './hopIdentity';
-import { AGENT_CHAIN_CONTRACT_VERSION, CONTRACT_VERSION, PROBE_RESULT_CONTRACT_VERSION } from './types';
 
 /** Add-time Route placement returned by both source-creation paths. */
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
@@ -492,1020 +478,453 @@ const liveApi: ModelsApi = {
   cancelOAuth: (flowId) => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })).then(() => undefined),
 };
 
-// ── Mock client ─────────────────────────────────────────────────────────
-// A single mutable store so reorder / add / mode-switch stick across calls
-// within a session, giving a realistic demo without a backend.
-/** `recovered` is captured when a reauth flow STARTS, like the server's own
- *  `recovered = source.state.status in {needs_action, error}` — read before the
- *  native irreversible step rewrites that very status. */
-type MockFlow = {
-  flow: OAuthFlow;
-  polls: number;
-  submitted: boolean;
-  recovered?: boolean;
-  placement?: Adoption;
+// ── Recorded mock client ─────────────────────────────────────────────────
+type JsonObject = Record<string, unknown>;
+type RecordedBody =
+  | { present: false }
+  | { present: true; value: unknown };
+type RecordedRequest = {
+  operation: string;
+  path: JsonObject;
+  query: Record<string, { present: boolean; value?: unknown }>;
+  body: RecordedBody;
 };
-
-const rid = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
-const delay = <T>(value: T, ms = 260, signal?: AbortSignal): Promise<T> =>
-  new Promise((resolve, reject) => {
-    const timer = globalThis.setTimeout(() => resolve(value), ms);
-    signal?.addEventListener('abort', () => {
-      globalThis.clearTimeout(timer);
-      reject(new DOMException('The operation was aborted.', 'AbortError'));
-    }, { once: true });
-  });
-const listedModelIdsForPlacement = (agent: AgentSupply): string[] => {
-  const values = [
-    ...(agent.builtin_models ?? []),
-    ...(agent.menu?.checked ?? []),
-    ...Object.keys(agent.routes ?? {}),
-  ];
-  return [...new Set(values)];
+type RecordedReads = {
+  sources: Source[];
+  agents: AgentSupply[];
+  agent_sources: Record<AgentBackend, AgentSupply>;
+  agent_chains: Partial<Record<AgentBackend, Record<string, AgentChain>>>;
 };
-
-/** Exported so tests can assert mock/live contract parity over the seeded store. */
-export class MockStore {
-  sources = buildMockSources();
-  agents = buildMockAgents(this.sources);
-  events = buildMockEvents();
-  runtime = buildMockRuntime();
-  flows = new Map<string, MockFlow>();
-
-  // ── Fake server-side recomputation ───────────────────────────────────
-  // Reads refresh server-authoritative eligibility while preserving the stored
-  // order. Matching and Route construction happen only at add time.
-  private syncAgents() {
-    for (const a of this.agents) {
-      if (a.mode === 'direct') {
-        a.sources = null;
-      } else {
-        const eligibility = mockEligibility(this.sources, a.backend);
-        const eligible = new Set(eligibility.filter((e) => e.eligible).map((e) => e.source_id));
-        const order = (a.sources?.order ?? []).filter((id) => eligible.has(id));
-        a.sources = { order, eligibility };
-      }
-      this.deriveSupply(a);
-    }
-  }
-
-  /** §4.3 + §4.5 in miniature: capability (supplies the configured id) split from
-   *  runnability (not blocked), then the rollup over the resulting chain. */
-  private deriveSupply(a: AgentSupply) {
-    if (a.mode === 'direct') {
-      a.selected_model_id = null;
-      a.selected_model_explicit = false;
-      a.selected_by_agent = null;
-      a.supply_status = null;
-      a.model_supply = null;
-      a.named_agents = (a.named_agents ?? []).map((n) => ({ ...n, effective_model_id: null, supply_status: null }));
-      return;
-    }
-    const routeFor = (model: string) => a.routes?.[model]?.hops ?? [];
-    const chainFor = (model: string) => this.chainFor(a, model).chain;
-    if (a.builtin_models) {
-      a.model_supply = a.builtin_models.map((m) => ({
-        model_id: m,
-        chain_length: routeFor(m).length,
-        has_runnable_hop: chainFor(m).some((link) => link.runnable),
-      }));
-    }
-    const selected = a.selected_model_id ?? null;
-    if (!selected) {
-      a.supply_status = null;
-    } else {
-      const chain = chainFor(selected);
-      const head = chain.find((link) => link.runnable) ?? null;
-      const blocked = chain.filter((link) => !link.runnable);
-      if (!head) {
-        a.supply_status =
-          chain.length > 0 && blocked.every((link) => link.health === 'cooldown' && link.reason === null) ? 'waiting' : 'interrupted';
-      } else {
-        a.supply_status = head === chain[0] && blocked.length === 0 ? 'ok' : 'degraded';
-      }
-    }
-    const rollup = a.supply_status ?? null;
-    a.named_agents = (a.named_agents ?? []).map((n) =>
-      n.effective_model_id ? { ...n, supply_status: rollup } : n,
-    );
-  }
-
-  listSources() {
-    // api.md: the inventory is explicitly UNORDERED — order is per-backend.
-    return delay(structuredClone(this.sources));
-  }
-
-  /** Materialize placement once, in the same transaction that creates a Source. */
-  private placeNewSource(source: Source): Adoption {
-    const added_to: AddedTo[] = [];
-    const adopted_by: AdoptedBy[] = [];
-    for (const agent of this.agents) {
-      if (agent.mode !== 'hub') continue;
-      const eligible = mockEligibility(this.sources, agent.backend).some(
-        (entry) => entry.source_id === source.id && entry.eligible,
-      );
-      if (!eligible) continue;
-      const order = agent.sources?.order ?? [];
-      if (!order.includes(source.id)) order.push(source.id);
-      agent.sources = { order, eligibility: agent.sources?.eligibility ?? null };
-      for (const menuModel of listedModelIdsForPlacement(agent)) {
-        const supplied = source.models.find((model) => model.id === menuModel);
-        if (!supplied) continue;
-        const hops = agent.routes?.[menuModel]?.hops ?? [];
-        if (hops.some((hop) => hop.source_id === source.id)) continue;
-        const next = [...hops, { source_id: source.id, model_id: supplied.id }];
-        agent.routes = { ...(agent.routes ?? {}), [menuModel]: { hops: next } };
-        added_to.push({
-          backend: agent.backend,
-          menu_model: menuModel,
-          source_id: source.id,
-          model_id: supplied.id,
-          position: next.length,
-        });
-        adopted_by.push({ backend: agent.backend, menu_model: menuModel });
-      }
-    }
-    this.syncAgents();
-    return { added_to, adopted_by };
-  }
-
-  createApiKeySource(draft: ApiKeySourceCreate) {
-    const existing = draft.client_nonce
-      ? this.sources.find((source) => source.client_nonce === draft.client_nonce)
-      : undefined;
-    if (existing) {
-      return delay({
-        source: structuredClone(existing),
-        added_to: [],
-        adopted_by: structuredClone(existing.adopted_by ?? []),
-      });
-    }
-    const count = mockDiscoveredCount(draft.vendor);
-    const source: Source = {
-      id: rid('src'),
-      client_nonce: draft.client_nonce ?? null,
-      created_at: new Date().toISOString(),
-      last_discovered_at: new Date().toISOString(),
-      kind: 'api_key',
-      vendor: draft.vendor,
-      display_name: draft.display_name || (draft.vendor === 'custom' ? hostLabel(draft.base_url) : vendorLabel(draft.vendor)),
-      protocol: draft.protocol_order?.[0] ?? (draft.vendor === 'anthropic' ? 'anthropic' : 'openai_chat'),
-      base_url: draft.base_url ?? null,
-      supply_channel: 'hub',
-      billing: 'metered',
-      state: { status: 'standby', retry_at: null, detail_key: null },
-      usage: { cycle_used_pct: null, month_spend_cents: 0, currency: 'USD' },
-      account_label: null,
-      // Simulates L2 computing the display mask once at provisioning.
-      masked_credential: maskKey(draft.key),
-      models: Array.from({ length: count }, (_, i) => ({
-        id: `${draft.vendor}-model-${i + 1}`,
-        display_name: null,
-        origin: 'discovered' as const,
-        reasoning_efforts: [],
-        discovered_at: new Date().toISOString(),
-      })),
-      credential_ref: rid('cred'),
+type RecordedOutcome =
+  | { kind: 'success'; value: unknown }
+  | {
+      kind: 'error';
+      error: string;
+      detail: string;
+      status: number;
+      data: JsonObject;
     };
-    this.sources.push(source);
-    const placement = this.placeNewSource(source);
-    source.adopted_by = placement.adopted_by;
-    // simulate probe latency
-    return delay({ source: structuredClone(source), ...placement }, 900);
-  }
-
-  observeApiKeySource(draft: ApiKeySourceObservation, signal?: AbortSignal) {
-    const marker = `${draft.base_url ?? ''} ${draft.key}`.toLowerCase();
-    const base = {
-      contract_version: CONTRACT_VERSION,
-      models: [] as string[],
+type RecordedTransition = {
+  key: {
+    id: string;
+    pre: {
+      model_hub_config_sha256: string;
+      fixture_world_sha256: string;
     };
-    let observation: SourceObservation;
-    if (marker.includes('timeout')) {
-      observation = { ...base, outcome: 'timeout', reachable: null, authenticated: 'unknown', protocol: null, discovery: 'not_attempted' };
-    } else if (marker.includes('auth')) {
-      observation = { ...base, outcome: 'authentication_failed', reachable: true, authenticated: 'rejected', protocol: null, discovery: 'not_attempted' };
-    } else if (marker.includes('ambiguous')) {
-      observation = { ...base, outcome: 'ambiguous', reachable: true, authenticated: 'authenticated', protocol: null, discovery: 'not_attempted' };
-    } else if (marker.includes('inventory')) {
-      observation = { ...base, outcome: 'observed', reachable: true, authenticated: 'authenticated', protocol: draft.protocol_order?.[0] ?? 'openai_chat', discovery: 'failed' };
-    } else if (marker.includes('adapter')) {
-      observation = { ...base, outcome: 'adapter_error', reachable: null, authenticated: 'unknown', protocol: null, discovery: 'not_attempted' };
-    } else if (marker.includes('unreachable')) {
-      observation = { ...base, outcome: 'unreachable', reachable: false, authenticated: 'unknown', protocol: null, discovery: 'not_attempted' };
-    } else {
-      observation = {
-        ...base,
-        outcome: 'observed',
-        reachable: true,
-        authenticated: 'authenticated',
-        protocol: draft.protocol_order?.[0] ?? 'openai_chat',
-        discovery: 'succeeded',
-        models: ['model-1', 'model-2', 'model-3'],
-      };
-    }
-    return delay(observation, 900, signal);
-  }
-
-  /**
-   * The supply guard, evaluated the way the server evaluates it: against the
-   * CANDIDATE config the write would produce, not against a live binding.
-   *
-   * The old version asked 「is this source some agent's `current`?」, which is a
-   * different and weaker question: deleting the second source of a two-source
-   * chain strands nothing (the head still serves), while deleting the only
-   * supplier of a *cooling* head strands a model that has no `current` at all.
-   * Reporting per (backend, model) with the Agents that run it is also what makes
-   * the confirm copy nameable — 「删除后 pm 将没有可用来源」.
-   */
-  private wouldInterrupt(candidate: Source[], removedHops: RouteHopRef[] = []): SupplyGap[] {
-    const byId = new Map(candidate.map((s) => [s.id, s]));
-    const removed = new Set(removedHops.map((hop) =>
-      `${hop.backend}\u0000${hop.menu_model}\u0000${hop.source_id}\u0000${hop.model_id}`));
-    const gaps: SupplyGap[] = [];
-    for (const a of this.agents) {
-      if (a.mode !== 'hub') continue;
-      const model = a.selected_model_id;
-      if (!model) continue;
-      const hops = a.routes?.[model]?.hops ?? [];
-      const survives = hops.some((hop) => {
-        if (removed.has(`${a.backend}\u0000${model}\u0000${hop.source_id}\u0000${hop.model_id}`)) return false;
-        const source = byId.get(hop.source_id);
-        return source !== undefined
-          && source.models.some((entry) => entry.id === hop.model_id && entry.retired !== true)
-          && isRunnable(source);
-      });
-      if (survives) continue;
-      gaps.push({
-        backend: a.backend,
-        model_id: model,
-        agents: (a.named_agents ?? []).filter((n) => n.effective_model_id === model).map((n) => n.name),
-      });
-    }
-    return gaps;
-  }
-
-  deleteSource(id: string, confirmation?: GuardConfirmation) {
-    this.syncAgents();
-    const removedHops: RouteHopRef[] = this.agents.flatMap((agent) =>
-      Object.entries(agent.routes ?? {}).flatMap(([menuModel, route]) =>
-        route.hops.flatMap((hop, index) => hop.source_id === id
-          ? [{
-              backend: agent.backend,
-              menu_model: menuModel,
-              source_id: hop.source_id,
-              model_id: hop.model_id,
-              position: index + 1,
-            }]
-          : [])));
-    const remaining = this.sources.filter((s) => s.id !== id);
-    const gaps = this.wouldInterrupt(remaining);
-    const confirmed = confirmation !== undefined
-      && JSON.stringify(confirmation.would_remove_hops) === JSON.stringify(removedHops)
-      && JSON.stringify(confirmation.would_interrupt) === JSON.stringify(gaps);
-    if ((removedHops.length > 0 || gaps.length > 0) && !confirmed) {
-      // Routed deletion wins over last-supplier: this mirrors delete_source's
-      // `_require_guard_plan(error=...)` choice, not the mode-switch route.
-      throw new ApiCallError(
-        removedHops.length > 0 ? 'source_in_route_chain' : 'source_last_supplier',
-        undefined,
-        true,
-        gaps,
-        [],
-        removedHops,
-      );
-    }
-    this.sources = remaining;
-    for (const agent of this.agents) {
-      if (agent.sources) {
-        agent.sources = {
-          ...agent.sources,
-          order: agent.sources.order.filter((sourceId) => sourceId !== id),
-        };
-      }
-      if (agent.routes) {
-        agent.routes = Object.fromEntries(
-          Object.entries(agent.routes).map(([menuModel, route]) => [
-            menuModel,
-            { hops: route.hops.filter((hop) => hop.source_id !== id) },
-          ]),
-        );
-      }
-    }
-    this.syncAgents();
-    return delay({ removed_hops: removedHops, interrupted: gaps });
-  }
-
-  replaceCredential(id: string, body: CredentialReplace) {
-    this.syncAgents();
-    const source = this.sources.find((s) => s.id === id);
-    if (!source) throw new ApiCallError('source_not_found');
-    // The server's preconditions, restated rather than assumed: the menu offers
-    // this only where they hold, but a mock that failed open would hide a wiring
-    // mistake until it reached a real backend.
-    if (!canReplaceKey(source) || !body.key.trim()) throw new ApiCallError('discovery_failed');
-    const recovered = wasBlocked(source.state);
-    const previousMask = source.masked_credential;
-    const previousState = { ...source.state };
-    // Atomic commit, standby-clearing semantics shared with refreshSource: a
-    // replacement re-discovers and lands on standby, never straight to active.
-    source.masked_credential = maskKey(body.key);
-    source.credential_ref = rid('cred');
-    source.state = { status: 'standby', retry_at: null, detail_key: null };
-    const interrupted = this.wouldInterrupt(this.sources);
-    // A RECOVERING write is exempt from the guard and merely reports what is
-    // still stranded; only an elective one can be refused.
-    if (interrupted.length > 0 && !recovered && !body.force) {
-      source.masked_credential = previousMask;
-      source.state = previousState;
-      throw new ApiCallError('source_last_supplier', undefined, true, interrupted);
-    }
-    this.syncAgents();
-    return delay({ source: structuredClone(source), removed_hops: [], interrupted }, 700);
-  }
-
-  reauthSource(id: string) {
-    const source = this.sources.find((s) => s.id === id);
-    if (!source) throw new ApiCallError('source_not_found');
-    if (!canReauth(source)) throw new ApiCallError('discovery_failed');
-    // Read BEFORE the irreversible step below, which sets needs_action itself and
-    // would otherwise make every native re-auth report a recovery.
-    const recovered = wasBlocked(source.state);
-    // Native re-auth is irreversible from the first step: the server clears the
-    // discovered models and drops the account label BEFORE any login happens, so
-    // the row goes to 需处理 even if the user abandons the browser tab. Mirrored
-    // here, because a mock that kept the old models would make the confirm dialog
-    // look like a formality.
-    if (source.supply_channel === 'native_cli') {
-      source.models = [];
-      source.account_label = null;
-      source.state = { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.oauth_expired' };
-    }
-    const isDevice = source.vendor === 'openai';
-    const flow: OAuthFlow = {
-      flow_id: rid('oaf'),
-      intent: 'reauth',
-      // A reauth flow binds to the EXISTING source, which is what makes its
-      // terminal response a repair rather than a creation.
-      source_id: source.id,
-      vendor: source.vendor,
-      channel: source.supply_channel,
-      state: 'awaiting_action',
-      presentation: isDevice
-        ? { auth_url: 'https://chatgpt.com/device', device_code: 'RFTQ-MPZK', expects: 'none', instructions_key: 'settings.models.oauth.deviceCode.hint' }
-        : { auth_url: 'https://claude.ai/oauth/authorize?code=true&client_id=avibe&scope=org%3Acreate_api_key', device_code: null, expects: 'paste_code', instructions_key: 'settings.models.oauth.pasteCode.hint' },
-      error_key: null,
-      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
-    };
-    this.flows.set(flow.flow_id, { flow, polls: 0, submitted: false, recovered });
-    this.syncAgents();
-    return delay(structuredClone(flow), 400);
-  }
-
-  listAgents() {
-    this.syncAgents();
-    return delay(structuredClone(this.agents));
-  }
-
-  private agentOr404(backend: AgentBackend): AgentSupply {
-    const agent = this.agents.find((a) => a.backend === backend);
-    if (!agent) throw new ApiCallError('source_not_found');
-    return agent;
-  }
-
-  getAgentSources(backend: AgentBackend) {
-    this.syncAgents();
-    return delay(structuredClone(this.agentOr404(backend)));
-  }
-
-  putAgentSources(backend: AgentBackend, body: AgentSourcesPut) {
-    const agent = this.agentOr404(backend);
-    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
-    const eligible = new Set(
-      mockEligibility(this.sources, backend).filter((e) => e.eligible).map((e) => e.source_id),
-    );
-    const seen = new Set<string>();
-    for (const id of body.order) {
-      if (!eligible.has(id) || seen.has(id)) throw new ApiCallError('invalid_source_order', id);
-      seen.add(id);
-    }
-    agent.sources = { order: [...body.order], eligibility: null };
-    this.syncAgents();
-    return delay(structuredClone(agent), 380);
-  }
-
-  /**
-   * The chain both hub-only routes answer from, shared the way the server shares
-   * it: `probe_agent` calls `_agent_chain` and takes its first runnable member.
-   * Deriving the head a second time is how the mock's probe and chain would
-   * disagree about the same supply — and `supply_state` is a rollup the v4 schema
-   * now pins to this very array, so it cannot be restated per route either.
-   */
-  private chainFor(agent: AgentSupply, model: string) {
-    const byId = new Map(this.sources.map((s) => [s.id, s]));
-    const hops = agent.routes?.[model]?.hops ?? [];
-    const chain: AgentChainLink[] = hops
-      .map((hop) => ({ hop, source: byId.get(hop.source_id) }))
-      .map(({ hop, source }) => {
-        const modelEntry = source?.models.find((entry) => entry.id === hop.model_id);
-        const callable = modelEntry !== undefined && modelEntry.retired !== true;
-        const reason = !source
-          ? 'source_missing' as const
-          : callable ? null : 'model_unsupported' as const;
-        return {
-          source_id: hop.source_id,
-          model_id: hop.model_id,
-          channel: source?.supply_channel ?? 'hub',
-          health: source && callable ? chainHealth(source) : 'error',
-          runnable: source !== undefined && callable && isRunnable(source),
-          // v4: process availability is a fact about the serving process — which
-          // native CLI it can launch under its own login — and a browser mock has
-          // no way to observe it. So it stands in for a runtime where every
-          // configured CLI is launchable, rather than inventing an outage. The
-          // unavailable branch is asserted in the unit tests, which can state the
-          // fact instead of guessing it.
-          reason,
-          retry_at: source && callable && source.state.status === 'cooldown' ? source.state.retry_at ?? null : null,
-        };
-      });
-    const supply_state: AgentChain['supply_state'] = chain.some((l) => l.runnable)
-      ? 'ok'
-      : chain.length > 0 && chain.every((l) => l.health === 'cooldown' && l.reason === null)
-        ? 'waiting'
-        : 'interrupted';
-    const current = chain.find((link) => link.runnable);
-    return { chain, current: current ? { source_id: current.source_id, model_id: current.model_id } : null, supply_state };
-  }
-
-  getAgentChain(backend: AgentBackend, model: string) {
-    this.syncAgents();
-    const agent = this.agentOr404(backend);
-    // AC-7: direct mode has no src_* identity to report, so the route refuses
-    // rather than answering with an empty (falsely alarming) chain.
-    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
-    const { chain, current, supply_state } = this.chainFor(agent, model);
-    return delay({
-      contract_version: AGENT_CHAIN_CONTRACT_VERSION,
-      backend,
-      model_id: model,
-      current,
-      chain,
-      supply_state,
-    });
-  }
-
-  putAgentChain(backend: AgentBackend, model: string, body: AgentChainPut) {
-    const agent = this.agentOr404(backend);
-    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
-    const byId = new Map(this.sources.map((source) => [source.id, source]));
-    const previous = agent.routes?.[model]?.hops ?? [];
-    if (!validateRouteDraft(agent, this.sources, previous, body.hops).valid) {
-      throw new ApiCallError('model_unsupported');
-    }
-    const removed_hops: RouteHopRef[] = previous.flatMap((hop, index) => body.hops.some((next) => equalHopIdentity(next, hop))
-      ? []
-      : [{ backend, menu_model: model, ...hop, position: index + 1 }]);
-    const impactedAgents = (agent.named_agents ?? [])
-      .filter((entry) => entry.effective_model_id === model)
-      .map((entry) => entry.name);
-    const hasRunnableHop = body.hops.some((hop) => {
-      const source = byId.get(hop.source_id);
-      return source?.models.some((entry) => entry.id === hop.model_id && entry.retired !== true) === true
-        && isRunnable(source);
-    });
-    const gaps: SupplyGap[] = impactedAgents.length > 0 && !hasRunnableHop
-      ? [{ backend, model_id: model, agents: impactedAgents }]
-      : [];
-    const confirmed = body.force === true
-      && JSON.stringify(body.would_interrupt ?? []) === JSON.stringify(gaps)
-      && JSON.stringify(body.would_remove_hops ?? []) === JSON.stringify(removed_hops);
-    if (gaps.length > 0 && !confirmed) throw new ApiCallError('source_last_supplier', undefined, true, gaps, [], removed_hops);
-    agent.routes = { ...(agent.routes ?? {}), [model]: { hops: body.hops.map((hop) => ({ ...hop })) } };
-    this.syncAgents();
-    const settled = this.chainFor(agent, model);
-    return delay({
-      chain: {
-        contract_version: AGENT_CHAIN_CONTRACT_VERSION,
-        backend,
-        model_id: model,
-        current: settled.current,
-        chain: settled.chain,
-        supply_state: settled.supply_state,
-      },
-      removed_hops,
-      interrupted: gaps,
-    });
-  }
-
-  probeAgent(backend: AgentBackend, model?: string) {
-    this.syncAgents();
-    const agent = this.agentOr404(backend);
-    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
-    const modelId = model ?? agent.selected_model_id;
-    if (!modelId) throw new ApiCallError('model_unsupported');
-    const { chain, supply_state } = this.chainFor(agent, modelId);
-    const head = chain.find((l) => l.runnable);
-    // `probe_no_candidate` is the contract's code for this; `no_runnable_source`
-    // was invented here and is in no error vocabulary, so the L5 dry-run button
-    // would have been written against a code the server never sends. The server
-    // also names WHICH blocked family it is in the 409's detail, and the drawer
-    // renders that key — a detail-less throw would leave it unreachable here.
-    // `ok` cannot occur on this branch: it is the rollup's word for "some member
-    // is runnable", which is exactly what failing to find a head rules out.
-    if (!head) throw new ApiCallError('probe_no_candidate', `models.probe.no_candidate.${supply_state}`);
-    // The native_cli half is a readiness answer, not a request: nothing upstream
-    // is attempted, so there is no latency to report and a measured local number
-    // would impersonate completion evidence. Readiness itself follows `reason`
-    // above — every configured CLI is launchable in the mock.
-    const native = head.channel === 'native_cli';
-    const probe: ProbeResult = {
-      contract_version: PROBE_RESULT_CONTRACT_VERSION,
-      backend,
-      channel: head.channel,
-      reachable: true,
-      source_id: head.source_id,
-      model_id: head.model_id,
-      latency_ms: native ? null : 180 + Math.floor(Math.random() * 420),
-      error: null,
-    };
-    // A real upstream request takes a real moment; a local readiness check does not.
-    return delay(probe, native ? 400 : 1200);
-  }
-
-  setAgentMode(backend: AgentBackend, mode: AgentMode) {
-    const agent = this.agentOr404(backend);
-    agent.mode = mode;
-    if (mode === 'hub') {
-      // Rejoining the gateway materializes one exact Route per matching menu model.
-      const order = mockRecommendedOrder(this.sources, backend);
-      agent.sources = { order, eligibility: null };
-      agent.routes = Object.fromEntries(
-        (agent.builtin_models ?? []).map((modelId) => [modelId, { hops: order
-          .map((sourceId) => this.sources.find((source) => source.id === sourceId))
-          .filter((source): source is Source => Boolean(source && source.models.some((model) => model.id === modelId)))
-          .map((source) => ({ source_id: source.id, model_id: modelId })) }]),
-      );
-      agent.selected_model_id = agent.builtin_models?.[0] ?? this.sources[0]?.models[0]?.id ?? null;
-      // The server's default comes from the STORED per-backend request, so a
-      // non-null id here is explicit; nothing selected is the false case.
-      agent.selected_model_explicit = agent.selected_model_id !== null;
-      agent.named_agents = (agent.named_agents ?? []).map((n) => ({
-        ...n,
-        effective_model_id: agent.selected_model_id ?? null,
-      }));
-    }
-    this.syncAgents();
-    return delay(structuredClone(agent));
-  }
-
-  putMenu(menu: AgentMenu) {
-    const agent = this.agents.find((a) => a.backend === 'opencode');
-    if (!agent) throw new ApiCallError('source_not_found');
-    agent.menu = menu;
-    this.syncAgents();
-    return delay(structuredClone(agent));
-  }
-
-  addCustomModel(sourceId: string, draft: CustomModelCreate) {
-    const source = this.sources.find((s) => s.id === sourceId);
-    if (!source) throw new ApiCallError('source_not_found');
-    const existing = source.models.find((m) => m.id === draft.model_id);
-    if (existing) {
-      existing.display_name = draft.display_name ?? existing.display_name;
-      existing.origin = 'manual';
-      existing.reasoning_efforts = [...draft.reasoning_efforts];
-    } else {
-      source.models.push({
-        id: draft.model_id,
-        display_name: draft.display_name ?? null,
-        origin: 'manual',
-        reasoning_efforts: [...draft.reasoning_efforts],
-        discovered_at: null,
-      });
-    }
-    return delay(structuredClone(source), 400);
-  }
-
-  updateModelReasoningEfforts(sourceId: string, modelId: string, reasoningEfforts: string[]) {
-    const source = this.sources.find((s) => s.id === sourceId);
-    if (!source) throw new ApiCallError('source_not_found');
-    const model = source.models.find((item) => item.id === modelId);
-    if (!model) throw new ApiCallError('source_not_found');
-    model.reasoning_efforts = [...reasoningEfforts];
-    return delay(structuredClone(source));
-  }
-
-  deleteCustomModel(sourceId: string, modelId: string, confirmation?: GuardConfirmation) {
-    const source = this.sources.find((s) => s.id === sourceId);
-    if (!source) throw new ApiCallError('source_not_found');
-    const references: RouteHopRef[] = [];
-    for (const agent of this.agents) {
-      for (const [menuModel, route] of Object.entries(agent.routes ?? {})) {
-        for (const [index, hop] of route.hops.entries()) {
-          if (equalHopIdentity(hop, { source_id: sourceId, model_id: modelId })) {
-            references.push({ backend: agent.backend, menu_model: menuModel, ...hop, position: index + 1 });
-          }
-        }
-      }
-    }
-    const confirmed = confirmation !== undefined
-      && JSON.stringify(confirmation.would_remove_hops) === JSON.stringify(references)
-      && JSON.stringify(confirmation.would_interrupt) === JSON.stringify([]);
-    if (references.length > 0 && !confirmed) {
-      throw new ApiCallError('source_model_in_route_chain', undefined, true, [], [], references);
-    }
-    source.models = source.models.filter((m) => !(m.id === modelId && m.origin === 'manual'));
-    if (confirmation) {
-      for (const agent of this.agents) {
-        agent.routes = Object.fromEntries(
-          Object.entries(agent.routes ?? {}).map(([menuModel, route]) => [
-            menuModel,
-            { hops: route.hops.filter((hop) => !equalHopIdentity(hop, { source_id: sourceId, model_id: modelId })) },
-          ]),
-        );
-      }
-    }
-    this.syncAgents();
-    return delay(structuredClone(source));
-  }
-
-  scanMigration() {
-    // Read-only: recompute the fixture each call so re-scans stay idempotent.
-    return delay(buildMockMigration(), 500);
-  }
-
-  applyMigration(itemIds: string[]) {
-    const scan = buildMockMigration();
-    // reauth needs the interactive OAuth flow, so it is never bulk-applied here.
-    const chosen = scan.items.filter((i) => itemIds.includes(i.id) && i.proposed_action !== 'reauth');
-    // Copy-only: each selected native config materializes a new source; the
-    // (simulated) originals are never touched. import lands on the hub channel;
-    // keep_native registers a sanctioned native_cli source. (controlled_import
-    // is deferred per the 2026-07-23 L6 finding, so it's never emitted here.)
-    for (const item of chosen) {
-      const isKey = item.kind === 'api_key' || item.kind === 'opencode_provider';
-      const channel: SupplyChannel = item.proposed_action === 'keep_native' ? 'native_cli' : 'hub';
-      this.sources.push({
-        id: rid('src'),
-        created_at: new Date().toISOString(),
-        last_discovered_at: new Date().toISOString(),
-        kind: isKey ? 'api_key' : 'subscription',
-        vendor: item.backend === 'opencode' ? 'zhipuai' : item.backend === 'codex' ? 'openai' : 'anthropic',
-        display_name: item.masked_detail.split(' · ')[0] || 'Imported',
-        protocol: item.backend === 'codex' ? 'openai_responses' : 'anthropic',
-        base_url: null,
-        supply_channel: channel,
-        billing: isKey ? 'metered' : 'monthly',
-        state: { status: 'standby', retry_at: null, detail_key: null },
-        usage: isKey ? { cycle_used_pct: null, month_spend_cents: 0, currency: 'USD' } : { cycle_used_pct: 0, month_spend_cents: null, currency: null },
-        account_label: channel === 'native_cli' ? 'me@gmail.com' : null,
-        masked_credential: isKey ? 'sk-…dd3c' : null,
-        models: [{ id: item.backend === 'opencode' ? 'glm-5.2' : item.backend === 'codex' ? 'gpt-5.6' : 'claude-opus-4-6', display_name: null, origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }],
-        credential_ref: channel === 'hub' ? rid('cred') : null,
-      });
-    }
-    // Enable hub on the backends that received a hub-channel import.
-    for (const backend of new Set(chosen.filter((i) => i.proposed_action !== 'keep_native').map((i) => i.backend))) {
-      const agent = this.agents.find((a) => a.backend === backend);
-      if (agent) agent.mode = 'hub';
-    }
-    this.syncAgents();
-    return delay({ applied: chosen.length, sources: structuredClone(this.sources) }, 700);
-  }
-
-  listEvents(limit = 20, before?: string) {
-    const start = before ? this.events.findIndex((e) => e.id === before) + 1 : 0;
-    return delay(structuredClone(this.events.slice(start, start + limit)));
-  }
-
-  getRuntimeStatus() {
-    return delay(structuredClone(this.runtime));
-  }
-
-  installRuntime() {
-    this.runtime.status.health = 'installing';
-    this.runtime.status.error_key = null;
-    setTimeout(() => {
-      this.runtime.status.installed_version = this.runtime.manifest.resolution === 'unresolved'
-        ? null
-        : this.runtime.manifest.version;
-      this.runtime.status.verified = true;
-      this.runtime.status.health = 'not_started';
-    }, 1200);
-    return delay(structuredClone(this.runtime));
-  }
-
-  startRuntime() {
-    this.runtime.status.health = 'ok';
-    this.runtime.status.listening = { host: '127.0.0.1', port: 15220 };
-    return delay(structuredClone(this.runtime));
-  }
-
-  startOAuth(vendor: string, channel: SupplyChannel, clientNonce?: string) {
-    if (clientNonce) {
-      const existing = [...this.flows.values()].find((entry) =>
-        entry.flow.client_nonce === clientNonce
-        && entry.flow.vendor === vendor
-        && entry.flow.channel === channel,
-      );
-      if (existing) return delay(structuredClone(existing.flow), 500);
-    }
-    const isDevice = vendor === 'openai';
-    const flow: OAuthFlow = {
-      flow_id: rid('oaf'),
-      // Deterministic pending-source binding (schema: hub flows always set it),
-      // consumed when the flow completes — mirrors the server, where the
-      // materialized source takes source.id = flow.source_id.
-      source_id: rid('src'),
-      vendor,
-      channel,
-      client_nonce: clientNonce ?? null,
-      state: 'awaiting_action',
-      presentation: isDevice
-        ? {
-            auth_url: 'https://chatgpt.com/device',
-            device_code: 'KDWT-GBSF',
-            expects: 'none',
-            instructions_key: 'settings.models.oauth.deviceCode.hint',
-          }
-        : {
-            auth_url: 'https://claude.ai/oauth/authorize?code=true&client_id=avibe&scope=org%3Acreate_api_key',
-            device_code: null,
-            expects: 'paste_code',
-            instructions_key: 'settings.models.oauth.pasteCode.hint',
-          },
-      error_key: null,
-      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
-    };
-    this.flows.set(flow.flow_id, { flow, polls: 0, submitted: false });
-    return delay(structuredClone(flow), 500);
-  }
-
-  getOAuthStatus(flowId: string) {
-    const entry = this.flows.get(flowId);
-    if (!entry) throw new ApiCallError('flow_not_found');
-    entry.polls += 1;
-    const { flow } = entry;
-    if (flow.state === 'success' || flow.state === 'failed' || flow.state === 'cancelled') {
-      return delay(this.oauthResult(entry));
-    }
-    if (flow.presentation.expects === 'none') {
-      // Device flow self-completes after a few polls.
-      if (entry.polls >= 3) this.completeFlow(entry);
-    } else if (entry.submitted) {
-      // Paste flows: verifying → success on the next poll.
-      this.completeFlow(entry);
-    }
-    return delay(this.oauthResult(entry));
-  }
-
-  submitOAuth(flowId: string, _value: string) {
-    const entry = this.flows.get(flowId);
-    if (!entry) throw new ApiCallError('flow_not_found');
-    entry.submitted = true;
-    entry.flow.state = 'verifying';
-    return delay(this.oauthResult(entry));
-  }
-
-  cancelOAuth(flowId: string) {
-    const entry = this.flows.get(flowId);
-    if (entry) entry.flow.state = 'cancelled';
-    return delay(undefined);
-  }
-
-  // Reaching `success` IS the creation, as on the server: status/submit
-  // materialize the Source inside the same call that first reports success, and
-  // consume the flow binding doing it. Splitting the two here is what let a
-  // client that finalized with a second POST look correct against the mock while
-  // failing `flow_not_found` against the real server.
-  private completeFlow(entry: MockFlow) {
-    entry.flow.state = 'success';
-    const flow = entry.flow;
-    const id = flow.source_id ?? rid('src');
-    flow.source_id = id;
-    const isOpenai = flow.vendor === 'openai';
-    if (flow.intent === 'reauth') {
-      // A reauth flow REPAIRS the source it bound to; it creates nothing. The
-      // login is what puts the credential back, so the blocker clears and the
-      // supply a native start had wiped comes back with it.
-      const source = this.sources.find((s) => s.id === id);
-      if (!source) return;
-      source.account_label = 'me@gmail.com';
-      source.state = { status: 'standby', retry_at: null, detail_key: null };
-      source.last_discovered_at = new Date().toISOString();
-      if (source.models.length === 0) {
-        source.models = [
-          {
-            id: isOpenai ? 'gpt-5.6' : 'claude-opus-4-6',
-            display_name: isOpenai ? 'GPT-5.6' : 'Opus 4.6',
-            origin: 'discovered',
-            reasoning_efforts: [],
-            discovered_at: new Date().toISOString(),
-          },
-        ];
-      }
-      return;
-    }
-    // Idempotent, like `_create_oauth_source(idempotent=True)`: re-polling a
-    // completed flow re-echoes the same source instead of creating a second one.
-    if (this.sources.some((s) => s.id === id)) return;
-    const source: Source = {
-      id,
-      created_at: new Date().toISOString(),
-      last_discovered_at: new Date().toISOString(),
-      kind: 'subscription',
-      vendor: flow.vendor,
-      display_name: isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅',
-      protocol: isOpenai ? 'openai_responses' : 'anthropic',
-      base_url: null,
-      supply_channel: flow.channel,
-      billing: 'monthly',
-      state: { status: 'standby', retry_at: null, detail_key: null },
-      usage: { cycle_used_pct: 0, month_spend_cents: null, currency: null },
-      // native_cli subscriptions surface the CLI account; gateway-held sources
-      // may stay null until a later adapter revision publishes an account label.
-      account_label: flow.channel === 'native_cli' ? 'me@gmail.com' : null,
-      masked_credential: null,
-      models: isOpenai
-        ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }]
-        : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }],
-      credential_ref: flow.channel === 'hub' ? rid('cred') : null,
-    };
-    this.sources.push(source);
-    entry.placement = this.placeNewSource(source);
-  }
-
-  /**
-   * The terminal envelope every status/submit response carries (api.md, "OAuth
-   * completion"): the flow, plus the creation it performed once it succeeded.
-   * Looked up by `source_id` rather than remembered from the completing call, so
-   * a later poll on an already-finished flow answers the same thing the server's
-   * idempotent path does instead of pretending nothing was created.
-   */
-  private oauthResult(entry: MockFlow): OAuthResult {
-    const flow = structuredClone(entry.flow);
-    const source = flow.state === 'success' ? this.sources.find((s) => s.id === flow.source_id) : undefined;
-    if (!source) return { flow, created: null, repaired: null };
-    // One intent, one tail — the same discrimination the live unwrap makes, so a
-    // reauth never reports an adoption list and a create never reports recovery.
-    if (flow.intent === 'reauth') {
-      this.syncAgents();
-      return {
-        flow,
-        created: null,
-        repaired: {
-          source: structuredClone(source),
-          recovered: entry.recovered === true,
-          interrupted_pairs: this.wouldInterrupt(this.sources),
-        },
-      };
-    }
-    return {
-      flow,
-      created: {
-        source: structuredClone(source),
-        ...(entry.placement ?? { added_to: [], adopted_by: [] }),
-      },
-      repaired: null,
-    };
-  }
-
-  patchSource(id: string, patch: SourcePatch) {
-    this.syncAgents();
-    const sourceIndex = this.sources.findIndex((s) => s.id === id);
-    const source = this.sources[sourceIndex];
-    if (!source) throw new ApiCallError('source_not_found');
-    const candidate = structuredClone(source);
-    if (typeof patch.display_name === 'string') candidate.display_name = patch.display_name;
-    const nextBaseUrl = patch.base_url ?? null;
-    const endpointChanged = 'base_url' in patch && (source.base_url ?? null) !== nextBaseUrl;
-    if (!endpointChanged) {
-      this.sources[sourceIndex] = candidate;
-      return delay({ source: structuredClone(candidate), removed_hops: [], interrupted: [] }, 300);
-    }
-    if (source.kind !== 'api_key' || source.supply_channel !== 'hub' || !source.credential_ref) {
-      throw new ApiCallError('discovery_failed');
-    }
-
-    // A target from the visual fixture rediscovers that target's known inventory;
-    // any other endpoint gets the fake server's deterministic vendor inventory.
-    const seededInventory = buildMockSources().find((item) =>
-      item.kind === 'api_key'
-      && item.vendor === source.vendor
-      && item.protocol === source.protocol
-      && (item.base_url ?? null) === nextBaseUrl);
-    const discoveredIds = seededInventory
-      ? seededInventory.models.filter((model) => model.origin === 'discovered').map((model) => model.id)
-      : Array.from({ length: mockDiscoveredCount(source.vendor) }, (_, index) => `${source.vendor}-model-${index + 1}`);
-    const previousById = new Map(source.models.map((model) => [model.id, model]));
-    const manualModels = candidate.models.filter((model) => model.origin === 'manual');
-    const manualIds = new Set(manualModels.map((model) => model.id));
-    const discoveredAt = new Date().toISOString();
-    candidate.base_url = nextBaseUrl;
-    candidate.credential_ref = rid('cred');
-    candidate.models = [
-      ...discoveredIds.filter((modelId) => !manualIds.has(modelId)).map((modelId) => {
-        const previous = previousById.get(modelId);
-        return {
-          id: modelId,
-          display_name: previous?.display_name ?? null,
-          origin: 'discovered' as const,
-          reasoning_efforts: [...(previous?.reasoning_efforts ?? [])],
-          discovered_at: discoveredAt,
-        };
-      }),
-      ...manualModels,
-    ];
-    candidate.last_discovered_at = discoveredAt;
-    candidate.state = { status: 'standby', retry_at: null, detail_key: null };
-    const candidateModelIds = new Set(candidate.models.filter((model) => model.retired !== true).map((model) => model.id));
-    const removedHops: RouteHopRef[] = this.agents.flatMap((agent) =>
-      Object.entries(agent.routes ?? {}).flatMap(([menuModel, route]) =>
-        route.hops.flatMap((hop, index) => hop.source_id === id && !candidateModelIds.has(hop.model_id)
-          ? [{ backend: agent.backend, menu_model: menuModel, ...hop, position: index + 1 }]
-          : [])));
-    const candidateSources = this.sources.map((item, index) => index === sourceIndex ? candidate : item);
-    const gaps = this.wouldInterrupt(candidateSources, removedHops);
-    const confirmed = patch.force === true
-      && JSON.stringify(patch.would_remove_hops) === JSON.stringify(removedHops)
-      && JSON.stringify(patch.would_interrupt) === JSON.stringify(gaps);
-    if ((removedHops.length > 0 || gaps.length > 0) && !confirmed) {
-      throw new ApiCallError(
-        removedHops.length > 0 ? 'source_model_in_route_chain' : 'source_last_supplier',
-        undefined,
-        true,
-        gaps,
-        [],
-        removedHops,
-      );
-    }
-
-    this.sources[sourceIndex] = candidate;
-    const removed = new Set(removedHops.map((hop) =>
-      `${hop.backend}\u0000${hop.menu_model}\u0000${hop.source_id}\u0000${hop.model_id}`));
-    for (const agent of this.agents) {
-      agent.routes = Object.fromEntries(
-        Object.entries(agent.routes ?? {}).map(([menuModel, route]) => [
-          menuModel,
-          {
-            hops: route.hops.filter((hop) =>
-              !removed.has(`${agent.backend}\u0000${menuModel}\u0000${hop.source_id}\u0000${hop.model_id}`)),
-          },
-        ]),
-      );
-    }
-    this.syncAgents();
-    return delay({ source: structuredClone(candidate), removed_hops: removedHops, interrupted: gaps }, 300);
-  }
-
-  refreshSource(id: string, _confirmation?: GuardConfirmation) {
-    const source = this.sources.find((s) => s.id === id);
-    if (!source) throw new ApiCallError('source_not_found');
-    // Native-CLI subscriptions can't be re-discovered (server rejects them);
-    // the UI only offers this action for hub sources, but fail closed anyway.
-    if (source.supply_channel === 'native_cli') throw new ApiCallError('discovery_failed');
-    source.state = { status: 'standby', retry_at: null, detail_key: null };
-    source.last_discovered_at = new Date().toISOString();
-    return delay({ source: structuredClone(source), discovered: source.models.length }, 700);
-  }
-}
-
-// §4.3's runnability half: retry-ready, and never needs_action / error. A
-// cooling source stays visible in the chain but is skipped by the turn. Derived
-// from the page's own predicate rather than restated, so the fake server and the
-// UI cannot drift into disagreeing about which statuses can serve a turn.
-const isRunnable = (s: Source): boolean => !isUnhealthy(s.state);
-
-// SourceStatus → the chain link's health vocabulary (the two healthy statuses
-// collapse; the three blockers map one-to-one).
-const chainHealth = (s: Source): AgentChainLink['health'] =>
-  s.state.status === 'cooldown' ? 'cooldown' : s.state.status === 'needs_action' ? 'needs_action' : s.state.status === 'error' ? 'error' : 'healthy';
-
-function vendorLabel(vendor: string): string {
-  const table: Record<string, string> = {
-    anthropic: 'Anthropic API Key',
-    openai: 'OpenAI API Key',
-    zhipuai: '智谱 API Key',
-    kimi: 'Kimi API Key',
-    xai: 'xAI API Key',
+    request: RecordedRequest;
   };
-  return table[vendor] ?? `${vendor} API Key`;
+  outcome: RecordedOutcome;
+  post: {
+    model_hub_config_sha256: string;
+    fixture_world_sha256: string;
+    config: unknown;
+    fixture_world: unknown;
+    reads: RecordedReads;
+  };
+};
+type MockCorpus = {
+  generator: string;
+  seed: {
+    model_hub_config_sha256: string;
+    fixture_world_sha256: string;
+    config: unknown;
+    fixture_world: unknown;
+    reads: RecordedReads;
+  };
+  transitions: RecordedTransition[];
+};
+
+const mockCorpus = mockCorpusJson as unknown as MockCorpus;
+const clone = <T>(value: T): T => structuredClone(value);
+
+const canonicalJson = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as JsonObject)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+};
+
+const base64Url = (value: string): string => {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return globalThis.btoa(binary)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '');
+};
+
+const normalizedRequest = (
+  operation: string,
+  path: JsonObject = {},
+  body: RecordedBody = { present: false },
+  query: RecordedRequest['query'] = {},
+): RecordedRequest => ({ operation, path, query, body });
+
+export class UncontractedMockTransitionError extends Error {
+  readonly code = 'uncontracted_mock_transition';
+  readonly missingKey: string;
+  readonly operation: string;
+  readonly generatorCommand: string;
+
+  constructor(missingKey: string, operation: string, generatorCommand: string) {
+    super(
+      [
+        'uncontracted_mock_transition',
+        `Missing key: ${missingKey}`,
+        `Operation: ${operation}`,
+        `Record it: ${generatorCommand}`,
+      ].join('\n'),
+    );
+    this.name = 'UncontractedMockTransitionError';
+    this.missingKey = missingKey;
+    this.operation = operation;
+    this.generatorCommand = generatorCommand;
+  }
 }
 
-// Non-reversible display mask (contract rule: ≤7-char prefix + "…" + last 4).
-function maskKey(key: string): string {
-  const k = key.trim();
-  if (k.length <= 5) return `${k}…`;
-  const prefix = k.slice(0, Math.min(7, k.length - 4));
-  return `${prefix}…${k.slice(-4)}`;
-}
+/**
+ * A replay store, not a second Model Hub service.
+ *
+ * Every policy-bearing mutation must match a transition produced by the Python
+ * service. Reads are the server projections recorded at that exact post-state.
+ */
+export class MockStore {
+  private reads = clone(mockCorpus.seed.reads);
+  private configHash = mockCorpus.seed.model_hub_config_sha256;
+  private fixtureWorldHash = mockCorpus.seed.fixture_world_sha256;
+  private readonly transitions = new Map(
+    mockCorpus.transitions.map((transition) => [transition.key.id, transition]),
+  );
+  private readonly events = buildMockEvents();
+  private readonly runtime = buildMockRuntime();
 
-function hostLabel(baseUrl: string | null | undefined): string {
-  if (!baseUrl) return 'API Key';
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return 'API Key';
+  get sources(): Source[] {
+    return clone(this.reads.sources);
+  }
+
+  get agents(): AgentSupply[] {
+    return clone(this.reads.agents);
+  }
+
+  private transitionKey(request: RecordedRequest) {
+    const key = {
+      version: 1,
+      pre: {
+        model_hub_config_sha256: this.configHash,
+        fixture_world_sha256: this.fixtureWorldHash,
+      },
+      request,
+    };
+    return base64Url(canonicalJson(key));
+  }
+
+  private replay<T>(request: RecordedRequest): Promise<T> {
+    const missingKey = this.transitionKey(request);
+    const transition = this.transitions.get(missingKey);
+    if (!transition) {
+      const generatorCommand =
+        `${mockCorpus.generator} --record-miss ${missingKey}`;
+      throw new UncontractedMockTransitionError(
+        missingKey,
+        request.operation,
+        generatorCommand,
+      );
+    }
+
+    this.reads = clone(transition.post.reads);
+    this.configHash = transition.post.model_hub_config_sha256;
+    this.fixtureWorldHash = transition.post.fixture_world_sha256;
+
+    if (transition.outcome.kind === 'error') {
+      const data = transition.outcome.data;
+      throw new ApiCallError(
+        transition.outcome.error,
+        transition.outcome.detail,
+        true,
+        supplyGaps(data.would_interrupt),
+        supplyGaps(data.interrupted_pairs),
+        routeHopRefs(data.would_remove_hops),
+        transition.outcome.status,
+        typeof data.observation === 'object' && data.observation !== null
+          ? data.observation as SourceObservation
+          : undefined,
+      );
+    }
+    return Promise.resolve(clone(transition.outcome.value) as T);
+  }
+
+  listSources(): Promise<Source[]> {
+    return Promise.resolve(this.sources);
+  }
+
+  listAgents(): Promise<AgentSupply[]> {
+    return Promise.resolve(this.agents);
+  }
+
+  getAgentSources(backend: AgentBackend): Promise<AgentSupply> {
+    const projection = this.reads.agent_sources[backend];
+    if (projection) return Promise.resolve(clone(projection));
+    return this.replay(normalizedRequest(
+      'getAgentSources',
+      { backend },
+    ));
+  }
+
+  getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain> {
+    const projection = this.reads.agent_chains[backend]?.[model];
+    if (projection) return Promise.resolve(clone(projection));
+    return this.replay(normalizedRequest(
+      'getAgentChain',
+      { backend },
+      { present: false },
+      { model: { present: true, value: model } },
+    ));
+  }
+
+  listEvents(limit = 20, before?: string): Promise<ResolutionEvent[]> {
+    const start = before
+      ? Math.max(0, this.events.findIndex((event) => event.id === before) + 1)
+      : 0;
+    return Promise.resolve(clone(this.events.slice(start, start + limit)));
+  }
+
+  getRuntimeStatus(): Promise<RuntimeDependency> {
+    return Promise.resolve(clone(this.runtime));
+  }
+
+  observeApiKeySource(
+    draft: ApiKeySourceObservation,
+    _signal?: AbortSignal,
+  ): Promise<SourceObservation> {
+    return this.replay(normalizedRequest(
+      'observeApiKeySource',
+      {},
+      { present: true, value: draft },
+    ));
+  }
+
+  createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated> {
+    return this.replay(normalizedRequest(
+      'createApiKeySource',
+      {},
+      { present: true, value: draft },
+    ));
+  }
+
+  patchSource(id: string, body: SourcePatch): Promise<SourcePatched> {
+    return this.replay(normalizedRequest(
+      'patchSource',
+      { id },
+      { present: true, value: body },
+    ));
+  }
+
+  refreshSource(
+    id: string,
+    confirmation?: GuardConfirmation,
+  ): Promise<SourceRefresh> {
+    return this.replay(normalizedRequest(
+      'refreshSource',
+      { id },
+      { present: true, value: confirmation ?? {} },
+    ));
+  }
+
+  deleteSource(
+    id: string,
+    confirmation?: GuardConfirmation,
+  ): Promise<SourceDeleted> {
+    return this.replay(normalizedRequest(
+      'deleteSource',
+      { id },
+      confirmation
+        ? {
+            present: true,
+            value: {
+              would_remove_hops: confirmation.would_remove_hops,
+              would_interrupt: confirmation.would_interrupt,
+            },
+          }
+        : { present: false },
+      confirmation
+        ? { force: { present: true, value: true } }
+        : {},
+    ));
+  }
+
+  replaceCredential(
+    id: string,
+    body: CredentialReplace,
+  ): Promise<CredentialReplacement> {
+    return this.replay(normalizedRequest(
+      'replaceCredential',
+      { id },
+      { present: true, value: body },
+    ));
+  }
+
+  reauthSource(id: string): Promise<OAuthFlow> {
+    return this.replay(normalizedRequest(
+      'reauthSource',
+      { id },
+      { present: true, value: { acknowledge_irreversible: true } },
+    ));
+  }
+
+  putAgentSources(
+    backend: AgentBackend,
+    body: AgentSourcesPut,
+  ): Promise<AgentSupply> {
+    return this.replay(normalizedRequest(
+      'putAgentSources',
+      { backend },
+      { present: true, value: body },
+    ));
+  }
+
+  putAgentChain(
+    backend: AgentBackend,
+    model: string,
+    body: AgentChainPut,
+  ): Promise<AgentChainMutation> {
+    return this.replay(normalizedRequest(
+      'putAgentChain',
+      { backend },
+      { present: true, value: body },
+      { model: { present: true, value: model } },
+    ));
+  }
+
+  probeAgent(
+    backend: AgentBackend,
+    model?: string,
+  ): Promise<ProbeResult> {
+    return this.replay(normalizedRequest(
+      'probeAgent',
+      { backend },
+      { present: true, value: model ? { model } : {} },
+    ));
+  }
+
+  setAgentMode(
+    backend: AgentBackend,
+    mode: AgentMode,
+  ): Promise<AgentSupply> {
+    return this.replay(normalizedRequest(
+      'setAgentMode',
+      { backend },
+      { present: true, value: { mode } },
+    ));
+  }
+
+  putMenu(menu: AgentMenu): Promise<AgentSupply> {
+    return this.replay(normalizedRequest(
+      'putMenu',
+      { backend: 'opencode' },
+      { present: true, value: { menu } },
+    ));
+  }
+
+  addCustomModel(
+    sourceId: string,
+    draft: CustomModelCreate,
+  ): Promise<Source> {
+    return this.replay(normalizedRequest(
+      'addCustomModel',
+      { sourceId },
+      { present: true, value: draft },
+    ));
+  }
+
+  updateModelReasoningEfforts(
+    sourceId: string,
+    modelId: string,
+    reasoningEfforts: string[],
+  ): Promise<Source> {
+    return this.replay(normalizedRequest(
+      'updateModelReasoningEfforts',
+      { sourceId, modelId },
+      { present: true, value: { reasoning_efforts: reasoningEfforts } },
+    ));
+  }
+
+  deleteCustomModel(
+    sourceId: string,
+    modelId: string,
+    confirmation?: GuardConfirmation,
+  ): Promise<Source> {
+    return this.replay(normalizedRequest(
+      'deleteCustomModel',
+      { sourceId, modelId },
+      { present: true, value: confirmation ?? {} },
+    ));
+  }
+
+  scanMigration(): Promise<MigrationScan> {
+    return this.replay(normalizedRequest('scanMigration'));
+  }
+
+  applyMigration(itemIds: string[]): Promise<MigrationApplyResult> {
+    return this.replay(normalizedRequest(
+      'applyMigration',
+      {},
+      { present: true, value: { item_ids: itemIds } },
+    ));
+  }
+
+  installRuntime(): Promise<RuntimeDependency> {
+    return this.replay(normalizedRequest('installRuntime'));
+  }
+
+  startRuntime(): Promise<RuntimeDependency> {
+    return this.replay(normalizedRequest('startRuntime'));
+  }
+
+  startOAuth(
+    vendor: string,
+    channel: SupplyChannel,
+    clientNonce?: string,
+  ): Promise<OAuthFlow> {
+    return this.replay(normalizedRequest(
+      'startOAuth',
+      {},
+      {
+        present: true,
+        value: {
+          vendor,
+          channel,
+          ...(clientNonce ? { client_nonce: clientNonce } : {}),
+        },
+      },
+    ));
+  }
+
+  getOAuthStatus(flowId: string): Promise<OAuthResult> {
+    return this.replay(normalizedRequest(
+      'getOAuthStatus',
+      { flowId },
+    ));
+  }
+
+  submitOAuth(flowId: string, value: string): Promise<OAuthResult> {
+    return this.replay(normalizedRequest(
+      'submitOAuth',
+      {},
+      { present: true, value: { flow_id: flowId, value } },
+    ));
+  }
+
+  cancelOAuth(flowId: string): Promise<void> {
+    return this.replay(normalizedRequest(
+      'cancelOAuth',
+      {},
+      { present: true, value: { flow_id: flowId } },
+    ));
   }
 }
 

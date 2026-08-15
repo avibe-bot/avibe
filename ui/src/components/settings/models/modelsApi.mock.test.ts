@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { ApiCallError, MockStore } from './modelsApi';
+import {
+  ApiCallError,
+  MockStore,
+  UncontractedMockTransitionError,
+} from './modelsApi';
 import type { RouteHopRef } from './types';
 
 const referencesTo = (store: MockStore, sourceId: string): RouteHopRef[] =>
@@ -128,6 +132,93 @@ describe('Model Hub mock endpoint-edit contract', () => {
           }
         }
       }
+    }
+  });
+});
+
+describe('Model Hub mock replay boundary', () => {
+  it('keys a delete by the full state after source reordering', async () => {
+    const store = new MockStore();
+    const reordered = ['src_anthkey01', 'src_claudepro1', 'src_relay9c1x'];
+    await store.putAgentSources('claude', { order: reordered });
+    expect((await store.getAgentSources('claude')).sources?.order).toEqual(reordered);
+
+    let refusal: ApiCallError | null = null;
+    try {
+      await store.deleteSource('src_claudepro1');
+    } catch (error) {
+      if (error instanceof ApiCallError) refusal = error;
+      else throw error;
+    }
+    expect(refusal?.code).toBe('source_in_route_chain');
+    await store.deleteSource('src_claudepro1', {
+      force: true,
+      would_remove_hops: refusal?.wouldRemoveHops ?? [],
+      would_interrupt: refusal?.wouldInterrupt ?? [],
+    });
+    expect((await store.getAgentSources('claude')).sources?.order)
+      .toEqual(['src_anthkey01', 'src_relay9c1x']);
+  });
+
+  it('hard-fails every unrecorded policy-bearing entry point with a record command', async () => {
+    const calls: Array<[string, (store: MockStore) => Promise<unknown>]> = [
+      ['observeApiKeySource', (store) => store.observeApiKeySource({ vendor: 'custom', base_url: 'https://missing.example/v1', key: 'test-only', protocol_order: ['openai_chat', 'openai_responses', 'anthropic'] })],
+      ['createApiKeySource', (store) => store.createApiKeySource({ kind: 'api_key', vendor: 'custom', display_name: 'Missing', base_url: 'https://missing.example/v1', supply_channel: 'hub', key: 'test-only', protocol_order: ['openai_chat', 'openai_responses', 'anthropic'] })],
+      ['patchSource', (store) => store.patchSource('src_missing0001', { display_name: 'Missing' })],
+      ['refreshSource', (store) => store.refreshSource('src_missing0001')],
+      ['deleteSource', (store) => store.deleteSource('src_missing0001')],
+      ['replaceCredential', (store) => store.replaceCredential('src_missing0001', { key: 'test-only' })],
+      ['reauthSource', (store) => store.reauthSource('src_missing0001')],
+      ['putAgentSources', (store) => store.putAgentSources('claude', { order: [] })],
+      ['putAgentChain', (store) => store.putAgentChain('claude', 'claude-opus-4-6', { hops: [] })],
+      ['probeAgent', (store) => store.probeAgent('claude', 'claude-opus-4-6')],
+      ['setAgentMode', (store) => store.setAgentMode('claude', 'direct')],
+      ['putMenu', (store) => store.putMenu({ view: 'full', checked: [] })],
+      ['addCustomModel', (store) => store.addCustomModel('src_missing0001', { id: 'missing-model', display_name: null })],
+      ['updateModelReasoningEfforts', (store) => store.updateModelReasoningEfforts('src_missing0001', 'missing-model', ['high'])],
+      ['deleteCustomModel', (store) => store.deleteCustomModel('src_missing0001', 'missing-model')],
+      ['scanMigration', (store) => store.scanMigration()],
+      ['applyMigration', (store) => store.applyMigration(['missing'])],
+      ['installRuntime', (store) => store.installRuntime()],
+      ['startRuntime', (store) => store.startRuntime()],
+      ['startOAuth', (store) => store.startOAuth('anthropic', 'hub')],
+      ['getOAuthStatus', (store) => store.getOAuthStatus('flow_missing')],
+      ['submitOAuth', (store) => store.submitOAuth('flow_missing', 'test-only')],
+      ['cancelOAuth', (store) => store.cancelOAuth('flow_missing')],
+    ];
+    const nonMutationMembers = new Set([
+      'constructor',
+      'sources',
+      'agents',
+      'transitionKey',
+      'replay',
+      'listSources',
+      'listAgents',
+      'getAgentSources',
+      'getAgentChain',
+      'listEvents',
+      'getRuntimeStatus',
+    ]);
+    const reachableMutations = Object.getOwnPropertyNames(MockStore.prototype)
+      .filter((name) => !nonMutationMembers.has(name))
+      .sort();
+    expect(reachableMutations).toEqual(calls.map(([operation]) => operation).sort());
+
+    for (const [operation, call] of calls) {
+      let failure: unknown;
+      try {
+        await call(new MockStore());
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure, operation).toBeInstanceOf(UncontractedMockTransitionError);
+      const error = failure as UncontractedMockTransitionError;
+      expect(error.operation, operation).toBe(operation);
+      expect(error.missingKey, operation).toBeTruthy();
+      expect(error.generatorCommand, operation).toBe(
+        `python3 scripts/generate_model_hub_mock_corpus.py --record-miss ${error.missingKey}`,
+      );
+      expect(error.message, operation).toContain(error.generatorCommand);
     }
   });
 });

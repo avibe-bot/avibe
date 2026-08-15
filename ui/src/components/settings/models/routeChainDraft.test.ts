@@ -82,11 +82,12 @@ describe("routeChainDraft", () => {
     ).toEqual({ invalidIndexes: [0, 1], valid: false });
   });
 
-  it("keeps the mock write path on the same persisted-pair validator", () => {
+  it("keeps UI draft validation out of the recorded mock write path", () => {
     const api = readFileSync(new URL("./modelsApi.ts", import.meta.url), "utf8");
 
+    expect(api).not.toMatch(/import .*validateRouteDraft/);
     expect(api).toMatch(
-      /validateRouteDraft\(agent, this\.sources, previous, body\.hops\)/,
+      /putAgentChain\([\s\S]*return this\.replay\(normalizedRequest\(\s*'putAgentChain'/,
     );
   });
 

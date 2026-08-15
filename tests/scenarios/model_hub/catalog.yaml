@@ -8,6 +8,7 @@ capability:
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
+    - tests/test_model_hub_mock_corpus.py
     - tests/test_opencode_server.py
     - tests/scenarios/model_hub/test_model_hub_catalog.py
     - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
@@ -68,6 +69,12 @@ scenarios:
     kind: mutation
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order
+  - id: MH-MOCK-REPLAY-001
+    name: Mock mutations replay full-state server transitions or fail with a recording command
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_mock_corpus.py::test_mh_mock_replay_001_corpus_is_server_generated_and_keyed_by_full_state
   - id: MH-SUPPLY-GAP-001
     name: Inventory loss leaves the affected menu model visibly unconfigured
     status: covered
