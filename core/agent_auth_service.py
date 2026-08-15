@@ -3494,6 +3494,24 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("post_web_success_hook failed for %s: %s", backend, err)
 
+    def _capture_codex_relay_for_oauth(self) -> str | None:
+        """Read the relay URL Codex would launch with, before OAuth cleanup.
+
+        Called immediately before ``_clear_codex_api_key_for_oauth``
+        clears the provider pointer; after that clear the user-owned
+        relay section is orphaned and unreadable through the normal
+        active/managed lookup, so this is the last moment the live relay
+        URL is observable. Failures degrade to ``None`` — a capture miss
+        only costs relay recovery on switch-back, never the OAuth flow.
+        """
+        try:
+            from vibe.codex_config import read_codex_auth_state
+
+            relay = read_codex_auth_state().get("base_url")
+        except Exception:  # noqa: BLE001
+            return None
+        return relay if isinstance(relay, str) and relay.strip() else None
+
     async def _clear_claude_settings_env_for_oauth(self) -> None:
         try:
             from vibe.claude_config import apply_claude_auth
@@ -3797,9 +3815,19 @@ class AgentAuthService:
 
     async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
+        captured_codex_relay: str | None = None
         if backend == "claude" and auth_mode == "oauth":
             await self._clear_claude_settings_env_for_oauth()
         if backend == "codex" and auth_mode == "oauth":
+            # Capture the live relay URL before the OAuth pass clears its
+            # provider pointer: that pointer clear is correct for OAuth
+            # runtime (ChatGPT tokens must hit OpenAI's official endpoint)
+            # but it also orphans the user's relay section, leaving
+            # ``config.toml`` reads unable to see it. Keeping the URL in
+            # V2Config is the persisted marker that lets the Settings
+            # form and the next API-key save restore the relay instead of
+            # silently rerouting the key to ``api.openai.com`` (401s).
+            captured_codex_relay = self._capture_codex_relay_for_oauth()
             await self._clear_codex_api_key_for_oauth()
         try:
             config = getattr(self.controller, "config", None)
@@ -3831,6 +3859,7 @@ class AgentAuthService:
                 and (
                     bool(getattr(target, "api_key", None))
                     or bool(getattr(target, "base_url", None))
+                    or captured_codex_relay is not None
                 )
             )
             if not needs_mode_write and not needs_marker_write and not needs_codex_oauth_cleanup:
@@ -3845,7 +3874,11 @@ class AgentAuthService:
                         target.auth_mode_set = True
                     if needs_codex_oauth_cleanup:
                         target.api_key = None
-                        target.base_url = None
+                        # Retain (or capture) the relay URL as the OAuth
+                        # transition's recovery marker — Codex's OAuth
+                        # runtime never reads V2Config.base_url; only the
+                        # Settings UI and the next API-key save do.
+                        target.base_url = captured_codex_relay
                     saver()
             except ImportError:
                 if needs_mode_write:
@@ -3854,7 +3887,11 @@ class AgentAuthService:
                     target.auth_mode_set = True
                 if needs_codex_oauth_cleanup:
                     target.api_key = None
-                    target.base_url = None
+                    # Retain (or capture) the relay URL as the OAuth
+                    # transition's recovery marker — Codex's OAuth runtime
+                    # never reads V2Config.base_url; only the Settings UI
+                    # and the next API-key save do.
+                    target.base_url = captured_codex_relay
                 saver()
             if loaded_config is not None and config is not None:
                 compat_target = getattr(config, backend, None)
@@ -3865,7 +3902,7 @@ class AgentAuthService:
                         setattr(compat_target, "auth_mode_set", True)
                     if needs_codex_oauth_cleanup:
                         setattr(compat_target, "api_key", None)
-                        setattr(compat_target, "base_url", None)
+                        setattr(compat_target, "base_url", captured_codex_relay)
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",

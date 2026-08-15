@@ -99,6 +99,13 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal
+  - id: AUTH-SETUP-110
+    name: Codex OAuth round trip keeps the relay base URL through settings save and relaunch config
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: codex
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_oauth_api_key_relay_round_trip_scenario
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered

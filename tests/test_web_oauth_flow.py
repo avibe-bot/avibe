@@ -351,9 +351,15 @@ def test_codex_oauth_success_clears_api_key_state(
     assert auth["auth_mode"] == "chatgpt"
     assert auth["tokens"] == {"id_token": "abc"}
     assert "OPENAI_API_KEY" not in auth
+    # The provider pointer is cleared for OAuth runtime…
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert not [line for line in toml.splitlines() if line.startswith("model_provider")]
+    # …but the relay URL is captured into V2Config as the recovery
+    # marker so the Settings form and the next API-key save can restore
+    # it instead of silently rerouting the key to api.openai.com.
     assert codex_cfg.auth_mode == "oauth"
     assert codex_cfg.api_key is None
-    assert codex_cfg.base_url is None
+    assert codex_cfg.base_url == "https://relay.example/v1"
     assert saves == ["saved"]
 
 

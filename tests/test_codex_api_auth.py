@@ -195,6 +195,80 @@ def test_save_codex_auth_prefers_disk_base_url_over_stale_cache(
     assert fake_codex.base_url == "https://fresh.example/v1"
 
 
+def test_save_codex_auth_restores_relay_from_v2config_capture_after_oauth(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Post-OAuth recovery via the persisted marker. The OAuth
+    transition cleared the provider pointer (disk chain now empty) but
+    captured the relay URL into V2Config. An api_key save omitting
+    ``base_url`` must restore the relay through the cache fallback —
+    this is the exact Settings round-trip that used to 401."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"id_token": "x"}, "auth_mode": "chatgpt"}),
+        encoding="utf-8",
+    )
+    # Pointer cleared by the OAuth pass; the relay section is orphaned
+    # and invisible to the disk chain.
+    (codex_home / "config.toml").write_text(
+        "[model_providers.OpenAI]\nbase_url = \"https://relay.example/v1\"\n",
+        encoding="utf-8",
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth", api_key=None, base_url="https://relay.example/v1"
+    )
+    fake_agents = types.SimpleNamespace(codex=fake_codex)
+    fake_config = types.SimpleNamespace(agents=fake_agents, save=lambda: None)
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    result = api.save_codex_auth({"auth_mode": "api_key", "api_key": "sk-relay"})
+    assert result.get("ok") is True
+
+    # The managed provider the next codex app-server launch will use
+    # carries the restored relay pointer.
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert 'base_url = "https://relay.example/v1"' in toml
+    assert 'model_provider = "openai-managed"' in toml
+
+
+def test_get_codex_auth_merges_v2config_capture_when_disk_chain_empty(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The Settings form pre-populates from ``get_codex_auth``; after an
+    OAuth transition the disk chain is empty, so the V2Config capture is
+    what keeps the Base URL field (and therefore the next explicit save
+    payload) carrying the relay."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        "[model_providers.OpenAI]\nbase_url = \"https://relay.example/v1\"\n",
+        encoding="utf-8",
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth", api_key=None, base_url="https://relay.example/v1"
+    )
+    fake_agents = types.SimpleNamespace(codex=fake_codex)
+    fake_config = types.SimpleNamespace(agents=fake_agents, save=lambda: None)
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+
+    state = api.get_codex_auth()
+    assert state["base_url"] == "https://relay.example/v1"
+
+    # Without the capture marker the dormant section alone surfaces
+    # nothing — the false-positive guard.
+    fake_codex.base_url = None
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    state = api.get_codex_auth()
+    assert state["base_url"] is None
+
+
 def test_save_codex_auth_blocks_recovery_before_external_mutation(monkeypatch) -> None:
     fake_config = types.SimpleNamespace(load_warnings=("recovery required",), language="zh")
     monkeypatch.setattr(api, "load_config", lambda: fake_config)

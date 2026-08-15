@@ -9696,8 +9696,24 @@ def get_codex_auth() -> dict:
         config = load_config()
         cfg = getattr(getattr(config, "agents", None), "codex", None)
         configured_mode = getattr(cfg, "auth_mode", None)
+        configured_base_url = getattr(cfg, "base_url", None)
     except Exception:
         configured_mode = None
+        configured_base_url = None
+
+    # Disk-first with the V2Config capture as fallback. The disk chain
+    # (active provider → managed → legacy) is what a live Codex launch
+    # would use. After an OAuth transition clears the provider pointer,
+    # the user's relay section is orphaned and unreadable on disk — the
+    # V2Config value captured at that transition
+    # (``AgentAuthService._persist_backend_auth_mode``) is the persisted
+    # recovery marker, so the Settings form still pre-populates and the
+    # next API-key save restores the relay instead of silently sending
+    # the key to ``api.openai.com``.
+    if isinstance(configured_base_url, str) and configured_base_url.strip():
+        effective_base_url: str | None = disk_state.get("base_url") or configured_base_url.strip()
+    else:
+        effective_base_url = disk_state.get("base_url")
 
     # Disk wins when it carries unambiguous evidence of API-key auth: an
     # ``OPENAI_API_KEY`` in ``~/.codex/auth.json`` is a concrete artefact
@@ -9735,7 +9751,7 @@ def get_codex_auth() -> dict:
         "has_api_key": has_api_key_live,
         "api_key_length": int(disk_state.get("api_key_length") or 0),
         "api_key_masked": _mask_api_key(disk_state.get("api_key_raw")),
-        "base_url": disk_state.get("base_url"),
+        "base_url": effective_base_url,
         "has_chatgpt_tokens": has_chatgpt_live,
         "chatgpt_account": disk_state.get("chatgpt_account"),
         # Forward the live Codex credentials-store status so the UI can
