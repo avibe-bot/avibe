@@ -387,17 +387,27 @@ class AgentService:
             # synchronously: deferring it behind the generic terminal tidy can
             # leave the next turn waiting forever if that best-effort emit stalls.
             if prewrite_user_stop_requested(request.context):
+                dispatcher = getattr(self.controller, "message_dispatcher", None)
+                status_key_for_context = getattr(dispatcher, "status_key_for_context", None)
+                consolidated_key = (
+                    status_key_for_context(request.context)
+                    if callable(status_key_for_context)
+                    else None
+                )
                 self.release_runtime_turn_key(runtime_key, gate.token)
                 cleanup = getattr(
-                    getattr(self.controller, "message_dispatcher", None),
+                    dispatcher,
                     "finish_prewrite_stop_surfaces",
                     None,
                 )
-                if callable(cleanup):
+                if callable(cleanup) and consolidated_key is not None:
                     try:
                         async def _cleanup_prewrite_stop_surfaces() -> None:
                             try:
-                                await cleanup(request.context)
+                                await cleanup(
+                                    request.context,
+                                    consolidated_key=consolidated_key,
+                                )
                             except Exception:
                                 logger.debug(
                                     "Failed to clean prewrite Stop surfaces",

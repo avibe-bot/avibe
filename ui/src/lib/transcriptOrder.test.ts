@@ -26,7 +26,8 @@ const claimed = (id: string, createdAt: string, text = 'pending'): WorkbenchMess
   ({
     ...mk(id, createdAt),
     text,
-    metadata: { workbench_claimed_delivery: true },
+    projection: 'claimed_delivery',
+    metadata: {},
   }) as WorkbenchMessage;
 
 describe('messageOrderTimeMs', () => {
@@ -299,5 +300,14 @@ describe('reconcileWorkbenchClaimedDeliveries', () => {
 
     expect(ids(reconciled)).toEqual(['accepted', 'stable']);
     expect(reconciled[0]).toEqual(accepted);
+  });
+
+  it('does not treat persisted user metadata as a projection marker', () => {
+    const durable = {
+      ...mk('durable', t(1)),
+      metadata: { workbench_claimed_delivery: true },
+    } as WorkbenchMessage;
+
+    expect(reconcileWorkbenchClaimedDeliveries([durable], [])).toEqual([durable]);
   });
 });

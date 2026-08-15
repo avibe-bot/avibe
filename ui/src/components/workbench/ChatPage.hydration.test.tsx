@@ -249,7 +249,7 @@ describe('ChatPage transcript hydration', () => {
     expect(screen.queryByText('chat.transcriptEmpty')).toBeNull();
   });
 
-  it('removes a retired claimed Delivery projection when the turn settles', async () => {
+  it('removes a retired claimed Delivery projection during reconnect recovery', async () => {
     const projected = {
       id: 'delivery-claimed',
       scope_id: 'scope-1',
@@ -262,9 +262,10 @@ describe('ChatPage transcript hydration', () => {
       author_name: null,
       native_message_id: null,
       parent_native_message_id: null,
+      projection: 'claimed_delivery' as const,
       text: 'claimed input still visible',
       content: {},
-      metadata: { workbench_claimed_delivery: true },
+      metadata: {},
       created_at: '2026-08-15T00:00:00Z',
       updated_at: '2026-08-15T00:00:00Z',
       delivered_at: null,
@@ -285,7 +286,7 @@ describe('ChatPage transcript hydration', () => {
     );
 
     await waitFor(() => expect(screen.getByText(projected.text)).toBeTruthy());
-    act(() => mocks.events?.onTurnEnd({ session_id: 'session-new' }));
+    act(() => mocks.events?.onConnected());
 
     await waitFor(() => expect(screen.queryByText(projected.text)).toBeNull());
     expect(mocks.api.listSessionMessages).toHaveBeenCalledWith('session-new', {

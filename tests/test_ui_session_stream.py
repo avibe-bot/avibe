@@ -1278,7 +1278,8 @@ def test_message_delivery_024_claimed_active_input_survives_transcript_reload(
         assert rows[0]["metadata"]["merged_delivery_ids"] == [
             delivery["id"] for delivery in claimed["deliveries"]
         ]
-        assert rows[0]["metadata"]["workbench_claimed_delivery"] is True
+        assert rows[0]["projection"] == "claimed_delivery"
+        assert rows[0]["delivered_at"] == claimed["turn"]["started_at"]
         assert "resource_user_context" not in rows[0]["metadata"]
 
     with create_sqlite_engine().connect() as conn:
@@ -1307,6 +1308,7 @@ def test_message_delivery_024_claimed_active_input_survives_transcript_reload(
     accepted_rows = accepted_response.get_json()["messages"]
     assert accepted_rows[0]["id"] == first_delivery["id"]
     assert accepted_rows[0]["text"] == "first input\nsecond input"
+    assert "projection" not in accepted_rows[0]
     assert "workbench_claimed_delivery" not in accepted_rows[0]["metadata"]
 
     from core.services import sessions as sessions_service
@@ -1329,6 +1331,40 @@ def test_message_delivery_024_claimed_active_input_survives_transcript_reload(
     )
     im_response = client.get(f"/api/sessions/{im_session_id}/messages?tail=1")
     assert im_response.get_json()["messages"] == []
+
+
+def test_claimed_projection_follows_the_result_before_its_turn(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-024: projection enters at claim time, not submission time."""
+
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(
+        tmp_path,
+        agent_name="opencode-order",
+        agent_backend="opencode",
+    )
+    with create_sqlite_engine().begin() as conn:
+        result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            message_type="result",
+            text="previous turn result",
+        )
+    claimed = _seed_claimed_batch(
+        scope_id=scope_id,
+        session_id=session_id,
+        texts=["next turn input"],
+    )
+
+    response = app.test_client().get(f"/api/sessions/{session_id}/messages?tail=1")
+
+    assert response.status_code == 200
+    rows = response.get_json()["messages"]
+    assert [row["id"] for row in rows] == [result["id"], claimed["deliveries"][0]["id"]]
+    assert rows[1]["delivered_at"] == claimed["turn"]["started_at"]
 
 
 def test_chat_bootstrap_filters_harness_activities_for_viewer(isolated_state, tmp_path):

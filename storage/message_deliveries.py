@@ -1243,12 +1243,7 @@ def claimed_workbench_message_payload(
         and snapshot.get("source") == "user"
     ):
         return None
-    payload = _delivery_payload_from_snapshot(deliveries[0], snapshot)
-    payload["metadata"] = {
-        **payload["metadata"],
-        "workbench_claimed_delivery": True,
-    }
-    return payload
+    return _delivery_payload_from_snapshot(deliveries[0], snapshot)
 
 
 def materialize_start_acceptance(

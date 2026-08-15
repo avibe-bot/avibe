@@ -1417,6 +1417,7 @@ def test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy(
             await surface_cleanup_release.wait()
 
         controller.message_dispatcher = SimpleNamespace(
+            status_key_for_context=Mock(return_value="status:first"),
             finish_prewrite_stop_surfaces=AsyncMock(side_effect=_stall_surface_cleanup),
         )
         service = AgentService(controller=controller)
@@ -1447,8 +1448,10 @@ def test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy(
         assert gate.token == ""
         controller.emit_agent_message.assert_not_awaited()
         controller.session_turns.on_native_terminal.assert_not_called()
+        controller.message_dispatcher.status_key_for_context.assert_called_once_with(first.context)
         controller.message_dispatcher.finish_prewrite_stop_surfaces.assert_awaited_once_with(
-            first.context
+            first.context,
+            consolidated_key="status:first",
         )
 
         second = _request("second")

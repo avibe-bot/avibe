@@ -8978,7 +8978,11 @@ def _active_unmaterialized_input(conn, session_id: str) -> dict[str, Any] | None
     if payload is None:
         return None
     payload = message_deliveries.public_delivery_payload(payload)
-    payload.update(delivered_at=None, read_at=None)
+    payload.update(
+        projection="claimed_delivery",
+        delivered_at=turn.get("started_at") or turn.get("created_at"),
+        read_at=None,
+    )
     return payload
 
 
@@ -8994,7 +8998,12 @@ def _append_active_input(
     if any(str(row.get("id") or "") == str(active_input["id"]) for row in current):
         return messages_result
     current.append(active_input)
-    current.sort(key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")))
+    current.sort(
+        key=lambda row: (
+            str(row.get("delivered_at") or row.get("created_at") or ""),
+            str(row.get("id") or ""),
+        )
+    )
     return {**messages_result, "messages": current}
 
 

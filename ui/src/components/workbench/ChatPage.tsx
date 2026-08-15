@@ -927,16 +927,16 @@ export const ChatPage: React.FC = () => {
   // Does NOT touch ``working``: ``turn.end`` is the authoritative end signal, and
   // clearing on a fetched (possibly older) result could hide Stop on a newer
   // queued turn that is still in flight (Codex P2). Cheap + idempotent.
-  const reconcile = useCallback(async (settleClaimedDeliveries = false) => {
+  const reconcile = useCallback(async ({ force = false }: { force?: boolean } = {}) => {
     if (!sessionId) return;
-    if (historicalWindowRef.current && !settleClaimedDeliveries) return;
+    if (historicalWindowRef.current && !force) return;
     // Reader scrolled up in an already-capped window: don't recover tail rows they
     // aren't looking at into the DOM — detach the live tail so jump-to-latest
     // reloads it. Synchronous flip (not via the [messages] effect) so the same
     // commit gates mark-read. Bounds repeated-gap growth: once historical, this
     // early-returns above. Mirrors the onMessageNew ingest policy.
     if (
-      !settleClaimedDeliveries &&
+      !force &&
       !followingTailRef.current &&
       messagesRef.current.length >= MAX_RETAINED_MESSAGES
     ) {
@@ -950,9 +950,10 @@ export const ChatPage: React.FC = () => {
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
       const fresh = res.messages.filter(isTranscriptMessage);
       setMessages((prev) => {
-        const reconciled = settleClaimedDeliveries
-          ? reconcileWorkbenchClaimedDeliveries(prev, fresh)
-          : prev;
+        // The tail endpoint includes the one active claimed projection, if any,
+        // so every successful recovery read is authoritative for projection
+        // replacement/removal even when turn.end was missed.
+        const reconciled = reconcileWorkbenchClaimedDeliveries(prev, fresh);
         if (historicalWindowRef.current) return reconciled;
         const merged = mergeById(reconciled, fresh);
         // Following the tail: keep the window capped. A gap larger than the tail
@@ -1400,7 +1401,7 @@ export const ChatPage: React.FC = () => {
           // so the header picks up both that route and a first native bind.
           void refreshSessionRow();
           void syncTurnState();
-          void reconcile(true);
+          void reconcile({ force: true });
         }
       },
       onQueueUpdated: (data) => {
@@ -1439,7 +1440,7 @@ export const ChatPage: React.FC = () => {
         // Every (re)connect recovers any state missed while the socket was down:
         // dropped message rows, the queue, whether a turn is still running, and
         // a native bind whose turn.end we missed.
-        void reconcile();
+        void reconcile({ force: true });
         void refreshQueue();
         void syncTurnState({ quiet: true });
         void refreshSessionRow();
@@ -1481,7 +1482,7 @@ export const ChatPage: React.FC = () => {
       if (document.visibilityState !== 'visible') return;
       // A suspended tab can drop the reply AND the turn.end, so recover all
       // three: missed rows, the queue, and the working/Stop state (Codex P2).
-      void reconcile();
+      void reconcile({ force: true });
       void refreshQueue();
       void syncTurnState({ quiet: true });
       void refreshSessionRow();

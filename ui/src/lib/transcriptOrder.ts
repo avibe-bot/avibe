@@ -96,7 +96,7 @@ function mergeReconcileMetadata(
 }
 
 export const isWorkbenchClaimedDelivery = (message: WorkbenchMessage): boolean =>
-  message.metadata?.workbench_claimed_delivery === true;
+  message.projection === 'claimed_delivery';
 
 /** Merge a fetched anchor window without trimming away the row it is meant to reveal. */
 export const mergeAnchorWindow = (
