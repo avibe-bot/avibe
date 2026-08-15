@@ -1078,6 +1078,179 @@ def test_merged_delivery_reports_provider_failure_per_owner(monkeypatch, tmp_pat
     engine.dispose()
 
 
+def test_persisted_ring_survives_delivery_process_restart(monkeypatch, tmp_path):
+    """A fresh delivery process hydrates the stored ring instead of truncating it."""
+
+    from core.chat_discovery import get_state_meta, set_state_meta
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-15T00:00:00Z"
+    pre_restart_entry = {
+        "at": "2026-08-15T00:00:00Z",
+        "message_id": "msg_before_restart",
+        "session_id": "ses_push_hydrate",
+        "owners": {
+            "remote:user-a": {"policy": "personal", "disposition": "sent", "reason": ""}
+        },
+        "disposition": "sent",
+    }
+    set_state_meta(
+        web_push_notifications._DELIVERY_DISPOSITIONS_STATE_KEY,
+        [pre_restart_entry],
+    )
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_hydrate",
+            session_id="ses_push_hydrate",
+            title="Hydrate Push",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_hydrate",
+            user_keys=["remote:user-a"],
+            records=[_remote_authorization_record("remote:user-a")],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_hydrate")
+        _upsert_subscriptions(conn, "remote:user-a")
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Hydrate Push",
+            "body": "Done",
+            "session_id": "ses_push_hydrate",
+            "message_id": message["id"],
+        }
+    )
+
+    stored = get_state_meta(web_push_notifications._DELIVERY_DISPOSITIONS_STATE_KEY)
+    assert [entry["message_id"] for entry in stored] == [
+        "msg_before_restart",
+        message["id"],
+    ]
+    engine.dispose()
+
+
+def test_merged_owner_without_endpoint_reports_no_subscription(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-15T00:00:00Z"
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_owner_no_endpoint",
+            session_id="ses_push_owner_no_endpoint",
+            title="Owner No Endpoint",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_owner_no_endpoint",
+            user_keys=["remote:user-a", "remote:user-b"],
+            records=[
+                _remote_authorization_record("remote:user-a"),
+                _remote_authorization_record("remote:user-b"),
+            ],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_owner_no_endpoint")
+        # Only user-a has an enabled subscription.
+        _upsert_subscriptions(conn, "remote:user-a")
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Owner No Endpoint",
+            "body": "Done",
+            "session_id": "ses_push_owner_no_endpoint",
+            "message_id": message["id"],
+        }
+    )
+
+    assert len(sends) == 1
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    owners = recent[0]["owners"]
+    assert owners["remote:user-a"]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    assert (
+        owners["remote:user-b"]["disposition"]
+        == web_push_notifications.WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION
+    )
+    engine.dispose()
+
+
+def test_read_suppressed_attempt_is_attributed_to_its_owners(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-15T00:00:00Z"
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_suppressed",
+            session_id="ses_push_suppressed",
+            title="Suppressed Push",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_suppressed",
+            user_keys=["remote:user-a"],
+            records=[_remote_authorization_record("remote:user-a")],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_suppressed")
+        messages_service.mark_session_read(conn, "ses_push_suppressed", until_message_id=message["id"])
+        _upsert_subscriptions(conn, "remote:user-a")
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Suppressed Push",
+            "body": "Done",
+            "session_id": "ses_push_suppressed",
+            "message_id": message["id"],
+        }
+    )
+
+    assert sends == []
+    scoped = web_push_notifications.recent_delivery_dispositions(user_key="remote:user-a")
+    assert len(scoped) == 1
+    assert scoped[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SUPPRESSED_READ
+    assert (
+        scoped[0]["owners"]["remote:user-a"]["disposition"]
+        == web_push_notifications.WEB_PUSH_DISPOSITION_SUPPRESSED_READ
+    )
+    engine.dispose()
+
+
 def test_scoped_dispositions_redact_other_owners(monkeypatch, tmp_path):
     from core.chat_discovery import set_state_meta
 
@@ -1708,7 +1881,10 @@ def test_authorized_owner_without_subscription_records_no_subscription(monkeypat
     assert sends == []
     recent = web_push_notifications.recent_delivery_dispositions(user_key="remote:user-a")
     assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION
-    assert recent[0]["owners"]["remote:user-a"]["disposition"] is None
+    assert (
+        recent[0]["owners"]["remote:user-a"]["disposition"]
+        == web_push_notifications.WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION
+    )
     engine.dispose()
 
 

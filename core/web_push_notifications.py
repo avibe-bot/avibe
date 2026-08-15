@@ -439,10 +439,18 @@ def _new_delivery_attempt(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _finish_delivery_attempt(attempt: dict[str, Any], disposition: str) -> None:
     attempt["disposition"] = disposition
-    # The durable write stays INSIDE the lock: two concurrent delivery threads
-    # snapshotting the deque and persisting afterwards could let the older
-    # snapshot overwrite the newer entry.
+    # The deque snapshot and the durable `state_meta` write stay inside one
+    # lock-held critical section: two concurrent delivery threads could
+    # otherwise let the older snapshot overwrite the newer persisted entry.
+    # The deque is hydrated from the persisted ring first so a process restart
+    # (empty deque, stored history intact) appends instead of truncating.
     with _RECENT_DELIVERY_LOCK:
+        if not _RECENT_DELIVERY_DISPOSITIONS:
+            stored = _stored_delivery_dispositions()
+            if stored:
+                _RECENT_DELIVERY_DISPOSITIONS.extend(
+                    stored[-_RECENT_DELIVERY_DISPOSITIONS.maxlen :]
+                )
         _RECENT_DELIVERY_DISPOSITIONS.append(attempt)
         entries = list(_RECENT_DELIVERY_DISPOSITIONS)
         _store_delivery_dispositions(entries)
@@ -773,14 +781,22 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
     engine = create_sqlite_engine()
     try:
         with engine.connect() as conn:
-            if not _message_still_unread(conn, payload.get("message_id")):
-                logger.debug("web push: skip notification for message already read or missing")
-                _finish_delivery_attempt(attempt, WEB_PUSH_DISPOSITION_SUPPRESSED_READ)
-                return
             session_id, owner_metadata = _web_push_owner_metadata_for_message(
                 conn,
                 payload.get("message_id"),
             )
+            if not _message_still_unread(conn, payload.get("message_id")):
+                # Attribute the suppression to the resolved owners so the
+                # scoped status surface can still explain this outcome.
+                logger.debug("web push: skip notification for message already read or missing")
+                for user_key in _metadata_user_keys(owner_metadata):
+                    attempt["owners"][user_key] = {
+                        "policy": "local" if user_key == "local" else "unknown",
+                        "disposition": WEB_PUSH_DISPOSITION_SUPPRESSED_READ,
+                        "reason": "message was read or missing before the delivery delay elapsed",
+                    }
+                _finish_delivery_attempt(attempt, WEB_PUSH_DISPOSITION_SUPPRESSED_READ)
+                return
             decisions = _resolve_owner_authorization_decisions(owner_metadata)
             user_keys = _metadata_user_keys(owner_metadata)
             for user_key in user_keys:
@@ -882,6 +898,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     seen_endpoints.add(endpoint)
                     deliveries.append((subscription, badge_counts[user_key], user_key))
         if not deliveries:
+            _mark_owners_without_delivery(attempt, [])
             _finish_delivery_attempt(attempt, WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION)
             logger.info(
                 "web push: notification for message %s skipped: no enabled subscription",
@@ -915,7 +932,9 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                 failed_count += 1
                 owner_failed_counts[delivery_owner] = owner_failed_counts.get(delivery_owner, 0) + 1
         # Provider outcomes are per owner: in a merged delivery the owner whose
-        # endpoint failed must not be told the attempt was sent.
+        # endpoint failed must not be told the attempt was sent, and an
+        # authorized owner with no enabled endpoint is told so explicitly.
+        _mark_owners_without_delivery(attempt, [owner for _s, _b, owner in deliveries])
         for delivery_owner in {owner for _s, _b, owner in deliveries}:
             owner_entry = attempt["owners"].setdefault(
                 delivery_owner,
@@ -931,3 +950,12 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
         )
     finally:
         engine.dispose()
+
+
+def _mark_owners_without_delivery(attempt: dict[str, Any], delivered_owners: list[str]) -> None:
+    """Label authorized owners that received no endpoint delivery."""
+
+    delivered = set(delivered_owners)
+    for user_key, owner_entry in attempt["owners"].items():
+        if user_key not in delivered and owner_entry.get("disposition") is None:
+            owner_entry["disposition"] = WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION

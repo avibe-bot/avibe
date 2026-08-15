@@ -75,6 +75,12 @@ skip was only logged at debug level.
     the durable disposition write is serialized inside the writer lock;
     provider outcomes are recorded per owner in merged deliveries; scoped
     disposition reads redact other merged owners.
+  - Review round 3 hardening (Codex findings): the disposition deque hydrates
+    from the persisted ring so a delivery-process restart appends instead of
+    truncating history; authorized owners without an enabled endpoint are
+    labeled `no_subscription` in merged deliveries; read-suppressed attempts
+    resolve and attribute their owners so the scoped surface can explain the
+    suppression.
 - `vibe/ui_server.py`:
   - `_web_push_user_key()` no longer applies the 12-hour refresh cutoff;
     `parse_session_cookie` still enforces signature, expiry, and confirmed
