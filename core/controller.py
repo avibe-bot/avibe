@@ -2361,6 +2361,7 @@ class Controller:
         attachment_reservation: object = None,
         attachment_config_generation: int | None = None,
         attachment_failure_reasons: object = None,
+        attachment_text_only: bool = False,
         admission_ready: asyncio.Event | None = None,
     ) -> Awaitable[None]:
         """Submit one eligible attributed human turn after session resolution.
@@ -2378,6 +2379,7 @@ class Controller:
             attachment_reservation=attachment_reservation,
             attachment_config_generation=attachment_config_generation,
             attachment_failure_reasons=attachment_failure_reasons,
+            attachment_text_only=attachment_text_only,
             admission_ready=admission_ready,
             observed_runtime=getattr(self, "memory_runtime", None),
         )
@@ -2392,6 +2394,7 @@ class Controller:
         attachment_reservation: object = None,
         attachment_config_generation: int | None = None,
         attachment_failure_reasons: object = None,
+        attachment_text_only: bool = False,
         admission_ready: asyncio.Event | None = None,
         observed_runtime: object,
     ) -> None:
@@ -2417,6 +2420,12 @@ class Controller:
         try:
             if admission.admits_attachment_turn(facts):
                 if reservation is None:
+                    await self._capture_user_memory_decided(
+                        admission,
+                        self._memory_attachment_text_fallback(facts),
+                        attachment_lease=None,
+                        observed_runtime=observed_runtime,
+                    )
                     return
                 principal_id = admission.principal_for(facts)
                 project_id = admission.project_for(facts)
@@ -2440,8 +2449,14 @@ class Controller:
                             admission_ready.set()
                         await self._capture_user_memory_decided(
                             admission,
-                            facts,
-                            attachment_lease=attachment_lease,
+                            (
+                                self._memory_attachment_text_fallback(facts)
+                                if attachment_text_only
+                                else facts
+                            ),
+                            attachment_lease=(
+                                None if attachment_text_only else attachment_lease
+                            ),
                             observed_runtime=observed_runtime,
                             held_admission=held_admission,
                         )
@@ -2459,6 +2474,23 @@ class Controller:
                 reservation.release()
             if admission_ready is not None:
                 admission_ready.set()
+
+    @staticmethod
+    def _memory_attachment_text_fallback(
+        facts: InboundTurnFacts,
+    ) -> InboundTurnFacts:
+        """Keep an admitted attachment turn's caption after attachment failure."""
+
+        return replace(
+            facts,
+            files=(),
+            is_ordinary_text=True,
+            is_ordinary_attachment=False,
+            attachment_lease=None,
+            attachment_capture_status=None,
+            attachment_config_generation=None,
+            attachment_failures=None,
+        )
 
     async def _capture_user_memory_decided(
         self,

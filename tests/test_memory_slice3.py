@@ -327,6 +327,79 @@ def test_slack_memory_reservation_survives_without_multimodal_opt_in() -> None:
     assert reservation.config_generation is None
 
 
+def test_attachment_reservation_failure_preserves_caption_as_text_only() -> None:
+    """Scenario: MEMORY-IM-ATTACH-004."""
+
+    controller = _controller()
+    controller.memory_module.reserve_capture_admission = Mock(
+        side_effect=RuntimeError("reservation unavailable")
+    )
+    context = _context("slack", ordinary=False)
+    context.files = [
+        FileAttachment(
+            name="receipt.pdf",
+            mimetype="application/pdf",
+            url="https://files.slack.test/private",
+        )
+    ]
+    context.is_ordinary_attachment = True
+
+    reservation = controller.reserve_memory_attachment_capture(
+        context,
+        "stable-session",
+    )
+    assert reservation is None
+
+    asyncio.run(
+        controller.capture_user_memory(
+            context,
+            "keep the caption",
+            "stable-session",
+            attachment_reservation=reservation,
+        )
+    )
+
+    assert len(controller.memory_module.accepted) == 1
+    request = controller.memory_module.accepted[0]
+    assert request.text == "keep the caption"
+    assert request.attachments == ()
+
+
+def test_retained_lease_failure_preserves_reserved_caption_as_text_only() -> None:
+    """Scenario: MEMORY-IM-ATTACH-004."""
+
+    controller = _controller()
+    context = _context("slack", ordinary=False)
+    context.files = [
+        FileAttachment(
+            name="receipt.pdf",
+            mimetype="application/pdf",
+            url="https://files.slack.test/private",
+        )
+    ]
+    context.is_ordinary_attachment = True
+    reservation = controller.reserve_memory_attachment_capture(
+        context,
+        "stable-session",
+    )
+    assert reservation is not None
+
+    asyncio.run(
+        controller.capture_user_memory(
+            context,
+            "keep the caption",
+            "stable-session",
+            attachment_reservation=reservation,
+            attachment_text_only=True,
+        )
+    )
+
+    assert len(controller.memory_module.accepted) == 1
+    request = controller.memory_module.accepted[0]
+    assert request.text == "keep the caption"
+    assert request.attachments == ()
+
+
 def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
     """Scenario: MEMORY-IM-ATTACH-003."""
 

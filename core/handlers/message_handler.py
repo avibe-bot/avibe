@@ -763,6 +763,7 @@ class MessageHandler(BaseHandler):
                 if callable(capture_memory):
                     memory_attachment_lease = None
                     memory_capture_reservation = None
+                    attachment_text_only = False
                     capture_task = None
                     try:
                         turn_lifecycle_admission = await self._acquire_memory_capture_admission(
@@ -792,7 +793,15 @@ class MessageHandler(BaseHandler):
                             and attachment_config_generation >= 0
                             and attachment_lease is not None
                         ):
-                            memory_attachment_lease = attachment_lease.retain()
+                            try:
+                                memory_attachment_lease = attachment_lease.retain()
+                            except Exception:
+                                attachment_text_only = True
+                                logger.warning(
+                                    "Memory attachment lease could not be retained; "
+                                    "capturing text only",
+                                    exc_info=True,
+                                )
                         capture_options = {
                             "attachment_reservation": memory_capture_reservation,
                             "attachment_config_generation": attachment_config_generation,
@@ -803,6 +812,8 @@ class MessageHandler(BaseHandler):
                             )
                         if memory_attachment_lease is not None:
                             capture_options["attachment_lease"] = memory_attachment_lease
+                        if attachment_text_only:
+                            capture_options["attachment_text_only"] = True
                         capture = capture_memory(
                             context,
                             control_message,

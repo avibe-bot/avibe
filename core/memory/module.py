@@ -748,8 +748,8 @@ class MemoryModule:
         """Pin and enqueue one validated capture under the provider-root fence."""
 
         pinned_bundle: PinnedBundle | None = None
-        try:
-            if request.attachments:
+        if request.attachments:
+            try:
                 if source_lease is None:
                     pinned_bundle = await run_blocking(
                         self._attachment_store.pin,
@@ -761,6 +761,24 @@ class MemoryModule:
                         request.attachments,
                         source_lease=source_lease,
                     )
+            except Exception as error:
+                if normalized_text.strip():
+                    return await self._capture_under_root(
+                        replace(
+                            request,
+                            attachments=(),
+                            attachment_config_generation=None,
+                        ),
+                        normalized_text,
+                        source_lease=None,
+                    )
+                if isinstance(error, AttachmentPinError):
+                    return await self._capture_pin_failure(error.error)
+                if isinstance(error, UnicodeError):
+                    return await self._skipped_with_missed("memory_invalid_input")
+                return OperationFailed(error="memory_store_unavailable")
+
+        try:
             attachment_payload = (
                 encode_pinned_bundle(pinned_bundle)
                 if pinned_bundle is not None
@@ -791,18 +809,6 @@ class MemoryModule:
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
                 nonterminal_limit=MAX_NONTERMINAL_QUEUE_ROWS,
             )
-        except AttachmentPinError as error:
-            if normalized_text.strip() and request.attachments:
-                return await self._capture_under_root(
-                    replace(
-                        request,
-                        attachments=(),
-                        attachment_config_generation=None,
-                    ),
-                    normalized_text,
-                    source_lease=None,
-                )
-            return await self._capture_pin_failure(error.error)
         except UnicodeError:
             if pinned_bundle is not None:
                 await self._release_unadmitted_bundle(pinned_bundle.bundle_id)

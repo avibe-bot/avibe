@@ -558,6 +558,82 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(("capture", retained_lease), events)
 
+    async def test_memory_lease_retain_failure_still_schedules_caption_capture(self):
+        """Scenario: MEMORY-IM-ATTACH-004."""
+
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        reservation = _capture_reservation()
+        controller.reserve_memory_attachment_capture = Mock(
+            return_value=reservation
+        )
+        captured = []
+
+        async def capture_user_memory(
+            _context,
+            text,
+            _session_id,
+            *,
+            attachment_reservation,
+            attachment_config_generation,
+            attachment_text_only,
+        ):
+            self.assertIs(attachment_reservation, reservation)
+            self.assertEqual(attachment_config_generation, 1)
+            self.assertIs(attachment_text_only, True)
+            captured.append(text)
+
+        controller.capture_user_memory = capture_user_memory
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="remember this")
+        lease = Mock()
+        lease.retain.side_effect = RuntimeError("retain failed")
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                lease=lease,
+            )
+        )
+
+        async def admit(**_kwargs):
+            lease.adopt()
+            lease.release()
+            return True
+
+        handler._admit_human_delivery = AsyncMock(side_effect=admit)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-retain-failure",
+            platform="slack",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        await handler.handle_user_message(context, "remember this")
+        await handler.drain_memory_capture_tasks()
+
+        self.assertEqual(captured, ["remember this"])
+        lease.retain.assert_called_once_with()
+        lease.adopt.assert_called_once_with()
+        lease.release.assert_called_once_with()
+
     async def test_denied_attachment_turn_does_not_retain_a_memory_lease(self):
         """Scenario: MEMORY-IM-ATTACH-002."""
 

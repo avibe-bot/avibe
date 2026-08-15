@@ -198,7 +198,7 @@ class CaptureAdmission:
                 if status == "ready" and config_generation is not None:
                     try:
                         selection = select_memory_attachments(facts.attachment_lease)  # type: ignore[arg-type]
-                    except (OSError, ValueError):
+                    except Exception:
                         _log_attachment_skip(platform, native_files, "unavailable")
                     else:
                         attachments = selection.attachments

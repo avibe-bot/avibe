@@ -302,7 +302,9 @@ all capture work to one late stage.
   an opt-out or endpoint replacement that completed while readiness was being read.
   A missing IM generation projects `not_configured` immediately and retains eligible
   text without performing a live health read. Workbench alone keeps its one-cycle
-  implicit compatibility path. Eligible text remains independently best effort.
+  implicit compatibility path. Eligible text remains independently best effort, and
+  that invariant must hold at every attachment-path failure or early return rather
+  than only for failures with an existing closed classification.
 - **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
   admission, the handler performs only an O(1), non-blocking, local registration of
   an exact-session Memory capture ticket. Registration records FIFO order but never
@@ -392,3 +394,10 @@ Hermetic tests prove the product contracts without live platform credentials.
 After all five slices merge, the orchestrator's integration pass should verify one
 eligible image and one rejected file on every configured IM platform in the local
 Incus regression environment, preserving accumulated product state.
+
+The final PR4 invariant audit also found five pre-existing paths outside this
+slice's implementation files. The two bounded-wait spans are tracked by #1470;
+the materializer-wide failure, post-enqueue bundle failure, and deterministic
+provider attachment rejection paths are tracked by #1471. They remain outside
+PR4 so its Slack activation does not expand into coordinator, provider, store, or
+shared materializer changes.

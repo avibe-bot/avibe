@@ -484,6 +484,33 @@ def test_all_materialization_failures_keep_text_and_emit_one_skip(
     assert "count=1 reason=download_failed" in records[0].getMessage()
 
 
+def test_unexpected_attachment_selection_failure_keeps_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-004."""
+
+    monkeypatch.setattr(
+        "core.memory.admission.select_memory_attachments",
+        lambda _lease: (_ for _ in ()).throw(RuntimeError("selector failed")),
+    )
+
+    request = _admission().decide(
+        _facts(
+            text="keep this caption",
+            files=[object()],
+            is_ordinary_text=False,
+            is_ordinary_attachment=True,
+            attachment_lease=object(),
+            attachment_capture_status="ready",
+            attachment_config_generation=9,
+        )
+    )
+
+    assert isinstance(request, CaptureRequest)
+    assert request.text == "keep this caption"
+    assert request.attachments == ()
+
+
 def test_disabled_memory_is_answered_before_any_directory_lookup() -> None:
     principals = _Principals(raises=True)
     bindings = _Bindings(raises=True)

@@ -441,6 +441,34 @@ async def test_capture_pin_failure_preserves_mixed_turn_text(
     assert len(store.list_queue_rows()) == 1
 
 
+async def test_unexpected_capture_pin_failure_preserves_mixed_turn_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-004."""
+
+    attachment_store = _attachment_store()
+    module, store, _provider = _module(tmp_path, attachment_store=attachment_store)
+    attachment = _source_attachment("unexpected.png", b"original bytes")
+
+    def fail_pin(*_args, **_kwargs):
+        raise RuntimeError("unexpected pin failure")
+
+    monkeypatch.setattr(attachment_store, "pin", fail_pin)
+    mixed = replace(
+        _request(source="unexpected-pin-failure", attachments=(attachment,)),
+        text="keep this caption",
+        attachment_config_generation=7,
+    )
+
+    assert await module.capture(mixed) == CaptureAccepted()
+    rows = store.list_queue_rows()
+    assert len(rows) == 1
+    assert rows[0].payload_text == "keep this caption"
+    assert rows[0].payload_attachments is None
+    assert rows[0].attachment_bundle_id is None
+
+
 async def test_boot_reconcile_waits_for_attachment_admission_and_preserves_accepted_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
