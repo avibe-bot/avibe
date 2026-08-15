@@ -55,10 +55,10 @@ from core.memory.admission import (
     WORKBENCH_PLATFORM,
     CaptureAdmission,
     InboundTurnFacts,
-    log_attachment_skip,
 )
 from core.memory.blocking import run_blocking
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
+from core.memory.telemetry import log_attachment_skip
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)

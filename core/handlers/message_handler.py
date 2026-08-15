@@ -804,7 +804,7 @@ class MessageHandler(BaseHandler):
                             )
                         )
                         if stale_attachment_capture:
-                            from core.memory.admission import log_attachment_skip
+                            from core.memory.telemetry import log_attachment_skip
 
                             log_attachment_skip(
                                 str(context.platform or "unknown"),

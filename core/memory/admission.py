@@ -27,6 +27,7 @@ from core.memory.im_attachments import (
     IM_ATTACHMENT_CAPTURE_PLATFORMS,
     select_memory_attachments,
 )
+from core.memory.telemetry import log_attachment_skip
 from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 
 
@@ -295,17 +296,6 @@ def _native_file_count(value: object) -> int | None:
 def _has_native_files(value: object) -> bool:
     count = _native_file_count(value)
     return count is not None and count > 0
-
-
-def log_attachment_skip(platform: str, count: int, reason: str) -> None:
-    """Record one aggregate attachment drop without native attachment detail."""
-
-    logger.info(
-        "memory_attachment_capture_skipped platform=%s count=%d reason=%s",
-        platform,
-        count,
-        reason,
-    )
 
 
 def _attributed_user_id(facts: InboundTurnFacts) -> str | None:

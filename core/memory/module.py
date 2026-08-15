@@ -18,7 +18,6 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar
 
 from config import paths
-from core.memory.admission import log_attachment_skip
 from core.memory.blocking import run_blocking
 from core.memory.attachments import (
     AttachmentPinError,
@@ -42,6 +41,7 @@ from core.memory.store import (
     MemoryStore,
     is_principal_id,
 )
+from core.memory.telemetry import log_attachment_skip
 from core.memory.types import (
     CaptureAccepted,
     CaptureAttachment,
