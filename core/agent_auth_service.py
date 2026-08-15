@@ -3502,33 +3502,43 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("post_web_success_hook failed for %s: %s", backend, err)
 
-    def _capture_codex_relay_for_oauth(self) -> dict | None:
-        """Record the live relay identity before OAuth cleanup.
+    def _capture_codex_relay_for_oauth(self) -> tuple[dict | None, bool]:
+        """Read the live relay identity before OAuth cleanup.
 
         Called immediately before ``_clear_codex_api_key_for_oauth``
         clears the provider pointer and drops the managed section; after
         that cleanup the relay is invisible on disk (Settings-created
         managed relays are deleted outright), so this is the only moment
-        its identity is observable. Returns the explicit marker dict
-        ``{"provider_id": str, "base_url": str}`` (chain resolution
-        covers both the ``model_provider`` pointer and our managed /
-        legacy sections). Failures degrade to ``None`` — a capture miss
-        only costs relay recovery on switch-back, never the OAuth flow.
+        its identity is observable. Returns
+        ``(marker, observed_api_key_auth)``:
+
+        - ``marker`` — ``{"provider_id": str, "base_url": str}`` when a
+          live relay is chain-readable (pointer or managed/legacy
+          section), else ``None``.
+        - ``observed_api_key_auth`` — True when the disk shows an active
+          API key WITHOUT any relay. That combination is the
+          official-key transition (e.g. ``codex login --with-api-key``
+          to the default endpoint): the user deliberately left relay
+          auth, so any earlier marker is stale and must be cleared
+          rather than retained for a future switch-back.
+
+        Failures degrade to ``(None, False)`` — a capture miss only
+        costs relay recovery on switch-back, never the OAuth flow.
         """
         try:
             from vibe.codex_config import read_codex_auth_state
 
             state = read_codex_auth_state()
-            base_url = state.get("base_url")
-            if not isinstance(base_url, str) or not base_url.strip():
-                return None
+        except Exception:  # noqa: BLE001
+            return None, False
+        base_url = state.get("base_url")
+        if isinstance(base_url, str) and base_url.strip():
             provider_id = state.get("active_provider_id")
             return {
                 "base_url": base_url.strip(),
-                "provider_id": provider_id if isinstance(provider_id, str) else "",
-            }
-        except Exception:  # noqa: BLE001
-            return None
+                "provider_id": provider_id if isinstance(provider_id, str) and provider_id.strip() else "",
+            }, False
+        return None, bool(state.get("has_api_key"))
 
     async def _clear_claude_settings_env_for_oauth(self) -> None:
         try:
@@ -3834,6 +3844,7 @@ class AgentAuthService:
     async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
         captured_codex_relay: dict | None = None
+        observed_codex_api_key_auth = False
         if backend == "claude" and auth_mode == "oauth":
             await self._clear_claude_settings_env_for_oauth()
         if backend == "codex" and auth_mode == "oauth":
@@ -3846,7 +3857,9 @@ class AgentAuthService:
             # Settings form and the next API-key save restore the relay
             # instead of silently rerouting the key to
             # ``api.openai.com`` (401s).
-            captured_codex_relay = self._capture_codex_relay_for_oauth()
+            captured_codex_relay, observed_codex_api_key_auth = (
+                self._capture_codex_relay_for_oauth()
+            )
             await self._clear_codex_api_key_for_oauth()
         try:
             config = getattr(self.controller, "config", None)
@@ -3880,8 +3893,23 @@ class AgentAuthService:
                     or bool(getattr(target, "base_url", None))
                     or getattr(target, "oauth_relay_marker", None) is not None
                     or captured_codex_relay is not None
+                    or observed_codex_api_key_auth
                 )
             )
+            # Relay-marker retention semantics for the OAuth transition:
+            #   fresh capture           → overwrite (latest relay wins)
+            #   official-key transition → clear (the user deliberately
+            #                            left relay auth; a stale marker
+            #                            would resurface and reroute a
+            #                            future key to the old relay)
+            #   repeated pure-OAuth     → retain (nothing new observed;
+            #                            the earlier capture stays valid)
+            if captured_codex_relay is not None:
+                resolved_codex_relay_marker: dict | None = captured_codex_relay
+            elif observed_codex_api_key_auth:
+                resolved_codex_relay_marker = None
+            else:
+                resolved_codex_relay_marker = getattr(target, "oauth_relay_marker", None)
             if not needs_mode_write and not needs_marker_write and not needs_codex_oauth_cleanup:
                 return
             try:
@@ -3903,9 +3931,7 @@ class AgentAuthService:
                         # — only an explicit API-key save or sign-out
                         # clears it.
                         target.base_url = None
-                        target.oauth_relay_marker = captured_codex_relay or getattr(
-                            target, "oauth_relay_marker", None
-                        )
+                        target.oauth_relay_marker = resolved_codex_relay_marker
                     saver()
             except ImportError:
                 if needs_mode_write:
@@ -3915,9 +3941,7 @@ class AgentAuthService:
                 if needs_codex_oauth_cleanup:
                     target.api_key = None
                     target.base_url = None
-                    target.oauth_relay_marker = captured_codex_relay or getattr(
-                        target, "oauth_relay_marker", None
-                    )
+                    target.oauth_relay_marker = resolved_codex_relay_marker
                 saver()
             if loaded_config is not None and config is not None:
                 compat_target = getattr(config, backend, None)
@@ -3929,12 +3953,7 @@ class AgentAuthService:
                     if needs_codex_oauth_cleanup:
                         setattr(compat_target, "api_key", None)
                         setattr(compat_target, "base_url", None)
-                        setattr(
-                            compat_target,
-                            "oauth_relay_marker",
-                            captured_codex_relay
-                            or getattr(compat_target, "oauth_relay_marker", None),
-                        )
+                        setattr(compat_target, "oauth_relay_marker", resolved_codex_relay_marker)
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",

@@ -378,6 +378,44 @@ def test_codex_oauth_success_clears_api_key_state(
     }
 
 
+def test_codex_oauth_after_official_key_transition_clears_stale_marker(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Official-key transition: the user ran ``codex login
+    --with-api-key`` against the default endpoint (active key, no relay)
+    and then signed in via OAuth. The pre-OAuth capture observes the
+    key-without-relay state, so the stale relay marker must be CLEARED —
+    retaining it would resurface the abandoned relay after OAuth removes
+    the key and reroute a future API-key save to it."""
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    # External official-key shape: API key, no relay anywhere.
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-official"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text('model = "gpt-5.4"\n', encoding="utf-8")
+
+    codex_cfg = SimpleNamespace(
+        auth_mode="api_key",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+    service.controller.config = SimpleNamespace(
+        language="en",
+        agents=SimpleNamespace(codex=codex_cfg),
+        save=lambda: None,
+    )
+
+    _run(service._invoke_post_web_success_hook("codex"))
+
+    assert codex_cfg.oauth_relay_marker is None
+
+
 def test_post_web_success_hook_swallows_exceptions(
     service: AgentAuthService,
     monkeypatch: pytest.MonkeyPatch,
