@@ -8,28 +8,40 @@
 
 This runbook validates the first Memory attachment release across Slack, Discord,
 Telegram, Lark, and WeChat. It is deliberately short: prepare five fixture pairs,
-send ten direct messages in two flush-bounded phases, and inspect the ten
-outcomes. The Agent's reply is not evidence of Memory capture; Memory runs
+send ten direct messages, wait for one shared idle-flush window, and inspect the
+ten outcomes. The Agent's reply is not evidence of Memory capture; Memory runs
 independently of Agent delivery.
+
+This owner-facing checklist uses only evidence visible in the product UI. It does
+not require container access, database queries, or log inspection. A property
+that needs engineering tools belongs in an automated contract test or a product
+observability issue, not in this checklist.
 
 ## Preconditions
 
-Do not start the ten-minute clock until all of these are true:
+Do not start the 15-minute clock until all of these are true:
 
 1. The authorized local Incus `master` target is healthy and still has its prior
    product state.
 2. Memory is enabled. In the Web UI, open **Memory > Processing Record** and verify
    **Engine status** is **Healthy**.
-3. In **Memory > Settings**, the **IM attachment processing model (optional)** has
+3. In **Memory > Processing Record**, verify **Call log** is **Recording
+   normally**. Open at least one recent terminal entry and confirm that **Model
+   calls** expands to a Request/Response payload. If the UI says **Model calls
+   weren't logged or have expired**, stop and record the run as `INCONCLUSIVE`.
+   Call recording is runtime state rather than a permanent capability:
+   `core/memory/sidecar_lifecycle.py` may disable `records_calls`, and
+   `MemoryLogPanel.tsx` renders the unavailable/expired state.
+4. In **Memory > Settings**, the **IM attachment processing model (optional)** has
    a complete base URL, model, and API key. This is the explicit opt-in required by
    `MEMORY-IM-ATTACH-003`.
-4. The human test account on each platform is enabled and bound to this Avibe
+5. The human test account on each platform is enabled and bound to this Avibe
    installation. Use a one-to-one direct message only. Group, channel, unbound,
    forwarded, edited, quoted, webhook, and system traffic stays outside this
    human baseline and is closed where the platform exposes the required facts.
    WeChat bot/self/system source exclusion remains unverified and is collected
    below; this checklist does not claim those sources are currently excluded.
-5. Record a run tag such as `IMA-20260816-0508`. Put it in every supported
+6. Record a run tag such as `IMA-20260816-0508`. Put it in every supported
    caption and in every fixture's pixel/file marker. Lark and WeChat native
    image/file messages are verified by bound user plus send timestamp rather
    than by assuming those clients support attachment captions.
@@ -53,30 +65,34 @@ production data.
 Use different markers for every platform. Keep a local table mapping each pair
 and marker to its platform; do not put that table in chat.
 
-## Ten-minute acceptance flow
+## 15-minute acceptance flow
 
-Run the accepted and rejected rows as separate phases. This separation matters:
-ordinary Memory adds otherwise wait for the five-minute idle flush, and a late
-accepted result could contaminate a rejected-row baseline.
+Send the ten fixtures first, then wait once. Idle flush is tracked per session,
+so waiting after the final send covers every platform without mutating any
+session-owned state.
 
-1. Record the newest processing entry and provider-call timestamp for each bound
-   user, then send all five accepted-image messages.
-2. In each of the same five direct-message sessions, send `/new` after the image
-   turn has been accepted for processing. Wait for the new-session acknowledgement.
-   `/new` invokes the old session's final Memory flush; it is the documented phase
-   boundary and avoids treating the five-minute idle timeout as a failure.
-3. Open **Memory > Processing Record**, refresh the processing log, and finish all
-   five accepted-row checks before continuing. Start the 60-second terminal-state
-   allowance only after the corresponding `/new` acknowledgement. A lifecycle
-   busy/flush error, a missing acknowledgement, or a non-terminal expected row
-   after that allowance is a recorded failure; do not continue to the rejected
-   phase with an unsettled accepted row.
-4. Record fresh per-user processing-entry and provider-call baselines. Send all
-   five rejected SVG messages, then send `/new` in each corresponding direct
-   message and wait for its acknowledgement.
-5. Refresh **Processing Record** and evaluate all five rejected rows against the
-   fresh baselines. Apply the same post-`/new` 60-second allowance where a
-   text-only entry is expected.
+1. In **Memory > Processing Record**, record the newest entry timestamp for each
+   bound platform user. This is the per-user high-water mark for the run.
+2. Within about two minutes, send each platform's accepted PNG and rejected SVG
+   as described in the table. The order within a platform does not affect the
+   result; finish all ten sends before waiting.
+3. Do not send another message in any tested session for at least **5 minutes 30
+   seconds after the final fixture**. The wait derives from
+   `core/memory/coordinator.py`'s `IDLE_FLUSH_TIMEOUT = 5 minutes`, with 30 seconds
+   of scheduling margin. `MAX_UNFLUSHED_AGE = 30 minutes` and
+   `MAX_UNFLUSHED_MESSAGES = 100` are fallback bounds, not the expected trigger
+   for this two-message-per-platform run.
+4. Refresh **Processing Record** and inspect all ten outcomes. Recheck that **Call
+   log** is **Recording normally** before interpreting accepted-image Model calls.
+   Allow the remaining clock time for terminal entries to appear.
+
+This flow deliberately does **not** use `/new`. That command tears down the Agent
+session and pauses session-bound tasks and watches
+(`core/handlers/command_handlers.py`), which conflicts with the long-lived
+`master` environment's state-preservation boundary. The shared idle window avoids
+those mutations and keeps the expected wall time near 15 minutes: roughly two
+minutes to send, 5.5 minutes idle, and the remaining time to inspect and record
+results.
 
 The processing log is the primary evidence because it covers every user and
 project on the installation; **Memory > Search** is scoped to the current
@@ -87,31 +103,40 @@ request must contain the image input and the response must describe or reproduce
 the pixel-only marker. The timeline and Memory snippet preview do not expose
 attachment-derived model output and therefore are not positive evidence.
 
-For a rejected SVG, inspect calls after the phase baseline and verify that no
-multimodal call has an image/attachment request attributable to that turn. A
-caption-bearing rejected turn must still produce its expected text-only entry;
-the Lark and WeChat file-only rows must produce neither a new processing entry nor
-an attributable multimodal call. A row passes only when the falsifiable condition
-below is met.
+For a rejected SVG, use only the post-baseline processing entries visible in the
+UI. A caption-bearing rejected turn must preserve its caption without showing the
+SVG filename as an attachment in the entry preview. The Lark and WeChat file-only
+rows must not produce an entry attributable to the rejected filename, marker,
+user, and send time. The hermetic `MEMORY-IM-ATTACH-004` scenario separately
+proves that a fully rejected attachment does not enter the multimodal provider
+path; the manual run does not try to reconstruct that engineering fact from an
+unobservable UI absence.
 
 | Platform | Scenario | Send | Pass condition in Memory > Processing Record |
 | --- | --- | --- | --- |
-| Slack | `MEMORY-IM-ATTACH-001` | In a bound human DM, send the Slack PNG with caption `<run-tag> slack accepted image`. | After `/new`, one terminal entry exists for the Slack user. Its **Model calls** contain an attributed multimodal request with the PNG and a response that describes or reproduces the PNG-only marker. |
-| Slack | `MEMORY-IM-ATTACH-004` | In the same DM, send the Slack SVG with caption `<run-tag> slack rejected file`. | After `/new`, the caption appears in a terminal text-only entry. No call after the phase baseline sends the SVG to the multimodal model, and no provider response contains its marker. |
-| Discord | `MEMORY-IM-ATTACH-005` | In a bound human DM, upload the Discord PNG as an ordinary attachment with caption `<run-tag> discord accepted image`. Do not add a link embed, component, sticker, or forward. | After `/new`, one terminal entry exists for the Discord user. Its attributed multimodal request contains the PNG and its response exposes the PNG-only marker. If the raw message has an automatic embed and no entry is created, fail this row and apply the Discord fixture decision below. |
-| Discord | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-005` | Upload the Discord SVG with caption `<run-tag> discord rejected file`. | After `/new`, the caption appears in a terminal text-only entry. No attributable multimodal request contains the SVG, and no provider response contains its marker. |
-| Telegram | `MEMORY-IM-ATTACH-006` | In a bound private chat, send the Telegram PNG as one photo message with caption `<run-tag> telegram accepted image`. Do not use an album. | After `/new`, one terminal entry exists for the Telegram user. Its attributed multimodal request contains the PNG and its response exposes the PNG-only marker. |
-| Telegram | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-006` | Send the Telegram SVG as one document with caption `<run-tag> telegram rejected file`. | After `/new`, the caption appears in a terminal text-only entry. No attributable multimodal request contains the SVG, and no provider response contains its marker. |
-| Lark | `MEMORY-IM-ATTACH-007` | In a bound one-to-one chat, send the Lark PNG through the native **image** action as one image-only message. The pixel marker includes the run tag. | After `/new`, exactly one terminal entry appears for the Lark user. Its attributed multimodal request contains the PNG and its response exposes the PNG-only marker. |
-| Lark | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-007` | Send the Lark SVG through the native **file** action as one file-only message. The filename includes the run tag; its visible SVG marker is different from the filename. | After `/new`, no processing entry or attributable multimodal call appears after the rejected-phase baseline, and no provider response contains the SVG-only marker. |
-| WeChat | `MEMORY-IM-ATTACH-008` | In a bound direct chat, send the WeChat PNG as one direct image item with no quoted/reference message. The pixel marker includes the run tag. | After `/new`, exactly one terminal entry appears for the WeChat user. Its attributed multimodal request contains the PNG and its response exposes the PNG-only marker. |
-| WeChat | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-008` | Send the WeChat SVG as one direct file item, with no quoted/reference message. The filename includes the run tag. | After `/new`, no processing entry or attributable multimodal call appears after the rejected-phase baseline, and no provider response contains the SVG-only marker. |
+| Slack | `MEMORY-IM-ATTACH-001` | In a bound human DM, send the Slack PNG with caption `<run-tag> slack accepted image`. | One post-baseline terminal entry exists for the Slack user. Its **Model calls** contain an attributed multimodal request with the image and a response that describes or reproduces the PNG-only marker. |
+| Slack | `MEMORY-IM-ATTACH-004` | In the same DM, send the Slack SVG with caption `<run-tag> slack rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Slack SVG filename as an attachment. |
+| Discord | `MEMORY-IM-ATTACH-005` | In a bound human DM, upload the Discord PNG as an ordinary attachment with caption `<run-tag> discord accepted image`. Do not add a link embed, component, sticker, or forward. | One post-baseline terminal entry exists for the Discord user. Its attributed multimodal request contains the image and its response exposes the PNG-only marker. If the raw message has an automatic embed and no entry is created, fail this row and apply the Discord fixture decision below. |
+| Discord | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-005` | Upload the Discord SVG with caption `<run-tag> discord rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Discord SVG filename as an attachment. |
+| Telegram | `MEMORY-IM-ATTACH-006` | In a bound private chat, send the Telegram PNG as one photo message with caption `<run-tag> telegram accepted image`. Do not use an album. | One post-baseline terminal entry exists for the Telegram user. Its attributed multimodal request contains the Telegram image input and its response exposes the PNG-only marker. The request may identify the normalized JPEG photo rather than the original PNG filename/MIME. |
+| Telegram | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-006` | Send the Telegram SVG as one document with caption `<run-tag> telegram rejected file`. | A post-baseline entry preserves the caption, and its preview does not show the Telegram SVG filename as an attachment. |
+| Lark | `MEMORY-IM-ATTACH-007` | In a bound one-to-one chat, send the Lark PNG through the native **image** action as one image-only message. The pixel marker includes the run tag. | One post-baseline terminal entry appears for the Lark user. Its attributed multimodal request contains the image input and its response exposes the PNG-only marker. |
+| Lark | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-007` | Send the Lark SVG through the native **file** action as one file-only message. The filename includes the run tag; its visible SVG marker is different from the filename. | No post-baseline entry is attributable to the rejected Lark filename, marker, user, and send time. |
+| WeChat | `MEMORY-IM-ATTACH-008` | In a bound direct chat, send the WeChat PNG as one direct image item with no quoted/reference message. The pixel marker includes the run tag. | One post-baseline terminal entry appears for the WeChat user. Its attributed multimodal request contains the image input and its response exposes the PNG-only marker. |
+| WeChat | `MEMORY-IM-ATTACH-004`, `MEMORY-IM-ATTACH-008` | Send the WeChat SVG as one direct file item, with no quoted/reference message. The filename includes the run tag. | No post-baseline entry is attributable to the rejected WeChat filename, marker, user, and send time. |
 
-Record `PASS` or `FAIL` for every row. Where a caption is supported, a missing
-caption is a failure. For every platform, an accepted image whose pixel-only
-marker is absent, a rejected SVG whose marker appears, an unexpected entry for a
-file-only rejected turn, or an entry attributed to the wrong platform user is a
-failure.
+Record `PASS`, `FAIL`, or `INCONCLUSIVE` for every row. Where a caption is
+supported, a missing caption is a failure. For every platform, an accepted image
+whose pixel-only marker is absent, a rejected SVG shown as an attachment, an
+unexpected entry attributable to a file-only rejected turn, or an entry
+attributed to the wrong platform user is a failure.
+
+An accepted row is `INCONCLUSIVE`, not `PASS` or `FAIL`, whenever **Call log** is
+not **Recording normally**, its Model calls are unavailable/expired, or the
+Request/Response evidence cannot be opened. Any row is `INCONCLUSIVE` when the
+Processing Record section needed by its pass condition is unavailable. Rejected
+rows do not use absence of Model calls as evidence; only the visible
+post-baseline entry conditions in the table decide them.
 
 ## Fixture collection plan
 
@@ -203,6 +228,9 @@ Decision:
   facts. WeChat source exclusion remains the explicit fixture decision above.
 - Resetting regression state, changing credentials, testing remote Incus, or
   validating Agent attachment behavior. This run covers Memory capture only.
+- Proving the absence of pre-memcell provider calls through the product UI. The
+  `MEMORY-IM-ATTACH-004` automated scenario owns the rejection-to-provider
+  boundary; issue #1483 tracks product visibility for calls without memcells.
 
 ## Follow-up tracking
 
@@ -212,10 +240,13 @@ Decision:
 - [#1480](https://github.com/avibe-bot/avibe/issues/1480) investigates why an
   explicit `vibe watch add --timeout 0` can read back as the default `21600`
   despite the repository reader preserving zero.
+- [#1483](https://github.com/avibe-bot/avibe/issues/1483) tracks the missing
+  Processing Record surface for provider calls and terminal turns that have no
+  memcell.
 
 ## Result record
 
-Record the run tag, source commit, service-health result, ten row outcomes, and
-the three fixture decisions in the owning issue or acceptance report. Do not
-paste raw payloads, signed URLs, credentials, or unsanitized logs into that
-report.
+Record the run tag, source commit, service-health result, Call log baseline and
+final state, ten row outcomes (including any `INCONCLUSIVE` reason), and the three
+fixture decisions in the owning issue or acceptance report. Do not paste raw
+payloads, signed URLs, credentials, or unsanitized logs into that report.
