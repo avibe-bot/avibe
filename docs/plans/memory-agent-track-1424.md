@@ -43,18 +43,34 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    named Memory project. Missing bindings fail closed.
 8. EverOS 1.2.3 limitations listed below are accepted. Avibe isolates and
    reports them but does not patch EverOS or file an upstream issue.
-9. First enable initializes the scan cursor to the current terminal-turn high
-   water mark. There is no historical backfill in v1; only turns completing
-   after explicit enablement are candidates.
+9. Every disabled-to-enabled transition initializes the scan cursor to the
+   current terminal-settlement sequence high water mark. There is no historical
+   or disabled-period backfill in v1; only turns settling after that explicit
+   enable cutover are candidates.
 
 ## Product Contract
 
 ### Enablement and disclosure
 
-`memory.agent_track.enabled` is a persisted boolean and defaults to `false`.
-Absence is equivalent to disabled. A malformed optional `agent_track` block is
-discarded with a sanitized warning; it must not prevent Avibe startup or alter
-the independently parsed Personal Memory configuration.
+`memory.agent_track` is an optional persisted block with this exact shape:
+
+```yaml
+memory:
+  agent_track:
+    enabled: false
+    project_bindings:
+      - workdir: /normalized/absolute/path
+        project_id: default
+```
+
+`enabled` is a boolean and defaults to `false`; `project_bindings` permits at
+most 128 entries with unique normalized absolute workdirs paired with exact
+new-style Memory project ids. Each UTF-8 workdir and project id is at most 4,096
+bytes. Absence is equivalent to disabled with no bindings. The V2 config block
+is the authoritative owner setting and survives Clear/factory reset. A malformed
+optional `agent_track` block is discarded as a whole with a sanitized warning;
+it must not prevent Avibe startup or alter the independently parsed Personal
+Memory configuration.
 
 The owner Settings surface explains that eligible Agent inputs and results may
 be sent to the configured Memory processing endpoints, that accepted processing
@@ -63,16 +79,20 @@ EverOS 1.2.3 limitations. The source set is fixed to eligible completed Agent
 Turns, including interactive and Harness turns; v1 has no source-type selector.
 
 Enabling requires the installed Memory runtime, complete processing endpoints,
-and at least one explicit project binding. On first enable the owner-visible
-operation snapshots the current terminal-turn high water mark before the
-scanner starts. It starts only the agent sidecar and scanner/worker slots needed
-by the track. A failed start rolls the agent-track projection back to
-unavailable without disabling Personal Memory or restarting the Avibe service.
+and at least one explicit project binding. Under the agent-capture lifecycle
+lock, every disabled-to-enabled operation snapshots the current committed
+terminal-sequence high water, persists it as the new scan cursor, rebuilds the
+opaque binding projection, and only then opens scanner admission. A disable
+closes scanner admission and waits for the current bounded scan transaction
+before it reports success. It preserves rows admitted before that cutover but
+never later imports turns settled while disabled. A failed start leaves the
+agent-track projection unavailable without disabling Personal Memory or
+restarting the Avibe service.
 
 ### Admission
 
 One durable `session_turns` row is one candidate trajectory. The scanner reads
-in stable `(terminal_at, id)` order and joins the owning `agent_sessions` row
+in stable `terminal_sequence` order and joins the owning `agent_sessions` row
 and its referenced `agents` row. Admission is provider-neutral and accepts a
 row only when all of these invariants hold:
 
@@ -210,10 +230,14 @@ Reconcile owns the roles independently:
   controller lifecycle; no routine verification restarts Avibe.
 
 Restart engine, Repair index, Clear Memory Data, rebuild, and factory reset must
-enumerate role-owned resources rather than assuming one global slot. Clear and
-factory reset cover both roots, both role call-log/health records, and both
-queues under one existing durable maintenance fence. A partial failure reports
-each role truthfully and keeps Memory fenced until idempotent retry converges.
+enumerate role-owned resources rather than assuming one global slot. A
+never-enabled Agent role whose root, sentinel, process record, and socket are all
+absent is a successful `absent` no-op. A present Agent path without its expected
+sentinel remains unsafe and fails closed. Clear and factory reset cover every
+existing owned root, both role call-log/health records, and both queues under one
+existing durable maintenance fence while preserving the V2 config binding
+source. A partial failure reports each role truthfully and keeps Memory fenced
+until idempotent retry converges.
 Embedding-identity rebuild validates once, quiesces both sidecars, rebuilds each
 nonempty owned root independently, and does not activate either root against a
 different vector-space identity. Restart/repair may target a degraded role
@@ -227,6 +251,19 @@ table, index, value, and project-catalog entry unchanged. The new tables are
 separate from `memory_capture_queue` and its user principal/session-generation
 invariants.
 
+### Commit-ordered terminal source
+
+The infrastructure slice also adds nullable
+`session_turns.terminal_sequence INTEGER` plus a unique partial index in the
+primary Avibe state schema. The transaction that first settles a Turn terminal
+assigns one greater than the maximum non-NULL `terminal_sequence` (or `1` when
+none exists) while holding SQLite's serialized writer lock. The assignment,
+terminal outcome/evidence, and terminal state commit
+together; retries cannot allocate a second value. Consequently sequence order
+is settlement commit order even when wall time moves backward or UUIDs sort in
+another order. `terminal_at` remains display metadata and is never a scanner
+cursor. Pre-migration terminal rows retain `NULL` and are not backfilled.
+
 ### Agent trajectory outbox
 
 `memory_agent_trajectory_queue` stores one row per admitted source Turn:
@@ -237,6 +274,14 @@ invariants.
 - closed `pending | processing | delivered | dead` state;
 - lease token/owner/time, attempts, next retry, closed error, provider request
   ids/status, and created/completed timestamps.
+
+Before enqueue, the store enforces an independent maximum of 500 nonterminal
+Agent rows and at least 512 MiB free on the volume containing `memory.sqlite`.
+At either guard, the scanner records a durable aggregate
+`missed_queue_full`/`missed_low_disk_space` count and advances past that source
+sequence in the same transaction; it never retains the rejected trajectory
+text. These guards are independent of, and do not consume, Personal Memory's
+500-row allowance. Status reports the counters without source content.
 
 Idempotent enqueue and cursor advancement are one transaction. A duplicate
 source digest returns duplicate without changing the existing row. Successful
@@ -254,21 +299,25 @@ ambiguous agent write cannot fence user capture.
 
 ### Scanner cursor and project bindings
 
-`memory_agent_scan_state` is a singleton containing the last committed
-`(terminal_at, turn_id)` cursor, whether the first-enable high water was
-initialized, and scan/update timestamps. The scanner queries strictly after
-that tuple in bounded pages. It advances through admitted, duplicate, and
-closed-skip rows only after the corresponding enqueue/skip decision is durable.
-A crash before commit re-reads the same row; the digest keeps enqueue
-idempotent. Adding a binding later does not backfill turns already skipped at an
-earlier cursor.
+`memory_agent_scan_state` is a singleton containing the last committed terminal
+sequence, enable epoch, durable missed counters, and scan/update timestamps. On
+every enable cutover the cursor advances to the primary store's current maximum
+before admission opens. The scanner then queries strictly after that sequence in
+bounded pages. It advances through admitted, duplicate, guarded, and closed-skip
+rows only after the corresponding decision is durable. A crash before commit
+re-reads the same row; the digest keeps enqueue idempotent. Adding a binding
+later does not backfill turns already skipped at an earlier cursor.
 
-`memory_agent_project_bindings` maps only opaque `binding_key` to exact
-new-style `project_id`, with created/updated timestamps. Settings writes the
-binding after resolving and normalizing a local workdir; reads expose a friendly
-local project/workdir label from the primary Avibe store, never by reversing the
-opaque Memory key. Deleting a binding stops new admission and does not rewrite
-queued or provider data already bound to that project.
+`memory_agent_project_bindings` is a replaceable projection of the V2 config. It
+maps only opaque `binding_key` to exact new-style `project_id`, with
+created/updated timestamps. Settings writes the normalized workdir/project pair
+to V2 config; reconcile derives the opaque key with the current Memory scope key
+and transactionally replaces the projection. Reads expose the config's friendly
+local workdir label, never by reversing the opaque Memory key. Clear may remove
+the projection; factory reset creates a new Memory scope key and rebuilds every
+opaque key from the preserved config before an enabled scanner starts. Deleting
+a config binding stops new admission after reconcile and does not rewrite queued
+or provider data already bound to that project.
 
 ## Provider and Sidecar Contracts
 
@@ -362,16 +411,17 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; first enable starts at the current high water. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every enable starts at the current high water. |
 | `MEMORY-AGENT-002` | Every eligible completed interactive or Harness Turn is represented once by its exact dispatch/result pair. |
 | `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant. |
-| `MEMORY-AGENT-004` | Crash/replay cannot enqueue one source Turn more than once. |
+| `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
 | `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output. |
 | `MEMORY-AGENT-006` | Malformed config, legacy Agent identity, and missing project binding fail closed. |
 | `MEMORY-AGENT-007` | Agent-sidecar outage leaves chat and Personal Memory healthy. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
 | `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
+| `MEMORY-AGENT-011` | Queue/disk exhaustion skips durably without retaining text or degrading Personal Memory. |
 
 Evidence layers are unit tests for config/identity/admission/store/worker/runtime,
 contract tests for provider/sidecar/internal API/CLI/UI, executable catalog

@@ -296,8 +296,10 @@ never logged or serialized as errors.
 ### Disable and re-enable
 
 Disabling Personal Memory closes user capture/content reads and stops its worker
-and chat sidecar. Disabling Agent Memory independently stops its scanner, worker,
-and agent sidecar. Both preserve their queues and provider data. Neither toggle
+and chat sidecar. Disabling Agent Memory independently closes scanner admission,
+stops its worker and agent sidecar, and preserves already admitted rows/provider
+data. Every later enable advances the scanner to the current terminal-settlement
+high water, so work completed during opt-out is never imported. Neither toggle
 mode-flips or deletes the other root.
 
 Changing only an API key is allowed without replacing the vector space.
@@ -312,9 +314,13 @@ idempotent. Under the shared lifecycle lock it:
 
 1. records `clear_in_progress` and advances the epoch;
 2. pauses both role workers/scanner and stops each owned sidecar;
-3. validates and removes children of both exact sentinel-owned provider roots
-   without following links;
-4. removes every user/agent queue row and recreates empty owned roots; and
+3. validates and removes children of the exact sentinel-owned chat root and any
+   existing sentinel-owned Agent root without following links (a never-created,
+   fully absent Agent root is a successful no-op; unexpected unowned paths fail
+   closed);
+4. removes every user/agent queue row, recreates the chat root, and recreates the
+   Agent root only when it existed before Clear or Agent Memory remains enabled;
+   and
 5. clears the recovery marker and restarts Memory only if it remains enabled.
 
 Startup resumes an interrupted clear before opening Memory. A restart failure

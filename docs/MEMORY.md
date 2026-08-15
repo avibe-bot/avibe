@@ -27,9 +27,17 @@ and Harness turns use the same admission rule. Failed, canceled, silent,
 legacy-Agent, oversized, malformed, callback, maintenance, and unbound turns are
 skipped without delaying or changing the Turn result.
 
+Each enable begins at the current completed-Turn high water. Turns completed
+before first enable or during a later disabled interval are not backfilled. The
+owner's workdir/project bindings remain in Memory settings across Clear and
+Reinitialize; the reset runtime derives fresh opaque internal keys from them.
+
 The existing Personal Memory root remains pinned to chat mode. Agent Memory has
 its own provider root, socket, lifecycle/health slot, scanner, and queue. An
 agent-track failure cannot alter user capture or Personal Memory processing.
+The Agent queue independently caps nonterminal work at 500 rows and requires at
+least 512 MiB free before admission; guarded turns are counted without retaining
+their text.
 
 Agent cases and skills are available only through explicit, scoped Agent Memory
 search/list operations in the CLI or owner Settings UI. Returned skill content
@@ -159,9 +167,10 @@ finish before starting another one.
 
 Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data or the
 call-log database is corrupt. Clear Memory Data records a durable intent marker, then
-removes the Personal and Agent Memory queues, both owned provider roots, role-owned call
-logs, and pinned attachments through their idempotent deletion primitives. Clear is
-irreversible; it does not delete
+removes the Personal and Agent Memory queues, the owned Personal root and any
+existing owned Agent root, role-owned call logs, and pinned attachments through
+their idempotent deletion primitives. A never-created Agent root is a safe no-op.
+Clear is irreversible; it does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs or
 user-created snapshots); it is not a secure wipe.
