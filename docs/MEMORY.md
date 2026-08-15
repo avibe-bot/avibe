@@ -57,7 +57,11 @@ never advances the boundary to restart time. Clear and Reinitialize record their
 capture high water after destructive deletion completes and before scan-state
 recreation. In that same primary transaction they scrub both terminal and
 in-flight dispatch snapshots, release their budget, and mark them reset-crossing
-before reporting success. The Memory scan state projects that exact cutover. Turns
+before reporting success. Primary state also persists the current capture
+epoch/enabled/config-revision projection; enable, disable, and reset replace it
+only when their intent is cleared, so native-start admission survives controller
+restart without reading `memory.sqlite` or inventing an epoch. The Memory scan
+state projects that exact cutover. Turns
 completed before first enable, during a later disabled interval, or before a
 destructive reset are not backfilled. The owner's workdir/project bindings
 remain in Memory settings across Clear and Reinitialize; the reset runtime
@@ -80,9 +84,13 @@ later enable, which also skips the completed opt-out interval.
 
 Adding, changing, or removing a workdir binding first records a prepared
 terminal high-water cutover and prior/desired config revision/digest pairs in
-primary state,
-then replaces V2 config. The Agent scanner pauses until the corresponding epoch
-is published, and the save succeeds only after publication. A failed config
+primary state, then replaces V2 config. Each add or reassignment receives a new
+monotonic opaque binding generation. After config commit, the promotion
+transaction scrubs an old generation from every Turn still active or settled
+after the cutover while preserving terminal backlog through the high water; a
+remove/re-add therefore cannot revive an earlier snapshot. The Agent scanner
+pauses until the corresponding epoch is published, and the save succeeds only
+after publication. A failed config
 write cancels the prepared cutover; recovery commits its original high water
 only when the desired revision/digest pair persisted. Backlogged
 Turns use the project binding that was effective when they settled; a new project
@@ -115,10 +123,11 @@ their text. Scrubbed terminal tombstones retain at most 90 days and the newest
 Final-dispatch snapshots are admitted only while a committed capture epoch is
 enabled and the source workdir has one committed explicit project binding, at
 most 256 KiB per Turn and 128 MiB total in primary state. The Turn persists only
-that binding's opaque key. The start gate checks it against a revision-matched
-controller projection while binding cutovers are fenced; it never reads the
-Memory store or stores a workdir/project. The Turn must settle in the same
-capture epoch, and its project is resolved from the epoch effective at
+that binding's opaque key and monotonic generation. The start gate checks both
+against a revision-matched controller projection while binding cutovers are
+fenced; it never reads the Memory store or stores a workdir/project. The Turn
+must settle in the same capture epoch and continuous binding generation, and its
+project is resolved from the epoch effective at
 settlement. A Turn started unbound is never admitted retroactively. The final
 native backend request must be text-only;
 any Turn with a separate image, attachment, audio, file, or other out-of-band
@@ -130,9 +139,14 @@ enqueue/skip, disabled settlement, abandonment, Clear, or Reinitialize;
 destructive operations include snapshots of Turns still in flight.
 
 Agent cases and skills are available only through explicit, scoped Agent Memory
-search/list operations in the CLI or owner Settings UI. CLI ownership comes from
-the trusted current Turn's immutable executing-Agent snapshot, not mutable
-Session routing. A read-only per-Agent project catalog keeps already-enqueued or
+search/list operations in the CLI or owner Settings UI. The CLI carries only its
+session-stable locator. Immediately before each recognized command, the backend
+tool callback resolves exactly one native-started nonterminal Turn and injects a
+30-second, one-use controller capability bound to that Turn, its immutable
+executing Agent, and the normalized request. Cached Claude clients use per-call
+`updated_input`, not spawn-time environment. Missing, stale, reused, or ambiguous
+context fails closed with no static-Session fallback. Mutable Session routing is
+never identity. A read-only per-Agent project catalog keeps already-enqueued or
 later-delivered data and existing provider data retrievable after its last
 workdir binding is removed. If the Agent is hard-deleted, owner Settings retains
 an opaque read-only `Deleted Agent` selector; CLI retrieval remains bound to the
