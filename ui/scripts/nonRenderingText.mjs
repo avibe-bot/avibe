@@ -33,32 +33,40 @@ import ts from 'typescript';
 // tracking is the part that matters: `/*` inside a string starts no comment, and
 // blanking from one would hide the real declarations after it.
 //
-// A CSS string body is blanked for the same reason and on a stronger guarantee:
-// no shadow value is ever quoted, because `box-shadow: "0 0 8px red"` is not
-// valid CSS at all. So a string can hold a font name, a `url(…)`, or a
-// `content:` that spells a declaration out as visible copy -- `content: "/*
-// box-shadow: 0 0 93px red */"` renders that text into a pseudo-element and
-// draws nothing -- and none of them can hide light. Keeping the quotes
-// themselves means the parse below still sees where the string was. This one was
-// not in the review; it was found reverse-verifying the comment fix, and it is
-// the same class, so it is closed in the same commit rather than in round twelve.
+// A CSS string body is blanked for the same reason, but on a narrower guarantee
+// than the one first written here. "No shadow value is ever quoted, because
+// `box-shadow: "0 0 8px red"` is not valid CSS at all" is true of a DECLARATION
+// and false of an at-rule prelude: Tailwind's `@source inline("shadow-[0_0_93px_red]")`
+// exists precisely to generate a utility from a string, so blanking it hides a
+// glow that really does reach the page. In a declaration a string still cannot
+// draw light -- it holds a font name, a `url(…)`, or a `content:` spelling a
+// declaration out as visible copy, and `content: "/* box-shadow: 0 0 93px red */"`
+// renders that text into a pseudo-element and draws nothing.
+//
+// So the boundary is where the string sits, not that it is quoted. A prelude runs
+// from `@` to the `{` or `;` that ends it, which is one rule rather than a list of
+// at-rule names to keep extending. Keeping the quotes themselves means the parse
+// below still sees where the string was.
 function blankCssComments(source) {
   let out = '';
   let quote = null;
   let index = 0;
+  let prelude = false;
   while (index < source.length) {
     const char = source[index];
     if (quote) {
       if (char === '\\') {
         // A line continuation must keep its newline, or every line number after
         // this string shifts by one and the offences point at the wrong place.
-        out += ' ';
-        if (index + 1 < source.length) out += source[index + 1] === '\n' ? '\n' : ' ';
+        out += prelude ? char : ' ';
+        if (index + 1 < source.length) {
+          out += prelude || source[index + 1] === '\n' ? source[index + 1] : ' ';
+        }
         index += 2;
         continue;
       }
       if (char === quote) { quote = null; out += char; index += 1; continue; }
-      out += char === '\n' ? '\n' : ' ';
+      out += prelude || char === '\n' ? char : ' ';
       index += 1;
     } else if (char === '"' || char === "'") {
       quote = char;
@@ -70,6 +78,8 @@ function blankCssComments(source) {
       out += source.slice(index, stop).replace(/[^\n]/g, ' ');
       index = stop;
     } else {
+      if (char === '@') prelude = true;
+      else if (char === '{' || char === ';') prelude = false;
       out += char;
       index += 1;
     }
@@ -103,8 +113,18 @@ function blankCssComments(source) {
 // from JSX text because one caller wants the boundary and the other wants the
 // prose: `glowScale.test.mjs` reads the design annotations that document a
 // component's frame, which are comments and never page copy.
+// The grammar follows the extension, because TSX is not a superset of TS. In a
+// `.ts` file `<T>(x: T) => …` is a generic arrow; read as TSX it is an unclosed
+// JSX element, everything after it becomes `JsxText`, and the blanking below
+// erases the rest of the file -- a real glow in it renders and is never seen.
+// Only `.ts` is narrowed: it is the one extension where the TSX grammar changes
+// what the bytes mean, and leaving everything else on TSX keeps JSX readable in
+// the files that may contain it.
+const scriptKind = (file) =>
+  /\.(m|c)?ts$/.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.TSX;
+
 function nonRenderingRanges(source, file) {
-  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, scriptKind(file));
   const comments = [];
   const jsxText = [];
   const collect = (ranges) => {

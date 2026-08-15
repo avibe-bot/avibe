@@ -598,13 +598,40 @@ function isZeroLength(part) {
 // failed `validate:theme` on a colour -- a false positive, in CI, on a file that
 // was correct.
 //
-// Excluding it is not a gap, because a custom property is inert: it renders only
-// where some declaration spends it, that declaration IS scanned, and a name no
-// stylesheet declares already fails as unreadable. The rendering path stays
-// covered; what leaves is the position that never rendered. Rejecting "values
-// that look like glow geometry" here instead would be one more enumeration of
-// spellings, which is the shape that cost rounds three through eight.
-const CSSOM_SETTER = /\.setProperty\(\s*(?<quote>['"\x60])(?!--)[^'"\x60]*shadow[^'"\x60]*\k<quote>\s*,/;
+// Excluding the NAME was the wrong repair, and the argument for it was wrong in
+// a way worth keeping written down: "a custom property is inert, it renders only
+// where some declaration spends it, and that declaration IS scanned" holds for
+// the value a stylesheet declares and not for the one assigned at runtime.
+// `--x: none` with `box-shadow: var(--x)` is scanned, innocent, and complete --
+// and then `setProperty('--x', '0 0 93px red')` supplies the glow from outside
+// the stylesheet, past a scan that already read every declaration and found
+// nothing. The static half is not where the value comes from.
+//
+// So the name is read again and the exemption moves to the VALUE, which is where
+// the original false positive actually lived: `setProperty('--shadow-color',
+// '#fff')` is innocent because a colour carries no geometry, not because a
+// custom property cannot draw. That is the same judgement `shadow-(color:--x)`
+// already makes one channel up, made with the same COLOUR recogniser, so it adds
+// no new notion of what a glow is -- which was the real objection to matching on
+// "values that look like glow geometry", and it is not what this does: anything
+// that is not provably a colour stays readable and gets classified.
+const CSSOM_SETTER = /\.setProperty\(\s*(?<quote>['"\x60])(?<property>[^'"\x60]*shadow[^'"\x60]*)\k<quote>\s*,/;
+
+const cssomArgument = (match) => valueArgument(match.input, match.index + match[0].length) ?? '';
+
+// A custom property assigned a bare colour contributes no shadow value: it tints
+// geometry that some scanned declaration still has to supply. Both halves of the
+// channel below ask through this one function, because "what this match yields"
+// and "why yielding nothing is innocent rather than unreadable" are the same
+// judgement, and the two spellings of it are exactly what drifts apart.
+//
+// Only `--*` earns it. `setProperty('box-shadow', '#fff')` names the shadow
+// property itself, and a colour there is a value to read, not one to excuse.
+const isTint = (match) => {
+  if (!match.groups?.property?.startsWith('--')) return false;
+  const values = stringLiterals(cssomArgument(match));
+  return values.length > 0 && values.every((value) => COLOUR.test(value.trim()));
+};
 
 const SHADOW_CHANNELS = [
   // `shadow-[0_0_16px_-4px_var(--x)]`, including variants such as `hover:shadow-[…]`.
@@ -692,9 +719,8 @@ const SHADOW_CHANNELS = [
   // version of that discipline which cannot be forgotten.
   {
     pattern: new RegExp(CSSOM_SETTER.source, 'gi'),
-    valuesOf: (match) => stringLiterals(valueArgument(match.input, match.index + match[0].length)),
-    provablyNotAShadow: (match) =>
-      NON_STRING_LITERAL.test(valueArgument(match.input, match.index + match[0].length) ?? ''),
+    valuesOf: (match) => (isTint(match) ? [] : stringLiterals(cssomArgument(match))),
+    provablyNotAShadow: (match) => isTint(match) || NON_STRING_LITERAL.test(cssomArgument(match)),
   },
 ];
 
@@ -902,8 +928,20 @@ const COLOUR = new RegExp(
 // a layer this scan cannot classify FAILS asking to be made legible. A name is
 // not taken at face value either -- indirection is resolved and the same test
 // runs on what it resolves to, so a glow cannot hide one alias deeper.
+// `!important` is a property of the DECLARATION, not of any layer in it, so it
+// is dropped here rather than in the six channels that would each have to
+// remember. This is the fact round ten already established -- `setProperty('box-
+// shadow', 'none', 'important')` had swept the priority up as a second layer --
+// taught to the branch that had not heard it: written in CSS instead of in
+// CSSOM, `box-shadow: var(--shadow-glow-md-mint) !important` parsed `!important`
+// as a layer part and failed correct, fully tokenized CSS. A guard that rejects
+// the very spelling it is asking for is worse than one that misses.
+const IMPORTANT = /\s*!\s*important\s*$/i;
+
 function glowOffencesInValue(value, tokens, seen = new Set(), depth = 0) {
-  return shadowLayers(value).flatMap((layer) => glowOffencesInLayer(layer, tokens, seen, depth));
+  return shadowLayers(value.replace(IMPORTANT, '')).flatMap((layer) =>
+    glowOffencesInLayer(layer, tokens, seen, depth)
+  );
 }
 
 function glowOffencesInLayer(layer, tokens, seen, depth) {

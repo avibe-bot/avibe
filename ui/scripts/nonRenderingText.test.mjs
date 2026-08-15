@@ -77,6 +77,31 @@ describe('withoutNonRenderingText', () => {
     expect(drifted).toEqual([]);
   });
 
+  // TSX is not a superset of TS. `<T>(x: T) => …` is a generic arrow in a `.ts`
+  // file and an unclosed JSX element in a `.tsx` one, so reading every file with
+  // the TSX grammar turns the rest of that file into `JsxText` -- and blanking
+  // then erases a real glow further down before the scan can ever see it. This
+  // is the same defect as reading a comment with the wrong language, arriving
+  // through the parser's configuration instead of through a hand-rolled regex.
+  it('reads each file with the grammar its extension implies', () => {
+    const source = 'const fn = <T>(x: T) => x;\nconst s = { boxShadow: "0 0 93px red" };\n';
+
+    expect(withoutNonRenderingText(source, 'probe.ts')).toContain('93px');
+  });
+
+  // Where the string sits, not that it is quoted. A quoted value cannot draw
+  // light in a declaration -- `box-shadow: "0 0 8px red"` is not valid CSS at
+  // all -- but an at-rule prelude is exactly where Tailwind's `@source inline(…)`
+  // generates a utility from such a string, and blanking it hides a glow that
+  // does reach the page.
+  it('keeps strings an at-rule can turn into CSS, and blanks the ones that render as copy', () => {
+    const prelude = '@source inline("shadow-[0_0_93px_red]");\n';
+    const declaration = '.a { content: "box-shadow: 0 0 93px red"; }\n';
+
+    expect(withoutNonRenderingText(prelude, 'probe.css')).toContain('93px');
+    expect(withoutNonRenderingText(declaration, 'probe.css')).not.toContain('93px');
+  });
+
   it('is applied to every extension the scan reads', () => {
     const scan = fs.readFileSync(new URL('validate-theme.mjs', import.meta.url), 'utf8');
     const extensions = scan.match(/extensions:\s*\[([^\]]*)\]/g) ?? [];
