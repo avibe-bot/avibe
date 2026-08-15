@@ -1802,6 +1802,13 @@ class MemoryRuntime:
                     high = middle
                 else:
                     low = middle + 1
+            for page_number, snapshot in tuple(probes.items()):
+                refreshed = await read_page(page_number)
+                if isinstance(refreshed, OperationFailed):
+                    return refreshed
+                warnings.extend(refreshed.warnings)
+                if refreshed != snapshot:
+                    return (None, refreshed.total_count)
             return (low, observed_total)
 
         if boundary_instant is not None:

@@ -4198,7 +4198,7 @@ async def test_list_all_episodes_cursor_uses_bounded_provider_page_hint() -> Non
     payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
 
     assert requested_pages[0] == 499
-    assert len(requested_pages) <= 15
+    assert len(requested_pages) <= 30
     assert [entry["id"] for entry in payload["items"]] == ["entry-09981"]
     assert payload["next_cursor"]
     _, page_hints, total_hints = memory_runtime._decode_memory_list_cursor(
@@ -4255,7 +4255,7 @@ async def test_list_all_episodes_repositions_page_hint_after_large_shrink() -> N
     payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=5)
 
     assert requested_pages[0] == 5
-    assert len(requested_pages) <= 7
+    assert len(requested_pages) <= 14
     assert [entry["id"] for entry in payload["items"]] == [
         f"survivor-{index}" for index in range(5)
     ]
@@ -4307,7 +4307,7 @@ async def test_list_all_episodes_does_not_rewind_for_deletions_after_boundary() 
     payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
 
     assert requested_pages[0] == 500
-    assert len(requested_pages) <= 15
+    assert len(requested_pages) <= 30
     assert [entry["id"] for entry in payload["items"]] == ["entry-09981"]
 
 
@@ -4357,8 +4357,71 @@ async def test_list_all_episodes_repositions_after_large_front_insertion() -> No
     payload = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=1)
 
     assert requested_pages[0] == 100
-    assert len(requested_pages) <= 15
+    assert len(requested_pages) <= 30
     assert [entry["id"] for entry in payload["items"]] == ["entry-09981"]
+
+
+@pytest.mark.asyncio
+async def test_list_all_episodes_retries_changed_binary_locator_probe() -> None:
+    base = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+
+    def item(index: int) -> MemoryListItem:
+        return MemoryListItem(
+            id=f"entry-{index:03d}",
+            subject="subject",
+            summary="summary",
+            body="body",
+            timestamp=(base - timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+            project="default",
+        )
+
+    entries = [item(index) for index in range(1, 101)]
+    boundary = item(70)
+    mutated = False
+
+    class _ListModule:
+        async def list_episodes(self, *, page: int, page_size: int, **_kwargs):
+            nonlocal mutated
+            if page != 3 and not mutated:
+                del entries[:40]
+                entries.extend(item(index) for index in range(101, 141))
+                mutated = True
+            start = (page - 1) * page_size
+            selected = tuple(entries[start : start + page_size])
+            return MemoryListPage(
+                items=selected,
+                page=page,
+                page_size=page_size,
+                count=len(selected),
+                total_count=len(entries),
+            )
+
+    runtime = object.__new__(MemoryRuntime)
+    runtime._module = _ListModule()
+    runtime._retired = False
+    runtime.list_memory_projects = lambda _principal_id: ("default",)
+    projects = ("default",)
+    fingerprint = memory_runtime._memory_list_catalog_fingerprint(PRINCIPAL, projects)
+    cursor = memory_runtime._encode_memory_list_cursor(
+        fingerprint,
+        {"default": (boundary.timestamp, boundary.id)},
+        {"default": 3},
+        {"default": 100},
+    )
+
+    inconsistent = await runtime.list_all_episodes_payload(PRINCIPAL, cursor=cursor, limit=5)
+    retried = await runtime.list_all_episodes_payload(
+        PRINCIPAL,
+        cursor=inconsistent["next_cursor"],
+        limit=5,
+    )
+
+    assert inconsistent["items"] == []
+    assert inconsistent["warnings"] == ["memory_list_partial"]
+    assert inconsistent["next_cursor"]
+    assert [entry["id"] for entry in retried["items"]] == [
+        f"entry-{index:03d}" for index in range(71, 76)
+    ]
 
 
 @pytest.mark.asyncio
@@ -5203,6 +5266,8 @@ async def test_list_all_episodes_rejects_cursor_from_another_principal() -> None
 
 @pytest.mark.asyncio
 async def test_list_all_episodes_marks_partial_results_and_omits_total() -> None:
+    """Scenario: MEMORY-LIST-005."""
+
     good = MemoryListItem(
         id="default-1",
         subject="subject",
