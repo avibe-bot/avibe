@@ -461,12 +461,12 @@ def _validate_add(
             if set(item) != {"type", "text"} or not isinstance(item.get("text"), str):
                 return "add"
             continue
-        if not _valid_workbench_attachment(item, attachments_root):
+        if not _valid_pinned_attachment(item, attachments_root):
             return "add"
     return None
 
 
-def _valid_workbench_attachment(item: dict[str, Any], attachments_root: Path | None) -> bool:
+def _valid_pinned_attachment(item: dict[str, Any], attachments_root: Path | None) -> bool:
     if set(item) != {"type", "name", "uri", "ext"}:
         return False
     if item.get("type") not in {"image", "audio", "doc", "pdf", "html", "email"}:

@@ -22,6 +22,7 @@ from .base import (
     FileAttachment,
 )
 from .message_facts import is_ordinary_slack_text
+from .download_target import open_download_target
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
 from .formatters import SlackFormatter
@@ -1097,6 +1098,7 @@ class SlackBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         file_info = await self._resolve_downloadable_file_info(file_info)
         url = file_info.get("url_private_download") or file_info.get("url_private") or file_info.get("url")
@@ -1107,7 +1109,11 @@ class SlackBot(BaseIMClient):
         file_size = file_info.get("size")
         if max_bytes is not None and file_size and file_size > max_bytes:
             logger.warning(f"File too large ({file_size} bytes > {max_bytes}), skipping: {file_info.get('name')}")
-            return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+            return FileDownloadResult(
+                False,
+                f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                "file_too_large",
+            )
 
         try:
             headers = {"Authorization": f"Bearer {self.config.bot_token}"}
@@ -1121,10 +1127,14 @@ class SlackBot(BaseIMClient):
                     content_length = response.headers.get("Content-Length")
                     if max_bytes is not None and content_length and int(content_length) > max_bytes:
                         logger.warning(f"File too large ({content_length} bytes), skipping: {file_info.get('name')}")
-                        return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+                        return FileDownloadResult(
+                            False,
+                            f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                            "file_too_large",
+                        )
 
                     total_size = 0
-                    with open(target_path, "wb") as file_obj:
+                    with open_download_target(target_path, target_fd=target_fd) as file_obj:
                         async for chunk in response.content.iter_chunked(64 * 1024):
                             total_size += len(chunk)
                             if max_bytes is not None and total_size > max_bytes:
@@ -1132,7 +1142,9 @@ class SlackBot(BaseIMClient):
                                     f"File exceeds max size during download, aborting: {file_info.get('name')}"
                                 )
                                 return FileDownloadResult(
-                                    False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                    False,
+                                    f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                    "file_too_large",
                                 )
                             file_obj.write(chunk)
                     return FileDownloadResult(True)

@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -6,9 +7,72 @@ import pytest
 from core.memory.modality import (
     PINNED_UPSTREAM_EXCLUDED_EXTENSIONS,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
+    classify_pinned_attachment,
     pinned_modality_contract_matches,
     pinned_modality_contract_script,
 )
+
+
+def _write_private(path: Path, payload: bytes) -> Path:
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    return path
+
+
+def test_classifier_accepts_mpeg_2_5_mp3_frame_sync(tmp_path: Path) -> None:
+    path = _write_private(tmp_path / "voice.mp3", b"\xff\xe3\x18\x00payload")
+
+    assert classify_pinned_attachment("voice.mp3", "audio/mpeg", path) == (
+        "audio",
+        "mp3",
+    )
+
+
+def test_classifier_requires_an_audio_brand_for_m4a(tmp_path: Path) -> None:
+    video = _write_private(
+        tmp_path / "clip.m4a",
+        b"\x00\x00\x00\x10ftypisom\x00\x00\x00\x0cfreeM4A ",
+    )
+    audio = _write_private(
+        tmp_path / "voice.m4a",
+        b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00M4A mp42",
+    )
+
+    assert classify_pinned_attachment("clip.m4a", "audio/mp4", video) is None
+    assert classify_pinned_attachment("voice.m4a", "audio/mp4", audio) == (
+        "audio",
+        "m4a",
+    )
+
+
+def test_classifier_accepts_utf8_sample_with_incomplete_trailing_codepoint(
+    tmp_path: Path,
+) -> None:
+    path = _write_private(tmp_path / "notes.txt", b"a" * (64 * 1024 - 1) + "你".encode())
+
+    assert classify_pinned_attachment("notes.txt", "text/plain", path) == (
+        "doc",
+        "txt",
+    )
+
+
+def test_classifier_still_rejects_invalid_utf8_inside_sample(tmp_path: Path) -> None:
+    path = _write_private(tmp_path / "notes.txt", b"valid\xffinvalid")
+
+    assert classify_pinned_attachment("notes.txt", "text/plain", path) is None
+
+
+@pytest.mark.parametrize("tail", [b"\x00", b"\xff"], ids=["nul", "invalid-utf8"])
+def test_classifier_validates_complete_text_file(tmp_path: Path, tail: bytes) -> None:
+    path = _write_private(tmp_path / "notes.txt", b"a" * 4096 + tail)
+
+    assert classify_pinned_attachment("notes.txt", "text/plain", path) is None
+
+
+def test_classifier_normalizes_missing_mime_to_octet_stream(tmp_path: Path) -> None:
+    path = _write_private(tmp_path / "notes.txt", b"valid text")
+
+    assert classify_pinned_attachment("notes.txt", None, path) == ("doc", "txt")
 
 
 def test_pinned_modality_contract_allows_exact_upstream_set_minus_exclusions() -> None:

@@ -756,8 +756,13 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             target_path = str(Path(tmpdir) / "wechat-test-image.bin")
+            async def download_to_path(_base, _query, _key, target, **_kwargs):
+                Path(target).write_bytes(b"img")
+                return 3
+
             with patch(
-                "modules.im.wechat._wechat_cdn_mod.download_and_decrypt", new=AsyncMock(return_value=b"img")
+                "modules.im.wechat._wechat_cdn_mod.download_and_decrypt_to_path",
+                new=AsyncMock(side_effect=download_to_path),
             ) as mock_dl:
                 result = await bot.download_file_to_path(file_info, target_path)
 
@@ -767,6 +772,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[0], "https://novac2c.cdn.weixin.qq.com/c2c")
         self.assertEqual(args[1], "encrypted-param")
         self.assertTrue(isinstance(args[2], str) and len(args[2]) > 0)
+        self.assertEqual(args[3], Path(target_path))
 
     async def test_download_file_to_path_uses_voice_media_aes_key(self):
         bot = self._make_bot()
@@ -780,16 +786,26 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             target_path = str(Path(tmpdir) / "wechat-test-voice.bin")
+            async def download_to_path(_base, _query, _key, target, **_kwargs):
+                Path(target).write_bytes(b"voice")
+                return 5
+
             with patch(
-                "modules.im.wechat._wechat_cdn_mod.download_and_decrypt", new=AsyncMock(return_value=b"voice")
+                "modules.im.wechat._wechat_cdn_mod.download_and_decrypt_to_path",
+                new=AsyncMock(side_effect=download_to_path),
             ) as mock_dl:
                 result = await bot.download_file_to_path(file_info, target_path)
 
         self.assertTrue(result.success)
-        mock_dl.assert_awaited_once_with(
-            "https://novac2c.cdn.weixin.qq.com/c2c",
-            "voice-param",
-            "dm9pY2Uta2V5",
+        args = mock_dl.await_args.args  # type: ignore[union-attr]
+        self.assertEqual(
+            args,
+            (
+                "https://novac2c.cdn.weixin.qq.com/c2c",
+                "voice-param",
+                "dm9pY2Uta2V5",
+                Path(target_path),
+            ),
         )
 
     async def test_upload_image_from_path_uses_cdn_workflow(self):

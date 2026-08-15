@@ -271,6 +271,11 @@
       "invalid_upload": "The file upload is invalid.",
       "upload_failed": "The file could not be saved. Please try again."
     },
+    "attachmentDownload": {
+      "title": "Attachment Download Errors",
+      "failed": "Attachment '{name}' could not be downloaded.",
+      "tooLarge": "Attachment '{name}' exceeds the attachment size limit."
+    },
     "agentArchive": {
       "agent_builtin": {
         "message": "Agent `{agent}` is built in and cannot be deleted.",

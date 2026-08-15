@@ -600,7 +600,7 @@ def test_sidecar_guard_keeps_profile_exact_and_allows_only_bounded_episode_lists
         )
 
 
-def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path) -> None:
+def test_sidecar_guard_allows_pinned_attachment_file_uri_only(tmp_path: Path) -> None:
     attachments_root = tmp_path / "attachments" / "avibe"
     asset = attachments_root / "session-1" / "diagram.png"
     asset.parent.mkdir(parents=True)

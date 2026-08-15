@@ -13,6 +13,7 @@ import threading
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from config import paths
@@ -27,6 +28,12 @@ from core.memory.types import (
     MemoryContentKind,
     MemoryErrorCode,
 )
+
+if TYPE_CHECKING:
+    from core.handlers.inbound_attachments import (
+        InboundAttachmentLease,
+        _LeasedAttachmentRecord,
+    )
 
 
 MAX_PINNED_ATTACHMENTS = 8
@@ -238,7 +245,12 @@ class AttachmentPinStore:
         with self._lock:
             self._prepare_private_layout()
 
-    def pin(self, sources: Sequence[CaptureAttachment]) -> PinnedBundle:
+    def pin(
+        self,
+        sources: Sequence[CaptureAttachment],
+        *,
+        source_lease: InboundAttachmentLease | None = None,
+    ) -> PinnedBundle:
         """Copy one bounded source set and publish it only after durable rename."""
 
         try:
@@ -246,6 +258,7 @@ class AttachmentPinStore:
         except TypeError as error:
             raise AttachmentPinError("memory_invalid_input", "attachments are invalid") from error
         self._validate_sources(source_items)
+        source_root, allowed_records = self._pin_source(source_lease)
         with self._lock:
             self._verify_private_layout()
             staging_fd = _open_private_directory(self._staging, "attachment staging root")
@@ -267,7 +280,12 @@ class AttachmentPinStore:
                 total_bytes = 0
                 try:
                     for index, source in enumerate(source_items):
-                        source_fd, source_info = self._open_source(source)
+                        source_fd, source_info, source_sha256 = self._open_source(
+                            source,
+                            source_root=source_root,
+                            allowed_records=allowed_records,
+                            source_lease=source_lease,
+                        )
                         try:
                             filename = _bundle_filename(index, source.ext)
                             size_bytes, digest = _copy_source_file(
@@ -276,6 +294,7 @@ class AttachmentPinStore:
                                 stage_fd,
                                 filename,
                                 total_before=total_bytes,
+                                expected_sha256=source_sha256,
                             )
                         finally:
                             os.close(source_fd)
@@ -535,10 +554,63 @@ class AttachmentPinStore:
             "attachment staging bundle could not be reserved",
         )
 
-    def _open_source(self, source: CaptureAttachment) -> tuple[int, os.stat_result]:
-        source_path = _path_from_file_uri(source.uri)
+    def _pin_source(
+        self,
+        source_lease: InboundAttachmentLease | None,
+    ) -> tuple[Path, dict[Path, _LeasedAttachmentRecord] | None]:
+        if source_lease is None:
+            return self._source_root, None
+        from core.handlers.inbound_attachments import (
+            InboundAttachmentLease,
+            leased_attachment_records,
+        )
+
+        if type(source_lease) is not InboundAttachmentLease:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment source lease is invalid",
+            )
+        directory_fd: int | None = None
         try:
-            relative = source_path.relative_to(self._source_root)
+            root, directory_fd, records = leased_attachment_records(source_lease)
+        except (TypeError, ValueError) as error:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment source lease is invalid",
+            ) from error
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+        expected_root = self._effective_home / "attachments" / "im"
+        if _absolute_lexical(root) != expected_root:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment source lease belongs to another Avibe home",
+            )
+        _require_path_below(root, self._effective_home, "leased attachment source root")
+        if _paths_overlap(self._root, root):
+            raise AttachmentPinError(
+                "memory_store_unavailable",
+                "attachment source and storage roots must be disjoint",
+            )
+        return root, {record.path: record for record in records}
+
+    def _open_source(
+        self,
+        source: CaptureAttachment,
+        *,
+        source_root: Path,
+        allowed_records: dict[Path, _LeasedAttachmentRecord] | None,
+        source_lease: InboundAttachmentLease | None,
+    ) -> tuple[int, os.stat_result, str | None]:
+        source_path = _path_from_file_uri(source.uri)
+        if allowed_records is not None and source_path not in allowed_records:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment is not part of the source lease",
+            )
+        try:
+            relative = source_path.relative_to(source_root)
         except ValueError as error:
             raise AttachmentPinError(
                 "memory_invalid_input",
@@ -549,7 +621,30 @@ class AttachmentPinStore:
         if source_path.suffix.lstrip(".").lower() != source.ext:
             raise AttachmentPinError("memory_invalid_input", "attachment extension is inconsistent")
 
-        current_fd = _open_source_directory_path(self._source_root)
+        if source_lease is not None:
+            from core.handlers.inbound_attachments import (
+                leased_attachment_records,
+                open_leased_attachment_record,
+            )
+
+            directory_fd: int | None = None
+            try:
+                current_root, directory_fd, current_records = leased_attachment_records(source_lease)
+                current = {record.path: record for record in current_records}.get(source_path)
+                if current_root != source_root or current != allowed_records[source_path]:
+                    raise ValueError("attachment source lease changed")
+                descriptor, info = open_leased_attachment_record(directory_fd, current)
+                return descriptor, info, current.sha256
+            except (TypeError, ValueError) as error:
+                raise AttachmentPinError(
+                    "memory_invalid_input",
+                    "attachment is not part of the source lease",
+                ) from error
+            finally:
+                if directory_fd is not None:
+                    os.close(directory_fd)
+
+        current_fd = _open_source_directory_path(source_root)
         try:
             for component in relative.parts[:-1]:
                 next_fd = _open_source_directory_at(current_fd, component)
@@ -559,7 +654,7 @@ class AttachmentPinStore:
         finally:
             os.close(current_fd)
         try:
-            return file_fd, os.fstat(file_fd)
+            return file_fd, os.fstat(file_fd), None
         except OSError as error:
             os.close(file_fd)
             raise AttachmentPinError(
@@ -893,6 +988,7 @@ def _copy_source_file(
     filename: str,
     *,
     total_before: int,
+    expected_sha256: str | None,
 ) -> tuple[int, str]:
     if source_info.st_size > MAX_PINNED_ATTACHMENT_BYTES:
         raise AttachmentPinError("memory_input_too_large", "attachment exceeds the file size limit")
@@ -943,6 +1039,12 @@ def _copy_source_file(
                     "memory_invalid_input",
                     "attachment source changed while it was pinned",
                 )
+            observed_sha256 = digest.hexdigest()
+            if expected_sha256 is not None and observed_sha256 != expected_sha256:
+                raise AttachmentPinError(
+                    "memory_invalid_input",
+                    "attachment source content changed after materialization",
+                )
             destination_info = os.fstat(destination_fd)
             _require_private_file(destination_info, "pinned attachment")
             if destination_info.st_size != copied:
@@ -957,7 +1059,7 @@ def _copy_source_file(
             raise _storage_failure(error, "pinned attachment could not be written") from error
     finally:
         os.close(destination_fd)
-    return copied, digest.hexdigest()
+    return copied, observed_sha256
 
 
 def _read_source_chunk(descriptor: int) -> bytes:

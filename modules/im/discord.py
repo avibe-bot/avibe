@@ -19,6 +19,7 @@ from .base import (
     FileAttachment,
 )
 from .message_facts import is_ordinary_discord_text
+from .download_target import open_download_target
 from config.v2_config import DiscordConfig
 from .formatters import DiscordFormatter
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -824,6 +825,7 @@ class DiscordBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         url = file_info.get("url") or file_info.get("url_private_download") or file_info.get("url_private")
         if not url:
@@ -836,15 +838,21 @@ class DiscordBot(BaseIMClient):
                         return FileDownloadResult(False, f"Download failed with HTTP {response.status}")
                     content_length = response.headers.get("Content-Length")
                     if max_bytes is not None and content_length and int(content_length) > max_bytes:
-                        return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+                        return FileDownloadResult(
+                            False,
+                            f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                            "file_too_large",
+                        )
 
                     total_size = 0
-                    with open(target_path, "wb") as file_obj:
+                    with open_download_target(target_path, target_fd=target_fd) as file_obj:
                         async for chunk in response.content.iter_chunked(64 * 1024):
                             total_size += len(chunk)
                             if max_bytes is not None and total_size > max_bytes:
                                 return FileDownloadResult(
-                                    False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                    False,
+                                    f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                    "file_too_large",
                                 )
                             file_obj.write(chunk)
                     return FileDownloadResult(True)

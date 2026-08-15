@@ -63,6 +63,22 @@ It calls the platform's `BaseIMClient.download_file_to_path` implementation,
 uses sanitized names, removes partial files, and publishes only an opaque,
 reference-counted local lease. Consumers never receive a native URL, token,
 encryption material, or mutable `MessageContext` as their durable contract.
+Lease files live below the fixed private
+`<effective-home>/attachments/im/<opaque-lease-id>/` root. A rejected or
+unclaimed batch is removed after its final reference; ordinary Agent delivery
+adopts its existing local-file lifetime, while a retained Memory reference can
+finish pinning first. Empty and failed batches are never preserved by adoption.
+The materializer keeps no-follow root and lease descriptors open for the lease
+lifetime. It pre-creates each partial file with descriptor-relative
+`O_EXCL | O_NOFOLLOW`, passes a duplicate file descriptor to bounded platform
+writers, and performs normalization, publication, and cleanup relative to the
+verified lease descriptor. Replacing the directory entry during materialization
+fails closed and cannot redirect writes outside the private lease.
+Each published record binds its original device/inode. Memory selection and
+durable pinning reopen that record relative to a duplicated retained lease
+descriptor and reject inode mismatches. The record also binds a materialization
+SHA-256 that durable pinning verifies while copying, so neither public pathname
+replacement nor same-inode modification can substitute bytes after acquisition.
 
 The message handler materializes before scheduling Memory capture. Agent delivery
 and Memory retain independent lease references, so Agent cleanup, retry, or
@@ -74,12 +90,20 @@ downloads with declared, response-header, and streamed-byte limits. Telegram is
 changed to a bounded-to-disk Bot API download; it must not buffer the entire file
 before checking the limit. WeChat checks declared size before acquisition and
 bounds ciphertext/decrypted output while writing; a post-download-only check is
-not sufficient.
+not sufficient. The shared materializer normalizes non-negative integer declared
+sizes and rejects an over-limit item before creating a partial or invoking any
+platform adapter.
 
 `core/memory/im_attachments.py` accepts only shared-materializer leases. It checks
 declared size before retaining a Memory consumer and checks final size, MIME,
 extension, and magic after acquisition through the closed modality table. It
-produces immutable `CaptureAttachment` values for surviving files.
+produces immutable `CaptureAttachment` values for surviving files. Missing or
+non-string native MIME metadata normalizes to `application/octet-stream` at this
+shared boundary. Text-like formats stream their complete bounded file through
+incremental UTF-8 and NUL validation; checking only the leading magic sample is
+insufficient. M4A admission parses brands only from the declared,
+four-byte-aligned `ftyp` brand table; brand-like bytes in later ISO-BMFF boxes do
+not admit excluded video.
 
 `core/memory/attachments.py` accepts either the fixed Workbench upload root or a
 fixed leased-IM source handle. Both paths keep no-follow opens, owner and mode
