@@ -675,3 +675,33 @@ def test_remove_backend_api_key_reports_v2_clear_failure(
     # The disk key removal itself did happen.
     auth = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
     assert "OPENAI_API_KEY" not in auth
+
+
+def test_empty_token_bag_is_not_live_oauth_evidence(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An empty ``tokens`` bag means signed out — the marker gate must
+    not treat it as live OAuth evidence and resurrect the stale relay."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {}, "auth_mode": "chatgpt"}), encoding="utf-8"
+    )
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\nmodel = "gpt-5.4"\n', encoding="utf-8"
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=lambda: None
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+
+    state = api.get_codex_auth()
+    assert state["base_url"] is None

@@ -631,7 +631,12 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
     auth_data = _load_auth(auth_path)
     toml_data = _load_toml(config_path)
     api_key = auth_data.get("OPENAI_API_KEY")
-    has_chatgpt_tokens = isinstance(auth_data.get("tokens"), dict)
+    # An empty ``tokens`` bag is "signed out", not live OAuth evidence:
+    # ``apply_codex_auth`` and the migration scanner already treat an
+    # empty dict as unsigned-in, and the marker gates rely on this
+    # field to mean "OAuth credentials are actually present".
+    tokens_bag = auth_data.get("tokens")
+    has_chatgpt_tokens = isinstance(tokens_bag, dict) and bool(tokens_bag)
     chatgpt_account = _extract_chatgpt_account(auth_data) if has_chatgpt_tokens else None
 
     providers = toml_data.get("model_providers")
