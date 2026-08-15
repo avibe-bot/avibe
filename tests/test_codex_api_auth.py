@@ -115,6 +115,81 @@ def test_save_codex_auth_falls_back_to_v2config_when_disk_empty(
     assert auth["OPENAI_API_KEY"] == "sk-from-cache"
 
 
+def test_save_codex_auth_rescues_disk_base_url_when_cache_empty(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Auth-mode round-trip regression. The oauth pass clears the
+    managed relay pointer, and installs that configured their relay
+    directly in ``config.toml`` never carry a ``base_url`` in V2Config.
+    A later api_key save without ``base_url`` in the payload must keep
+    using the disk relay URL — dropping it sends the relay key to
+    ``api.openai.com`` and every turn 401s until the user repairs
+    ``config.toml`` by hand. Disk must win over an empty cache."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        'model_provider = "OpenAI"\n'
+        "[model_providers.OpenAI]\n"
+        'name = "OpenAI"\n'
+        'base_url = "https://relay.example/v1"\n',
+        encoding="utf-8",
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="api_key", api_key="sk-any", base_url=None
+    )
+    fake_agents = types.SimpleNamespace(codex=fake_codex)
+    fake_config = types.SimpleNamespace(agents=fake_agents, save=lambda: None)
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    # No base_url in the payload: the disk relay URL must survive.
+    payload = {"auth_mode": "api_key", "api_key": "sk-relay"}
+    result = api.save_codex_auth(payload)
+    assert result.get("ok") is True
+
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert 'base_url = "https://relay.example/v1"' in toml
+    # The rescued value is also mirrored into the V2Config cache so the
+    # next save (and the Settings form) starts from it.
+    assert fake_codex.base_url == "https://relay.example/v1"
+
+
+def test_save_codex_auth_prefers_disk_base_url_over_stale_cache(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A relay URL hand-edited in ``config.toml`` outranks a stale
+    V2Config cache, mirroring the api-key disk-first contract."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        'model_provider = "OpenAI"\n'
+        "[model_providers.OpenAI]\n"
+        'name = "OpenAI"\n'
+        'base_url = "https://fresh.example/v1"\n',
+        encoding="utf-8",
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="api_key", api_key="sk-any", base_url="https://stale.example/v1"
+    )
+    fake_agents = types.SimpleNamespace(codex=fake_codex)
+    fake_config = types.SimpleNamespace(agents=fake_agents, save=lambda: None)
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    result = api.save_codex_auth({"auth_mode": "api_key", "api_key": "sk-relay"})
+    assert result.get("ok") is True
+
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert 'base_url = "https://fresh.example/v1"' in toml
+    assert fake_codex.base_url == "https://fresh.example/v1"
+
+
 def test_save_codex_auth_blocks_recovery_before_external_mutation(monkeypatch) -> None:
     fake_config = types.SimpleNamespace(load_warnings=("recovery required",), language="zh")
     monkeypatch.setattr(api, "load_config", lambda: fake_config)

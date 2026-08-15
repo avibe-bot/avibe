@@ -9828,17 +9828,35 @@ def save_codex_auth(payload: dict) -> dict:
             return {"ok": False, "message": "api_key is required when auth_mode='api_key'"}
 
     # Resolve the effective base_url: explicit payload wins, otherwise
-    # preserve whatever V2Config currently has.
+    # prefer the value Codex actually reads on disk, falling back to the
+    # V2Config cache. Disk-first mirrors the api-key resolution above:
+    # the live ``config.toml`` is what Codex reads at launch, so a relay
+    # ``base_url`` hand-edited there (or left behind by an oauth pass
+    # that cleared our managed section) must outrank a possibly-stale
+    # cache. Trusting the cache alone either reverts hand edits or, when
+    # the cache is empty, drops the relay entirely — sending a relay API
+    # key to ``api.openai.com`` and surfacing as a confusing 401 after
+    # an auth-mode switch.
     if base_url_present:
         effective_base_url = base_url_change
     else:
-        with CONFIG_LOCK:
-            try:
-                existing_cfg = load_config()
-                stored_codex = getattr(getattr(existing_cfg, "agents", None), "codex", None)
-                effective_base_url = getattr(stored_codex, "base_url", None) or None
-            except Exception:
-                effective_base_url = None
+        effective_base_url = None
+        try:
+            from vibe.codex_config import read_codex_auth_state
+
+            disk_base_url = read_codex_auth_state().get("base_url")
+            if isinstance(disk_base_url, str) and disk_base_url.strip():
+                effective_base_url = disk_base_url.strip()
+        except Exception:
+            logger.debug("Codex disk base_url read failed", exc_info=True)
+        if not effective_base_url:
+            with CONFIG_LOCK:
+                try:
+                    existing_cfg = load_config()
+                    stored_codex = getattr(getattr(existing_cfg, "agents", None), "codex", None)
+                    effective_base_url = getattr(stored_codex, "base_url", None) or None
+                except Exception:
+                    effective_base_url = None
 
     from vibe.codex_config import apply_codex_auth
 
@@ -11425,7 +11443,7 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
     ``base_url`` override is also persisted into ``opencode.json``.
 
     ``base_url`` field semantics in the payload:
-      * absent              → leave the stored value untouched
+      * absent              → resolve from disk first, then the stored value
       * empty / whitespace  → clear the stored value
       * non-empty string    → upsert (must start with http:// or https://)
     """
