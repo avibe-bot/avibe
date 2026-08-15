@@ -7,6 +7,8 @@ capability:
     - tests/test_memory_runtime.py
     - tests/test_internal_server.py
     - tests/test_memory_cli.py
+    - ui/src/components/settings/memory/MemorySearchPanel.test.tsx
+    - ui/src/context/ApiContext.memoryList.test.tsx
 status_legend:
   covered: executable evidence exists
   partial: contract coverage exists
@@ -41,3 +43,15 @@ scenarios:
     kind: degradation
     layer: contract
     test: tests/test_memory_runtime.py::test_list_all_episodes_marks_partial_results_and_omits_total
+  - id: MEMORY-LIST-006
+    name: Empty Search query browses episodes with detail and a copyable entry id
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: ui/src/components/settings/memory/MemorySearchPanel.test.tsx
+  - id: MEMORY-LIST-007
+    name: Non-empty Search query preserves relevance search behavior
+    status: covered
+    kind: compatibility
+    layer: contract
+    test: ui/src/components/settings/memory/MemorySearchPanel.test.tsx

@@ -25,6 +25,14 @@ from tests.test_api_save_config_merge import _full_config_payload
 from tests.ui_server_test_helpers import csrf_headers
 
 
+@pytest.fixture(autouse=True)
+def _clear_web_push_delivery_dispositions():
+    from core import web_push_notifications
+
+    web_push_notifications._RECENT_DELIVERY_DISPOSITIONS.clear()
+    yield
+
+
 def _raw_client_get(client, path: str, *, headers: dict[str, str] | None = None):
     request_headers = {TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}
     request_headers.update(headers or {})
@@ -3303,9 +3311,79 @@ def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_pat
     )
 
     assert sent.status_code == 200
-    assert sent.get_json() == {"ok": True, "sent": 1, "failed": 0}
+    sent_body = sent.get_json()
+    assert sent_body["ok"] is True
+    assert sent_body["sent"] == 1
+    assert sent_body["failed"] == 0
     assert sends[0][0]["endpoint"] == subscription["endpoint"]
     assert sends[0][1]["title"] == "Hello"
+    # The test surface carries the same authorization evaluation the normal
+    # path applies, so a successful test send can be compared against the
+    # normal-only gates (#1434). A local install has no remote gates.
+    normal_delivery = sent_body["normal_delivery"]
+    assert normal_delivery["user_key"] == "local"
+    assert normal_delivery["policy"] == "local"
+    assert normal_delivery["authorized"] is True
+    assert normal_delivery["recent_deliveries"] == []
+
+
+def test_web_push_status_reports_normal_delivery_diagnostics(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    status = client.post("/api/web-push/status", json={}, headers=headers)
+    assert status.status_code == 200
+    body = status.get_json()
+    assert body["ok"] is True
+    normal_delivery = body["normal_delivery"]
+    assert normal_delivery["user_key"] == "local"
+    assert normal_delivery["policy"] == "local"
+    assert normal_delivery["authorized"] is True
+    assert normal_delivery["disposition"] is None
+    assert normal_delivery["recent_deliveries"] == []
+
+
+def test_web_push_status_reads_cross_process_delivery_dispositions(monkeypatch, tmp_path):
+    """The status surface reads dispositions persisted by the delivery process.
+
+    Normal delivery runs in the controller process while this endpoint runs in
+    the UI process, so the disposition ring must round-trip through storage.
+    """
+
+    from core import web_push_notifications
+    from core.chat_discovery import set_state_meta
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    controller_entry = {
+        "at": "2026-08-14T00:00:00Z",
+        "message_id": "msg_controller",
+        "session_id": "ses_controller",
+        "owners": {"local": {"policy": "local", "disposition": "sent", "reason": ""}},
+        "disposition": "sent",
+    }
+    other_entry = {
+        "at": "2026-08-14T00:01:00Z",
+        "message_id": "msg_other",
+        "session_id": "ses_other",
+        "owners": {"remote:user-a": {"policy": "personal", "disposition": None, "reason": ""}},
+        "disposition": "sent",
+    }
+    set_state_meta(
+        web_push_notifications._DELIVERY_DISPOSITIONS_STATE_KEY,
+        [controller_entry, other_entry],
+    )
+
+    client = app.test_client()
+    status = client.post("/api/web-push/status", json={}, headers=csrf_headers(client))
+    assert status.status_code == 200
+    normal_delivery = status.get_json()["normal_delivery"]
+    # Newest first, scoped to the calling local owner: the remote entry stays
+    # private to its own owner's diagnostics.
+    assert normal_delivery["recent_deliveries"] == [controller_entry]
 
 
 def test_web_push_test_route_targets_current_endpoint_only(monkeypatch, tmp_path):
@@ -3345,7 +3423,9 @@ def test_web_push_test_route_targets_current_endpoint_only(monkeypatch, tmp_path
     )
 
     assert sent.status_code == 200
-    assert sent.get_json() == {"ok": True, "sent": 1, "failed": 0}
+    assert sent.get_json()["ok"] is True
+    assert sent.get_json()["sent"] == 1
+    assert sent.get_json()["failed"] == 0
     assert [send[0]["endpoint"] for send in sends] == [subscriptions[0]["endpoint"]]
 
 

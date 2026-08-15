@@ -9,6 +9,18 @@ const REMOTE_AUTH_RECOVERY_ERRORS = new Set([
 ]);
 
 let csrfTokenPromise: Promise<string> | null = null;
+// Preserve owned-deadline identity across the operation boundary without
+// adding a new public error type to the callers' failure taxonomy.
+const deadlineAbortReasons = new WeakSet<object>();
+
+export const isApiFetchDeadlineAbort = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && deadlineAbortReasons.has(error);
+
+type DeadlineSignalHandle = {
+  signal: AbortSignal;
+  isOwnDeadline(reason: unknown): boolean;
+  dispose(): void;
+};
 
 function readCookie(name: string): string | null {
   if (typeof document === 'undefined') {
@@ -131,7 +143,87 @@ function canReplayRequest(input: RequestInfo | URL, body: BodyInit | null | unde
   return !(typeof ReadableStream !== 'undefined' && body instanceof ReadableStream);
 }
 
-export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+const signalWithDeadline = (
+  callerSignal: AbortSignal | undefined,
+  deadlineMs: number,
+): DeadlineSignalHandle => {
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    throw new TypeError('withApiDeadline deadlineMs must be a positive finite number');
+  }
+  if (callerSignal?.aborted) {
+    return {
+      signal: callerSignal,
+      isOwnDeadline: () => false,
+      dispose: () => undefined,
+    };
+  }
+
+  const deadlineReason = new DOMException(
+    `Request exceeded its ${deadlineMs}ms deadline`,
+    'TimeoutError',
+  );
+  const deadlineController = new AbortController();
+  const deadlineTimer = globalThis.setTimeout(() => {
+    deadlineController.abort(deadlineReason);
+  }, deadlineMs);
+  if (!callerSignal) {
+    return {
+      signal: deadlineController.signal,
+      isOwnDeadline: (reason) => reason === deadlineReason,
+      dispose: () => globalThis.clearTimeout(deadlineTimer),
+    };
+  }
+
+  const composedController = new AbortController();
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    globalThis.clearTimeout(deadlineTimer);
+    callerSignal.removeEventListener('abort', abortFromCaller);
+    deadlineController.signal.removeEventListener('abort', abortFromDeadline);
+  };
+  const abortFromCaller = () => abortFrom(callerSignal);
+  const abortFromDeadline = () => abortFrom(deadlineController.signal);
+  const abortFrom = (source: AbortSignal) => {
+    dispose();
+    composedController.abort(
+      source.reason ?? new DOMException('request aborted', 'AbortError'),
+    );
+  };
+  callerSignal.addEventListener('abort', abortFromCaller, { once: true });
+  deadlineController.signal.addEventListener('abort', abortFromDeadline, { once: true });
+  return {
+    signal: composedController.signal,
+    isOwnDeadline: (reason) => reason === deadlineReason,
+    dispose,
+  };
+};
+
+export async function withApiDeadline<T>(
+  deadlineMs: number,
+  callerSignal: AbortSignal | undefined,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const deadline = signalWithDeadline(callerSignal, deadlineMs);
+  try {
+    // The caller defines the complete operation. One wall-clock deadline must
+    // cover every phase inside it rather than restarting at inner fetches.
+    return await run(deadline.signal);
+  } catch (error) {
+    if (deadline.isOwnDeadline(error) && typeof error === 'object' && error !== null) {
+      deadlineAbortReasons.add(error);
+    }
+    throw error;
+  } finally {
+    deadline.dispose();
+  }
+}
+
+export async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
   const method = (init.method || 'GET').toUpperCase();
   const nextInit: RequestInit = { ...init };
   const headers = new Headers(init.headers || {});

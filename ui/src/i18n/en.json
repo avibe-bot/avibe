@@ -1339,21 +1339,32 @@
           "subject": "{{backend}} · {{menuModel}}",
           "agents": "Agents pinned to it: {{agents}}"
         },
+        "result": {
+          "label": "Removed hops",
+          "gapLabel": "Models left with no source",
+          "hint": {
+            "safe": "These models still have another source available.",
+            "interrupt": "Some models now have no usable source."
+          }
+        },
         "cancel": "Cancel",
         "title": {
           "refetch": "Refetch models from {{source}}",
           "removeModel": "Remove {{model}} from {{source}}",
-          "saveRoute": "Save the route chain for {{menuModel}}"
+          "saveRoute": "Save the route chain for {{menuModel}}",
+          "replaceKey": "Replace key for {{source}}"
         },
         "subtitle": {
           "refetch": "This refetch drops models from this source's inventory.",
           "removeModel": "This model disappears from this source's inventory.",
-          "saveRoute": "This save leaves a configured model with no usable source"
+          "saveRoute": "This save leaves a configured model with no usable source",
+          "replaceKey": "The replacement changes this source's model inventory."
         },
         "confirm": {
           "refetch": "Refetch anyway",
           "removeModel": "Remove anyway",
-          "saveRoute": "Save anyway"
+          "saveRoute": "Save anyway",
+          "replaceKey": "Replace anyway"
         }
       },
       "repair": {
@@ -1560,6 +1571,8 @@
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",
     "remote_access_session_secret_missing": "Remote access is misconfigured (missing session secret). Re-pair this device to restore access.",
     "remote_access_unknown": "The operation did not finish. Refresh the status and try again; if it still fails, check the remote access runtime logs.",
+    "editor_config_write_forbidden": "Only messaging preferences can be saved from this role.",
+    "editor_config_write_invalid": "That messaging setting could not be saved.",
     "show_page_email_access_transient": "Email access is temporarily unavailable. Try again.",
     "invalid_pairing_key": "This pairing key is invalid or expired. Create a new key at avibe.bot, then paste it here.",
     "missing_pairing_key": "Paste the pairing key first.",
@@ -2044,7 +2057,8 @@
         "testTitle": "Avibe",
         "testBody": "Notifications are ready.",
         "testSent": "Test notification sent",
-        "testFailed": "Test notification failed"
+        "testFailed": "Test notification failed",
+        "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
       }
     },
     "modules": {
@@ -4251,19 +4265,43 @@
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
-      "description": "Search your Memory. Conversations are stored in Default unless an Agent saved a fact to a named project.",
-      "placeholder": "Search your memory…",
+      "description": "Search your Memory, or leave the query empty to browse processed episodes. Conversations are stored in Default unless an Agent saved a fact to a named project.",
+      "placeholder": "Search memories — empty shows everything",
       "button": "Search",
       "searching": "Searching…",
       "empty": "No results.",
       "searchFailed": "Search failed.",
-      "disabledHint": "Enable Memory to search.",
+      "disabledHint": "Enable Memory to search or browse.",
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded.",
       "projectLabel": "Memory project",
       "projectDefault": "Default",
       "projectAll": "All my projects",
       "partial": "Some projects could not be searched. These results may be incomplete.",
-      "truncated": "Search stopped before every project was checked. These results may be incomplete."
+      "truncated": "Search stopped before every project was checked. These results may be incomplete.",
+      "browse": {
+        "sortLabel": "Episode order",
+        "newestFirst": "Newest first",
+        "episodes": "Episodes",
+        "loading": "Loading episodes…",
+        "empty": "No processed episodes in this project yet.",
+        "partialEmpty": "Episodes may exist in projects that could not be loaded. Continue or retry this page.",
+        "loadFailed": "Couldn't load episodes.",
+        "retry": "Retry page",
+        "closedTitle": "Memory closed",
+        "closedDescription": "Memory is unavailable. Enable it from Settings and try again.",
+        "partial": "Some projects could not be loaded. This page may be incomplete.",
+        "truncated": "Listing stopped before every episode was checked. This page may be incomplete.",
+        "total": "{{count}} episodes",
+        "pageSummary": "Page {{page}} of {{total}}",
+        "previous": "Previous page",
+        "next": "Next page",
+        "page": "Page {{page}}",
+        "detailTitle": "Episode detail",
+        "entryId": "Entry ID",
+        "copyEntryId": "Copy entry ID",
+        "entryIdCopied": "Entry ID copied",
+        "openDetail": "Open episode: {{title}}"
+      }
     },
     "log": {
       "description": "See the processing history for created Memory entries across every user and project on this installation.",

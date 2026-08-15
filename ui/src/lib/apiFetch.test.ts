@@ -7,7 +7,12 @@ const remoteAuth = vi.hoisted(() => ({
 
 vi.mock('./remoteAuth', () => remoteAuth);
 
-import { apiFetch, recoverRemoteAuthFromSessionProbe } from './apiFetch';
+import {
+  apiFetch,
+  isApiFetchDeadlineAbort,
+  recoverRemoteAuthFromSessionProbe,
+  withApiDeadline,
+} from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
   beforeEach(() => {
@@ -228,6 +233,128 @@ describe('apiFetch remote auth recovery', () => {
     resolveCsrf(Response.json({ csrf_token: 'token' }));
     await expect(request).resolves.toMatchObject({ status: 200 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts a deadline-bound request without a caller signal', async () => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          expect(input).toBe('/api/models/sources');
+          issuedSignal = init?.signal ?? undefined;
+          issuedSignal?.addEventListener('abort', () => reject(issuedSignal?.reason), { once: true });
+        })),
+    );
+
+    const request = withApiDeadline(
+      1_000,
+      undefined,
+      (signal) => apiFetch('/api/models/sources', { signal }),
+    );
+    const failure = request.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(issuedSignal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await failure;
+    expect(error).toMatchObject({ name: 'TimeoutError' });
+    expect(isApiFetchDeadlineAbort(error)).toBe(true);
+  });
+
+  it('lets a caller abort before the deadline', async () => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          issuedSignal = init?.signal ?? undefined;
+          issuedSignal?.addEventListener('abort', () => reject(issuedSignal?.reason), { once: true });
+        })),
+    );
+    const controller = new AbortController();
+    const callerReason = new DOMException('caller stopped waiting', 'TimeoutError');
+
+    const request = withApiDeadline(
+      1_000,
+      controller.signal,
+      (signal) => apiFetch('/api/models/sources', { signal }),
+    );
+    const rejected = expect(request).rejects.toBe(callerReason);
+    controller.abort(callerReason);
+
+    await rejected;
+    expect(issuedSignal).not.toBe(controller.signal);
+    expect(issuedSignal?.reason).toBe(callerReason);
+    expect(isApiFetchDeadlineAbort(callerReason)).toBe(false);
+  });
+
+  it('fires the deadline while a shared CSRF fetch is in flight', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(Response.json({ csrf_token: 'fresh-token' }))
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const stalled = withApiDeadline(
+      1_000,
+      undefined,
+      (signal) => apiFetch('/api/models/sources', { method: 'POST', signal }),
+    );
+    const rejected = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejected;
+    await expect(apiFetch('/api/models/sources', { method: 'POST' })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ['success', false, false],
+    ['throw', false, true],
+    ['success with a caller signal', true, false],
+    ['throw with a caller signal', true, true],
+  ])('disposes deadline resources after request %s', async (_label, withCaller, shouldThrow) => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    const fetchError = new Error('request failed');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        issuedSignal = init?.signal ?? undefined;
+        if (shouldThrow) throw fetchError;
+        return Response.json({ ok: true });
+      }),
+    );
+    const controller = withCaller ? new AbortController() : null;
+    const removeEventListener = controller
+      ? vi.spyOn(controller.signal, 'removeEventListener')
+      : null;
+
+    const request = withApiDeadline(
+      1_000,
+      controller?.signal,
+      (signal) => apiFetch('/api/models/sources', { signal }),
+    );
+    if (shouldThrow) {
+      await expect(request).rejects.toBe(fetchError);
+    } else {
+      await expect(request).resolves.toMatchObject({ status: 200 });
+    }
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(issuedSignal?.aborted).toBe(false);
+    if (controller) {
+      expect(issuedSignal).not.toBe(controller.signal);
+      expect(removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function));
+      controller.abort(new DOMException('settled request', 'AbortError'));
+      expect(issuedSignal?.aborted).toBe(false);
+    }
   });
 
   it('evicts a stalled shared CSRF fetch after a deadline-bound caller aborts', async () => {

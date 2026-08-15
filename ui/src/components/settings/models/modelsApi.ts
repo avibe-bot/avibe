@@ -6,7 +6,7 @@
 // Methods unwrap the frozen envelope ({ok:true, …} | {ok:false, error}) and
 // throw an Error carrying the machine code on failure, so callers work with
 // plain domain objects.
-import { apiFetch } from '@/lib/apiFetch';
+import { apiFetch, isApiFetchDeadlineAbort, withApiDeadline } from '@/lib/apiFetch';
 import { MODELS_API_MODE } from './featureFlags';
 import {
   buildMockAgents,
@@ -58,6 +58,11 @@ import { AGENT_CHAIN_CONTRACT_VERSION, CONTRACT_VERSION, PROBE_RESULT_CONTRACT_V
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
 export type SourceCreated = { source: Source } & Adoption;
 export type SourceRefresh = { source: Source; discovered: number };
+export type CredentialReplacement = {
+  source: Source;
+  removed_hops: RouteHopRef[];
+  interrupted: SupplyGap[];
+};
 export type GuardConfirmation = {
   force: true;
   would_remove_hops: RouteHopRef[];
@@ -101,12 +106,11 @@ export type ModelsApi = {
    *  it clears the blocker and returns the source to standby. v3 adds no second
    *  「recover」 endpoint, so this is the whole retry affordance. */
   refreshSource(id: string, confirmation?: GuardConfirmation): Promise<SourceRefresh>;
-  /** Delete a source. `force` overrides the only-supplier guard. */
-  deleteSource(id: string, force?: boolean): Promise<void>;
-  /** Replace the credential of a hub-channel api_key source. Refuses with
-   *  `source_last_supplier` + `would_interrupt` when the replacement set would
-   *  strand a selected model; `force` commits anyway. */
-  replaceCredential(id: string, body: CredentialReplace): Promise<SourceRepaired>;
+  /** Delete a source. A destructive retry echoes the server's exact guard plan. */
+  deleteSource(id: string, confirmation?: GuardConfirmation): Promise<void>;
+  /** Replace the credential of a hub-channel api_key source. The normal guarded
+   *  mutation tail reports every route hop removed and model interrupted. */
+  replaceCredential(id: string, body: CredentialReplace): Promise<CredentialReplacement>;
   /** Start re-authorization for a subscription source. Irreversible once it
    *  begins, which is why the acknowledgement is sent unconditionally — the
    *  server rejects a native source without it (`reauth_confirmation_required`).
@@ -268,36 +272,61 @@ export const apiFailure = (
       }
     : null;
 
+// The server owns the execution ceiling; this browser deadline is only a
+// backstop for a server that never answers, so it must outlast that controlled
+// failure. The margin covers CSRF acquisition, both transits (including a
+// tunnel), one fast CSRF-rejected attempt and replay, handler dispatch, and body
+// decoding. Keep the ceiling aligned with model_hub_client.py:_RPC_TIMEOUT_SECONDS.
+export const MODEL_HUB_RPC_CEILING_MS = 300_000;
+const TRANSPORT_MARGIN_MS = 30_000;
+export const MODEL_HUB_REQUEST_DEADLINE_MS =
+  MODEL_HUB_RPC_CEILING_MS + TRANSPORT_MARGIN_MS;
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await apiFetch(path, init);
-  let payload: unknown = null;
   try {
-    payload = await res.json();
-  } catch {
-    // Invented here, not read off the wire: the request may well have been
-    // carried out and its answer lost coming back.
-    throw new ApiCallError('bad_response', `Non-JSON response from ${path}`, false, [], [], [], res.status);
-  }
-  const envelope = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
-  if (!res.ok || envelope.ok === false) {
-    const error = typeof envelope.error === 'string' ? envelope.error : null;
-    throw new ApiCallError(
-      error ?? `http_${res.status}`,
-      typeof envelope.detail === 'string' ? envelope.detail : undefined,
-      // `payload.error` is the only thing that carries a route's own verdict, so
-      // its presence IS the answer. `http_502` is this client summarizing a
-      // response that never gave one.
-      error !== null,
-      supplyGaps(envelope.would_interrupt),
-      supplyGaps(envelope.interrupted_pairs),
-      routeHopRefs(envelope.would_remove_hops),
-      res.status,
-      typeof envelope.observation === 'object' && envelope.observation !== null
-        ? envelope.observation as SourceObservation
-        : undefined,
+    return await withApiDeadline(
+      MODEL_HUB_REQUEST_DEADLINE_MS,
+      init?.signal ?? undefined,
+      async (signal) => {
+        const res = await apiFetch(path, { ...init, signal });
+        let payload: unknown = null;
+        try {
+          payload = await res.json();
+        } catch (error) {
+          if (signal.aborted) {
+            throw signal.reason ?? error;
+          }
+          // Invented here, not read off the wire: the request may well have been
+          // carried out and its answer lost coming back.
+          throw new ApiCallError('bad_response', `Non-JSON response from ${path}`, false, [], [], [], res.status);
+        }
+        const envelope = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+        if (!res.ok || envelope.ok === false) {
+          const error = typeof envelope.error === 'string' ? envelope.error : null;
+          throw new ApiCallError(
+            error ?? `http_${res.status}`,
+            typeof envelope.detail === 'string' ? envelope.detail : undefined,
+            // `payload.error` is the only thing that carries a route's own verdict, so
+            // its presence IS the answer. `http_502` is this client summarizing a
+            // response that never gave one.
+            error !== null,
+            supplyGaps(envelope.would_interrupt),
+            supplyGaps(envelope.interrupted_pairs),
+            routeHopRefs(envelope.would_remove_hops),
+            res.status,
+            typeof envelope.observation === 'object' && envelope.observation !== null
+              ? envelope.observation as SourceObservation
+              : undefined,
+          );
+        }
+        return payload as T;
+      },
     );
+  } catch (error) {
+    if (!isApiFetchDeadlineAbort(error)) throw error;
+    // The deadline says the answer did not arrive, not whether the route wrote.
+    throw new ApiCallError('bad_response', `Request deadline exceeded for ${path}`, false);
   }
-  return payload as T;
 }
 
 const jsonInit = (method: string, body?: unknown): RequestInit => ({
@@ -322,13 +351,16 @@ const created = (r: SourceCreatedResponse): SourceCreated => ({
   ...adoption(r),
 });
 
-/** api.md "recovery symmetry": both repair routes answer with this same tail,
- *  so both unwrap through one reader. */
-type SourceRepairedResponse = { source?: Source; recovered?: boolean; interrupted_pairs?: SupplyGap[] } & Source;
-const repaired = (r: SourceRepairedResponse): SourceRepaired => ({
+type CredentialReplacementResponse = {
+  source?: Source;
+  removed_hops?: RouteHopRef[];
+  interrupted?: SupplyGap[];
+} & Source;
+
+const credentialReplacement = (r: CredentialReplacementResponse): CredentialReplacement => ({
   source: (r.source ?? r) as Source,
-  recovered: r.recovered === true,
-  interrupted_pairs: supplyGaps(r.interrupted_pairs),
+  removed_hops: routeHopRefs(r.removed_hops),
+  interrupted: supplyGaps(r.interrupted),
 });
 
 /** The oauth terminal envelope, unwrapped without discarding either tail. */
@@ -382,15 +414,20 @@ const liveApi: ModelsApi = {
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
   refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
-  deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=true' : ''}`, jsonInit('DELETE')).then(() => undefined),
+  deleteSource: (id, confirmation) => call(
+    `/api/models/sources/${encodeURIComponent(id)}${confirmation ? '?force=true' : ''}`,
+    jsonInit('DELETE', confirmation ? {
+      would_remove_hops: confirmation.would_remove_hops,
+      would_interrupt: confirmation.would_interrupt,
+    } : undefined),
+  ).then(() => undefined),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
   // and carry no `contract_version` — the same closed-body rule as putAgentSources.
-  replaceCredential: (id, body) => call<SourceRepairedResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(repaired),
-  // The acknowledgement is unconditional by design: the server enforces it for
-  // native sources pre-login, and api.md's per-channel truth makes a hub grant
-  // replacement equally irreversible once new material is written. One confirm,
-  // no channel branch.
+  replaceCredential: (id, body) => call<CredentialReplacementResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(credentialReplacement),
+  // The OAuth acknowledgement is unconditional because beginning reauth may
+  // irreversibly replace grant material. It does not stand in for destructive
+  // supply consent: guarded inventory mutations separately echo the server plan.
   reauthSource: (id) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })).then((r) => (r.flow ?? r) as OAuthFlow),
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
   getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
@@ -670,14 +707,14 @@ class MockStore {
     return gaps;
   }
 
-  deleteSource(id: string, force = false) {
+  deleteSource(id: string, confirmation?: GuardConfirmation) {
     this.syncAgents();
     const remaining = this.sources.filter((s) => s.id !== id);
     // `source_last_supplier` — the code the contract actually sends here.
     // `mode_switch_blocked` belongs to the mode route, and a client written
     // against it retried nothing on a real refusal.
     const gaps = this.wouldInterrupt(remaining);
-    if (gaps.length > 0 && !force)
+    if (gaps.length > 0 && !confirmation)
       throw new ApiCallError('source_last_supplier', undefined, true, gaps);
     this.sources = remaining;
     // Orders and the rollup are recomputed on the next read (syncAgents).
@@ -709,10 +746,7 @@ class MockStore {
       throw new ApiCallError('source_last_supplier', undefined, true, interrupted);
     }
     this.syncAgents();
-    return delay(
-      { source: structuredClone(source), recovered, interrupted_pairs: interrupted },
-      700,
-    );
+    return delay({ source: structuredClone(source), removed_hops: [], interrupted }, 700);
   }
 
   reauthSource(id: string) {
@@ -1326,7 +1360,7 @@ const mockApi: ModelsApi = {
   createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
   patchSource: (id, patch) => mockStore.patchSource(id, patch),
   refreshSource: (id, confirmation) => mockStore.refreshSource(id, confirmation),
-  deleteSource: (id, force) => mockStore.deleteSource(id, force),
+  deleteSource: (id, confirmation) => mockStore.deleteSource(id, confirmation),
   replaceCredential: (id, body) => mockStore.replaceCredential(id, body),
   reauthSource: (id) => mockStore.reauthSource(id),
   listAgents: () => mockStore.listAgents(),

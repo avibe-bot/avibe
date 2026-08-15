@@ -1,0 +1,41 @@
+version: 1
+capability:
+  id: memory_im_attachment_capture
+  name: Bound-DM attachment capture through EverOS multimodal ingest
+  canonical_tests:
+    - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_catalog.py
+contract:
+  admission: bound_enabled_one_to_one_dm_fail_closed
+  opt_in: explicit_complete_multimodal_endpoint
+  degradation: text_and_valid_attachments_survive_independently
+  formats: current_avibe_memory_allowlist
+  limits: memory_only_8_files_25_mib_each_100_mib_bundle
+  preflight: generated_image_without_user_data
+  workbench_compatibility: implicit_main_llm_for_one_cycle
+status_legend:
+  planned: scenario id and invariant reserved; behavior evidence lands in a later slice
+scenarios:
+  - id: MEMORY-IM-ATTACH-001
+    name: Bound Slack DM attachments traverse one download, pin, add, flush, and search path
+    status: planned
+    kind: happy_path
+    layer: scenario
+    delivery_slice: 4
+  - id: MEMORY-IM-ATTACH-002
+    name: Group and unbound events perform no Memory attachment acquisition
+    status: planned
+    kind: authorization
+    layer: scenario
+    delivery_slice: 4
+  - id: MEMORY-IM-ATTACH-003
+    name: Missing multimodal configuration preserves eligible text without attachment provider activity
+    status: planned
+    kind: degradation
+    layer: scenario
+    delivery_slice: 4
+  - id: MEMORY-IM-ATTACH-004
+    name: Invalid attachments preserve valid siblings and leave no temporary or bundle leak
+    status: planned
+    kind: boundary
+    layer: scenario
+    delivery_slice: 4

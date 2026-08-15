@@ -4288,6 +4288,34 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
     return session_claims
 
 
+def session_authorization_revision_state(
+    config: V2Config,
+    payload: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> str:
+    """Classify signed remote claims against the fresh device watermark.
+
+    Returns one of ``not_configured`` (no paired revision sync), ``unsigned``
+    (the claims carry no usable revision), ``unavailable`` (the fresh device
+    watermark could not be read — a recoverable connectivity state, not
+    evidence that authorization changed), ``current``, or ``mismatch``.
+    """
+
+    if not _authorization_revision_sync_configured(config):
+        return "not_configured"
+    try:
+        signed_revision = _normalize_authorization_revision(
+            payload.get(_AUTHORIZATION_REVISION_KEY)
+        )
+    except ValueError:
+        return "unsigned"
+    current_revision = current_authorization_revision(config, now=now)
+    if current_revision is None:
+        return "unavailable"
+    return "current" if signed_revision == current_revision else "mismatch"
+
+
 def session_authorization_is_current(
     config: V2Config,
     payload: Mapping[str, Any],
@@ -4296,18 +4324,10 @@ def session_authorization_is_current(
 ) -> bool:
     """Return whether signed remote claims match the fresh device watermark."""
 
-    if not _authorization_revision_sync_configured(config):
-        return True
-    current_revision = current_authorization_revision(config, now=now)
-    if current_revision is None:
-        return False
-    try:
-        signed_revision = _normalize_authorization_revision(
-            payload.get(_AUTHORIZATION_REVISION_KEY)
-        )
-    except ValueError:
-        return False
-    return signed_revision == current_revision
+    return session_authorization_revision_state(config, payload, now=now) in {
+        "current",
+        "not_configured",
+    }
 
 
 def _encode_session_cookie(secret: str, payload: Mapping[str, Any]) -> str:

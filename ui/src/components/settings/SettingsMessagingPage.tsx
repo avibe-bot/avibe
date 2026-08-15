@@ -26,7 +26,7 @@ import {
   normalizeChatMessageFontSize,
 } from '@/lib/chatDisplay';
 
-const SAVE_KEYS = [
+const OWNER_SAVE_KEYS = [
   'platforms',
   'ack_mode',
   'show_duration',
@@ -44,16 +44,21 @@ const SAVE_KEYS = [
   'agents',
 ] as const;
 
-function buildMessagePatch(config: any, extraPatch: Record<string, unknown> = {}) {
-  // ``save_config`` merges onto the stored config and the backend derives the
-  // internal default platform from ``platforms.enabled``, so this messaging
-  // save no longer sends a ``platform``/primary field.
+function buildMessagePatch(
+  config: any,
+  extraPatch: Record<string, unknown> = {},
+  { fieldSpecific }: { fieldSpecific: boolean },
+) {
+  // Owners still send the existing messaging snapshot so a first-time save of
+  // an older page does not drop sibling fields. Editors send only the changed
+  // field so an unrelated autosave cannot overwrite a newer ASR value.
+  if (fieldSpecific) {
+    return extraPatch;
+  }
   const patch: Record<string, unknown> = {};
-
-  for (const key of SAVE_KEYS) {
+  for (const key of OWNER_SAVE_KEYS) {
     patch[key] = config?.[key];
   }
-
   return { ...patch, ...extraPatch };
 }
 
@@ -73,6 +78,8 @@ export const SettingsMessagingPage: React.FC = () => {
   const api = useApi();
   const { capabilities } = useInstanceAuthorization();
   const canUseSystem = capabilities.can_use_system;
+  const canManageInstance = capabilities.can_manage_instance;
+  const canEditMessaging = capabilities.can_chat || canUseSystem;
   const [config, setConfig] = useState<any>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -97,10 +104,20 @@ export const SettingsMessagingPage: React.FC = () => {
   );
 
   const persist = async (nextConfig: any, extraPatch?: Record<string, unknown>) => {
+    const fieldSpecific = !canUseSystem;
+    // A field-specific save carries only what the control passes, so a control
+    // without an explicit patch would post ``{}``: a silent success that drops
+    // the change on reload. Controls that write owner-only fields have no
+    // Editor patch by design and must be gated out below; reaching here means
+    // one was rendered anyway, so fail visibly instead of pretending to save.
+    if (fieldSpecific && !extraPatch) {
+      setSaveError(t('common.saveFailed'));
+      return;
+    }
     setConfig(nextConfig);
     setSaveError(null);
     try {
-      await api.saveConfig(buildMessagePatch(nextConfig, extraPatch));
+      await api.saveConfig(buildMessagePatch(nextConfig, extraPatch, { fieldSpecific }));
       setSavedAt(Date.now());
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : t('common.saveFailed'));
@@ -134,8 +151,9 @@ export const SettingsMessagingPage: React.FC = () => {
   const includeTimeInfoEnabled = config.include_time_info !== false;
   const audioAsr = config.audio_asr || {};
   const audioEchoEnabled = audioAsr.echo_transcript !== false;
-  const vibeCloud = config.remote_access?.vibe_cloud || {};
-  const vibeCloudPaired = Boolean(vibeCloud.enabled && vibeCloud.instance_id);
+  // Server-computed readiness: the identifiers alone cannot answer this, since
+  // the secret the ASR runtime needs is redacted from every config response.
+  const vibeCloudPaired = Boolean(config.remote_access?.vibe_cloud?.paired);
   const audioAsrEnabled = vibeCloudPaired && audioAsr.enabled !== false;
   const chatMessageFontSize = normalizeChatMessageFontSize(config.ui?.chat_message_font_size);
   const saveChatMessageFontSize = (fontSize: number) => {
@@ -237,12 +255,17 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={audioAsrEnabled}
-              disabled={!vibeCloudPaired}
+              disabled={!canEditMessaging || !vibeCloudPaired}
               onClick={() =>
                 void persist({
                   ...config,
                   audio_asr: {
                     ...audioAsr,
+                    enabled: !audioAsrEnabled,
+                    enabled_configured: true,
+                  },
+                }, {
+                  audio_asr: {
                     enabled: !audioAsrEnabled,
                     enabled_configured: true,
                   },
@@ -258,7 +281,7 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={audioEchoEnabled}
-              disabled={!audioAsrEnabled}
+              disabled={!canEditMessaging || !audioAsrEnabled}
               onClick={() =>
                 void persist({
                   ...config,
@@ -266,6 +289,8 @@ export const SettingsMessagingPage: React.FC = () => {
                     ...audioAsr,
                     echo_transcript: !audioEchoEnabled,
                   },
+                }, {
+                  audio_asr: { echo_transcript: !audioEchoEnabled },
                 })
               }
             />
@@ -289,7 +314,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={includeTimeInfoEnabled}
               onClick={() =>
-                void persist({ ...config, include_time_info: !includeTimeInfoEnabled })
+                void persist(
+                  { ...config, include_time_info: !includeTimeInfoEnabled },
+                  { include_time_info: !includeTimeInfoEnabled },
+                )
               }
             />
           }
@@ -302,7 +330,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={Boolean(config.include_user_info)}
               onClick={() =>
-                void persist({ ...config, include_user_info: !config.include_user_info })
+                void persist(
+                  { ...config, include_user_info: !config.include_user_info },
+                  { include_user_info: !config.include_user_info },
+                )
               }
             />
           }
@@ -325,7 +356,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <CompactSelect
               value={config.ack_mode || 'typing'}
               onChange={(event) =>
-                void persist({ ...config, ack_mode: event.target.value || 'typing' })
+                void persist(
+                  { ...config, ack_mode: event.target.value || 'typing' },
+                  { ack_mode: event.target.value || 'typing' },
+                )
               }
               className="w-40"
             >
@@ -345,10 +379,13 @@ export const SettingsMessagingPage: React.FC = () => {
             <CompactSelect
               value={config.agent_progress_style || 'off'}
               onChange={(event) =>
-                void persist({
-                  ...config,
-                  agent_progress_style: event.target.value || 'off',
-                })
+                void persist(
+                  {
+                    ...config,
+                    agent_progress_style: event.target.value || 'off',
+                  },
+                  { agent_progress_style: event.target.value || 'off' },
+                )
               }
               className="w-40"
             >
@@ -430,7 +467,10 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={config.show_duration !== false}
-              onClick={() => void persist({ ...config, show_duration: !config.show_duration })}
+              onClick={() => void persist(
+                { ...config, show_duration: !config.show_duration },
+                { show_duration: !config.show_duration },
+              )}
             />
           }
         />
@@ -452,7 +492,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={config.reply_enhancements !== false}
               onClick={() =>
-                void persist({ ...config, reply_enhancements: !config.reply_enhancements })
+                void persist(
+                  { ...config, reply_enhancements: !config.reply_enhancements },
+                  { reply_enhancements: !config.reply_enhancements },
+                )
               }
             />
           }
@@ -474,22 +517,26 @@ export const SettingsMessagingPage: React.FC = () => {
             }
           />
         )}
-        {slackSupportsLinkUnfurl && (
+        {/* ``slack.*`` is outside the Editor write allowlist, so this control
+            is only offered to roles that may manage the instance — a remote
+            Owner included, which is why it carries its own field patch. */}
+        {canManageInstance && slackSupportsLinkUnfurl && (
           <SettingsRow
             title={t('dashboard.slackLinkPreviews')}
             description={t('dashboard.slackLinkPreviewsHint')}
             control={
               <ToggleSwitch
                 enabled={Boolean(config.slack?.disable_link_unfurl)}
-                onClick={() =>
-                  void persist({
-                    ...config,
-                    slack: {
-                      ...(config.slack || {}),
-                      disable_link_unfurl: !config.slack?.disable_link_unfurl,
+                onClick={() => {
+                  const next = !config.slack?.disable_link_unfurl;
+                  void persist(
+                    {
+                      ...config,
+                      slack: { ...(config.slack || {}), disable_link_unfurl: next },
                     },
-                  })
-                }
+                    { slack: { disable_link_unfurl: next } },
+                  );
+                }}
               />
             }
           />

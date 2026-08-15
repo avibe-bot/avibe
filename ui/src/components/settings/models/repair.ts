@@ -133,6 +133,20 @@ export const REPAIR_LABEL_KEY: Record<RepairKind, string> = {
 };
 
 /**
+ * The concrete control each remedy reaches. This is deliberately another total
+ * Record over `RepairKind`: a label without a destination is still the dead end
+ * this module exists to prevent. `retest` names the existing refetch control,
+ * rather than being treated as an exception by the component or its test.
+ */
+export type RepairDestination = 'reauth_dialog' | 'replace_key_dialog' | 'refetch_button';
+
+export const REPAIR_DESTINATION: Record<RepairKind, RepairDestination> = {
+  reauth: 'reauth_dialog',
+  replace_key: 'replace_key_dialog',
+  retest: 'refetch_button',
+};
+
+/**
  * What STARTING a re-login costs on this source's channel — the confirm's whole
  * subject, and the one thing about it the two channels do not share.
  *

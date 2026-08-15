@@ -13,7 +13,7 @@ import { createPendingWrites } from './asyncLifetime';
 import { modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { GuardGapList } from './GuardGapList';
-import { repairAction } from './repair';
+import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import {
   COOLDOWN_DETAIL_KEYS,
@@ -33,6 +33,7 @@ const source: Source = {
   base_url: 'https://relay.example/v1',
   supply_channel: 'hub',
   billing: 'metered',
+  credential_ref: 'cred_detail',
   state: { status: 'active', retry_at: null, detail_key: null },
   models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
 };
@@ -453,14 +454,11 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
   });
 
-  // The property, not the rows that satisfy it today: the entry is offered exactly
-  // when `repairAction` — the module that owns 「which remedy this source has」 —
-  // names a re-login. Seeding is complete by construction, so a status, cause,
-  // kind or channel added later is swept without editing this test: the two
-  // vocabularies are the const arrays `contractLocaleKeys` pins to the schema, and
-  // the two unions are enumerated through `satisfies`, which stops compiling when
-  // a member appears.
-  it('offers the re-login entry exactly where repairAction names one', () => {
+  // The property, not today's button list: every remedy the authority can return
+  // reaches the control declared by its total destination Record. Seeding is
+  // complete by construction, so a new status/cause/kind/channel is swept without
+  // editing the test, while a new RepairKind fails the Record/type checks first.
+  it('gives every repair kind a reachable declared destination', () => {
     const kinds = Object.keys({ subscription: 0, api_key: 0 } satisfies Record<SourceKind, 0>) as SourceKind[];
     const channels = Object.keys({ native_cli: 0, hub: 0 } satisfies Record<SupplyChannel, 0>) as SupplyChannel[];
     const causes: (SourceDetailKey | null)[] = [
@@ -477,6 +475,7 @@ describe('SourceDetailPanel', () => {
         state: { status, retry_at: null, detail_key },
       })),
     )));
+    const reached = new Set<RepairKind>();
 
     for (const shape of shapes) {
       const view = render(
@@ -484,11 +483,43 @@ describe('SourceDetailPanel', () => {
           <SourceDetailPanel source={shape} trackMutation={immediateTrack} onReauth={vi.fn()} />
         </I18nextProvider>,
       );
-      const offered = screen.queryAllByRole('button', { name: /^Sign in$|^重新登录$/i }).length > 0;
-      expect(offered, JSON.stringify({ kind: shape.kind, channel: shape.supply_channel, ...shape.state }))
-        .toBe(repairAction(shape) === 'reauth');
+      const action = repairAction(shape);
+      const offered = view.container.querySelectorAll('[data-repair-kind]');
+      expect(offered.length, JSON.stringify({ kind: shape.kind, channel: shape.supply_channel, ...shape.state }))
+        .toBe(action ? 1 : 0);
+      if (action) {
+        reached.add(action);
+        expect(offered[0].getAttribute('data-repair-kind')).toBe(action);
+        expect(offered[0].getAttribute('data-repair-destination')).toBe(REPAIR_DESTINATION[action]);
+      }
       view.unmount();
     }
+
+    expect(reached).toEqual(new Set(Object.keys(REPAIR_LABEL_KEY) as RepairKind[]));
+  });
+
+  it('opens key replacement from the revoked hub credential repair tap', async () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceDetailPanel
+          source={{
+            ...source,
+            state: {
+              status: 'needs_action',
+              retry_at: null,
+              detail_key: 'models.source.needs_action.credential_revoked',
+            },
+          }}
+          trackMutation={immediateTrack}
+          onReauth={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /^Replace key$|^更换 Key$/i }));
+
+    expect(await screen.findByRole('dialog', { name: /Replace the API key|更换.*API Key/i })).toBeTruthy();
+    expect(screen.getByLabelText(/^New API key$|^新的 API Key$/i)).toBeTruthy();
   });
 
   it('confirms a native re-login with the cost it pays at start before handing the source up', async () => {

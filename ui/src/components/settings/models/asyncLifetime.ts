@@ -358,12 +358,14 @@ export type FlowEvent =
  */
 export type FlowAction = 'continue' | 'succeed' | 'fail' | 'timeout' | 'ignore';
 
-export type OAuthFailureClass =
+export type ModelHubFailureClass =
   | 'authoritative-terminal'
   | 'inconclusive'
   | 'retryable-provider';
 
-type OAuthFailureEvidence = {
+export type OAuthFailureClass = ModelHubFailureClass;
+
+type ModelHubFailureEvidence = {
   serverNamed: boolean;
   code?: string;
   detail?: string;
@@ -376,7 +378,7 @@ const AUTHORITATIVE_TERMINAL_CODES = new Set([
 ]);
 
 /** One classification shared by polling, timeout recovery, and Retry. */
-export const classifyOAuthFailure = (failure: OAuthFailureEvidence): OAuthFailureClass => {
+export const classifyModelHubFailure = (failure: ModelHubFailureEvidence): ModelHubFailureClass => {
   const rawCode = failure?.code ?? failure?.detail;
   const code = rawCode?.startsWith('modelHub.errors.')
     ? rawCode.slice('modelHub.errors.'.length)
@@ -386,6 +388,8 @@ export const classifyOAuthFailure = (failure: OAuthFailureEvidence): OAuthFailur
     ? 'authoritative-terminal'
     : 'retryable-provider';
 };
+
+export const classifyOAuthFailure = classifyModelHubFailure;
 
 /** Everything that decides what the dialog shows, including its terminal latch. */
 export type FlowView = {

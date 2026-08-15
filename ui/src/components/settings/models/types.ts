@@ -584,6 +584,9 @@ export type OAuthSourceCreate = {
 export type SourcePatch = {
   display_name?: string;
   base_url?: string | null;
+  force?: boolean;
+  would_remove_hops?: RouteHopRef[];
+  would_interrupt?: SupplyGap[];
 };
 
 /** PUT /api/models/agents/<backend>/sources — replaces the complete order. */
@@ -608,7 +611,12 @@ export type AgentChainMutation = {
  * Also a TOTAL body that rejects unknown keys (`contract_version` included), so
  * `force` is omitted rather than sent false on the unguarded first attempt.
  */
-export type CredentialReplace = { key: string; force?: boolean };
+export type CredentialReplace = {
+  key: string;
+  force?: boolean;
+  would_remove_hops?: RouteHopRef[];
+  would_interrupt?: SupplyGap[];
+};
 
 /**
  * POST /api/models/sources/<id>/reauth. The acknowledgement is server-enforced

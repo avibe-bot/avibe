@@ -3997,7 +3997,20 @@ async def model_hub_sources_delete(source_id):
 
     try:
         force = str(request.args.get("force") or "").lower() in _TRUE_BOOL_STRINGS
-        result = await _model_hub_service().delete_source(source_id, force=force)
+        payload = request.json
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or set(payload) - {
+            "would_remove_hops",
+            "would_interrupt",
+        }:
+            raise ModelHubError("invalid_source_order")
+        result = await _model_hub_service().delete_source(
+            source_id,
+            force=force,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
+        )
         return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -4011,11 +4024,17 @@ async def model_hub_sources_refresh(source_id):
         payload = request.json
         if payload is None:
             payload = {}
-        if not isinstance(payload, dict) or set(payload) - {"force"}:
+        if not isinstance(payload, dict) or set(payload) - {
+            "force",
+            "would_remove_hops",
+            "would_interrupt",
+        }:
             raise ModelHubError("invalid_source_order")
         result = await _model_hub_service().refresh_source(
             source_id,
             force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
         )
         return _model_hub_success(**result)
     except ModelHubError as exc:
@@ -4128,6 +4147,8 @@ async def model_hub_source_models_delete(source_id, model_id):
             source_id,
             model_id,
             force=payload.get("force") is True,
+            confirmed_remove_hops=payload.get("would_remove_hops"),
+            confirmed_interruptions=payload.get("would_interrupt"),
         )
         return _model_hub_success(**result)
     except ModelHubError as exc:
@@ -5481,6 +5502,12 @@ def _web_push_user_key() -> str:
 
     Remote-access sessions carry a subject claim; purely local UI sessions do
     not yet have a user identity, so they share the local install namespace.
+    Subscription identity is durable (#1434): a still-valid session cookie
+    keeps attributing subscriptions and test sends to its subject across
+    sliding-session renewal. Confirmed revocation is enforced by
+    ``parse_session_cookie`` itself (signature, expiry, and current
+    authorization revision), so no separate interactive-refresh cutoff is
+    applied here.
     """
 
     config = _load_remote_access_config()
@@ -5491,15 +5518,47 @@ def _web_push_user_key() -> str:
             payload = remote_access.parse_session_cookie(
                 config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)
             )
-            if (
-                payload
-                and not remote_access.session_needs_authorization_refresh(payload)
-                and payload.get("sub")
-            ):
+            if payload and payload.get("sub"):
                 return f"remote:{payload['sub']}"
         except Exception:
             logger.debug("web push: could not resolve remote user key", exc_info=True)
     return "local"
+
+
+def _web_push_normal_delivery_diagnostics() -> dict:
+    """Explain the normal-path authorization gates for the calling owner.
+
+    The Web Push test send skips the authorization gates that normal inbox
+    delivery applies. Reporting the same evaluation here lets a user see why a
+    test notification arrives while a normal one does not, without exposing
+    protected content or credentials.
+    """
+
+    from core import web_push_notifications
+
+    user_key = _web_push_user_key()
+    try:
+        evaluation = web_push_notifications.evaluate_delivery_authorization_for_context(
+            user_key,
+            getattr(g, "authorization_context", None),
+        )
+    except Exception:
+        logger.debug("web push: normal delivery evaluation failed", exc_info=True)
+        evaluation = {
+            "user_key": user_key,
+            "policy": "unknown",
+            "authorized": None,
+            "disposition": None,
+            "reason": "evaluation_unavailable",
+        }
+    try:
+        evaluation["recent_deliveries"] = web_push_notifications.recent_delivery_dispositions(
+            user_key=user_key,
+        )
+    except Exception:
+        logger.debug("web push: recent delivery lookup failed", exc_info=True)
+        evaluation["recent_deliveries"] = []
+    return evaluation
 
 
 def _workbench_memory_user_id() -> str | None:
@@ -5570,6 +5629,7 @@ def web_push_status():
             "public_key": keys.public_key,
             "subscription_count": subscription_count,
             "current_subscription_enabled": current_subscription is not None,
+            "normal_delivery": _web_push_normal_delivery_diagnostics(),
         }
     )
 
@@ -5669,7 +5729,14 @@ def web_push_test():
                 disable=status_code in {404, 410},
             )
         failed += 1
-    return jsonify({"ok": failed == 0, "sent": sent, "failed": failed})
+    return jsonify(
+        {
+            "ok": failed == 0,
+            "sent": sent,
+            "failed": failed,
+            "normal_delivery": _web_push_normal_delivery_diagnostics(),
+        }
+    )
 
 
 @app.route("/api/cli/detect")
@@ -5871,7 +5938,23 @@ async def config_post():
     from vibe import internal_client
     from vibe import remote_access
 
-    payload = request.json or {}
+    # The decoded body, not the usual ``request.json or {}``: this route's two
+    # validators already require a JSON object — ``editor_config_write_payload``
+    # for an Editor, ``api.save_config`` for everyone — and that coercion turns
+    # every falsy body (``null``, ``[]``, ``false``, ``0``, ``""``, or none at
+    # all) into an empty patch before either of them sees it, so a malformed
+    # write saved nothing and answered 200. Passing the value through keeps one
+    # property — a config write is an object — instead of an enumeration of the
+    # falsy shapes that happen to exist today.
+    payload = request.json
+    authorization_context = getattr(g, "authorization_context", None)
+    editor_write = authorization_context is not None and not authorization_context.can_manage_instance
+    if editor_write:
+        try:
+            payload = api.editor_config_write_payload(payload)
+        except ValueError as exc:
+            code = api.editor_config_write_error_code(exc)
+            return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
     remote_access_runtime = None
     try:
         (
@@ -5884,6 +5967,13 @@ async def config_post():
             payload,
         )
     except ValueError as exc:
+        # Same chokepoint as the allowlist rejection above: an Editor write
+        # answers with a stable code whichever layer refused it, including
+        # value validation raised deep inside ``V2Config.from_payload``. Owner
+        # saves keep the descriptive message the Settings pages already show.
+        if editor_write:
+            code = api.editor_config_write_error_code(exc)
+            return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
         message = str(exc)
         return jsonify({"ok": False, "error": message, "message": message}), 400
     if should_reconcile_remote_access:

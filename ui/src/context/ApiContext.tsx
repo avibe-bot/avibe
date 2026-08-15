@@ -566,6 +566,10 @@ export type ApiContextType = {
   getMemoryMaintenance: () => Promise<MemoryMaintenanceResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
   searchMemory: (query: string, limit?: number, project?: string) => Promise<MemoryRecallResult>;
+  listMemoryEpisodes: (
+    project: string,
+    options?: { page?: number; cursor?: string | null; limit?: number },
+  ) => Promise<MemoryListResult>;
   listMemoryProjects: () => Promise<{ status: 'ok'; projects: Array<{ id: string; kind: 'default' | 'named' | 'all' }> } | { status: 'failed'; error?: string }>;
   getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
   getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
@@ -2031,6 +2035,31 @@ export type MemoryRecallResult =
     }
   | MemoryFailure;
 
+export type MemoryListWarning = 'memory_list_partial' | 'memory_list_truncated';
+
+export type MemoryListItem = {
+  id: string;
+  kind: 'episode';
+  subject: string;
+  summary: string;
+  body: string;
+  timestamp: string;
+  project: string;
+};
+
+export type MemoryListResult =
+  | {
+      status: 'ok';
+      items: MemoryListItem[];
+      count: number;
+      total_count: number | null;
+      warnings: MemoryListWarning[];
+      page?: number;
+      page_size?: number;
+      next_cursor?: string | null;
+    }
+  | MemoryFailure;
+
 export type MemoryLogSourceStatus = {
   status: 'available' | 'partial' | 'stale' | 'unknown' | 'unavailable';
   observed_at: string | null;
@@ -2440,12 +2469,38 @@ export type OpencodeMutationResult = {
   };
 };
 
+export type WebPushNormalDeliveryOwner = {
+  policy?: string;
+  disposition?: string | null;
+  reason?: string;
+};
+
+export type WebPushNormalDeliveryRecent = {
+  at?: string;
+  message_id?: string | null;
+  session_id?: string | null;
+  owners?: Record<string, WebPushNormalDeliveryOwner>;
+  disposition?: string | null;
+};
+
+/** Normal-path authorization evaluation shared by the test/status surface. */
+export type WebPushNormalDelivery = {
+  user_key?: string;
+  policy?: string;
+  authorized?: boolean | null;
+  disposition?: string | null;
+  reason?: string;
+  revision_state?: string;
+  recent_deliveries?: WebPushNormalDeliveryRecent[];
+};
+
 export type WebPushStatus = {
   ok: boolean;
   configured: boolean;
   public_key: string;
   subscription_count: number;
   current_subscription_enabled?: boolean;
+  normal_delivery?: WebPushNormalDelivery;
 };
 
 export type WebPushStatusPayload = {
@@ -2474,6 +2529,7 @@ export type WebPushTestResult = {
   sent?: number;
   failed?: number;
   error?: string;
+  normal_delivery?: WebPushNormalDelivery;
 };
 
 // Error thrown by the JSON helpers below when a request fails. Carries the
@@ -3330,6 +3386,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       },
       ...(project ? { project } : {}),
     }, { handleError: false }),
+    listMemoryEpisodes: (project, options = {}) => {
+      const limit = options.limit ?? 20;
+      return postJson('/api/memory/list', {
+        project,
+        limit,
+        ...(project === 'all'
+          ? (options.cursor ? { cursor: options.cursor } : {})
+          : { page: options.page ?? 1 }),
+      }, { handleError: false });
+    },
     listMemoryProjects: () => getJson('/api/memory/projects', { handleError: false }),
     getMemoryLog: (cursor = null, limit = 20) => {
       const query = new URLSearchParams({ limit: String(limit) });

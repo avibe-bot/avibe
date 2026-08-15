@@ -294,6 +294,18 @@ describe('the copy each remedy names', () => {
     for (const bundle of [en, zh]) expect(typeof translated(bundle, key)).toBe('string');
   });
 
+  it.each([
+    'settings.models.guard.title.replaceKey',
+    'settings.models.guard.subtitle.replaceKey',
+    'settings.models.guard.confirm.replaceKey',
+    'settings.models.guard.result.label',
+    'settings.models.guard.result.gapLabel',
+    'settings.models.guard.result.hint.safe',
+    'settings.models.guard.result.hint.interrupt',
+  ])('has replacement guard copy in both locales for %s', (key) => {
+    for (const bundle of [en, zh]) expect(typeof translated(bundle, key)).toBe('string');
+  });
+
   it('warns up front on a native re-login and only about failure on a hub one', () => {
     // `mark_native_irreversible_start` rewrites every native source of that
     // vendor's backend to 需要处理 as the login spawns, so 「开始后旧的登录立即失效」
