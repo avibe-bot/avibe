@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import { intendedFiles } from './lintPolicy.mjs';
 import { rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
+import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // `validate:theme` reads whole source files with regular expressions, so the set
 // of bytes it treats as CSS is decided here and nowhere else. Ten review rounds
@@ -113,7 +114,7 @@ describe('withoutNonRenderingText', () => {
     }
 
     expect(drifted).toEqual([]);
-  });
+  }, WHOLE_TREE_SCAN);
 
   // TSX is not a superset of TS. `<T>(x: T) => …` is a generic arrow in a `.ts`
   // file and an unclosed JSX element in a `.tsx` one, so reading every file with

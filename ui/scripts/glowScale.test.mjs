@@ -8,6 +8,7 @@ import postcss from 'postcss';
 import { customPropertiesIn } from './customProperties.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { typeScriptComments } from './nonRenderingText.mjs';
+import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // `validate:theme` already forces every glow in the tree to be a
 // `--shadow-glow-*` token. That check is about spelling: it says a call site
@@ -212,5 +213,5 @@ describe('the accent glow scale', () => {
     const spellable = new Set(Object.values(ROLE_BLUR));
 
     expect([...annotated].filter((blur) => !spellable.has(blur)).sort((a, b) => a - b)).toEqual([]);
-  });
+  }, WHOLE_TREE_SCAN);
 });
