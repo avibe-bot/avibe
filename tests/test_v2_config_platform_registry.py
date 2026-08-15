@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import copy
+import re
+from dataclasses import fields
+
 import pytest
 
 from config.v2_config import (
+    _BOOL_SPELLINGS,
+    _named_value,
     AgentsConfig,
+    AudioAsrConfig,
     DiscordConfig,
     LarkConfig,
     PlatformsConfig,
@@ -13,6 +20,7 @@ from config.v2_config import (
     UiConfig,
     UpdateConfig,
     V2Config,
+    VibeCloudRemoteAccessConfig,
     WeChatConfig,
 )
 from vibe import api
@@ -264,10 +272,13 @@ def test_chat_message_font_size_is_clamped() -> None:
 
     assert config.ui.chat_message_font_size == 20
 
+    # A size out of range still names a size, so it is clamped. One that names
+    # no size is refused rather than answered with the default: this is the
+    # write path for /api/config, where substituting a default would return 200
+    # holding a value the caller never sent.
     payload["ui"]["chat_message_font_size"] = "bad"
-    config = V2Config.from_payload(payload)
-
-    assert config.ui.chat_message_font_size == 14
+    with pytest.raises(ValueError, match="chat_message_font_size"):
+        V2Config.from_payload(payload)
 
 
 def test_show_agent_activity_defaults_off_and_round_trips() -> None:
@@ -306,6 +317,42 @@ def test_show_tool_calls_defaults_on_and_round_trips() -> None:
     assert config.ui.show_tool_calls is False
     assert api.config_to_payload(config)["ui"]["show_tool_calls"] is False
 
+
+def test_ui_switches_resolve_the_side_a_spelling_names_or_refuse_the_value() -> None:
+    """A switch stores the side its value names; a value naming none is refused.
+
+    ``/api/config`` validates through this same parser, so a value read as a
+    side it never named is answered 200 holding the opposite of what the caller
+    sent. Seeded from ``_BOOL_SPELLINGS`` and from the switches ``UiConfig``
+    declares rather than from lists repeated here, so a spelling added to the
+    vocabulary or a switch added to the section is covered without editing it.
+    """
+    payload = api.config_to_payload(_base_config())
+    switches = [info.name for info in fields(UiConfig) if info.type in (bool, "bool")]
+    assert len(switches) > 1
+
+    for name in switches:
+        for spelling, side in _BOOL_SPELLINGS.items():
+            for written in (spelling, spelling.upper(), f"  {spelling} "):
+                payload["ui"][name] = written
+                parsed = getattr(V2Config.from_payload(payload).ui, name)
+                assert parsed is side, (name, written)
+        for literal in (True, False, 1, 0):
+            payload["ui"][name] = literal
+            assert getattr(V2Config.from_payload(payload).ui, name) is bool(literal), (
+                name,
+                literal,
+            )
+
+        # Outside the vocabulary the value names no side at all. Reading it as
+        # off — which is what a truthy-list-plus-else does — is the defect:
+        # ``5`` was read as on and ``"garbage"`` as off, both silently.
+        for unspellable in ("garbage", "maybe", "true-ish", 5, -1, 2.0, [], {}, None):
+            payload["ui"][name] = unspellable
+            with pytest.raises(ValueError, match=name):
+                V2Config.from_payload(payload)
+        payload["ui"][name] = getattr(_base_config().ui, name)
+
     # String forms parse explicitly — ``bool("false")`` would be True, which must NOT
     # keep tool rows visible when the user hid them.
     for truthy in ("true", "True", "1", "yes", "on"):
@@ -314,6 +361,217 @@ def test_show_tool_calls_defaults_on_and_round_trips() -> None:
     for falsey in ("false", "False", "0", "no", "off", ""):
         payload["ui"]["show_tool_calls"] = falsey
         assert V2Config.from_payload(payload).ui.show_tool_calls is False, falsey
+
+
+# The sections this PR makes writable, and how to reach each one in a payload.
+# ``instance_kind`` is server-set at pairing and means "unknown" whenever it is
+# not a kind this build knows, so for it an unreadable value and an
+# unrecognised one are the same answer; it is exempt by name in the dataclass.
+_KIND_HELD_SECTIONS = (
+    ("ui", UiConfig, ("ui",)),
+    ("audio_asr", AudioAsrConfig, ("audio_asr",)),
+    (
+        "remote_access.vibe_cloud",
+        VibeCloudRemoteAccessConfig,
+        ("remote_access", "vibe_cloud"),
+    ),
+)
+_KIND_EXEMPT_FIELDS = {("remote_access.vibe_cloud", "instance_kind")}
+
+# What each declared kind must refuse. ``True`` appears under the numbers on
+# purpose: Python makes ``bool`` an ``int``, so ``int(True)`` is a legal ``1``
+# and a switch posted where a size or a timeout belongs would be stored as one.
+# The infinities and the NaN are there because they are numbers that name no
+# setting: ``json`` produces them from a hand-edited ``1e309`` as readily as
+# from the literal ``Infinity``, ``int(inf)`` raises ``OverflowError`` rather
+# than the ``ValueError`` every other refusal here raises, and a ``float`` field
+# accepted them outright — an ASR timeout of infinity never expires.
+_NAMING_NO_NUMBER = (True, False, "garbage", [], {}, None, float("inf"), float("-inf"), float("nan"))
+# A fractional value is a legal ``float`` and names no ``int``, so this is the
+# one row the two numeric kinds cannot share: ``int(14.9)`` is ``14``, and a
+# font size posted as 14.9 was answered 200 and stored as 14.
+_VALUES_NAMING_NO = {
+    "bool": ("garbage", 5, -1, 2.0, [], {}, None),
+    "int": _NAMING_NO_NUMBER + (14.9, -0.5, 0.1),
+    "float": _NAMING_NO_NUMBER,
+    "str": (5, True, 2.0, [], {}, None),
+}
+
+
+def _declared_kind(info) -> tuple[str, bool]:
+    """The kind a field declares, and whether it also names ``None``.
+
+    ``Optional[int]`` reports its ``__name__`` as the bare ``"Optional"``, which
+    dropped the kind being wrapped and quietly excused every optional field from
+    the rule below — ``audio_asr.max_file_bytes`` was skipped while this test's
+    docstring claimed every declared field was covered.
+    """
+
+    text = info.type if isinstance(info.type, str) else getattr(info.type, "__name__", "")
+    if text.startswith("Optional"):
+        text = str(info.type)
+    optional = re.fullmatch(r"(?:typing\.)?Optional\[(?:typing\.)?(.+)\]", text)
+    return (optional.group(1), True) if optional else (text, False)
+
+
+def test_config_fields_are_held_to_the_kind_they_declare() -> None:
+    """Every field of a writable section refuses a value naming another kind.
+
+    ``/api/config`` validates through this same parser, so a value coerced into
+    a legal one is answered 200 having stored something the caller never sent:
+    ``{"chat_message_font_size": true}`` became the minimum font size,
+    ``{"timeout_seconds": true}`` a one-second ASR timeout, and a number where
+    a credential belongs emptied the credential. Each was a separate finding
+    because each field open-coded its own coercion; the property is stated once
+    here instead.
+
+    "Another kind" includes a number of the right type that still names no
+    setting. An infinity is a ``float`` and a NaN loses every comparison it is
+    given, so both slip past a type check and then behave as settings — an ASR
+    timeout that never expires, a size that clamps to whichever bound is written
+    first — and on an ``int`` field the conversion raises ``OverflowError``
+    instead, which is not the exception the disk path recovers from.
+
+    Seeded from the declared fields of each section rather than from the ones a
+    review reached, and closed with a non-vacuity assertion, so a field added to
+    any of these dataclasses is covered without editing this test.
+    """
+    healthy = api.config_to_payload(
+        V2Config.from_payload(
+            {
+                **api.config_to_payload(_base_config(), include_secrets=True),
+                "remote_access": {"provider": "vibe_cloud", "vibe_cloud": {"enabled": True}},
+                "audio_asr": {"enabled": True},
+            }
+        ),
+        include_secrets=True,
+        include_internal=True,
+    )
+
+    def _seed(section_path: tuple[str, ...], name: str, value: object) -> dict:
+        payload = copy.deepcopy(healthy)
+        cursor = payload
+        for key in section_path:
+            cursor = cursor[key]
+        cursor[name] = value
+        return payload
+
+    held: set[tuple[str, str]] = set()
+    declared_kinds: set[tuple[str, str]] = set()
+    for section, dataclass_type, section_path in _KIND_HELD_SECTIONS:
+        assert V2Config.from_payload(copy.deepcopy(healthy)), section
+        for info in fields(dataclass_type):
+            kind, optional = _declared_kind(info)
+            if kind not in _VALUES_NAMING_NO:
+                # Containers and nested sections are held by the code that
+                # already understands them, not by the declared-kind rule.
+                continue
+            if (section, info.name) in _KIND_EXEMPT_FIELDS:
+                continue
+            declared_kinds.add((section, info.name))
+            for value in _VALUES_NAMING_NO[kind]:
+                if value is None and optional:
+                    # A field that declares ``Optional`` names ``None`` as one of
+                    # its own values, so refusing it would be the mirror defect.
+                    assert V2Config.from_payload(_seed(section_path, info.name, None))
+                    continue
+                with pytest.raises(ValueError, match=re.escape(f"{section}.{info.name}")):
+                    V2Config.from_payload(_seed(section_path, info.name, value))
+                held.add((section, info.name))
+
+    assert declared_kinds <= held, declared_kinds - held
+    assert len(held) > 10, held
+
+    # An optional scalar is a declared kind like any other, and it existing is
+    # what stops the line above from being satisfied by a resolver that quietly
+    # drops every ``Optional`` field out of ``declared_kinds`` as well as out of
+    # ``held`` — which is how ``audio_asr.max_file_bytes`` went uncovered.
+    optional_scalars = {
+        (section, info.name)
+        for section, dataclass_type, _ in _KIND_HELD_SECTIONS
+        for info in fields(dataclass_type)
+        if _declared_kind(info)[1] and _declared_kind(info)[0] in _VALUES_NAMING_NO
+    }
+    assert optional_scalars, "no optional scalar field left to hold to its declared kind"
+    assert optional_scalars <= held, optional_scalars - held
+
+    # A value that *names* the declared kind is still read, so the rule refuses
+    # wrong kinds rather than everything that is not already the right type.
+    assert V2Config.from_payload(_seed(("ui",), "chat_message_font_size", "15")).ui.chat_message_font_size == 15
+    assert V2Config.from_payload(_seed(("audio_asr",), "timeout_seconds", "2.5")).audio_asr.timeout_seconds == 2.5
+    assert (
+        V2Config.from_payload(
+            _seed(("remote_access", "vibe_cloud"), "auto_recovery", "off")
+        ).remote_access.vibe_cloud.auto_recovery
+        is False
+    )
+
+
+# Numbers to offer the numeric vocabulary: whole and fractional, negative, the
+# first integer a ``float`` cannot hold, one too large for a ``float`` at all,
+# and the three that are numbers without naming a quantity.
+_NUMBERS_GIVEN = (
+    0,
+    1,
+    -3,
+    14,
+    14.0,
+    -2.0,
+    0.5,
+    2.5,
+    14.9,
+    -0.5,
+    10**19,
+    2**53 + 1,
+    10**309,
+    float("inf"),
+    float("-inf"),
+    float("nan"),
+)
+
+
+def test_a_number_this_parser_accepts_is_the_number_it_was_given() -> None:
+    """Whatever the numeric vocabulary accepts, it stores unchanged.
+
+    Three review rounds each found one coercion — a switch read as ``1``, an
+    infinity read as an ASR timeout, a font size of 14.9 truncated to ``14`` —
+    and they are one defect wearing three faces: a conversion that succeeds
+    while changing the number, so the write is answered 200 having stored a
+    setting the caller never sent. Listing the three known faces would leave the
+    fourth to a fourth review round, so the property is stated over inputs
+    instead of over forbidden cases: offer this vocabulary a number, and either
+    it refuses or it hands back exactly what it was given. A conversion added
+    later that rounds, truncates, or saturates fails here rather than in review.
+
+    A spelling is deliberately not held to the rule — reading ``"14"`` as 14 is
+    the normalization this keeps, asserted at the bottom — because a spelling
+    names a number without being one, and no fractional spelling reaches the
+    conversion anyway: ``int("14.9")`` raises.
+    """
+
+    read: dict[str, list[object]] = {"int": [], "float": []}
+    for kind in read:
+        for value in _NUMBERS_GIVEN:
+            try:
+                number = _named_value(f"probe.{kind}", kind, value)
+            except ValueError:
+                continue
+            assert number == value, (kind, value, number)
+            read[kind].append(value)
+
+    # Non-vacuity, and the half of the contract the rule must not eat: refusing
+    # every number satisfies the loop above, so the values that must still be
+    # read are named. They are asserted by calling rather than by looking for
+    # them in what was accepted, because ``14.0 in [14]`` is true in Python —
+    # membership would report the float as read on the strength of the int it
+    # equals, and a rule that refused every float would pass.
+    assert _named_value("probe.int", "int", 14.0) == 14
+    assert _named_value("probe.float", "float", 14.9) == 14.9
+    assert _named_value("probe.int", "int", 2**53 + 1) == 2**53 + 1
+    assert len(read["int"]) >= 6 and len(read["float"]) >= 6, read
+
+    assert _named_value("probe.int", "int", "14") == 14
+    assert _named_value("probe.float", "float", "2.5") == 2.5
 
 
 def test_config_payload_includes_vibe_cloud_remote_access() -> None:

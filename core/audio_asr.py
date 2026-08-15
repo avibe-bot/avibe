@@ -117,16 +117,14 @@ class AudioAsrService:
         return getattr(self.config, "audio_asr", None) or AudioAsrConfig()
 
     def _runtime_config(self) -> AudioAsrRuntimeConfig | None:
+        # Readiness is decided by ``VibeCloudRemoteAccessConfig`` so this
+        # service and the config projections that gate the ASR controls can
+        # never disagree about whether the pairing is usable.
         cloud = getattr(getattr(self.config, "remote_access", None), "vibe_cloud", None)
-        if not cloud:
+        credentials = cloud.runtime_credentials() if cloud is not None else None
+        if credentials is None:
             return None
-        if not getattr(cloud, "enabled", False):
-            return None
-        base_url = (getattr(cloud, "backend_url", "") or "").strip().rstrip("/")
-        instance_id = (getattr(cloud, "instance_id", "") or "").strip()
-        device_secret = (getattr(cloud, "instance_secret", "") or "").strip()
-        if not base_url or not instance_id or not device_secret:
-            return None
+        base_url, instance_id, device_secret = credentials
         return AudioAsrRuntimeConfig(base_url=base_url, instance_id=instance_id, device_secret=device_secret)
 
     def _endpoint_url(self, runtime: AudioAsrRuntimeConfig) -> str:

@@ -155,6 +155,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/asr/status"),
         ("POST", "/api/asr/transcribe"),
         ("POST", "/api/asr/telemetry"),
+        ("POST", "/api/config"),
         ("POST", "/api/sessions/session-1/messages"),
         ("POST", "/api/sessions/session-1/attachments"),
         ("POST", "/api/sessions/session-1/cancel"),

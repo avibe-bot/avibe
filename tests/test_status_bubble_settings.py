@@ -44,17 +44,21 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertEqual(cfg.agent_status_heartbeat_ms, 12000)
         self.assertEqual(cfg.agent_status_no_output_ms, 60000)
 
-    def test_invalid_values_fall_back_to_defaults(self):
+    def test_invalid_timings_fall_back_to_defaults(self):
+        # These two are internal tuning knobs, absent from the Settings write
+        # surface, so a bad value has no caller to answer and keeps degrading.
         cfg = V2Config.from_payload(
-            _payload(
-                agent_progress_style="bogus",
-                agent_status_heartbeat_ms=-5,
-                agent_status_no_output_ms="nope",
-            )
+            _payload(agent_status_heartbeat_ms=-5, agent_status_no_output_ms="nope")
         )
-        self.assertEqual(cfg.agent_progress_style, "off")
         self.assertEqual(cfg.agent_status_heartbeat_ms, 8000)
         self.assertEqual(cfg.agent_status_no_output_ms, 180000)
+
+    def test_invalid_progress_style_is_refused(self):
+        # ``agent_progress_style`` is written from the Settings page, where
+        # answering a rejected value with a default silently changes a
+        # preference the caller asked to set.
+        with self.assertRaises(ValueError):
+            V2Config.from_payload(_payload(agent_progress_style="bogus"))
 
     def test_bool_is_not_accepted_as_int(self):
         cfg = V2Config.from_payload(_payload(agent_status_heartbeat_ms=True))

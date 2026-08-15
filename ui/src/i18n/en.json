@@ -1560,6 +1560,8 @@
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",
     "remote_access_session_secret_missing": "Remote access is misconfigured (missing session secret). Re-pair this device to restore access.",
     "remote_access_unknown": "The operation did not finish. Refresh the status and try again; if it still fails, check the remote access runtime logs.",
+    "editor_config_write_forbidden": "Only messaging preferences can be saved from this role.",
+    "editor_config_write_invalid": "That messaging setting could not be saved.",
     "show_page_email_access_transient": "Email access is temporarily unavailable. Try again.",
     "invalid_pairing_key": "This pairing key is invalid or expired. Create a new key at avibe.bot, then paste it here.",
     "missing_pairing_key": "Paste the pairing key first.",
