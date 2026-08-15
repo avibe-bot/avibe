@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
@@ -20,6 +21,54 @@ class FixtureRuntimeManager(ManagedRuntimeManager):
         if binary is None:
             return None
         return binary.read_text(encoding="utf-8").strip()
+
+
+def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() -> None:
+    module = ast.parse(Path("core/managed_runtime.py").read_text(encoding="utf-8"))
+    manager = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "ManagedRuntimeManager"
+    )
+    methods = {
+        node.name: node
+        for node in manager.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    reachable = {"ensure"}
+    pending = ["ensure"]
+    while pending:
+        method = methods[pending.pop()]
+        for node in ast.walk(method):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            if not (
+                isinstance(function, ast.Attribute)
+                and isinstance(function.value, ast.Name)
+                and function.value.id == "self"
+                and function.attr in methods
+                and function.attr not in reachable
+            ):
+                continue
+            reachable.add(function.attr)
+            pending.append(function.attr)
+
+    reason_suffixes = {
+        node.args[0].value
+        for method_name in reachable
+        for node in ast.walk(methods[method_name])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr == "_reason"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    }
+
+    assert managed_runtime._ENSURE_FAILURE_SUFFIXES == reason_suffixes
 
 
 @pytest.mark.parametrize(
