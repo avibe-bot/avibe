@@ -316,12 +316,14 @@ all capture work to one late stage.
   than only for failures with an existing closed classification.
 - **Drop-accounting invariant.** Every attachment deterministically dropped in one
   turn is counted exactly once by one scrub-safe
-  `memory_attachment_capture_skipped` record. Admission aggregates its own drop
-  reasons; every drop after admission emits the same platform/count/closed-reason
-  shape itself. The finite post-admission set is currently configuration-generation
-  mismatch (`configuration_changed`) and mixed-turn pin fallback (`pin_failed`). A
-  new post-admission drop point must name its single accounting owner when added;
-  silent loss and duplicate counting are both contract violations.
+  `memory_attachment_capture_skipped` record. From successful materialization
+  onward, Admission aggregates the eligibility and selection reasons it owns; every
+  deterministic drop outside Admission emits the same platform/count/closed-reason
+  shape itself. That finite outside-Admission set is currently lease-retention
+  failure (`lease_retain_failed`), configuration-generation mismatch
+  (`configuration_changed`), and mixed-turn pin fallback (`pin_failed`). A new
+  deterministic drop point after materialization must name its single accounting
+  owner when added; silent loss and duplicate counting are both contract violations.
 - **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
   admission, the handler performs only an O(1), non-blocking, local registration of
   an exact-session Memory capture ticket. Registration records FIFO order but never

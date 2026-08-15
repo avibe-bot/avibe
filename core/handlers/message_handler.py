@@ -19,6 +19,7 @@ from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_context_thread_id,
 )
+from core.memory.telemetry import log_attachment_skip
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
@@ -804,8 +805,6 @@ class MessageHandler(BaseHandler):
                             )
                         )
                         if stale_attachment_capture:
-                            from core.memory.telemetry import log_attachment_skip
-
                             log_attachment_skip(
                                 str(context.platform or "unknown"),
                                 len(context.files),
@@ -835,13 +834,20 @@ class MessageHandler(BaseHandler):
                         ):
                             try:
                                 memory_attachment_lease = attachment_lease.retain()
-                            except Exception:
+                            except Exception as error:
                                 attachment_text_only = True
                                 logger.warning(
                                     "Memory attachment lease could not be retained; "
-                                    "capturing text only",
-                                    exc_info=True,
+                                    "capturing text only error_type=%s",
+                                    type(error).__name__,
                                 )
+                                retained_attachment_count = len(processed_files or ())
+                                if retained_attachment_count:
+                                    log_attachment_skip(
+                                        str(context.platform or "unknown"),
+                                        retained_attachment_count,
+                                        "lease_retain_failed",
+                                    )
                         capture_options = {
                             "attachment_reservation": memory_capture_reservation,
                             "attachment_config_generation": attachment_config_generation,

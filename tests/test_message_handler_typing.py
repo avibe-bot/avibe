@@ -626,10 +626,15 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             is_ordinary_attachment=True,
         )
 
-        await handler.handle_user_message(context, "remember this")
-        await handler.drain_memory_capture_tasks()
+        with self.assertLogs("core.memory.admission", level="INFO") as logs:
+            await handler.handle_user_message(context, "remember this")
+            await handler.drain_memory_capture_tasks()
 
         self.assertEqual(captured, ["remember this"])
+        self.assertEqual(
+            sum("reason=lease_retain_failed" in line for line in logs.output),
+            1,
+        )
         lease.retain.assert_called_once_with()
         lease.adopt.assert_called_once_with()
         lease.release.assert_called_once_with()
