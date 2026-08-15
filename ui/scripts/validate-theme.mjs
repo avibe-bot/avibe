@@ -3,7 +3,12 @@ import path from 'node:path';
 import vm from 'node:vm';
 import postcss from 'postcss';
 
-import { COLOUR, glowOffencesInValue } from './shadowLayer.mjs';
+import {
+  COLOUR,
+  glowOffencesInValue,
+  readsIntoDropShadow,
+  spreadOffencesInDropShadow,
+} from './shadowLayer.mjs';
 import { SHADOW_KEY, isStyleWrite, propertyExpression, valueArgument } from './styleWrite.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { colourRegistrationsIn, customPropertiesIn } from './customProperties.mjs';
@@ -980,8 +985,17 @@ function assertGlowsReadThroughTokens(root) {
           continue;
         }
 
+        // `drop-shadow()` takes no spread, and a layer carrying one is dropped
+        // whole rather than drawn wrong, so the call site adds a constraint the
+        // token layer cannot know about.
+        const dropShadow = readsIntoDropShadow(source, match.index, match[0]);
+
         for (const value of values) {
           for (const offence of glowOffencesInValue(value, tokens)) {
+            offenders.push(`${file}: ${offence}`);
+          }
+          if (!dropShadow) continue;
+          for (const offence of spreadOffencesInDropShadow(value, tokens)) {
             offenders.push(`${file}: ${offence}`);
           }
         }

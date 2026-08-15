@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { glowOffencesInValue } from './shadowLayer.mjs';
+import {
+  glowOffencesInValue,
+  readsIntoDropShadow,
+  spreadOffencesInDropShadow,
+} from './shadowLayer.mjs';
 
 // The rule the whole gate is about: a glow may not be written by hand, and a
 // layer that cannot be shown not to be one fails asking to be made legible.
@@ -91,6 +95,24 @@ describe('what the classifier accepts', () => {
   it('accepts a name registered as a colour in the blur slot', () => {
     accepts('0 0 var(--tint)', declaring({ colours: ['--tint'] }));
   });
+
+  // The fallback is part of the value, not a separate spelling to exclude.
+  // Accepting the registration only when it stood alone read `var(--tint, blue)`
+  // as unprovable and failed a shadow where NEITHER possible value can occupy
+  // the blur slot -- the registered name cannot hold a length, and `blue` is a
+  // colour. Both halves have to be answered, and each hop asks the same
+  // question, so a fallback that is itself a registered name is answered too.
+  it('accepts a registered colour whose fallback is also a colour', () => {
+    accepts('0 0 var(--tint, blue)', declaring({ colours: ['--tint'] }));
+  });
+
+  it('accepts a registered colour whose fallback is a colour function', () => {
+    accepts('0 0 var(--tint, color-mix(in oklab, red, blue))', declaring({ colours: ['--tint'] }));
+  });
+
+  it('accepts a registered colour falling back to another registered colour', () => {
+    accepts('0 0 var(--tint, var(--other))', declaring({ colours: ['--tint', '--other'] }));
+  });
 });
 
 describe('what the classifier rejects', () => {
@@ -116,6 +138,17 @@ describe('what the classifier rejects', () => {
   // above covers.
   it('rejects a name in the blur slot', () => {
     rejects('0 0 var(--blur)');
+  });
+
+  // The other half of reading the fallback: it is a second value that renders
+  // whenever the registration does not, so it has to be a colour too. A
+  // registration cannot vouch for a value it does not constrain.
+  it('rejects a registered colour whose fallback is a length', () => {
+    rejects('0 0 var(--tint, 93px)', declaring({ colours: ['--tint'] }));
+  });
+
+  it('rejects a registered colour falling back to an unregistered name', () => {
+    rejects('0 0 var(--tint, var(--blur))', declaring({ colours: ['--tint'] }));
   });
 
   // Managed is a PLACE, not a prefix. A name that only looks managed falls
@@ -147,4 +180,91 @@ describe('what the classifier rejects', () => {
   it('rejects a glow in the second layer of a list', () => {
     rejects('0 2px 8px rgba(0, 0, 0, 0.4), 0 0 93px red');
   });
+});
+
+// `drop-shadow()` has no spread slot. A filter function given a length too many
+// is invalid, so the browser drops the layer whole and the glow does not render
+// AT ALL -- a silent nothing rather than a wrong something, which is why the
+// glow classifier could never see it: the value it reads is a correct, managed
+// token. The constraint belongs to the CALL SITE, and these are the two facts
+// that follow from that.
+describe('what drop-shadow() refuses to carry', () => {
+  const SIZED = declaring({
+    values: {
+      '--shadow-glow-md-mint': '0 0 24px -6px rgba(91, 255, 160, 0.44)',
+      '--shadow-glow-wire-mint': '0 0 4px rgba(91, 255, 160, 0.44)',
+      '--indirect': 'var(--shadow-glow-md-mint)',
+    },
+    managed: {
+      '--shadow-glow-md-mint': '0 0 24px -6px rgba(91, 255, 160, 0.44)',
+      '--shadow-glow-wire-mint': '0 0 4px rgba(91, 255, 160, 0.44)',
+    },
+  });
+  const spreads = (value) => spreadOffencesInDropShadow(value, SIZED);
+
+  // The whole point of the separate walk: the glow classifier stops AT a managed
+  // token because its geometry is read against design.pen, and that is exactly
+  // the wrong stop for a question the token cannot answer about itself.
+  it('opens a managed token the glow walk is finished with', () => {
+    expect(spreads('var(--shadow-glow-md-mint)').length).toBe(1);
+    expect(glowOffencesInValue('var(--shadow-glow-md-mint)', SIZED)).toEqual([]);
+  });
+
+  it('follows a spread one alias deeper', () => {
+    expect(spreads('var(--indirect)').length).toBe(1);
+  });
+
+  // Stated as the property, so a hand-written layer that names no role at all
+  // fails for the same reason a sized token does.
+  it('rejects a hand-written layer carrying a spread', () => {
+    expect(spreads('2px 2px 4px 2px red').length).toBe(1);
+  });
+
+  it('accepts a spreadless role', () => {
+    expect(spreads('var(--shadow-glow-wire-mint)')).toEqual([]);
+  });
+
+  it('accepts a spreadless hand-written layer', () => {
+    expect(spreads('0 0 4px red')).toEqual([]);
+  });
+
+  // A keyword and a priority are both parts that are not lengths, and either one
+  // left in place turns a one-part layer into a multi-part one -- which is a
+  // count of lengths that never reaches the token, so the spread inside it goes
+  // unread. Both are dropped for the same reason the glow walk drops them, and
+  // this is the direction that matters: a MISS, not a spurious failure.
+  it('reads the token behind a keyword', () => {
+    expect(spreads('inset var(--shadow-glow-md-mint)').length).toBe(1);
+  });
+
+  it('reads the token behind !important', () => {
+    expect(spreads('var(--shadow-glow-md-mint) !important').length).toBe(1);
+  });
+
+  // Every layer is asked, so a spread cannot ride along beside a spreadless one.
+  it('finds a spread in the second layer of a list', () => {
+    expect(spreads('0 0 4px red, 0 0 4px 2px blue').length).toBe(1);
+  });
+});
+
+// Which matches that rule applies to. The four spellings all reach the same
+// function, and only two of them carry the `drop-` prefix inside the match --
+// which is why this is asked of the source text rather than of the channel.
+describe('which spellings read into drop-shadow()', () => {
+  const reads = (source, needle) => readsIntoDropShadow(source, source.indexOf(needle), needle);
+
+  it.each([
+    ['the filter function', 'filter: drop-shadow(0 0 4px red)', 'drop-shadow('],
+    ['the custom-property shorthand', '<i class="drop-shadow-(--x)" />', 'drop-shadow-(--x)'],
+    ['the Tailwind prefix, whose match starts after it', 'class="drop-shadow-[var(--x)]"', 'shadow-[var(--x)]'],
+    ['a capitalised filter function', 'filter: DROP-SHADOW(0 0 4px red)', 'DROP-SHADOW('],
+  ])('reads %s', (_label, source, needle) => expect(reads(source, needle)).toBe(true));
+
+  // And the half that has to stay false: `box-shadow` DOES take a spread, so
+  // answering yes here would restrict every sized token on the page.
+  it.each([
+    ['a box-shadow utility', 'class="shadow-[var(--x)]"', 'shadow-[var(--x)]'],
+    ['a box-shadow declaration', 'box-shadow: 0 0 4px 2px red', 'box-shadow:'],
+    ['a shorthand with no prefix', '<i class="shadow-(--x)" />', 'shadow-(--x)'],
+  ])('does not read %s', (_label, source, needle) => expect(reads(source, needle)).toBe(false));
 });

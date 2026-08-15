@@ -94,6 +94,32 @@ export const COLOUR = new RegExp(
   'i',
 );
 
+// Whether a part is provably a colour, which is the question the blur slot asks
+// when it wants to prove there is no blur: a layer whose third part is its
+// colour skipped the blur, and that is the ring-spacer shape.
+//
+// A literal answers it directly. A NAME answers it when `@property --tint
+// { syntax: "<color>" }` registers it, because the browser then rejects a length
+// assigned to that name -- the registration turns "could be any radius" from a
+// fact about the spelling into a fact about the value.
+//
+// The fallback is part of the value, not a separate spelling to exclude. This
+// used to accept a registration only with no fallback at all, which read
+// `var(--tint, blue)` as unprovable and failed a shadow where NEITHER possible
+// value can occupy the blur slot -- the registered name cannot hold a length,
+// and `blue` is a colour. So the same question is asked of the fallback, which
+// is also what makes it recursive: a fallback may itself be a registered name
+// with a fallback, and each hop is strictly shorter text than the one that
+// contains it. Order is load-bearing and unchanged -- `color-mix(…, var(--x) …)`
+// is a colour that happens to contain a name, so COLOUR is asked first.
+const isProvableColour = (part, tokens) => {
+  const trimmed = part.trim();
+  if (COLOUR.test(trimmed)) return true;
+  const reference = trimmed.match(VAR_REFERENCE);
+  if (!reference || !tokens.colours.has(reference[1])) return false;
+  return reference[2] === undefined || isProvableColour(reference[2], tokens);
+};
+
 // The classification is DENY BY DEFAULT, and that is the whole point of it.
 // Three review rounds each found another spelling that fell past a check built
 // to recognise glows and reject them -- an unlisted colour syntax, an unread
@@ -205,18 +231,71 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
   // no better reason than that the two tests above had not recognised it.
   if (third === undefined) return [];
   if (isLength(third)) return isZeroLength(third) ? [] : [shown];
-  if (COLOUR.test(third)) return [];
-  // A name is unprovable only while it could be a length. `@property --tint
-  // { syntax: "<color>" }` removes that possibility at the source: the browser
-  // rejects a length assigned to it, so the slot holds a colour and the layer
-  // has no blur part at all -- the same ring-spacer shape the line above already
-  // accepts, written with a registered name instead of a literal. Asking the
-  // registration is what turns "could be any radius" from a fact about the
-  // spelling into a fact about the value.
-  const registered = third.match(VAR_REFERENCE);
-  if (registered && tokens.colours.has(registered[1]) && !registered[2]) return [];
+  if (isProvableColour(third, tokens)) return [];
   if (INDIRECT.test(third)) {
     return [`${shown} -- a name in the blur slot could be any radius, so this cannot be shown not to be a glow`];
   }
   return [`${shown} -- the blur slot is neither a length nor a colour this scan can read, so this cannot be shown not to be a glow`];
 }
+
+// A shadow's fourth length is its spread, and `drop-shadow()` has no slot for
+// one: a filter function given a length too many is invalid, so the browser
+// drops the whole layer and the glow does not render AT ALL. The gate's own
+// error message has been telling call sites this since the roles were named --
+// "inside drop-shadow() only the spreadless roles fit, dot and wire" -- while
+// nothing checked it, which is the enumeration-instead-of-invariant failure
+// stated in the guard's own words: a rule written where it is read rather than
+// where it is enforced.
+//
+// It asks the property, not the role. `drop-shadow(var(--shadow-glow-md-mint))`
+// is the spelling the reviewer found, but a hand-written
+// `drop-shadow(2px 2px 4px 2px red)` disappears the same way and names no role
+// at all, and a role added later is covered without editing anything.
+//
+// It is a separate walk rather than a mode of the one above because the two
+// stop in OPPOSITE places. The glow walk stops at a managed token: its geometry
+// is read against design.pen in one place, so a call site naming it is answered.
+// That is exactly the wrong stop here, because the constraint belongs to the
+// CALL SITE -- the token cannot know which function it will be spliced into --
+// so this walk has to open the token the other one is finished with. Threading
+// that contradiction through one function as a flag would make each stop
+// condition read as an exception to the other.
+export function spreadOffencesInDropShadow(value, tokens, seen = new Set(), depth = 0) {
+  return shadowLayers(value.replace(IMPORTANT, '')).flatMap((layer) => {
+    const parts = layerParts(layer).filter((part) => !INSET.test(part));
+    const shown = layer.trim();
+
+    if (parts.length === 1) {
+      const reference = parts[0].match(VAR_REFERENCE);
+      // A name that resolves to nothing, or resolves too deep, is already the
+      // glow walk's finding to report; saying it twice would only double it.
+      if (!reference || depth >= MAX_INDIRECTION) return [];
+      const [, name, fallback] = reference;
+      if (seen.has(name)) return [];
+      const next = new Set(seen).add(name);
+      return [...(tokens.values.get(name) ?? []), ...(fallback ? [fallback] : [])]
+        .flatMap((declared) => spreadOffencesInDropShadow(declared, tokens, next, depth + 1))
+        .map((offence) => `${offence}  <- reached through ${shown}`);
+    }
+
+    return parts.filter(isLength).length > 3
+      ? [`${shown} -- drop-shadow() takes no spread, so a layer carrying one is invalid and draws nothing at all; use a spreadless role, dot or wire`]
+      : [];
+  });
+}
+
+// Whether a channel's match lands inside a `drop-shadow()`, which decides
+// whether the rule above applies to the values it yielded.
+//
+// It is a question about the SPELLING, not about the channel that found it, and
+// that distinction is the whole reason it is a function rather than a flag on
+// the channel list: `drop-shadow-[var(--shadow-glow-wire-mint)]` is read by the
+// bracket channel, whose pattern begins at `shadow-[` and so leaves the `drop-`
+// prefix outside its own match. A flag per channel would answer for that
+// channel's other spelling too and restrict every `shadow-[…]` on the page.
+//
+// So both sides of the match are asked, which reads all four spellings at once
+// -- the function, the custom-property shorthand, and the two Tailwind prefixes
+// -- without giving any channel a second idea of what it is looking at.
+export const readsIntoDropShadow = (source, index, matched) => /^drop-shadow/i.test(matched)
+  || /drop-$/i.test(source.slice(Math.max(0, index - 5), index));
