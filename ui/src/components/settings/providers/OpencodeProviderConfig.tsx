@@ -37,6 +37,7 @@ import { useModelHubCapability } from '../models/useModelHubCapability';
 import { OpencodePermissionSetup } from '../shared/OpencodePermissionSetup';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { useOpencodePermission } from '../shared/useOpencodePermission';
+import { providerOauthSignedIn } from './opencodeProviderAuth';
 import { useApi } from '@/context/ApiContext';
 import type {
   OpencodeMutationResult,
@@ -1354,7 +1355,7 @@ export const OpencodeProviderConfig: React.FC<{
                                   <BackendOAuthPanel
                                     backend="opencode"
                                     opencodeProviderId={provider.id}
-                                    signedIn={provider.configured}
+                                    signedIn={providerOauthSignedIn(provider)}
                                     title={t('settings.backends.opencodeProviderOauthPanelTitle', {
                                       name: provider.name,
                                     })}
