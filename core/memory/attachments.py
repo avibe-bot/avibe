@@ -53,6 +53,9 @@ _BUNDLE_FILENAME_PATTERN = re.compile(r"(0[0-7])\.([a-z0-9]{1,8})")
 _STAGING_NAME_PATTERN = re.compile(r"([0-9a-f]{32})\.tmp")
 _VALID_KINDS = frozenset({"image", "audio", "doc", "pdf", "html", "email"})
 _INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_DETERMINISTIC_STORAGE_ERRNOS = frozenset(
+    {errno.ENOENT, errno.ENOTDIR, getattr(errno, "ELOOP", errno.ENOENT)}
+)
 
 
 def attachment_pin_root(effective_home: Path | str | None = None) -> Path:
@@ -65,9 +68,16 @@ def attachment_pin_root(effective_home: Path | str | None = None) -> Path:
 class AttachmentPinError(OSError):
     """A closed attachment admission or durable-storage failure."""
 
-    def __init__(self, error: MemoryErrorCode, message: str) -> None:
+    def __init__(
+        self,
+        error: MemoryErrorCode,
+        message: str,
+        *,
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.error = error
+        self.retryable = retryable
 
 
 @dataclass(frozen=True, slots=True)
@@ -1439,4 +1449,8 @@ def _storage_failure(error: OSError, message: str) -> AttachmentPinError:
         if error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
         else "memory_store_unavailable"
     )
-    return AttachmentPinError(code, message)
+    return AttachmentPinError(
+        code,
+        message,
+        retryable=error.errno not in _DETERMINISTIC_STORAGE_ERRNOS,
+    )

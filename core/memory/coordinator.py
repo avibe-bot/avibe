@@ -529,14 +529,27 @@ class SessionFlushCoordinator:
                     row.attachment_bundle_id,
                     attachment_payload,
                 )
+            except AttachmentPinError as failure:
+                await self._settle_attachment_preflight_failure(
+                    row,
+                    lease_owner=lease_owner,
+                    failure=failure,
+                    retryable=False,
+                    downgrade_allowed=True,
+                )
+                return False
+            try:
                 attachments = await asyncio.to_thread(
                     self._attachment_store.provider_attachments,
                     bundle,
                 )
-            except AttachmentPinError:
-                await self._downgrade_attachment_capture_to_text(
+            except AttachmentPinError as failure:
+                await self._settle_attachment_preflight_failure(
                     row,
                     lease_owner=lease_owner,
+                    failure=failure,
+                    retryable=True,
+                    downgrade_allowed=not failure.retryable,
                 )
                 return False
         capture = ProviderCapture(
@@ -699,22 +712,34 @@ class SessionFlushCoordinator:
             lease_owner=lease_owner,
         )
 
-    async def _downgrade_attachment_capture_to_text(
+    async def _settle_attachment_preflight_failure(
         self,
         row: QueueRow,
         *,
         lease_owner: str,
-    ) -> bool:
-        bundle_id = await self._store_call(
-            self._store._downgrade_claimed_attachment_to_text,
-            row,
-            lease_owner=lease_owner,
-            now=self._current_time(),
-        )
+        failure: AttachmentPinError,
+        retryable: bool,
+        downgrade_allowed: bool,
+    ) -> None:
+        bundle_id = None
+        if downgrade_allowed:
+            bundle_id = await self._store_call(
+                self._store._downgrade_claimed_attachment_to_text,
+                row,
+                lease_owner=lease_owner,
+                now=self._current_time(),
+            )
         if bundle_id is None:
-            return False
+            await self._settle_failure(
+                row,
+                lease_owner=lease_owner,
+                outcome=MessageFailure(
+                    error=failure.error,
+                    retryable=retryable,
+                ),
+            )
+            return
         await self._release_bundle(bundle_id)
-        return True
 
     async def _settle_failure(
         self,

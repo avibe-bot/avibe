@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import gc
 import sqlite3
 import threading
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from config import paths
+from core.memory import attachments as attachment_module
 from core.memory.attachments import (
     AttachmentPinStore,
     PinnedBundle,
@@ -151,6 +153,7 @@ def _enqueue_attachment_bundle(
     bundle: PinnedBundle,
     *,
     source: str,
+    payload_text: str = "remember the attachment",
 ) -> QueueRow:
     result = store.enqueue_request(
         source_message_id=source,
@@ -158,7 +161,7 @@ def _enqueue_attachment_bundle(
         principal_id=PRINCIPAL,
         project_ref=PROJECT,
         provenance="user_input",
-        payload_text="remember the attachment",
+        payload_text=payload_text,
         payload_attachments=encode_pinned_bundle(bundle),
         attachment_bundle_id=bundle.bundle_id,
         attachment_bundle_relative_path=bundle.relative_path,
@@ -3554,6 +3557,141 @@ async def test_attachment_preflight_failure_retries_caption_as_text_only(
     assert provider.captures[0].text == "remember the attachment"
     assert provider.captures[0].attachments == ()
     assert releases == [bundle.bundle_id]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_state"),
+    [("decode", "dead"), ("revalidation", "pending")],
+)
+async def test_captionless_attachment_preflight_failure_always_makes_progress(
+    tmp_path: Path,
+    failure: str,
+    expected_state: str,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source=f"captionless-{failure}-failure",
+        payload_text="",
+    )
+    if failure == "decode":
+        with sqlite3.connect(store.path) as conn:
+            conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET payload_attachments = '{}'
+                WHERE source_message_digest = ?
+                """,
+                (original.source_message_digest,),
+            )
+    else:
+        pinned_path.write_bytes(b"tampered after enqueue")
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=FakeMemoryProvider(),
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    terminal = store.get_queue_row(original.source_message_digest)
+    assert terminal is not None
+    assert (terminal.state, terminal.attempts) == (expected_state, 1)
+    if failure == "decode":
+        assert (
+            terminal.payload_text,
+            terminal.payload_attachments,
+            terminal.attachment_bundle_id,
+        ) == (None, None, None)
+        assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+    else:
+        assert terminal.payload_text == ""
+        assert terminal.payload_attachments == original.payload_attachments
+        assert terminal.attachment_bundle_id == bundle.bundle_id
+        assert store.attachment_bundle_sets() == (
+            frozenset({bundle.bundle_id}),
+            frozenset(),
+        )
+
+
+async def test_transient_attachment_projection_failure_retries_original_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source="transient-projection-failure",
+    )
+    provider = FakeMemoryProvider()
+    current = [datetime(2026, 1, 1, tzinfo=UTC)]
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        now=lambda: current[0],
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    original_open = attachment_module.os.open
+    failed = False
+
+    def fail_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError(errno.EMFILE, "temporary descriptor exhaustion")
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(attachment_module.os, "open", fail_once)
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    retryable = store.get_queue_row(original.source_message_digest)
+    assert retryable is not None
+    assert (
+        retryable.state,
+        retryable.attempts,
+        retryable.payload_text,
+        retryable.payload_attachments,
+        retryable.attachment_bundle_id,
+    ) == (
+        "pending",
+        1,
+        "remember the attachment",
+        original.payload_attachments,
+        bundle.bundle_id,
+    )
+    assert store.attachment_bundle_sets() == (
+        frozenset({bundle.bundle_id}),
+        frozenset(),
+    )
+    assert pinned_path.exists()
+    assert provider.captures == []
+
+    monkeypatch.setattr(attachment_module.os, "open", original_open)
+    current[0] += timedelta(seconds=30)
+    retry = store.claim_due(
+        lease_owner="retry-worker",
+        now="2026-01-01T00:00:30.000Z",
+    )
+    assert retry is not None
+    assert await coordinator.deliver(retry, lease_owner="retry-worker")
+    assert len(provider.captures) == 1
+    assert provider.captures[0].attachments
 
 
 async def test_cancel_after_downgrade_leaves_releasing_bundle_for_boot_recovery(
