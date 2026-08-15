@@ -47,4 +47,39 @@ function customPropertiesIn(css, into = new Map()) {
   return into;
 }
 
-export { customPropertiesIn };
+// A registration says more than what a name is worth: it says what a name is
+// ALLOWED to be worth. `@property --tint { syntax: "<color>" }` is a promise the
+// browser enforces -- a length assigned to that name is invalid at computed-value
+// time and never reaches the property -- so `box-shadow: 0 0 var(--tint)` has no
+// blur part at all, and reading its `var()` as "a name that could be any radius"
+// failed CSS whose radius is provably absent.
+//
+// Only a syntax whose every alternative is `<color>` earns it. That is a closed
+// rule rather than an enumeration of the ones that happen to be lengths: the
+// component types CSS can grow are open, so proving "no alternative here is a
+// length" by listing lengths would be wrong on the next spec release, while
+// proving "every alternative is a colour" stays true. The multipliers are
+// stripped because `<color>#` is a comma-separated list of colours and `<color>+`
+// a space-separated one -- neither introduces a component that is not a colour.
+//
+// Anything else -- `*`, `<length>`, `<color> | <length>` -- is simply not proven
+// here, and falls through to the classification it had before.
+const COLOUR_ONLY_SYNTAX = /^<color>[#+]?$/;
+
+function colourRegistrationsIn(css, into = new Set()) {
+  const root = typeof css === 'string' ? postcss.parse(css) : css;
+  root.walkAtRules('property', (rule) => {
+    let syntax;
+    rule.walkDecls('syntax', (decl) => { syntax = decl.value; });
+    if (syntax === undefined) return;
+
+    const alternatives = syntax.trim().replace(/^(['"])(.*)\1$/s, '$2').split('|');
+    if (alternatives.every((one) => COLOUR_ONLY_SYNTAX.test(one.trim()))) {
+      into.add(rule.params.trim());
+    }
+  });
+
+  return into;
+}
+
+export { colourRegistrationsIn, customPropertiesIn };

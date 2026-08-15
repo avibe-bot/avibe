@@ -133,7 +133,7 @@
      through a runtime variable the way `--card-wash` does. */
   --shadow-glow-dot-mint: 0 0 8px rgba(91, 255, 160, 0.9);
   --shadow-glow-dot-gold: 0 0 8px rgba(255, 200, 87, 0.9);
-  --shadow-glow-dot-danger: 0 0 8px rgba(255, 107, 107, 0.9);
+  --shadow-glow-dot-destructive: 0 0 8px rgba(255, 107, 107, 0.9);
 
   /* `wire` is the drop-shadow role: the Model Hub connection wires glow through
      `filter: drop-shadow(…)`, which takes no spread, so none of the sized roles

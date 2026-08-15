@@ -131,14 +131,20 @@ describe('the shadow channels and the completeness matcher', () => {
   });
 
   // The third thing the two readers have to agree on, after the property name
-  // and the flags: which assignments are style writes at all. `const cardShadow
-  // = 'compact'` was read as one by both, and narrowing only the channel would
+  // and the flags: which JavaScript is a style write at all. `const cardShadow =
+  // 'compact'` was read as one by both, and narrowing only the channel would
   // have left the mention counting a span nothing claims -- the "unscanned
   // channel" failure this file was written about, arriving from the other side.
-  // One constant, both readers, asserted rather than intended.
-  it('agrees with the mention matcher on what makes an assignment a style write', () => {
-    expect(SCAN).toContain("import { SHADOW_KEY, STYLE_ASSIGNMENT,");
-    expect(mention()).toContain('${STYLE_ASSIGNMENT}');
+  //
+  // Sharing a constant was the first answer and it was not enough. The two still
+  // COMPOSED it differently -- one added a quote here, the other a bracket there
+  // -- and three rounds of keeping those compositions in step by hand produced
+  // three rounds of them drifting. The mention matcher now embeds the channel's
+  // whole key, so there is no composition left to keep in step: they are one
+  // regex, and a spelling the channel gains is a spelling the measurement gains
+  // in the same edit.
+  it('measures a style write with the very key the channel reads it by', () => {
+    expect(mention()).toContain('${SHADOW_KEY}');
 
     const inline = eachChannel().find((channel) =>
       channel.trimStart().startsWith('new RegExp(SHADOW_KEY')

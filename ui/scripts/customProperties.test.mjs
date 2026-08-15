@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { customPropertiesIn } from './customProperties.mjs';
+import { colourRegistrationsIn, customPropertiesIn } from './customProperties.mjs';
 
 // `validate:theme` resolves `box-shadow: var(--x)` by looking `--x` up in
 // everything the scanned stylesheets declare, and reports a name it cannot find
@@ -88,5 +88,57 @@ describe('customPropertiesIn', () => {
     customPropertiesIn(':root { --b: 2px; }', into);
 
     expect([...into.keys()]).toEqual(['--a', '--b']);
+  });
+});
+
+// A registration says what a name is ALLOWED to be worth, and the browser
+// enforces it: a length assigned to a `<color>` property is invalid at
+// computed-value time and never reaches it. So `box-shadow: 0 0 var(--tint)` has
+// no blur part AT ALL, and reading its `var()` as "a name that could be any
+// radius" failed a stylesheet whose radius is provably absent.
+//
+// What earns that proof is the shape of the rule rather than its membership.
+// Proving "no alternative here is a length" by listing the lengths CSS has today
+// would be wrong on the next spec release; proving "every alternative is a
+// colour" stays true however many component types are added.
+describe('colourRegistrationsIn', () => {
+  const registered = (syntax) => [...colourRegistrationsIn(`@property --tint { syntax: ${syntax}; }`)];
+
+  it.each([
+    ['a colour', '"<color>"'],
+    // The multipliers are a comma- and a space-separated LIST of colours.
+    // Neither introduces a component that is not one.
+    ['a comma-separated list of colours', '"<color>#"'],
+    ['a space-separated list of colours', '"<color>+"'],
+    ['alternatives that are all colours', '"<color> | <color>"'],
+    ['a single-quoted syntax', "'<color>'"],
+  ])('proves %s can hold no length', (_label, syntax) => {
+    expect(registered(syntax)).toEqual(['--tint']);
+  });
+
+  it.each([
+    ['a length', '"<length>"'],
+    // `*` accepts anything, which is the opposite of a proof.
+    ['the universal syntax', '"*"'],
+    // One alternative that is not a colour is enough: the browser will accept a
+    // length here, so a radius written through this name really can render.
+    ['a colour OR a length', '"<color> | <length>"'],
+  ])('proves nothing about %s', (_label, syntax) => {
+    expect(registered(syntax)).toEqual([]);
+  });
+
+  it('proves nothing about a registration with no syntax at all', () => {
+    expect([...colourRegistrationsIn('@property --tint { inherits: false; }')]).toEqual([]);
+  });
+
+  it('leaves an ordinary declaration unproven, however it is named', () => {
+    expect([...colourRegistrationsIn(':root { --tint: red; }')]).toEqual([]);
+  });
+
+  it('folds several stylesheets into one set', () => {
+    const into = colourRegistrationsIn('@property --a { syntax: "<color>"; }');
+    colourRegistrationsIn('@property --b { syntax: "<color>"; }', into);
+
+    expect([...into]).toEqual(['--a', '--b']);
   });
 });

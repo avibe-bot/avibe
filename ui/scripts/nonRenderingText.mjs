@@ -56,15 +56,30 @@ import ts from 'typescript';
 // -- the one construct in CSS whose entire purpose is to name a value without
 // applying it -- failed `validate:theme`.
 //
-// A condition is therefore blanked whole, not merely stripped of its strings,
-// and the exception list names generators rather than conditions. That polarity
-// is the point: an at-rule nobody has thought of yet is blanked, which risks a
-// miss, and the alternative risks failing correct CSS. `{` and `;` survive so
-// the block structure the scan reads afterwards is unchanged.
-const GENERATOR_AT_RULES = ['source'];
-
-const atRuleGenerates = (source, at) =>
-  GENERATOR_AT_RULES.some((name) => source.startsWith(name, at + 1));
+// A condition is therefore blanked whole, not merely stripped of its strings.
+// Which polarity, though. Listing the GENERATORS and blanking everything else
+// was the first answer, and its cost arrived on schedule: `@apply
+// shadow-[0_0_93px_red]` generates a declaration from its prelude exactly as
+// `@source inline(…)` does, was not on the list, and was blanked through the
+// semicolon -- an untokenized glow into the built CSS, past a guard reporting
+// all-clear.
+//
+// The list was the wrong shape, not one entry short. Generators are an OPEN set:
+// Tailwind alone has `@source`, `@apply`, `@utility` and `@variant`, and a
+// framework can add another next release. Conditions are CLOSED -- the CSS
+// conditional rules are `@supports`, `@media` and `@container`, defined by a
+// spec rather than by a build tool -- so naming THEM is an enumeration that can
+// actually be finished, and an at-rule nobody here has thought of is kept rather
+// than blanked. That inverts the residual risk from a silent miss to a loud
+// failure, which is the direction this scan has been wrong in every time it was
+// wrong.
+//
+// The name comes from PostCSS rather than from the bytes after the `@`. The
+// prefix test it replaces matched `@sourcemap` as `@source`, which is the same
+// class of error one level down: a rule about structure answered by comparing
+// characters. `{` and `;` survive so the block structure the scan reads
+// afterwards is unchanged.
+const CONDITION_AT_RULES = new Set(['supports', 'media', 'container']);
 
 // Which `@` characters actually open an at-rule -- asked of a CSS parser rather
 // than of the bytes, for the same reason the TypeScript branch below asks the
@@ -88,14 +103,14 @@ const atRuleGenerates = (source, at) =>
 // deliberately not caught: the same file is parsed unguarded by
 // `collectCustomProperties` before this runs, so an unreadable stylesheet
 // already fails the scan loudly rather than degrading into a silent miss here.
-function atRuleOffsets(source) {
-  const offsets = new Set();
-  postcss.parse(source).walkAtRules((rule) => offsets.add(rule.source.start.offset));
-  return offsets;
+function atRuleNames(source) {
+  const names = new Map();
+  postcss.parse(source).walkAtRules((rule) => names.set(rule.source.start.offset, rule.name));
+  return names;
 }
 
 function blankCssComments(source) {
-  const opens = atRuleOffsets(source);
+  const opens = atRuleNames(source);
   let out = '';
   let quote = null;
   let index = 0;
@@ -133,7 +148,7 @@ function blankCssComments(source) {
       index = stop;
     } else {
       if (char === '@' && opens.has(index)) {
-        prelude = atRuleGenerates(source, index);
+        prelude = !CONDITION_AT_RULES.has(opens.get(index));
         condition = !prelude;
       } else if (char === '{' || char === ';') {
         prelude = false;
@@ -194,22 +209,71 @@ const scriptKind = (file) =>
 // the tree has already classified has to be re-classified by hand to keep the
 // regexes off it.
 const NON_RENDERING_KINDS = new Set([
-  ts.SyntaxKind.JsxText,
   ts.SyntaxKind.RegularExpressionLiteral,
 ]);
 
-// Except in the one element where JSX text is not copy. `<style>` hands its
-// children to the CSS parser, so `.probe { box-shadow: 0 0 93px red }` written
-// there is a declaration that renders -- and blanking it removed a real glow
-// before any channel could see it. The parent decides, not the text: this is the
-// same question the surrounding module answers everywhere else, asked one node
-// up, and the tree already knows the answer.
-const isStyleElementText = (node, tree) =>
-  node.kind === ts.SyntaxKind.JsxText
-  && node.parent?.openingElement?.tagName?.getText(tree) === 'style';
+// Page copy, whichever of the two ways it is written. `<code>box-shadow: 0 0
+// 93px red</code>` is `JsxText`, and `<code>{'box-shadow: 0 0 93px red'}</code>`
+// -- the spelling a lint rule pushes you to the moment the text contains a
+// brace or a quote -- is a `StringLiteral` inside a `JsxExpression`. They render
+// identically and neither can draw light, but only the first was blanked, so
+// documentation and diagnostic copy failed `validate:theme` for containing the
+// string it was documenting.
+//
+// The two were one rule all along, and splitting them was the defect: what makes
+// a span copy is its POSITION -- a child of a JSX element -- not the node kind
+// that happens to carry it there. Asking about position also keeps the answer
+// correct where kind cannot be: `className={'shadow-[0_0_93px_red]'}` is the
+// same `StringLiteral` in a `JsxExpression`, and it renders, because its
+// expression belongs to an attribute rather than to the element's children.
+const isJsxChild = (node) => {
+  if (node.kind === ts.SyntaxKind.JsxText) return true;
+  const inExpression = node.kind === ts.SyntaxKind.StringLiteral
+    || node.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral;
+  return inExpression
+    && node.parent?.kind === ts.SyntaxKind.JsxExpression
+    && (node.parent.parent?.kind === ts.SyntaxKind.JsxElement
+      || node.parent.parent?.kind === ts.SyntaxKind.JsxFragment);
+};
+
+// Except in the one element where JSX children are not copy. `<style>` hands
+// them to the CSS parser, so `.probe { box-shadow: 0 0 93px red }` written there
+// is a declaration that renders -- and blanking it removed a real glow before
+// any channel could see it. The parent decides, not the child: this is the same
+// question the surrounding module answers everywhere else, asked one node up,
+// and the tree already knows the answer.
+//
+// It climbs rather than checking one parent, because a `<style>` child is
+// routinely a string in an expression -- `<style>{'.a { … }'}</style>` -- which
+// sits one level deeper than the bare text it used to be written for.
+const isStyleElementChild = (node, tree) => {
+  for (let up = node.parent; up; up = up.parent) {
+    if (up.kind === ts.SyntaxKind.JsxElement) {
+      return up.openingElement?.tagName?.getText(tree) === 'style';
+    }
+  }
+  return false;
+};
+
+// One parse of one file, shared. `styleWrite.mjs` needs the same tree to answer
+// where a style value ends, and parsing is the expensive part of this scan --
+// the cache keys on the exact source text, so a caller that hands over the same
+// blanked string gets the same tree rather than a second parse of it.
+let lastParse = { file: null, source: null, tree: null };
+
+function parseSource(source, file) {
+  if (lastParse.file !== file || lastParse.source !== source) {
+    lastParse = {
+      file,
+      source,
+      tree: ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, scriptKind(file)),
+    };
+  }
+  return lastParse.tree;
+}
 
 function nonRenderingRanges(source, file) {
-  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, scriptKind(file));
+  const tree = parseSource(source, file);
   const comments = [];
   const literals = [];
   const collect = (ranges) => {
@@ -219,7 +283,7 @@ function nonRenderingRanges(source, file) {
   const visit = (node) => {
     collect(ts.getLeadingCommentRanges(source, node.getFullStart()));
     collect(ts.getTrailingCommentRanges(source, node.getEnd()));
-    if (NON_RENDERING_KINDS.has(node.kind) && !isStyleElementText(node, tree)) {
+    if ((NON_RENDERING_KINDS.has(node.kind) || isJsxChild(node)) && !isStyleElementChild(node, tree)) {
       literals.push([node.getStart(tree), node.getEnd()]);
     }
     node.getChildren(tree).forEach(visit);
@@ -276,4 +340,11 @@ const NON_RENDERING_FILES = /(^|\/)(__tests__|__mocks__)\/|\.(test|spec)\.[cm]?t
 
 const rendersAtAll = (file) => !NON_RENDERING_FILES.test(file.replaceAll('\\', '/'));
 
-export { blankCssComments, blankTypeScriptComments, rendersAtAll, typeScriptComments, withoutNonRenderingText };
+export {
+  blankCssComments,
+  blankTypeScriptComments,
+  parseSource,
+  rendersAtAll,
+  typeScriptComments,
+  withoutNonRenderingText,
+};

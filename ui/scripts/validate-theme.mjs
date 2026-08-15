@@ -4,10 +4,10 @@ import vm from 'node:vm';
 import postcss from 'postcss';
 
 import { isLength, isZeroLength } from './cssLength.mjs';
-import { SHADOW_KEY, STYLE_ASSIGNMENT, propertyExpression, valueArgument } from './styleWrite.mjs';
+import { SHADOW_KEY, propertyExpression, valueArgument } from './styleWrite.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
-import { customPropertiesIn } from './customProperties.mjs';
-import { rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
+import { colourRegistrationsIn, customPropertiesIn } from './customProperties.mjs';
+import { parseSource, rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
 
 const html = fs.readFileSync('index.html', 'utf8');
 const css = fs.readFileSync('src/index.css', 'utf8');
@@ -654,7 +654,8 @@ const cssomArgument = (match) => valueArgument(match.input, match.index + match[
 // The expression a style property is given, read from where the match ends. An
 // empty string when it never terminates, which yields no values and excuses
 // nothing, so the site is reported as unreadable rather than passed over.
-const styleExpression = (match) => propertyExpression(match.input, match.index + match[0].length) ?? '';
+const styleExpression = (match, tree) =>
+  propertyExpression(match.input, match.index + match[0].length, tree) ?? '';
 
 // A custom property assigned a bare colour contributes no shadow value: it tints
 // geometry that some scanned declaration still has to supply. Both halves of the
@@ -742,13 +743,13 @@ const SHADOW_CHANNELS = [
     // answers it where the answer lives, at the assignment target, and is shared
     // with SHADOW_MENTION so the two cannot drift apart.
     pattern: new RegExp(SHADOW_KEY, 'g'),
-    valuesOf: (match) => stringLiterals(styleExpression(match)),
+    valuesOf: (match, tree) => stringLiterals(styleExpression(match, tree)),
     // A CSS shadow is a string, so a bare non-string literal is provably not
     // one: `scrollbar: { useShadows: false }` is a Monaco flag, not a shadow.
     // This is deliberately narrower than "no string literal here" -- that is the
     // `boxShadow: glow` case, where an identifier could hold anything and the
     // value stays unreadable rather than becoming innocent.
-    provablyNotAShadow: (match) => NON_STRING_LITERAL.test(styleExpression(match)),
+    provablyNotAShadow: (match, tree) => NON_STRING_LITERAL.test(styleExpression(match, tree)),
   },
   // `el.style.setProperty('box-shadow', '0 0 93px red')`. Read through the
   // shared CSSOM_SETTER source rather than a pattern of its own, because the
@@ -839,23 +840,29 @@ const NON_STRING_LITERAL =/^\s*(true|false|null|undefined|[+-]?\d+(\.\d+)?)\s*($
 // and a spelling becomes either scanned-but-uncounted or counted-but-unscannable,
 // and both of those are silence.
 //
-// The word is the TAIL of the identifier here for the same reason it is in the
-// channel above: `box-shadow`, `text-shadow` and `drop-shadow` all end in it,
-// while `shadowPreset` and `shadowRoot` only start with it and are not
-// properties at all. The two must narrow together -- a mention this stopped
-// counting while the channel still read it would be scanned-but-unreported,
-// which is the silence these two exist to make impossible.
+// A colon means two different things in the two languages this scan reads, and
+// measuring both with one rule is what made `{ cardShadow: 'compact' }` a
+// finding. In CSS a colon makes a DECLARATION, so the property before it is
+// whatever the spec says it is -- the word rule has to stay open there, or the
+// next shadow property CSS grows goes uncounted. In JavaScript a colon makes an
+// OBJECT KEY, and an object key only paints when it names a real CSS property:
+// `cardShadow` is a variable, `style.cardShadow = x` draws nothing, and there is
+// no future spelling of it that will. So the CSS half keeps the open word rule
+// and the JS half takes the closed list, which is what SHADOW_KEY already is.
 //
-// The equals sign carries STYLE_ASSIGNMENT for the same reason the channel does,
-// and from the same constant. This is the one narrowing the error message below
-// warns against making by hand -- "do NOT narrow SHADOW_MENTION to make this
-// pass" -- and it is not that: the span it stops counting is one no channel
-// should ever have claimed, because `const cardShadow = 'compact'` is a variable
-// and never reached a page. Narrowing only one of the two would be the silence
-// that warning is about, which is why both read this from one definition.
+// The JS half is not merely read from the same list as the channel, it IS the
+// channel's pattern. That is the one narrowing the error message below warns
+// against making by hand -- "do NOT narrow SHADOW_MENTION to make this pass" --
+// and sharing the pattern is what makes it safe rather than forbidden: a mention
+// counted here and claimed by no channel is a loud failure, a mention claimed by
+// a channel and not counted here is a silent one, and the two cannot land on
+// opposite sides of that line while they are the same string. Three rounds of
+// widening these in lockstep by hand ended in a drift anyway; a copy that has to
+// be edited twice is a copy that will be edited once.
 const SHADOW_MENTION = new RegExp(
-  `${SHADOW_PROPERTY}(?:['"]?\\s*\\]?\\s*:|-?[([])`
-  + `|${STYLE_ASSIGNMENT}${SHADOW_PROPERTY}['"]?\\s*\\]?\\s*=`
+  `${CSS_SHADOW_PROPERTY}\\s*:`
+  + `|${SHADOW_PROPERTY}-?[([]`
+  + `|${SHADOW_KEY}`
   + `|${CSSOM_SETTER.source}`,
   'gi',
 );
@@ -873,6 +880,19 @@ function collectCustomProperties(root) {
     customPropertiesIn(fs.readFileSync(path.join(root, relative), 'utf8'), values);
   }
   return values;
+}
+
+// The names a registration constrains to colours, which is the one thing that
+// can prove a `var()` in a shadow's third slot holds no radius. Folded across
+// stylesheets by the same shape as the values above, and answered in
+// `customProperties.mjs` for the same reason: what a registration promises is a
+// question about CSS grammar, and a question about grammar wants cases.
+function collectColourRegistrations(root) {
+  const names = new Set();
+  for (const relative of intendedFiles(root, { extensions: ['.css'] })) {
+    colourRegistrationsIn(fs.readFileSync(path.join(root, relative), 'utf8'), names);
+  }
+  return names;
 }
 
 // The VALUES declared inside an `@theme` block, per name -- the token layer
@@ -1045,6 +1065,15 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
   if (third === undefined) return [];
   if (isLength(third)) return isZeroLength(third) ? [] : [shown];
   if (COLOUR.test(third)) return [];
+  // A name is unprovable only while it could be a length. `@property --tint
+  // { syntax: "<color>" }` removes that possibility at the source: the browser
+  // rejects a length assigned to it, so the slot holds a colour and the layer
+  // has no blur part at all -- the same ring-spacer shape the line above already
+  // accepts, written with a registered name instead of a literal. Asking the
+  // registration is what turns "could be any radius" from a fact about the
+  // spelling into a fact about the value.
+  const registered = third.match(VAR_REFERENCE);
+  if (registered && tokens.colours.has(registered[1]) && !registered[2]) return [];
   if (INDIRECT.test(third)) {
     return [`${shown} -- a name in the blur slot could be any radius, so this cannot be shown not to be a glow`];
   }
@@ -1061,7 +1090,11 @@ function assertGlowsReadThroughTokens(root) {
   const offenders = [];
   const unscanned = [];
   const unreadable = [];
-  const tokens = { values: collectCustomProperties(root), managed: collectThemeDeclarations(root) };
+  const tokens = {
+    values: collectCustomProperties(root),
+    managed: collectThemeDeclarations(root),
+    colours: collectColourRegistrations(root),
+  };
 
   for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
     // A test is not a page. Its strings document values rather than drawing
@@ -1072,6 +1105,12 @@ function assertGlowsReadThroughTokens(root) {
     const file = path.join(root, relative);
     const raw = fs.readFileSync(file, 'utf8');
     const source = withoutNonRenderingText(raw, file);
+
+    // The tree of the file AS WRITTEN, which the JS channels need to say where a
+    // value ends. `withoutNonRenderingText` has already parsed exactly this text,
+    // so the memo makes it the same tree rather than a second parse. CSS has no
+    // tree here and no channel that asks for one.
+    const tree = file.endsWith('.css') ? null : parseSource(raw, file);
     const claimed = [];
 
     for (const { pattern, valuesOf, provablyNotAShadow } of SHADOW_CHANNELS) {
@@ -1084,9 +1123,9 @@ function assertGlowsReadThroughTokens(root) {
         // case: the expression holds no string literal, so there is no value to
         // test, and moving a literal into a constant would slip the gate. A
         // channel that claims a mention owes a value, and owing nothing fails.
-        const values = valuesOf(match).filter((value) => value && value.trim());
+        const values = valuesOf(match, tree).filter((value) => value && value.trim());
         if (values.length === 0) {
-          if (provablyNotAShadow?.(match)) continue;
+          if (provablyNotAShadow?.(match, tree)) continue;
           unreadable.push(`${file}:${source.slice(0, match.index).split('\n').length}: ${
             match[0].split('\n')[0].slice(0, 80)}`);
           continue;

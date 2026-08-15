@@ -31,6 +31,10 @@ const NON_RENDERING = [
   ['a TypeScript block comment', 'probe.ts', `/* box-shadow: ${GLOW} */\nconst a = 1;\n`],
   ['a JSX comment', 'probe.tsx', `const a = <div>{/* box-shadow: ${GLOW} */}</div>;\n`],
   ['JSX text', 'probe.tsx', `const a = <div>box-shadow: ${GLOW}</div>;\n`],
+  // Page copy, spelled as an expression. What makes a span copy is its POSITION
+  // -- a child of a JSX element -- and not the node kind, so listing `JsxText`
+  // and leaving the braces around it alone blanked one spelling of one thing.
+  ['a string a JSX element renders as copy', 'probe.tsx', `const a = <div>{'box-shadow: ${GLOW}'}</div>;\n`],
   // A pattern, not a value. Nothing assigns a regex literal to a style, so it
   // describes CSS in exactly the sense a comment does.
   ['a regular expression literal', 'probe.ts', `export const RE = /box-shadow: ${GLOW}/;\n`],
@@ -39,6 +43,7 @@ const NON_RENDERING = [
   // declaration that does not apply.
   ['an @supports condition', 'probe.css', `@supports (box-shadow: ${GLOW}) {\n  .a { color: red; }\n}\n`],
   ['a @media condition', 'probe.css', '@media (min-width: 93px) {\n  .a { color: red; }\n}\n'],
+  ['a @container condition', 'probe.css', '@container (min-width: 93px) {\n  .a { color: red; }\n}\n'],
   ['a CSS comment', 'probe.css', `/* box-shadow: ${GLOW} */\n.a { color: red; }\n`],
   ['a CSS string', 'probe.css', `.a { content: "box-shadow: ${GLOW}"; }\n`],
   ['a comment opener inside a CSS string', 'probe.css', `.a { content: "/* box-shadow: ${GLOW} */"; }\n`],
@@ -46,6 +51,10 @@ const NON_RENDERING = [
 
 const RENDERING = [
   ['a Tailwind arbitrary value', 'probe.tsx', 'const a = <div className="shadow-[0_0_93px_red]" />;\n', '0_0_93px_red'],
+  // The other half of the position rule. This expression is a child of an
+  // ATTRIBUTE, not of an element, so it is a class name on its way to Tailwind
+  // rather than words on a page.
+  ['a class name written as an expression', 'probe.tsx', "const a = <div className={'shadow-[0_0_93px_red]'} />;\n", '0_0_93px_red'],
   ['an inline style object', 'probe.tsx', `const a = <div style={{ boxShadow: '${GLOW}' }} />;\n`, GLOW],
   ['a template literal', 'probe.ts', `const a = { boxShadow: \`${GLOW}\` };\n`, GLOW],
   ['a CSSOM setter', 'probe.ts', `el.style.setProperty('box-shadow', '${GLOW}');\n`, GLOW],
@@ -60,6 +69,12 @@ const RENDERING = [
   // Blanking a condition must stop at the brace. The rule inside an @supports
   // block renders exactly like any other rule.
   ['a rule inside an @supports block', 'probe.css', `@supports (display: grid) {\n  .a { box-shadow: ${GLOW}; }\n}\n`, GLOW],
+  // The at-rules that GENERATE CSS are an open set -- Tailwind adds to it, and
+  // the next release will add more -- while the ones that TEST it are the three
+  // above. Listing the generators to keep meant every at-rule nobody had listed
+  // was silently blanked, taking a real glow with it; naming the conditions
+  // instead makes that residual risk a loud failure rather than a quiet miss.
+  ['a utility pulled in by @apply', 'probe.css', '.a {\n  @apply shadow-[0_0_93px_red];\n}\n', '0_0_93px_red'],
   // The one element where JSX text is not page copy. `<style>` hands its
   // children to the CSS parser, so blanking them removed a declaration that
   // really does draw light.

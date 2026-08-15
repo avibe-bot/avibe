@@ -3,6 +3,9 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import postcss from 'postcss';
+
+import { customPropertiesIn } from './customProperties.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { typeScriptComments } from './nonRenderingText.mjs';
 
@@ -44,19 +47,34 @@ const CSS = fs.readFileSync(new URL('../src/index.css', import.meta.url), 'utf8'
 // `validate-theme.mjs` trusts these declarations too, so nothing else would have
 // caught it either. Each exception now carries the contract it is an exception
 // TO, so the escape from the general rule is itself a rule.
+// `holds` pins every number the general rule would have pinned. Leaving `\d+`
+// where the rule would have computed a value is the exception eating one field
+// wider than it was granted: `wire` is off the rule because `drop-shadow()`
+// takes no SPREAD, which says nothing about its blur, and a `\d+px` there let
+// the 4px design.pen draws become 40px with the suite green. An exception names
+// the field it excuses and fixes the rest.
 const OFF_RULE = {
   dot: {
-    why: 'a spreadless status dot, clamped to 0.9 because ours sit on lit panels',
-    holds: /^0 0 \d+px rgba\(\d+, \d+, \d+, 0\.9\)$/,
+    why: 'a spreadless status dot at blur 8, clamped to 0.9 because ours sit on lit panels',
+    holds: /^0 0 8px rgba\(\d+, \d+, \d+, 0\.9\)$/,
   },
   wire: {
-    why: 'a drop-shadow() filter, which takes no spread at all',
-    holds: /^0 0 \d+px color-mix\(in srgb, var\(--[a-z]+\) \d+%, transparent\)$/,
+    why: 'a drop-shadow() filter at blur 4, which takes no spread at all',
+    holds: /^0 0 4px color-mix\(in srgb, var\(--[a-z]+\) 40%, transparent\)$/,
   },
   cta: {
     why: 'owner-set: themed blur (2026-08-14) and 0.6 alpha, not from design.pen',
     holds: /^0 0 var\(--brand-glow-blur\) -4px rgba\(\d+, \d+, \d+, 0\.6\)$/,
   },
+};
+
+// What each role's blur IS, rather than which blurs the scale happens to
+// contain. A set says `md` and `lg` are both spellable while saying nothing
+// about which is 24 and which is 32, so swapping two rungs' blurs left every
+// assertion here green and every converted call site one rung off its frame.
+// A role is a name for a size; the mapping is the thing being asserted.
+const ROLE_BLUR = {
+  dot: 8, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48,
 };
 
 const SPREAD_CAP = 12;
@@ -67,6 +85,35 @@ const rungs = [...CSS.matchAll(/^\s*--shadow-glow-(?<role>[a-z]+)-(?<accent>[a-z
 );
 
 const sized = rungs.filter((rung) => !(rung.role in OFF_RULE));
+
+// The accent values as the dark theme declares them, which is what these tokens
+// carry. `@theme inline` is not themed, so a glow cannot route through
+// `var(--mint)` and follow the palette the way `--card-wash` does -- the RGB is
+// written out, and a written-out RGB is a copy that can go stale. Reading the
+// source it was copied FROM is what turns the copy back into a derivation.
+// The selector is matched WHOLE, per comma-separated part. A substring test
+// reads `:root:not([data-theme="dark"])` -- the light block, whose entire job is
+// to say it is not the dark one -- as a dark declaration, and then every accent
+// has two conflicting values and no assertion can be made about either. That is
+// the same mistake this scan's own history is made of: a structural question
+// answered by looking for characters.
+const DARK_ACCENTS = (() => {
+  const declared = new Map();
+  postcss.parse(CSS).walkRules((rule) => {
+    if (rule.selectors.some((one) => one.trim() === '[data-theme="dark"]')) {
+      customPropertiesIn(rule, declared);
+    }
+  });
+  return declared;
+})();
+
+// `#5bffa0` as `91, 255, 160` -- the one spelling difference between an accent
+// and the glow that carries it.
+const channels = (hex) => {
+  const digits = hex.trim().replace(/^#/, '');
+  if (!/^[0-9a-f]{6}$/i.test(digits)) return null;
+  return [0, 2, 4].map((at) => parseInt(digits.slice(at, at + 2), 16)).join(', ');
+};
 
 describe('the accent glow scale', () => {
   it('has rungs to check', () => {
@@ -87,6 +134,40 @@ describe('the accent glow scale', () => {
     const alpha = value.match(/rgba\([^)]*,\s*([\d.]+)\)/);
     expect(alpha, `${value} is not an rgba() literal`).not.toBeNull();
     expect(Number(alpha[1])).toBe(GLOW_ALPHA);
+  });
+
+  // Every rung, not just the sized ones: `dot` and `cta` pin their alpha in
+  // `holds` and leave the RGB as `\d+, \d+, \d+`, so before this the colour of a
+  // status dot was unasserted in every theme. A token named for an accent that
+  // draws a different one is the same defect as a blur off its frame, and it is
+  // the harder one to see by eye.
+  it.each(rungs)('$token is its accent, as the dark theme declares it', ({ accent, value }) => {
+    const declared = DARK_ACCENTS.get(`--${accent}`);
+    expect(declared, `--${accent} is declared in no [data-theme="dark"] block`).toBeDefined();
+    expect([...declared], `--${accent} is declared more than once in dark`).toHaveLength(1);
+
+    // Two spellings, because `wire` mixes the live variable while the rest write
+    // the channels out. Both are "this token's colour is that accent"; only the
+    // second can drift, and asserting them apart is what let it.
+    const mixed = value.match(/color-mix\(in srgb, var\((--[a-z]+)\)/);
+    if (mixed) {
+      expect(mixed[1]).toBe(`--${accent}`);
+      return;
+    }
+
+    const written = value.match(/rgba\((\d+, \d+, \d+),/);
+    expect(written, `${value} is neither a color-mix() nor an rgba() literal`).not.toBeNull();
+    expect(written[1]).toBe(channels([...declared][0]));
+  });
+
+  // A role is a name for a size, so the size is the assertion. Membership in a
+  // set of blurs cannot see two roles trading values.
+  it.each(rungs)('$token has its role\'s blur', ({ role, value }) => {
+    if (!(role in ROLE_BLUR)) {
+      expect(value, `${role} has no fixed blur, so it must carry a themed one`).toMatch(/^0 0 var\(--[a-z-]+\) /);
+      return;
+    }
+    expect(Number(value.match(/^0 0 (\d+)px/)?.[1])).toBe(ROLE_BLUR[role]);
   });
 
   it.each(Object.entries(OFF_RULE))('states why %s is off the rule', (role, { why }) => {
@@ -124,13 +205,11 @@ describe('the accent glow scale', () => {
 
     expect(annotated.size).toBeGreaterThan(0);
 
-    const spellable = new Set(sized.map(({ value }) => Number(value.match(/^0 0 (\d+)px/)[1])));
-    for (const role of Object.keys(OFF_RULE)) {
-      for (const rung of rungs.filter((entry) => entry.role === role)) {
-        const blur = rung.value.match(/^0 0 (\d+)px/);
-        if (blur) spellable.add(Number(blur[1]));
-      }
-    }
+    // Read off ROLE_BLUR rather than off the declarations, so this asks the
+    // scale the test pins and not whatever index.css currently happens to say.
+    // Taking it from the file made the two agree by construction: a rung nudged
+    // to 40px became "spellable" in the same edit that broke its frame.
+    const spellable = new Set(Object.values(ROLE_BLUR));
 
     expect([...annotated].filter((blur) => !spellable.has(blur)).sort((a, b) => a - b)).toEqual([]);
   });
