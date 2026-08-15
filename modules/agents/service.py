@@ -12,6 +12,7 @@ from core.message_output import (
     terminal_output_for,
     terminal_turn_output,
 )
+from core.native_dispatch_phase import prewrite_user_stop_requested
 from core.runtime_activation import (
     RuntimeActivationIdentity,
     RuntimeActivationRegistry,
@@ -381,6 +382,48 @@ class AgentService:
             # make the scheduled tidy a no-op and leave the bubble stuck. Release
             # inside the scheduled task's finally; fall back to a synchronous
             # release if the emit can't be scheduled so the gate never leaks.
+            # A durable pre-write Stop already owns the terminal receipt and has
+            # proven that no native write happened. Release this adapter gate
+            # synchronously: deferring it behind the generic terminal tidy can
+            # leave the next turn waiting forever if that best-effort emit stalls.
+            if prewrite_user_stop_requested(request.context):
+                dispatcher = getattr(self.controller, "message_dispatcher", None)
+                status_key_for_context = getattr(dispatcher, "status_key_for_context", None)
+                consolidated_key = (
+                    status_key_for_context(request.context)
+                    if callable(status_key_for_context)
+                    else None
+                )
+                self.release_runtime_turn_key(runtime_key, gate.token)
+                cleanup = getattr(
+                    dispatcher,
+                    "finish_prewrite_stop_surfaces",
+                    None,
+                )
+                if callable(cleanup) and consolidated_key is not None:
+                    try:
+                        async def _cleanup_prewrite_stop_surfaces() -> None:
+                            try:
+                                await cleanup(
+                                    request.context,
+                                    consolidated_key=consolidated_key,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to clean prewrite Stop surfaces",
+                                    exc_info=True,
+                                )
+
+                        cleanup_task = asyncio.create_task(_cleanup_prewrite_stop_surfaces())
+                        self._background_tasks.add(cleanup_task)
+                        cleanup_task.add_done_callback(self._background_tasks.discard)
+                    except Exception:
+                        logger.debug(
+                            "Failed to schedule prewrite Stop surface cleanup",
+                            exc_info=True,
+                        )
+                raise
+
             emit = getattr(self.controller, "emit_agent_message", None)
             scheduled = False
             if callable(emit):

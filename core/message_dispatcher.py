@@ -458,6 +458,11 @@ class ConsolidatedMessageDispatcher:
         trigger_id = self._thread_current_message_id.get(tracking_key) or context.message_id or ""
         return f"{session_key}:{thread_key}:{trigger_id}"
 
+    def status_key_for_context(self, context: MessageContext) -> str:
+        """Capture the current turn's status key before runtime ownership changes."""
+
+        return self._get_consolidated_message_key(context)
+
     def update_thread_message_id(self, context: MessageContext) -> None:
         if not context.message_id:
             return
@@ -503,6 +508,27 @@ class ConsolidatedMessageDispatcher:
 
     async def _clear_consolidated_state(self, context: MessageContext) -> None:
         await self._drop_status_keys(self._get_consolidated_message_key(context))
+
+    async def finish_prewrite_stop_surfaces(
+        self,
+        context: MessageContext,
+        *,
+        consolidated_key: str,
+    ) -> None:
+        """Retire IM-only progress surfaces without claiming Turn terminal ownership."""
+
+        try:
+            await self._collapse_status_bubble(
+                context,
+                self._get_im_client(context),
+                reason="stopped",
+                consolidated_key=consolidated_key,
+            )
+        finally:
+            try:
+                await self._drop_status_keys(consolidated_key)
+            finally:
+                await self._finish_processing_indicator_turn(context)
 
     # ------------------------------------------------------------------
     # Concise status bubble (Slack / Discord)
@@ -1053,7 +1079,12 @@ class ConsolidatedMessageDispatcher:
             return self._consolidated_message_ids.get(consolidated_key)
 
     async def _collapse_status_bubble(
-        self, context: MessageContext, im_client, *, reason: str = "done"
+        self,
+        context: MessageContext,
+        im_client,
+        *,
+        reason: str = "done",
+        consolidated_key: str | None = None,
     ) -> None:
         """Collapse a still-open concise status bubble to its terminal marker.
 
@@ -1070,7 +1101,7 @@ class ConsolidatedMessageDispatcher:
         if a bubble exists — edits it to the terminal footer. The footer marker
         (✅ for ``done`` else ⏹, time only when ``show_duration``) is owned by
         ``_status_footer_text``. ``reason`` ∈ {"done","stopped","failed"}."""
-        key = self._get_consolidated_message_key(context)
+        key = consolidated_key or self._get_consolidated_message_key(context)
         # Gate on whether a CONCISE bubble was posted for this turn, not the current
         # style: a Web UI concise -> off/verbose change mid-turn must still collapse
         # an already-posted bubble. Keying on the concise-bubble set (not plain

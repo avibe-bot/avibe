@@ -16,6 +16,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -173,6 +174,48 @@ def _settle_reserved_delivery(payload: dict, *, state: str) -> dict:
             settled = accepted[0] if accepted else None
         assert settled is not None
         return settled
+
+
+def _seed_claimed_batch(
+    *,
+    scope_id: str,
+    session_id: str,
+    texts: list[str],
+    platform: str = "avibe",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create the pre-native-write state that must remain visible in Chat."""
+
+    with create_sqlite_engine().begin() as conn:
+        deliveries = [
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=f"msg_claimed_{session_id}_{index}",
+                session_id=session_id,
+                priority="p1",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    platform=platform,
+                    author="user",
+                    source="user",
+                    text=text,
+                    metadata=metadata,
+                ),
+                dispatch_text=text,
+            )
+            for index, text in enumerate(texts)
+        ]
+        turn_id = message_deliveries.new_turn_id()
+        return message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="opencode",
+            deliveries=deliveries,
+            dispatch_text="\n".join(texts),
+        )
 
 
 def _accepted_dispatch(session_id: str) -> AsyncMock:
@@ -1183,6 +1226,145 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert body["turn_state"]["background_activities"][0]["id"] == "task-1"
     assert body["turn_state"]["background_activities"][0]["label"] == "Waiting for turn"
     assert body["turn_state"]["connection"] == "connected"
+
+
+def test_message_delivery_024_claimed_active_input_survives_transcript_reload(
+    isolated_state,
+    tmp_path,
+):
+    """MESSAGE-DELIVERY-024: claimed Web input survives and then reconciles."""
+
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(
+        tmp_path,
+        agent_name="opencode-worker",
+        agent_backend="opencode",
+    )
+    claimed = _seed_claimed_batch(
+        scope_id=scope_id,
+        session_id=session_id,
+        texts=["first input", "second input"],
+        metadata={"resource_user_context": {"sub": "must-not-leak"}},
+    )
+    first_delivery = claimed["deliveries"][0]
+
+    turn_state = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"in_flight": True, "native_turn_started": False},
+        }
+    )
+    with (
+        patch("vibe.internal_client.turn_state", turn_state),
+        patch(
+            "vibe.api.get_vibe_agents",
+            return_value={"agents": [], "default_agent_name": None},
+        ),
+    ):
+        client = app.test_client()
+        messages_response = client.get(f"/api/sessions/{session_id}/messages?tail=1")
+        bootstrap_response = client.get(f"/api/sessions/{session_id}/bootstrap")
+
+    assert messages_response.status_code == 200
+    assert bootstrap_response.status_code == 200
+    for rows in (
+        messages_response.get_json()["messages"],
+        bootstrap_response.get_json()["messages"],
+    ):
+        assert [row["id"] for row in rows] == [first_delivery["id"]]
+        assert rows[0]["text"] == "first input\nsecond input"
+        assert rows[0]["type"] == "user"
+        assert rows[0]["metadata"]["merged_delivery_ids"] == [
+            delivery["id"] for delivery in claimed["deliveries"]
+        ]
+        assert rows[0]["projection"] == "claimed_delivery"
+        assert rows[0]["delivered_at"] == claimed["turn"]["started_at"]
+        assert "resource_user_context" not in rows[0]["metadata"]
+
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(messages.c.id).where(messages.c.session_id == session_id)
+        ).scalar_one_or_none() is None
+
+    with create_sqlite_engine().begin() as conn:
+        turn = message_deliveries.get_turn(conn, claimed["turn"]["id"])
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn["id"],
+            expected_version=int(turn["version"]),
+            runtime_key="runtime:accepted",
+            runtime_turn_id="runtime-turn:accepted",
+            native_turn_id="native:accepted",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn["id"],
+            evidence={"kind": "test_native_acceptance"},
+        )
+
+    accepted_response = client.get(f"/api/sessions/{session_id}/messages?tail=1")
+    accepted_rows = accepted_response.get_json()["messages"]
+    assert accepted_rows[0]["id"] == first_delivery["id"]
+    assert accepted_rows[0]["text"] == "first input\nsecond input"
+    assert "projection" not in accepted_rows[0]
+    assert "workbench_claimed_delivery" not in accepted_rows[0]["metadata"]
+
+    from core.services import sessions as sessions_service
+
+    im_agent = _ensure_vibe_agent("im-opencode-worker", "opencode")
+    with create_sqlite_engine().begin() as conn:
+        im_session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend=im_agent.backend,
+            agent_id=im_agent.id,
+            agent_name=im_agent.name,
+        )
+    im_session_id = im_session["id"]
+    _seed_claimed_batch(
+        scope_id=scope_id,
+        session_id=im_session_id,
+        texts=["unaccepted IM input"],
+        platform="slack",
+    )
+    im_response = client.get(f"/api/sessions/{im_session_id}/messages?tail=1")
+    assert im_response.get_json()["messages"] == []
+
+
+def test_claimed_projection_follows_the_result_before_its_turn(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-024: projection enters at claim time, not submission time."""
+
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(
+        tmp_path,
+        agent_name="opencode-order",
+        agent_backend="opencode",
+    )
+    with create_sqlite_engine().begin() as conn:
+        result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            message_type="result",
+            text="previous turn result",
+        )
+    claimed = _seed_claimed_batch(
+        scope_id=scope_id,
+        session_id=session_id,
+        texts=["next turn input"],
+    )
+
+    response = app.test_client().get(f"/api/sessions/{session_id}/messages?tail=1")
+
+    assert response.status_code == 200
+    rows = response.get_json()["messages"]
+    assert [row["id"] for row in rows] == [result["id"], claimed["deliveries"][0]["id"]]
+    assert rows[1]["delivered_at"] == claimed["turn"]["started_at"]
 
 
 def test_chat_bootstrap_filters_harness_activities_for_viewer(isolated_state, tmp_path):

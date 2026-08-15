@@ -12,6 +12,7 @@ from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY, terminal_turn_outp
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     backend_dispatch_attempted,
+    mark_prewrite_user_stop,
     set_dispatch_phase,
 )
 from core.session_activities import SessionActivityRegistry
@@ -1394,6 +1395,71 @@ def test_agent_service_schedules_terminal_tidy_on_cancellation() -> None:
         # Gate released AFTER the tidy emit so a later prompt can't hang behind the
         # cancelled turn.
         assert not service._turn_gates["session:/repo"].token
+
+    asyncio.run(_run())
+
+
+def test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy() -> None:
+    """MESSAGE-DELIVERY-023: a prewrite Stop cannot retain runtime ownership."""
+
+    async def _run() -> None:
+        controller = _Controller()
+        stalled_tidy = asyncio.Event()
+
+        async def _stall_terminal_tidy(*_args, **_kwargs) -> None:
+            await stalled_tidy.wait()
+
+        controller.emit_agent_message = AsyncMock(side_effect=_stall_terminal_tidy)
+        controller.session_turns = Mock()
+        surface_cleanup_release = asyncio.Event()
+
+        async def _stall_surface_cleanup(*_args, **_kwargs) -> None:
+            await surface_cleanup_release.wait()
+
+        controller.message_dispatcher = SimpleNamespace(
+            status_key_for_context=Mock(return_value="status:first"),
+            finish_prewrite_stop_surfaces=AsyncMock(side_effect=_stall_surface_cleanup),
+        )
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        entered = asyncio.Event()
+
+        class _PrewriteAgent(_RuntimeAgent):
+            async def handle_message(self, request):
+                self.started.append(request.message)
+                if request.message == "first":
+                    entered.set()
+                    await asyncio.Event().wait()
+
+        agent = _PrewriteAgent()
+        service.register(agent)
+        first = _request("first")
+        first_task = asyncio.create_task(service.handle_message("claude", first))
+        await asyncio.wait_for(entered.wait(), timeout=0.5)
+
+        mark_prewrite_user_stop(first.context)
+        first_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_task
+        await asyncio.sleep(0)
+
+        gate = service._turn_gates["session:/repo"]
+        assert not gate.lock.locked()
+        assert gate.token == ""
+        controller.emit_agent_message.assert_not_awaited()
+        controller.session_turns.on_native_terminal.assert_not_called()
+        controller.message_dispatcher.status_key_for_context.assert_called_once_with(first.context)
+        controller.message_dispatcher.finish_prewrite_stop_surfaces.assert_awaited_once_with(
+            first.context,
+            consolidated_key="status:first",
+        )
+
+        second = _request("second")
+        await asyncio.wait_for(service.handle_message("claude", second), timeout=0.5)
+        assert agent.started == ["first", "second"]
+        service.release_runtime_turn(second.context)
+        surface_cleanup_release.set()
+        await asyncio.sleep(0)
 
     asyncio.run(_run())
 

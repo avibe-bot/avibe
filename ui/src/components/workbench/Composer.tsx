@@ -79,6 +79,10 @@ export type ComposerAttachment = {
 // concurrency still prevents a large drop from saturating the connection.
 const UPLOAD_CONCURRENCY = 4;
 
+// Send and Stop occupy the same pointer target. A fast second click from the
+// send gesture can otherwise land on the newly-rendered destructive control.
+const STOP_ARM_DELAY_MS = 400;
+
 // Unique-enough id for an optimistic attachment chip before the server token
 // lands. Date.now() collides within a batch, so the random suffix separates
 // files staged in the same tick.
@@ -1198,6 +1202,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
   const voiceCaptureActive = recording || voiceProcessing;
   const voiceDiscardAvailable = recording || voiceRetainedSession !== null;
+  const [stopArmed, setStopArmed] = useState(false);
+
+  useEffect(() => {
+    if (!busyControls) {
+      setStopArmed(false);
+      return;
+    }
+    setStopArmed(false);
+    const timer = window.setTimeout(() => setStopArmed(true), STOP_ARM_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [busyControls, sessionId]);
 
   const update = (next: string) => {
     valueRef.current = next;
@@ -1530,6 +1545,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               variant="destructive-soft"
               size="icon"
               onClick={onStop}
+              disabled={!stopArmed}
               aria-label={t('chat.compose.stop')}
               className="size-9 shrink-0"
             >

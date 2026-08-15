@@ -157,6 +157,9 @@ capabilities:
       - tests/scenarios/message_delivery/test_message_delivery_scenarios.py
     unit_or_contract_tests:
       - tests/test_message_dispatcher_scheduled.py
+      - tests/test_agent_service.py
+      - tests/test_ui_session_stream.py
+      - ui/src/components/workbench/Composer.attachmentRetry.test.tsx
   - id: tunnel_quality
     name: remote-access tunnel quality and smooth route recovery
     status: active

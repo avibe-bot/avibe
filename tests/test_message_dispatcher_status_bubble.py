@@ -652,6 +652,44 @@ class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m, _, _ in controller.im_client.sent], ["msg-1"])  # still one send
         self.assertEqual(controller.im_client.edits, [("msg-1", "🔧 Bash {}", "⌛ 0s · 1 st")])
 
+    async def test_prewrite_stop_cleanup_retires_bubble_without_terminal_emit(self):
+        controller = _StubController(platform="slack")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        await d.begin_status_bubble(ctx)
+        key = d._get_consolidated_message_key(ctx)
+
+        await d.finish_prewrite_stop_surfaces(ctx, consolidated_key=key)
+
+        self.assertIn(("msg-1", "", "⏹ stopped · 0s"), controller.im_client.edits)
+        self.assertNotIn(key, d._consolidated_message_ids)
+        self.assertNotIn(key, d._concise_bubble_keys)
+
+    async def test_prewrite_stop_cleanup_cannot_clear_successor_status(self):
+        controller = _StubController(platform="slack")
+        d = _dispatcher(controller)
+        stopped = MessageContext(
+            user_id="U1", channel_id="C1", platform="slack", message_id="old-trigger"
+        )
+        d.update_thread_message_id(stopped)
+        await d.begin_status_bubble(stopped)
+        stopped_key = d.status_key_for_context(stopped)
+
+        successor = MessageContext(
+            user_id="U1", channel_id="C1", platform="slack", message_id="new-trigger"
+        )
+        d.update_thread_message_id(successor)
+        await d.begin_status_bubble(successor)
+        successor_key = d.status_key_for_context(successor)
+
+        await d.finish_prewrite_stop_surfaces(stopped, consolidated_key=stopped_key)
+
+        self.assertNotIn(stopped_key, d._consolidated_message_ids)
+        self.assertEqual(d._consolidated_message_ids[successor_key], "msg-2")
+        self.assertIn(successor_key, d._concise_bubble_keys)
+        self.assertIn(("msg-1", "", "⏹ stopped · 0s"), controller.im_client.edits)
+        self.assertNotIn(("msg-2", "", "⏹ stopped · 0s"), controller.im_client.edits)
+
     async def test_begin_is_idempotent(self):
         controller = _StubController(platform="slack")
         d = _dispatcher(controller)

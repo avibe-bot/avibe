@@ -1248,6 +1248,8 @@ export type WorkbenchMessage = {
   source_session_agent_name?: string | null;
   native_message_id: string | null;
   parent_native_message_id: string | null;
+  // Server-owned read projection. Durable Message rows never carry this field.
+  projection?: 'claimed_delivery' | null;
   text: string;
   content: Record<string, unknown>;
   metadata: Record<string, unknown>;

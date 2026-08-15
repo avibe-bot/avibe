@@ -65,6 +65,7 @@ import {
   isTranscriptWindowDisjoint,
   mergeById,
   insertMessageOrdered,
+  reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import {
@@ -789,6 +790,26 @@ export const ChatPage: React.FC = () => {
   // authorization refresh). Only the latest bootstrap may commit state: a
   // superseded success or failure describes an older authorization snapshot.
   const bootstrapRequestGenerationRef = useRef(0);
+  // Bootstrap, recovery, and jump-to-latest all return authoritative live-tail
+  // snapshots. Order their successful commits through one generation so an
+  // older response cannot restore a claimed projection after a newer
+  // post-settlement snapshot removed it. A failed newer read does not suppress
+  // an older successful fallback; the next successful generation still wins.
+  const transcriptReadGenerationRef = useRef(0);
+  const committedTranscriptReadGenerationRef = useRef(0);
+  const beginTranscriptSnapshotRead = useCallback((requestSessionId: string) => {
+    const generation = ++transcriptReadGenerationRef.current;
+    return () => {
+      if (
+        requestSessionId !== sessionIdRef.current
+        || generation < committedTranscriptReadGenerationRef.current
+      ) {
+        return false;
+      }
+      committedTranscriptReadGenerationRef.current = generation;
+      return true;
+    };
+  }, []);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
@@ -926,41 +947,50 @@ export const ChatPage: React.FC = () => {
   // Does NOT touch ``working``: ``turn.end`` is the authoritative end signal, and
   // clearing on a fetched (possibly older) result could hide Stop on a newer
   // queued turn that is still in flight (Codex P2). Cheap + idempotent.
-  const reconcile = useCallback(async () => {
+  const reconcile = useCallback(async ({ force = false }: { force?: boolean } = {}) => {
     if (!sessionId) return;
-    if (historicalWindowRef.current) return;
+    if (historicalWindowRef.current && !force) return;
     // Reader scrolled up in an already-capped window: don't recover tail rows they
     // aren't looking at into the DOM — detach the live tail so jump-to-latest
     // reloads it. Synchronous flip (not via the [messages] effect) so the same
     // commit gates mark-read. Bounds repeated-gap growth: once historical, this
     // early-returns above. Mirrors the onMessageNew ingest policy.
-    if (!followingTailRef.current && messagesRef.current.length >= MAX_RETAINED_MESSAGES) {
+    if (
+      !force &&
+      !followingTailRef.current &&
+      messagesRef.current.length >= MAX_RETAINED_MESSAGES
+    ) {
       setHistoricalWindow(true);
       return;
     }
+    const claimTranscriptSnapshot = beginTranscriptSnapshotRead(sessionId);
     try {
       // tail: the RECENT window (not the oldest page), so a missed latest row in
       // a long chat is actually recovered (Codex P2).
       const res = await api.listSessionMessages(sessionId, { limit: 50, tail: true, cache: false });
-      if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
+      if (!claimTranscriptSnapshot()) return;
       const fresh = res.messages.filter(isTranscriptMessage);
+      setMessages((prev) => {
+        // The tail endpoint includes the one active claimed projection, if any,
+        // so every successful recovery read is authoritative for projection
+        // replacement/removal even when turn.end was missed.
+        const reconciled = reconcileWorkbenchClaimedDeliveries(prev, fresh);
+        if (historicalWindowRef.current) return reconciled;
+        const merged = mergeById(reconciled, fresh);
+        // Following the tail: keep the window capped. A gap larger than the tail
+        // fetch, recovered here, would otherwise blow past the cap until the next
+        // live append. Drop the oldest and re-point the cursor below.
+        if (followingTailRef.current && merged.length > MAX_RETAINED_MESSAGES) {
+          trimmedOldestRef.current = true;
+          return merged.slice(merged.length - MAX_RETAINED_MESSAGES);
+        }
+        return merged;
+      });
+      if (historicalWindowRef.current) return;
       if (fresh.length) {
         const tailOldest = fresh[0];
         const previousOldestId = oldestLoadedIdRef.current;
         const previousNewest = messagesRef.current[messagesRef.current.length - 1];
-        setMessages((prev) => {
-          const merged = mergeById(prev, fresh);
-          // Following the tail: keep the window capped. A gap larger than the tail
-          // fetch, recovered here, would otherwise blow past the cap until the next
-          // live append (Codex). Drop the oldest; the [messages] effect re-points
-          // the older cursor (it overrides the cursor set below, which stays for
-          // the no-trim case).
-          if (followingTailRef.current && merged.length > MAX_RETAINED_MESSAGES) {
-            trimmedOldestRef.current = true;
-            return merged.slice(merged.length - MAX_RETAINED_MESSAGES);
-          }
-          return merged;
-        });
         if (
           !previousOldestId ||
           !previousNewest ||
@@ -976,7 +1006,7 @@ export const ChatPage: React.FC = () => {
     // settled groups from storage (a recovered turn gets its chip; a still-running
     // turn keeps/re-hydrates its card). Coalesced + no-op when the toggle is off.
     scheduleActivityRefresh(workingRef.current);
-  }, [api, sessionId, scheduleActivityRefresh]);
+  }, [api, sessionId, scheduleActivityRefresh, beginTranscriptSnapshotRead]);
 
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
@@ -1032,10 +1062,11 @@ export const ChatPage: React.FC = () => {
 
   const reloadLatestMessages = useCallback(async (): Promise<boolean> => {
     if (!sessionId) return false;
+    const claimTranscriptSnapshot = beginTranscriptSnapshotRead(sessionId);
     try {
       const res = await api.listSessionMessages(sessionId, { limit: 50, tail: true, cache: false });
-      if (sessionId !== sessionIdRef.current) return false;
       const tailMessages = res.messages.filter(isTranscriptMessage);
+      if (!claimTranscriptSnapshot()) return false;
       if (tailMessages.length === 0) return false;
       setMessages(tailMessages);
       setOlderCursor(res.next_before_id ?? null);
@@ -1049,7 +1080,7 @@ export const ChatPage: React.FC = () => {
     } catch {
       return false;
     }
-  }, [api, sessionId, scheduleActivityRefresh]);
+  }, [api, sessionId, scheduleActivityRefresh, beginTranscriptSnapshotRead]);
 
   // Cache every edit synchronously so navigation, a tab close, or a disconnected
   // network cannot lose it. Cloud persistence remains debounced and serialized.
@@ -1154,6 +1185,7 @@ export const ChatPage: React.FC = () => {
   const refresh = useCallback(async () => {
     if (!sessionId) return;
     const requestGeneration = ++bootstrapRequestGenerationRef.current;
+    const claimTranscriptSnapshot = beginTranscriptSnapshotRead(sessionId);
     const requestIsCurrent = () => (
       sessionId === sessionIdRef.current
       && requestGeneration === bootstrapRequestGenerationRef.current
@@ -1202,11 +1234,14 @@ export const ChatPage: React.FC = () => {
       // visibility decision too — unfiltered, a queued annotation opened the chat
       // as a delivered bubble *and* sat in the queue strip, the exact double
       // render the live path already rejects.
-      setMessages((prev) => mergeById(bootstrap.messages.filter(isTranscriptMessage), prev));
+      const transcriptSnapshotIsCurrent = claimTranscriptSnapshot();
+      if (transcriptSnapshotIsCurrent) {
+        setMessages((prev) => mergeById(prev, bootstrap.messages.filter(isTranscriptMessage)));
+        setOlderCursor(bootstrap.next_before_id ?? null);
+        setHistoricalWindow(false);
+      }
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
-      setOlderCursor(bootstrap.next_before_id ?? null);
-      setHistoricalWindow(false);
       // Chat Activity chips for past turns: resync the per-turn summary (row text
       // lazy-loads on expand). If a turn is in flight, the refresh re-hydrates the
       // running card instead of showing it as interrupted.
@@ -1236,7 +1271,7 @@ export const ChatPage: React.FC = () => {
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -1392,6 +1427,7 @@ export const ChatPage: React.FC = () => {
           // so the header picks up both that route and a first native bind.
           void refreshSessionRow();
           void syncTurnState();
+          void reconcile({ force: true });
         }
       },
       onQueueUpdated: (data) => {
@@ -1430,7 +1466,7 @@ export const ChatPage: React.FC = () => {
         // Every (re)connect recovers any state missed while the socket was down:
         // dropped message rows, the queue, whether a turn is still running, and
         // a native bind whose turn.end we missed.
-        void reconcile();
+        void reconcile({ force: true });
         void refreshQueue();
         void syncTurnState({ quiet: true });
         void refreshSessionRow();
@@ -1472,7 +1508,7 @@ export const ChatPage: React.FC = () => {
       if (document.visibilityState !== 'visible') return;
       // A suspended tab can drop the reply AND the turn.end, so recover all
       // three: missed rows, the queue, and the working/Stop state (Codex P2).
-      void reconcile();
+      void reconcile({ force: true });
       void refreshQueue();
       void syncTurnState({ quiet: true });
       void refreshSessionRow();

@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   events: null as null | {
     onConnected: () => void;
     onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
+    onTurnEnd: (data: { session_id: string }) => void;
   },
 }));
 
@@ -138,11 +139,41 @@ const bootstrapPayload = (sessionId: string) => ({
   draft: { text: '' },
 });
 
+const projectedMessage = (id: string, text: string) => ({
+  id,
+  scope_id: 'scope-1',
+  session_id: 'session-new',
+  platform: 'avibe',
+  author: 'user',
+  type: 'user',
+  source: 'user',
+  author_id: null,
+  author_name: null,
+  native_message_id: null,
+  parent_native_message_id: null,
+  projection: 'claimed_delivery' as const,
+  text,
+  content: {},
+  metadata: {},
+  created_at: '2026-08-15T00:00:00Z',
+  updated_at: '2026-08-15T00:00:00Z',
+  delivered_at: '2026-08-15T00:00:01Z',
+  read_at: null,
+});
+
 describe('ChatPage transcript hydration', () => {
   let sessionRow: Deferred<{ id: string }>;
   let bootstrap: Deferred<never>;
 
   beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
     sessionRow = deferred();
     bootstrap = deferred();
     mocks.events = null;
@@ -162,7 +193,10 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.onSessionArchived.mockReturnValue(() => {});
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   it('keeps the loading view when SSE Session-row recovery beats transcript bootstrap', async () => {
     render(
@@ -235,5 +269,93 @@ describe('ChatPage transcript hydration', () => {
 
     expect(screen.getByText('common.loading')).toBeTruthy();
     expect(screen.queryByText('chat.transcriptEmpty')).toBeNull();
+  });
+
+  it('removes a retired claimed Delivery projection during reconnect recovery', async () => {
+    const projected = projectedMessage('delivery-claimed', 'claimed input still visible');
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      messages: [projected],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText(projected.text)).toBeTruthy());
+    act(() => mocks.events?.onConnected());
+
+    await waitFor(() => expect(screen.queryByText(projected.text)).toBeNull());
+    expect(mocks.api.listSessionMessages).toHaveBeenCalledWith('session-new', {
+      limit: 50,
+      tail: true,
+      cache: false,
+    });
+  });
+
+  it('does not let an older recovery resurrect a projection after settlement', async () => {
+    const projected = projectedMessage('delivery-racing-recovery', 'stale projected input');
+    const staleRecovery = deferred<{ messages: typeof projected[] }>();
+    const settledRecovery = deferred<{ messages: never[] }>();
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      messages: [projected],
+    });
+    mocks.api.listSessionMessages
+      .mockReset()
+      .mockReturnValueOnce(staleRecovery.promise)
+      .mockReturnValueOnce(settledRecovery.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText(projected.text)).toBeTruthy());
+    act(() => mocks.events?.onConnected());
+    await waitFor(() => expect(mocks.api.listSessionMessages).toHaveBeenCalledTimes(1));
+    act(() => mocks.events?.onTurnEnd({ session_id: 'session-new' }));
+    await waitFor(() => expect(mocks.api.listSessionMessages).toHaveBeenCalledTimes(2));
+
+    await act(async () => settledRecovery.resolve({ messages: [] }));
+    await waitFor(() => expect(screen.queryByText(projected.text)).toBeNull());
+    await act(async () => staleRecovery.resolve({ messages: [projected] }));
+
+    expect(screen.queryByText(projected.text)).toBeNull();
+  });
+
+  it('does not let an older bootstrap resurrect a projection after recovery', async () => {
+    const projected = projectedMessage('delivery-racing-bootstrap', 'stale bootstrap projection');
+    const staleBootstrap = deferred<ReturnType<typeof bootstrapPayload> & { messages: typeof projected[] }>();
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockReset().mockReturnValue(staleBootstrap.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(mocks.events).not.toBeNull());
+    act(() => mocks.events?.onConnected());
+    await waitFor(() => expect(mocks.api.listSessionMessages).toHaveBeenCalledTimes(1));
+    await act(async () => staleBootstrap.resolve({
+      ...bootstrapPayload('session-new'),
+      messages: [projected],
+    }));
+
+    await waitFor(() => expect(screen.getByText('chat.transcriptEmpty')).toBeTruthy());
+    expect(screen.queryByText(projected.text)).toBeNull();
   });
 });
