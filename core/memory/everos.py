@@ -83,6 +83,13 @@ _RECORDER_HEALTH_REASONS = {
     "serialization_failed",
     "call_log_corrupt",
 }
+# The pinned EverOS 1.2.3 `/add` route emits these only while ingesting attachment
+# content, before boundary preparation or any durable provider write. Unknown
+# codes stay out: destructive text-only replay requires positive no-write proof.
+_ATTACHMENT_ADD_REJECTION_CODES_VALIDATED_EVEROS_VERSION = "1.2.3"
+_ATTACHMENT_ADD_REJECTION_CODES_WITHOUT_WRITE = frozenset(
+    {"UNSUPPORTED_FORMAT", "CAPABILITY_UNAVAILABLE"}
+)
 
 ProviderAttachment = CaptureAttachment
 
@@ -123,6 +130,19 @@ class ProviderCapture:
     text: str
     provider_timestamp_ms: int
     attachments: tuple[CaptureAttachment, ...] = ()
+
+
+def attachment_add_rejection_proves_no_write(
+    capture: ProviderCapture,
+    result: AddResult,
+) -> bool:
+    """Return whether EverOS proved an attachment add stopped before writing."""
+
+    return (
+        bool(capture.attachments)
+        and isinstance(result, AddRejected)
+        and result.error_code in _ATTACHMENT_ADD_REJECTION_CODES_WITHOUT_WRITE
+    )
 
 
 @dataclass(frozen=True)

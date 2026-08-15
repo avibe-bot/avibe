@@ -142,12 +142,17 @@ claimed row or the committed downgraded row, never a caption-less intermediate.
 
 ## PR-C: deterministic provider rejection downgrade (#1471 item 3)
 
-**Selected model.** Reuse PR-B's row downgrade only when the provider returns the
-closed capability codes `UNSUPPORTED_FORMAT` or `CAPABILITY_UNAVAILABLE`. Those
-results prove no attachment write was accepted, so the row may safely retry as
-text-only. Timeouts, transport failures, unknown errors, and every other 4xx remain
-ambiguous and terminal/retry according to existing behavior; they are never
-replayed as text-only because the remote write may already exist.
+**Selected model.** Reuse PR-B's row downgrade only when pinned EverOS 1.2.3 returns one
+of the closed upstream `/add` envelope codes `UNSUPPORTED_FORMAT` or
+`CAPABILITY_UNAVAILABLE`. These are raw provider codes, not Avibe's closed
+`MemoryErrorCode` values. In the pinned provider they can arise only during
+attachment ingest/parser work, before boundary preparation or any durable provider
+write, so they prove no attachment write was accepted and the row may safely retry
+as text-only. Timeouts, transport failures, unknown errors,
+`PROVIDER_NOT_CONFIGURED`, and every other 4xx/5xx retain their existing
+terminal/retry semantics; they are never replayed as text-only because the remote
+write may already exist or the failure does not prove that dropping attachments
+would make the request acceptable.
 
 **Rejected models.** Treating every 4xx as deterministic guesses provider semantics.
 Routing all provider exceptions through one degradation path can duplicate memory
@@ -161,7 +166,8 @@ or migration.
 **Tests.** Parameterize the two allowed capability codes and the full rejected
 boundary. Allowed codes produce one attachment call followed by the durable
 text-only retry. Timeout, transport error, unknown error, and all other 4xx keep a
-single provider invocation and never enqueue or invoke a text-only replay.
+single provider invocation and never enqueue or invoke a text-only replay. The
+closed-loop provider-rejection degradation is `MEMORY-IM-ATTACH-011`.
 
 ## Delivery order and lane boundaries
 
