@@ -298,6 +298,7 @@ class MessageHandler(BaseHandler):
                     mirror_harness_inbound(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
+            memory_session_id = base_session_id
             payload = dict(context.platform_specific or {})
             payload["turn_source"] = source
             payload["turn_base_session_id"] = base_session_id
@@ -305,6 +306,26 @@ class MessageHandler(BaseHandler):
                 context, source=source
             )
             context.platform_specific = payload
+
+            # Text-only turns keep the original early capture path. Attachment
+            # turns defer only until the shared materializer has produced a
+            # descriptor-backed lease.
+            if is_human and not context.files:
+                capture_memory = getattr(self.controller, "capture_user_memory", None)
+                if callable(capture_memory):
+                    turn_lifecycle_admission = await self._acquire_memory_capture_admission(
+                        memory_session_id,
+                        turn_lifecycle_admission,
+                    )
+                    capture_task = asyncio.create_task(
+                        capture_memory(context, control_message, memory_session_id),
+                        name="memory-capture",
+                    )
+                    self._track_memory_capture_task(
+                        capture_task,
+                        lifecycle_admission=turn_lifecycle_admission,
+                    )
+                    turn_lifecycle_admission = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -709,7 +730,7 @@ class MessageHandler(BaseHandler):
             # Memory capture remains best effort and outside the Agent turn, but
             # file turns start only after the one shared download has produced an
             # immutable lease. Authorization precedes retaining a Memory consumer.
-            if is_human:
+            if is_human and context.files:
                 capture_memory = getattr(self.controller, "capture_user_memory", None)
                 if callable(capture_memory):
                     memory_attachment_lease = None
@@ -723,7 +744,7 @@ class MessageHandler(BaseHandler):
                         try:
                             admitted = bool(
                                 callable(admits_attachment)
-                                and await admits_attachment(context, base_session_id)
+                                and admits_attachment(context, memory_session_id)
                             )
                         except Exception:
                             admitted = False
@@ -731,25 +752,25 @@ class MessageHandler(BaseHandler):
                         if admitted:
                             memory_attachment_lease = attachment_lease.retain()
                         turn_lifecycle_admission = await self._acquire_memory_capture_admission(
-                            base_session_id,
+                            memory_session_id,
                             turn_lifecycle_admission,
                         )
-                        if memory_attachment_lease is None:
-                            capture = capture_memory(
-                                context,
-                                control_message,
-                                base_session_id,
-                            )
-                        else:
-                            capture = capture_memory(
-                                context,
-                                control_message,
-                                base_session_id,
-                                attachment_lease=memory_attachment_lease,
-                            )
+                        admission_ready = asyncio.Event()
+                        capture_options = {"admission_ready": admission_ready}
+                        if memory_attachment_lease is not None:
+                            capture_options["attachment_lease"] = memory_attachment_lease
+                        capture = capture_memory(
+                            context,
+                            control_message,
+                            memory_session_id,
+                            **capture_options,
+                        )
                         capture_task = asyncio.create_task(
                             capture,
                             name="memory-capture",
+                        )
+                        capture_task.add_done_callback(
+                            lambda _task: admission_ready.set()
                         )
                     except Exception:
                         if memory_attachment_lease is not None:
@@ -766,9 +787,13 @@ class MessageHandler(BaseHandler):
                     else:
                         self._track_memory_capture_task(
                             capture_task,
-                            lifecycle_admission=turn_lifecycle_admission,
                             attachment_lease=memory_attachment_lease,
                         )
+                        if turn_lifecycle_admission is not None:
+                            try:
+                                await admission_ready.wait()
+                            finally:
+                                turn_lifecycle_admission.release()
                         turn_lifecycle_admission = None
 
             if durable_ingress_enabled and not durable_delivery_owned:

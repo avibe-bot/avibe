@@ -87,6 +87,21 @@ PROVIDER_READ_TIMEOUT_SECONDS = 20.0
 CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
+class _HeldCaptureAdmission:
+    """One active claim on an exact-session capture fence."""
+
+    def __init__(
+        self,
+        module: "MemoryModule",
+        lock: asyncio.Lock,
+        key: tuple[str, str, str],
+    ) -> None:
+        self.module = module
+        self.lock = lock
+        self.key = key
+        self.active = True
+
+
 logger = logging.getLogger(__name__)
 _SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
 
@@ -470,6 +485,7 @@ class MemoryModule:
         request: CaptureRequest,
         *,
         source_lease: InboundAttachmentLease | None = None,
+        admission: object = None,
     ) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
@@ -480,42 +496,101 @@ class MemoryModule:
         if self._clear_active or self._is_maintenance_open():
             return CaptureSkipped(reason="memory_clear_failed")
 
-        admission_lock = (
-            self._capture_admission_lock(
-                principal_id=request.principal_id,
-                project_id=request.project_id,
-                session_id=request.session_id,
-            )
-            if isinstance(request, CaptureRequest)
-            else self._invalid_capture_admission_lock
-        )
-        async with admission_lock:
-            async with self._root_lifecycle_lock():
-                if self._retired:
-                    return CaptureSkipped(reason="memory_operation_in_progress")
-                if not self._is_enabled():
-                    return CaptureSkipped(reason="memory_disabled")
-                if self._clear_active or self._is_maintenance_open():
-                    return CaptureSkipped(reason="memory_clear_failed")
-                if not isinstance(request, CaptureRequest):
-                    return await self._skipped_with_missed("memory_invalid_input")
-
-                normalized_text = self._normalize_text(request.text)
-                validation_error = self._capture_validation_error(request, normalized_text)
-                if validation_error is not None:
-                    return await self._skipped_with_missed(validation_error)
-
-                try:
-                    disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
-                except Exception:
-                    return await self._skipped_with_missed("memory_low_disk_space")
-                if disk_free < MIN_FREE_DISK_BYTES:
-                    return await self._skipped_with_missed("memory_low_disk_space")
-                return await self._capture_under_root(
+        admission_lock = self._capture_lock_for_request(request)
+        if admission is None:
+            async with admission_lock:
+                return await self._capture_with_admission(
                     request,
-                    normalized_text,
                     source_lease=source_lease,
                 )
+        if not self._owns_capture_admission(admission, request, admission_lock):
+            return await self._skipped_with_missed("memory_invalid_input")
+        return await self._capture_with_admission(
+            request,
+            source_lease=source_lease,
+        )
+
+    @asynccontextmanager
+    async def capture_admission(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        session_id: str,
+    ) -> AsyncIterator[_HeldCaptureAdmission]:
+        """Acquire the exact-session fence before deferred capture work starts."""
+
+        key = (principal_id, project_id, session_id)
+        lock = self._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        await lock.acquire()
+        admission = _HeldCaptureAdmission(self, lock, key)
+        try:
+            yield admission
+        finally:
+            admission.active = False
+            lock.release()
+
+    async def _capture_with_admission(
+        self,
+        request: CaptureRequest,
+        *,
+        source_lease: InboundAttachmentLease | None,
+    ) -> CaptureReceipt:
+        async with self._root_lifecycle_lock():
+            if self._retired:
+                return CaptureSkipped(reason="memory_operation_in_progress")
+            if not self._is_enabled():
+                return CaptureSkipped(reason="memory_disabled")
+            if self._clear_active or self._is_maintenance_open():
+                return CaptureSkipped(reason="memory_clear_failed")
+            if not isinstance(request, CaptureRequest):
+                return await self._skipped_with_missed("memory_invalid_input")
+
+            normalized_text = self._normalize_text(request.text)
+            validation_error = self._capture_validation_error(request, normalized_text)
+            if validation_error is not None:
+                return await self._skipped_with_missed(validation_error)
+
+            try:
+                disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
+            except Exception:
+                return await self._skipped_with_missed("memory_low_disk_space")
+            if disk_free < MIN_FREE_DISK_BYTES:
+                return await self._skipped_with_missed("memory_low_disk_space")
+            return await self._capture_under_root(
+                request,
+                normalized_text,
+                source_lease=source_lease,
+            )
+
+    def _capture_lock_for_request(self, request: object) -> asyncio.Lock:
+        if not isinstance(request, CaptureRequest):
+            return self._invalid_capture_admission_lock
+        return self._capture_admission_lock(
+            principal_id=request.principal_id,
+            project_id=request.project_id,
+            session_id=request.session_id,
+        )
+
+    def _owns_capture_admission(
+        self,
+        admission: object,
+        request: object,
+        lock: asyncio.Lock,
+    ) -> bool:
+        return bool(
+            isinstance(admission, _HeldCaptureAdmission)
+            and admission.active
+            and admission.module is self
+            and admission.lock is lock
+            and isinstance(request, CaptureRequest)
+            and admission.key
+            == (request.principal_id, request.project_id, request.session_id)
+        )
 
     async def _capture_under_root(
         self,

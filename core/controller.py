@@ -1880,12 +1880,12 @@ class Controller:
             self._memory_turn_facts(context, include_workdir=False)
         )
 
-    async def memory_attachment_capture_admitted(
+    def memory_attachment_capture_admitted(
         self,
         context: MessageContext,
         session_id: str,
     ) -> bool:
-        """Fail closed before MessageHandler retains a lease for Memory."""
+        """Locally authorize retaining a materialized lease for Memory."""
 
         admission = self._memory_admission()
         facts = self._memory_turn_facts(
@@ -1896,12 +1896,20 @@ class Controller:
         )
         if not admission.admits_attachment_turn(facts):
             return False
-        runtime = getattr(self, "memory_runtime", None)
-        read_status = getattr(runtime, "attachment_capture_status", None)
-        if not callable(read_status):
+        multimodal = getattr(
+            getattr(
+                getattr(getattr(self, "config", None), "memory", None),
+                "processing",
+                None,
+            ),
+            "multimodal",
+            None,
+        )
+        complete = getattr(multimodal, "complete", None)
+        if not callable(complete):
             return False
         try:
-            return await read_status() == "ready"
+            return complete() is True
         except Exception:
             return False
 
@@ -2300,6 +2308,7 @@ class Controller:
         session_id: str,
         *,
         attachment_lease: object = None,
+        admission_ready: asyncio.Event | None = None,
     ) -> Awaitable[None]:
         """Submit one eligible attributed human turn after session resolution.
 
@@ -2313,6 +2322,7 @@ class Controller:
             text,
             session_id,
             attachment_lease=attachment_lease,
+            admission_ready=admission_ready,
             observed_runtime=getattr(self, "memory_runtime", None),
         )
 
@@ -2323,6 +2333,7 @@ class Controller:
         session_id: str,
         *,
         attachment_lease: object = None,
+        admission_ready: asyncio.Event | None = None,
         observed_runtime: object,
     ) -> None:
         admission = self._memory_admission()
@@ -2332,6 +2343,53 @@ class Controller:
             session_id=session_id,
             attachment_lease=attachment_lease,
         )
+        try:
+            if admission.admits_attachment_turn(facts):
+                principal_id = admission.principal_for(facts)
+                project_id = admission.project_for(facts)
+                module = getattr(observed_runtime, "module", None)
+                acquire_admission = getattr(module, "capture_admission", None)
+                if (
+                    isinstance(principal_id, str)
+                    and isinstance(project_id, str)
+                    and callable(acquire_admission)
+                ):
+                    async with acquire_admission(
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        session_id=session_id,
+                    ) as held_admission:
+                        if admission_ready is not None:
+                            admission_ready.set()
+                        await self._capture_user_memory_decided(
+                            admission,
+                            facts,
+                            attachment_lease=attachment_lease,
+                            observed_runtime=observed_runtime,
+                            held_admission=held_admission,
+                        )
+                    return
+            if admission_ready is not None:
+                admission_ready.set()
+            await self._capture_user_memory_decided(
+                admission,
+                facts,
+                attachment_lease=attachment_lease,
+                observed_runtime=observed_runtime,
+            )
+        finally:
+            if admission_ready is not None:
+                admission_ready.set()
+
+    async def _capture_user_memory_decided(
+        self,
+        admission: CaptureAdmission,
+        facts: InboundTurnFacts,
+        *,
+        attachment_lease: object,
+        observed_runtime: object,
+        held_admission: object = None,
+    ) -> None:
         if admission.admits_attachment_turn(facts):
             status = "unavailable"
             read_status = getattr(observed_runtime, "attachment_capture_status", None)
@@ -2364,13 +2422,12 @@ class Controller:
                     or not runtime.available
                 ):
                     return
+                capture_options = {}
+                if held_admission is not None:
+                    capture_options["admission"] = held_admission
                 if request.attachments and attachment_lease is not None:
-                    await runtime.module.capture(
-                        request,
-                        source_lease=attachment_lease,
-                    )
-                else:
-                    await runtime.module.capture(request)
+                    capture_options["source_lease"] = attachment_lease
+                await runtime.module.capture(request, **capture_options)
             logger.info(
                 "Memory capture platform=%s latency_ms=%d",
                 platform,

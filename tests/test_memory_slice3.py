@@ -8,6 +8,7 @@ import gc
 import json
 import sys
 import weakref
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -121,7 +122,11 @@ class _CaptureModule:
         self.accepted = []
         self.seen: set[str] = set()
 
-    async def capture(self, request):
+    @asynccontextmanager
+    async def capture_admission(self, **_scope):
+        yield object()
+
+    async def capture(self, request, **_options):
         if request.source_message_id in self.seen:
             return CaptureDuplicate()
         self.seen.add(request.source_message_id)
@@ -132,7 +137,18 @@ class _CaptureModule:
 def _controller(*, user=None):
     user = user or SimpleNamespace(enabled=True, is_admin=False)
     controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller.config = SimpleNamespace(
+        memory=SimpleNamespace(
+            enabled=True,
+            processing=MemoryProcessingConfig(
+                multimodal=MemoryEndpointConfig(
+                    base_url="https://multimodal.test/v1",
+                    model="vision-test",
+                    api_key="secret",
+                )
+            ),
+        )
+    )
     controller.platform_settings_managers = {
         platform: _Manager(user)
         for platform in ("slack", "discord", "telegram", "feishu", "wechat", "lark")
@@ -214,13 +230,9 @@ def test_capture_admits_every_enabled_bound_dm_user(platform: str) -> None:
     assert controller.memory_capture_admitted(_context(platform, is_dm=False)) is False
 
 
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [("ready", True), ("not_configured", False), ("unavailable", False)],
-)
-def test_slack_memory_lease_retention_requires_current_attachment_readiness(
+@pytest.mark.parametrize("status", ["ready", "unavailable"])
+def test_slack_memory_lease_retention_is_local_and_ignores_runtime_health(
     status: str,
-    expected: bool,
 ) -> None:
     """Scenarios: MEMORY-IM-ATTACH-001, MEMORY-IM-ATTACH-003."""
 
@@ -236,15 +248,69 @@ def test_slack_memory_lease_retention_requires_current_attachment_readiness(
     ]
     context.is_ordinary_attachment = True
 
-    assert (
-        asyncio.run(
-            controller.memory_attachment_capture_admitted(
+    assert controller.memory_attachment_capture_admitted(context, "stable-session") is True
+
+
+def test_slack_memory_lease_retention_requires_explicit_multimodal_config() -> None:
+    """Scenario: MEMORY-IM-ATTACH-003."""
+
+    controller = _controller()
+    controller.config.memory.processing.multimodal = None
+    context = _context("slack", ordinary=False)
+    context.files = [
+        FileAttachment(
+            name="receipt.pdf",
+            mimetype="application/pdf",
+            url="https://files.slack.test/private",
+        )
+    ]
+    context.is_ordinary_attachment = True
+
+    assert controller.memory_attachment_capture_admitted(context, "stable-session") is False
+
+
+def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
+    """Scenario: MEMORY-IM-ATTACH-001."""
+
+    async def run() -> None:
+        controller = _controller()
+        health_started = asyncio.Event()
+        release_health = asyncio.Event()
+        admission_ready = asyncio.Event()
+
+        async def attachment_capture_status() -> str:
+            health_started.set()
+            await release_health.wait()
+            return "unavailable"
+
+        controller.memory_runtime.attachment_capture_status = attachment_capture_status
+        context = _context("slack", ordinary=False)
+        context.files = [
+            FileAttachment(
+                name="receipt.pdf",
+                mimetype="application/pdf",
+                url="https://files.slack.test/private",
+            )
+        ]
+        context.is_ordinary_attachment = True
+
+        capture = asyncio.create_task(
+            controller.capture_user_memory(
                 context,
+                "remember this",
                 "stable-session",
+                attachment_lease=object(),
+                admission_ready=admission_ready,
             )
         )
-        is expected
-    )
+        await asyncio.wait_for(admission_ready.wait(), timeout=1.0)
+        await asyncio.wait_for(health_started.wait(), timeout=1.0)
+        assert not capture.done()
+
+        release_health.set()
+        await asyncio.wait_for(capture, timeout=1.0)
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

@@ -270,6 +270,32 @@ until slice 5 adds contract evidence for the other four adapters.
   `vibe memory search`. It proves a single adapter download and zero temp or
   Memory-bundle residue after successful processing.
 
+### Capture call-site contract
+
+Memory capture stays best effort and must not become part of user-visible Agent
+dispatch latency. The call site therefore branches by turn shape instead of moving
+all capture work to one late stage.
+
+- Text-only human turns use the original early capture path immediately after the
+  stable base session is resolved and before Agent routing. Attachment turns alone
+  use the delayed path, and the only legal reason for that delay is waiting for the
+  shared materializer to produce its immutable descriptor-backed lease.
+- The canonical Memory session anchor is copied from `base_session_id` immediately
+  after session resolution, before any subagent or routing-agent namespace can
+  rewrite the Agent session id. Both the early capture and the delayed lifecycle
+  fence/capture request receive that saved canonical value.
+- The synchronous attachment segment may evaluate only local facts: platform and
+  message-shape admission, binding/config completeness, lease retention, and fence
+  handoff. It must never await a provider, subprocess, or any other deadline-bound
+  health read. Current multimodal readiness is read only inside the background
+  capture task.
+- The per-session `SessionTurn` lifecycle admission is held only until the
+  background task has acquired Memory's exact-session capture fence. It is then
+  released before durable Agent admission. Attachment validation, bundle pin/copy,
+  queue commit, and provider work happen outside the `SessionTurn` lock while the
+  Memory fence remains held, so `/new` cannot pass the old turn but Agent startup
+  never waits for the attachment pin.
+
 ## Scenario contract
 
 The canonical capability is `memory_im_attachment_capture` under

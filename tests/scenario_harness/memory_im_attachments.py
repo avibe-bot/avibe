@@ -165,8 +165,17 @@ class MemoryIMAttachmentScenarioHarness:
         )
         self.runtime = _Runtime(self.module, attachment_status=attachment_status)
         self.controller = Controller.__new__(Controller)
+        multimodal = (
+            None
+            if attachment_status == "not_configured"
+            else SimpleNamespace(complete=lambda: True)
+        )
         self.controller.config = SimpleNamespace(
-            memory=SimpleNamespace(enabled=True, recovery_intent=None)
+            memory=SimpleNamespace(
+                enabled=True,
+                recovery_intent=None,
+                processing=SimpleNamespace(multimodal=multimodal),
+            )
         )
         self.controller.platform_settings_managers = {
             "slack": _SettingsManager(bound=bound)
@@ -235,7 +244,7 @@ class MemoryIMAttachmentScenarioHarness:
         ).materialize(context, self.downloader)
         memory_lease = None
         try:
-            if await self.controller.memory_attachment_capture_admitted(
+            if self.controller.memory_attachment_capture_admitted(
                 context,
                 "stable-session",
             ):

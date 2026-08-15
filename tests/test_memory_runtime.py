@@ -2071,6 +2071,61 @@ async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
         await memory_runtime_factory.close(runtime)
 
 
+async def test_deferred_capture_handoff_keeps_memory_lifecycle_fenced(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    request = CaptureRequest(
+        source_message_id="deferred-source",
+        session_id="canonical-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_id=PROJECT,
+        provenance="user_input",
+        text="remember this",
+        occurred_at_ms=1_725_000_001_234,
+    )
+    lifecycle_ran = asyncio.Event()
+
+    async def reset_session() -> None:
+        lifecycle_ran.set()
+
+    try:
+        async with runtime.module.capture_admission(
+            principal_id=request.principal_id,
+            project_id=request.project_id,
+            session_id=request.session_id,
+        ) as admission:
+            lifecycle = asyncio.create_task(
+                runtime.run_session_lifecycle(
+                    principal_id=request.principal_id,
+                    project_id=request.project_id,
+                    raw_session_id=request.session_id,
+                    operation=reset_session,
+                    deadline_seconds=2.0,
+                )
+            )
+            await asyncio.sleep(0)
+            assert not lifecycle_ran.is_set()
+            assert isinstance(
+                await runtime.module.capture(request, admission=admission),
+                CaptureAccepted,
+            )
+            assert not lifecycle_ran.is_set()
+
+        await asyncio.wait_for(lifecycle, timeout=2.0)
+        assert lifecycle_ran.is_set()
+    finally:
+        await memory_runtime_factory.close(runtime)
+
+
 async def test_retired_close_aborts_when_claim_quiescence_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
