@@ -306,11 +306,14 @@ def test_slack_memory_lease_retention_is_local_and_ignores_runtime_health(
     assert reservation.config_generation == 1
 
 
-def test_slack_memory_reservation_survives_without_multimodal_opt_in() -> None:
+@pytest.mark.parametrize("generation", [None, True, -1, "1"])
+def test_slack_memory_reservation_normalizes_invalid_multimodal_generation(
+    generation: object,
+) -> None:
     """Scenario: MEMORY-IM-ATTACH-003."""
 
     controller = _controller()
-    controller.memory_runtime.attachment_generation = None
+    controller.memory_runtime.attachment_generation = generation
     context = _context("slack", ordinary=False)
     context.files = [
         FileAttachment(
@@ -475,20 +478,32 @@ def test_slack_without_multimodal_opt_in_skips_live_health_read() -> None:
     asyncio.run(run())
 
 
-def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
+def test_configured_attachment_capture_skips_live_health_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Scenario: MEMORY-IM-ATTACH-001."""
 
     async def run() -> None:
         controller = _controller()
-        health_started = asyncio.Event()
-        release_health = asyncio.Event()
+        health_reads = 0
 
         async def attachment_capture_status() -> str:
-            health_started.set()
-            await release_health.wait()
-            return "unavailable"
+            nonlocal health_reads
+            health_reads += 1
+            await asyncio.Event().wait()
+            return "ready"
 
         controller.memory_runtime.attachment_capture_status = attachment_capture_status
+        attachment = CaptureAttachment(
+            kind="pdf",
+            name="receipt.pdf",
+            uri="file:///leased/receipt.pdf",
+            ext="pdf",
+        )
+        monkeypatch.setattr(
+            "core.memory.admission.select_memory_attachments",
+            lambda _lease: SimpleNamespace(attachments=(attachment,), skipped=()),
+        )
         context = _context("slack", ordinary=False)
         context.files = [
             FileAttachment(
@@ -503,21 +518,93 @@ def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
             "stable-session",
         )
         assert reservation is not None
+        assert reservation.config_generation == 1
 
-        capture = asyncio.create_task(
+        await asyncio.wait_for(
             controller.capture_user_memory(
                 context,
                 "remember this",
                 "stable-session",
                 attachment_lease=object(),
                 attachment_reservation=reservation,
+            ),
+            timeout=1.0,
+        )
+
+        assert health_reads == 0
+        assert len(controller.memory_module.accepted) == 1
+        assert controller.memory_module.accepted[0].attachments == (attachment,)
+
+    asyncio.run(run())
+
+
+def test_configured_attachment_capture_does_not_block_session_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-003."""
+
+    async def run() -> None:
+        controller = _controller()
+        store = MemoryStore()
+        module = MemoryModule(store, FakeMemoryProvider(), enabled=True)
+        controller.memory_module = module
+        controller.memory_runtime = _Runtime(module)
+        health_reads = 0
+
+        async def attachment_capture_status() -> str:
+            nonlocal health_reads
+            health_reads += 1
+            await asyncio.Event().wait()
+            return "ready"
+
+        controller.memory_runtime.attachment_capture_status = attachment_capture_status
+        monkeypatch.setattr(
+            "core.memory.admission.select_memory_attachments",
+            lambda _lease: SimpleNamespace(attachments=(), skipped=()),
+        )
+        context = _context("slack", ordinary=False)
+        context.files = [
+            FileAttachment(
+                name="receipt.pdf",
+                mimetype="application/pdf",
+                url="https://files.slack.test/private",
+            )
+        ]
+        context.is_ordinary_attachment = True
+        reservation = controller.reserve_memory_attachment_capture(
+            context,
+            "stable-session",
+        )
+        assert reservation is not None
+        capture = asyncio.create_task(
+            controller.capture_user_memory(
+                context,
+                "keep the caption",
+                "stable-session",
+                attachment_lease=object(),
+                attachment_reservation=reservation,
             )
         )
-        await asyncio.wait_for(health_started.wait(), timeout=1.0)
-        assert not capture.done()
+        reset_ran = False
 
-        release_health.set()
+        async def reset() -> None:
+            nonlocal reset_ran
+            reset_ran = True
+
+        await asyncio.wait_for(
+            module.run_session_lifecycle(
+                principal_id="u-" + ("1" * 32),
+                project_id=PROJECT,
+                raw_session_id="stable-session",
+                operation=reset,
+                deadline_seconds=0.25,
+            ),
+            timeout=0.75,
+        )
         await asyncio.wait_for(capture, timeout=1.0)
+
+        assert reset_ran is True
+        assert health_reads == 0
 
     asyncio.run(run())
 
@@ -608,16 +695,14 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
             uri="file:///leased/receipt.pdf",
             ext="pdf",
         )
+        def select_attachments(_lease):
+            controller.memory_runtime.attachment_generation = 2
+            return SimpleNamespace(attachments=(attachment,), skipped=())
+
         monkeypatch.setattr(
             "core.memory.admission.select_memory_attachments",
-            lambda _lease: SimpleNamespace(attachments=(attachment,), skipped=()),
+            select_attachments,
         )
-
-        async def attachment_capture_status() -> str:
-            controller.memory_runtime.attachment_generation = 2
-            return "ready"
-
-        controller.memory_runtime.attachment_capture_status = attachment_capture_status
         context = _context("slack", ordinary=False)
         context.files = [
             FileAttachment(
@@ -655,6 +740,60 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
     ]
     assert len(records) == 1
     assert "platform=slack total=1 captured=0 dropped=1" in records[0].getMessage()
+
+
+def test_downstream_capture_unavailability_does_not_change_ingress_eligibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-003."""
+
+    async def run() -> None:
+        controller = _controller()
+        attachment = CaptureAttachment(
+            kind="pdf",
+            name="receipt.pdf",
+            uri="file:///leased/receipt.pdf",
+            ext="pdf",
+        )
+        monkeypatch.setattr(
+            "core.memory.admission.select_memory_attachments",
+            lambda _lease: SimpleNamespace(attachments=(attachment,), skipped=()),
+        )
+        captured_requests: list[CaptureRequest] = []
+
+        async def unavailable_capture(request, **_options):
+            captured_requests.append(request)
+            return CaptureSkipped(reason="memory_operation_in_progress")
+
+        controller.memory_module.capture = unavailable_capture
+        controller.memory_runtime.attachment_status = "unavailable"
+        context = _context("slack", ordinary=False)
+        context.files = [
+            FileAttachment(
+                name="receipt.pdf",
+                mimetype="application/pdf",
+                url="https://files.slack.test/private",
+            )
+        ]
+        context.is_ordinary_attachment = True
+        reservation = controller.reserve_memory_attachment_capture(
+            context,
+            "stable-session",
+        )
+        assert reservation is not None
+
+        await controller.capture_user_memory(
+            context,
+            "keep the caption",
+            "stable-session",
+            attachment_lease=object(),
+            attachment_reservation=reservation,
+        )
+
+        assert len(captured_requests) == 1
+        assert captured_requests[0].attachments == (attachment,)
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
