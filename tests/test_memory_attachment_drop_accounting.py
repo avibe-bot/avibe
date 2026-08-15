@@ -36,7 +36,8 @@ _Injection = Callable[
 @dataclass(frozen=True, slots=True)
 class _DropCase:
     name: str
-    reason: str
+    records: tuple[tuple[int, str], ...]
+    dropped_count: int
     expected_caption: str | None
     inject: _Injection
 
@@ -172,6 +173,46 @@ async def _inject_generation_mismatch(
         attachment_lease=object(),
         attachment_reservation=reservation,
     )
+    request = controller.memory_module.accepted[0]
+    assert request.attachments == ()
+    return _DropOutcome(captured_text=request.text)
+
+
+async def _inject_reservation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    _caplog: pytest.LogCaptureFixture,
+    _tmp_path: Path,
+) -> _DropOutcome:
+    from tests.test_memory_slice3 import _context, _controller
+
+    controller = _controller()
+    monkeypatch.setattr(
+        controller.memory_module,
+        "reserve_capture_admission",
+        Mock(side_effect=RuntimeError("reservation unavailable")),
+    )
+    context = _context("slack", ordinary=False)
+    context.files = [
+        FileAttachment(
+            name="receipt.pdf",
+            mimetype="application/pdf",
+            url="https://files.slack.test/private",
+        )
+    ]
+    context.is_ordinary_attachment = True
+
+    reservation = controller.reserve_memory_attachment_capture(
+        context,
+        "stable-session",
+    )
+    assert reservation is None
+    await controller.capture_user_memory(
+        context,
+        CAPTION,
+        "stable-session",
+        attachment_reservation=reservation,
+    )
+
     request = controller.memory_module.accepted[0]
     assert request.attachments == ()
     return _DropOutcome(captured_text=request.text)
@@ -326,42 +367,100 @@ async def _inject_pin_failure_without_caption(
     )
 
 
+async def _inject_materialization_rejection_then_pin_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    _caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> _DropOutcome:
+    from tests.test_memory_module import _attachment_store, _module, _source_attachment
+
+    attachment_store = _attachment_store()
+    module, store, _provider = _module(tmp_path, attachment_store=attachment_store)
+    survivor = _source_attachment("drop-matrix-survivor.png", b"original bytes")
+    monkeypatch.setattr(
+        "core.memory.admission.select_memory_attachments",
+        lambda _lease: SimpleNamespace(attachments=(survivor,), skipped=()),
+    )
+    request = _admission().decide(
+        _facts(
+            files=[object(), object()],
+            attachment_failures=("download_failed",),
+        )
+    )
+    assert isinstance(request, CaptureRequest)
+    assert request.attachments == (survivor,)
+
+    def fail_pin(*_args, **_kwargs):
+        raise AttachmentPinError(
+            "memory_store_unavailable",
+            "leased source changed before pinning",
+        )
+
+    monkeypatch.setattr(attachment_store, "pin", fail_pin)
+    await module.capture(request, attachment_platform="slack")
+
+    rows = store.list_queue_rows()
+    assert len(rows) == 1
+    assert rows[0].payload_attachments is None
+    return _DropOutcome(captured_text=rows[0].payload_text)
+
+
 DROP_ACCOUNTING_MATRIX = (
     _DropCase(
         "selection-rejection",
-        "unsupported_type",
+        ((1, "unsupported_type"),),
+        1,
         CAPTION,
         _inject_selection_rejection,
     ),
     _DropCase(
         "partial-materialization-failure",
-        "download_failed",
+        ((1, "download_failed"),),
+        1,
         CAPTION,
         _inject_partial_materialization_failure,
     ),
     _DropCase(
+        "capture-reservation-failure",
+        ((1, "reservation_failed"),),
+        1,
+        CAPTION,
+        _inject_reservation_failure,
+    ),
+    _DropCase(
         "lease-retention-failure",
-        "lease_retain_failed",
+        ((1, "lease_retain_failed"),),
+        1,
         CAPTION,
         _inject_retain_failure,
     ),
     _DropCase(
         "configuration-generation-mismatch",
-        "configuration_changed",
+        ((1, "configuration_changed"),),
+        1,
         CAPTION,
         _inject_generation_mismatch,
     ),
     _DropCase(
         "pin-failure-with-caption",
-        "pin_failed",
+        ((1, "pin_failed"),),
+        1,
         CAPTION,
         _inject_pin_failure_with_caption,
     ),
     _DropCase(
         "pin-failure-without-caption",
-        "pin_failed",
+        ((1, "pin_failed"),),
+        1,
         None,
         _inject_pin_failure_without_caption,
+    ),
+    _DropCase(
+        "materialization-rejection-then-pin-failure",
+        ((1, "download_failed"), (1, "pin_failed")),
+        2,
+        CAPTION,
+        _inject_materialization_rejection_then_pin_failure,
     ),
 )
 
@@ -388,6 +487,11 @@ async def test_memory_im_attachment_drop_accounting_matrix(
         for record in caplog.records
         if record.message.startswith("memory_attachment_capture_skipped")
     ]
-    assert len(records) == 1
-    assert f"platform=slack count=1 reason={case.reason}" in records[0].getMessage()
+    assert len(records) == len(case.records)
+    for record, (count, reason) in zip(records, case.records, strict=True):
+        assert (
+            f"platform=slack count={count} reason={reason}"
+            in record.getMessage()
+        )
+    assert sum(count for count, _reason in case.records) == case.dropped_count
     assert outcome.captured_text == case.expected_caption

@@ -315,27 +315,35 @@ all capture work to one late stage.
   that invariant must hold at every attachment-path failure or early return rather
   than only for failures with an existing closed classification.
 - **Drop-accounting invariant.** Every attachment deterministically dropped in one
-  turn is counted exactly once by one scrub-safe
-  `memory_attachment_capture_skipped` record. From successful materialization
-  onward, Admission aggregates the eligibility and selection reasons it owns; every
-  deterministic drop outside Admission emits the same platform/count/closed-reason
-  shape itself. The complete post-materialization injection matrix is:
+  turn is counted exactly once across that turn's scrub-safe
+  `memory_attachment_capture_skipped` records. A turn may produce multiple records:
+  each drop point accounts only for the attachments it discards, and the records'
+  attachment sets must be disjoint with a union equal to every deterministic drop in
+  the turn. From successful materialization onward, Admission aggregates the
+  eligibility and selection reasons it owns; every deterministic drop outside
+  Admission emits the same platform/count/closed-reason shape itself. The complete
+  post-materialization injection matrix is:
 
   | Drop point | Closed reason represented in the matrix | Accounting owner |
   | --- | --- | --- |
   | Admission selection rejection | `unsupported_type` | Admission aggregate |
   | Partial materialization failure | `download_failed` | Admission aggregate |
+  | Capture reservation failure | `reservation_failed` | Controller |
   | Lease-retention failure | `lease_retain_failed` | Message handler |
   | Configuration-generation mismatch | `configuration_changed` | Controller |
   | Pin failure with a caption | `pin_failed` | Memory module |
   | Pin failure without a caption | `pin_failed` | Memory module |
+  | Materialization rejection followed by survivor pin failure | `download_failed` + `pin_failed` | Admission + Memory module, disjointly |
 
   This table maps one-to-one to the parameter rows in
   `tests/test_memory_attachment_drop_accounting.py`. Adding a deterministic drop
   point requires both a table row naming its single accounting owner and a matrix
-  row; either omission violates the contract. All-shape pin failure, not only mixed
-  turn fallback, is owned before the pin-error result branches. Silent loss and
-  duplicate counting are both contract violations.
+  row; either omission violates the contract. Each row asserts that every affected
+  attachment is accounted exactly once across the full turn; the cross-layer row
+  proves that distinct owners may emit distinct records without overlapping counts.
+  All-shape pin failure, not only mixed turn fallback, is owned before the pin-error
+  result branches. Silent loss and duplicate attachment counting are both contract
+  violations.
 - **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
   admission, the handler performs only an O(1), non-blocking, local registration of
   an exact-session Memory capture ticket. Registration records FIFO order but never
@@ -432,3 +440,7 @@ the materializer-wide failure, post-enqueue bundle failure, and deterministic
 provider attachment rejection paths are tracked by #1471. They remain outside
 PR4 so its Slack activation does not expand into coordinator, provider, store, or
 shared materializer changes.
+
+A future observability improvement may add a non-identifying per-turn correlation
+marker so operators can group multiple disjoint skip records from the same turn.
+That marker is an operational convenience, not part of drop-accounting correctness.

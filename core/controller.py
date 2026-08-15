@@ -1933,6 +1933,11 @@ class Controller:
             or not isinstance(principal_id, str)
             or not isinstance(project_id, str)
         ):
+            log_attachment_skip(
+                CaptureAdmission.platform_of(facts),
+                len(context.files or ()),
+                "reservation_failed",
+            )
             return None
         read_generation = getattr(
             runtime,
@@ -1957,6 +1962,11 @@ class Controller:
                 session_id=session_id,
             )
         except Exception:
+            log_attachment_skip(
+                CaptureAdmission.platform_of(facts),
+                len(context.files or ()),
+                "reservation_failed",
+            )
             return None
         return _MemoryAttachmentCaptureReservation(
             module=module,
