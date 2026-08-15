@@ -31,9 +31,9 @@ snapshots the final executing `agents.id` when the Turn starts; later Session
 routing or Agent hard deletion cannot change its Memory partition. Platform
 transcript mirrors are not capture sources. Delivery batching keeps ordinary
 Harness work separate from callbacks. Accepted-live-steer, failed, canceled,
-silent, missing/guarded-snapshot, epoch-crossing, oversized, malformed, callback,
-maintenance, and unbound turns are skipped without delaying or changing the
-Turn result.
+silent, missing/guarded-snapshot, epoch-crossing, out-of-band attachment,
+oversized, malformed, callback, maintenance, and unbound turns are skipped
+without delaying or changing the Turn result.
 
 Because the input is the exact backend dispatch, it can contain identifiers in
 user/Agent-authored text and Avibe-injected time, source-Session, username, or
@@ -41,9 +41,15 @@ user-id attribution lines. Enabling Agent Memory discloses that those content
 bytes are retained locally and sent to the configured processing endpoints;
 they never become structural Memory ownership, scope, or provider paths.
 
-The Settings UI sends Agent-track changes to one controller IPC operation; it
-does not save that config block itself. Under the same controller lifecycle lock
-used by scanner, Clear, and reset, each enable or disable first atomically records
+Every writer of Personal, Agent, endpoint, credential, or repair/rebuild Memory
+config submits a field-scoped revision-checked patch through one controller IPC
+transaction; UI, compatibility, and maintenance processes do not persist any
+Memory config block directly. The Memory navigation and recovery controls remain
+visible when either role is enabled or recovery is pending, and shared
+credentials can be cleared only when both roles will be disabled and no recovery
+intent needs them. Under the same cross-process controller lifecycle/config lock
+used by scanner, Clear, and reset, each Agent enable or disable first atomically
+records
 a prepared completed-Turn high water and capture intent in the primary state
 transaction that orders Turn settlement, then replaces V2 config. Recovery
 commits that exact boundary only when config has the desired digest, or cancels
@@ -94,15 +100,24 @@ The roles also share remote processing credentials: Agent load can consume the
 endpoint account's concurrency, rate, or quota and throttle Personal requests.
 This external resource coupling cannot corrupt or merge the two local tracks;
 Agent requests remain bounded and back off when throttled.
+Both roots and `memory.sqlite` share the effective-home volume. Agent-root or
+index growth after provider acceptance can therefore exhaust local capacity and
+make later Personal or Agent writes fail even though their paths and state are
+disjoint. Status reports free space and per-role provider use, and new Agent
+claims pause below the reserve; this is backpressure and observability, not a
+local-disk quota or capacity-isolation guarantee.
 The Agent queue independently caps nonterminal work at 500 rows and requires at
 least 512 MiB free before admission; guarded turns are counted without retaining
 their text. Scrubbed terminal tombstones retain at most 90 days and the newest
 100,000 rows.
 Final-dispatch snapshots are admitted only while a committed capture epoch is
 enabled, at most 256 KiB per Turn and 128 MiB total in primary state. A Turn must
-settle in that same epoch. Disabled/transitioning, oversized, and over-budget
-dispatches retain only an omission reason and still execute normally. Admitted
-primary snapshots are scrubbed after durable enqueue/skip, disabled settlement,
+settle in that same epoch. The final native backend request must be text-only;
+any Turn with a separate image, attachment, audio, file, or other out-of-band
+input is excluded without copying its path, metadata, or bytes. Disabled,
+transitioning, attachment-bearing, oversized, and over-budget dispatches retain
+only a closed shape/omission reason and still execute normally. Admitted primary
+snapshots are scrubbed after durable enqueue/skip, disabled settlement,
 abandonment, Clear, or Reinitialize.
 
 Agent cases and skills are available only through explicit, scoped Agent Memory

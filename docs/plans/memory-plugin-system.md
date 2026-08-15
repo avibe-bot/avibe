@@ -47,9 +47,10 @@ The setup flow is deliberately staged:
    `/admin/settings/memory` (`/settings/memory` redirects there).
 3. The owner configures separate OpenAI-compatible LLM and embedding endpoints,
    reviews the data disclosure, and explicitly enables Memory.
-4. After the runtime is installed and Memory is enabled, **Memory - Beta** is
-   visible in Settings navigation. Before then, the route still exists but is
-   reached from Dependencies.
+4. After the runtime is installed and either Personal Memory or Agent Memory is
+   enabled, **Memory - Beta** is visible in Settings navigation. It also remains
+   visible while either role has a pending recovery intent. Before then, the
+   route still exists but is reached from Dependencies.
 
 Enablement requires complete endpoint blocks, bounded authenticated probes, a
 verified runtime, an owned provider root, and a healthy sidecar. A failed
@@ -57,9 +58,14 @@ Personal Memory enable rolls its persisted setting back to disabled. Agent
 Memory follows its separate cutover contract: a post-commit role-start failure
 retains the desired enabled setting and recovery intent in degraded state, keeps
 capture/claims closed, and retries only through the controller role-recovery
-path. API keys are write-only: responses expose only `has_api_key`, omission
-preserves an existing key, and explicit key clearing is allowed only while the
-resulting configuration is disabled.
+path. Every writer of Personal, Agent, endpoint, credential, or repair/rebuild
+Memory config submits a field-scoped revision-checked patch through the
+controller's single cross-process lifecycle/config transaction; UI,
+compatibility, and maintenance processes do not persist Memory config directly.
+API keys are write-only: responses
+expose only `has_api_key`, omission preserves an existing key, and explicit key
+clearing is allowed only when the resulting configuration disables both roles
+and no pending recovery intent requires the credential.
 
 The Settings page provides:
 
@@ -420,7 +426,14 @@ with different content.
   inherited.
 - Captured text, attachment content, and search queries may be sent to the
   configured Memory endpoints and retained under those providers' policies.
-  Disable retains local data; only Clear all removes Avibe-owned Memory data.
+  Disable retains local data. **Clear Memory Data** removes both roles'
+  Avibe-owned provider data, queues, and call-log/health state while preserving
+  installed runtime artifacts, settings, credentials, and bindings.
+  **Reinitialize** also deletes the mixed-purpose `memory/` and `state/memory/`
+  trees, including both provider roots and operational state, then recreates
+  them from preserved settings/credentials/bindings and the installed artifact.
+  Neither operation is a secure wipe or deletes copies retained by remote
+  processing providers.
 
 These controls enforce the supported product surfaces. They are not a sandbox
 against arbitrary code running as the same OS account and do not prove that two

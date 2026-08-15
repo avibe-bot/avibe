@@ -103,19 +103,26 @@ for later-settling Turns, while already-settled backlog through its committed
 cutover remains eligible under the old project.
 
 Enabling requires the installed Memory runtime, complete processing endpoints,
-and at least one explicit project binding. The UI validates the candidate but
-does not persist `agent_track` settings itself. It sends the candidate plus its
-expected prior config digest to one authenticated controller IPC operation,
-`apply_agent_memory_settings`. The controller owns the complete
-capture/binding/config/claim transition under the same lifecycle lock used by
-scanner, Clear, and reset orchestration; a process-local UI lock is not a
-correctness boundary. If the controller is unavailable, the request fails before
-any mutation.
+and at least one explicit project binding. Every writer that mutates any Memory
+V2 config field, including Personal enablement, endpoint/API-key edits, Agent
+enablement and bindings, and repair/rebuild settings, submits a field-scoped
+patch plus its expected Memory-config revision to one authenticated controller
+IPC transaction, `apply_memory_settings`. `apply_agent_memory_settings` is its
+Agent-role logical operation, not an independent writer. No UI, compatibility,
+or maintenance process directly persists any part of the Memory config. The
+controller compares the expected revision, applies the patch to the latest
+config, owns any capture/binding/config/claim transition, atomically replaces
+V2 config, reconciles the affected roles, and retains the same cross-process
+lifecycle/config transaction through intent cleanup. A stale revision returns a
+conflict for reload instead of overwriting another writer; a process-local UI
+lock is only a debounce and never a correctness boundary. If the controller is
+unavailable, the request fails before any mutation.
 
-The controller first uses one serialized primary state transaction to read
-terminal high water `H` and insert a singleton prepared
+For an Agent-role patch, the controller first uses one serialized primary state
+transaction to read terminal high water `H` and insert a singleton prepared
 `memory_agent_capture_cutover` intent with a new capture epoch, prior and desired
-config digests, desired enabled state, and `H`. Terminal settlement cannot
+Agent-block digests, the whole Memory-config revision, desired enabled state,
+and `H`. Terminal settlement cannot
 interleave between that read and intent commit. The scanner is fenced, then the
 desired V2 config is atomically replaced and the prepared intent is promoted to
 committed. The cutover is conditionally sequence-effective at the prepared
@@ -136,13 +143,18 @@ worker quiescence no provider write may start. The scanner runs local-only in
 then stops and clears the intent. Rows enqueued by the drain remain pending
 without provider I/O and become claimable only after a later enable.
 
-If V2 config persistence fails, the still-prior digest authorizes cancellation
+All Memory writers remain serialized behind that controller transaction until
+the intent is cleared, so a Personal or endpoint save cannot create a third
+digest during Agent recovery. If V2 config persistence fails, the still-prior
+Agent-block digest and config revision authorize cancellation
 of the prepared intent, any claims closed for a proposed disable reopen, and
 scanner work resumes under the prior epoch, including Turns above `H`. After a
-crash, recovery compares the persisted digest: the
-prior digest cancels the intent, the exact desired digest promotes and projects
-the intent's original epoch and `H`, and any third digest fences Agent Memory as
-degraded for explicit repair. Recovery never invents a later high water. Thus a
+crash, recovery compares the persisted revision and Agent-block digest: the
+prior state cancels the intent, the exact desired state promotes and projects
+the intent's original epoch and `H`, and any unrecognized state fences Agent
+Memory as degraded for explicit repair. The same controller transaction must
+repair or retire that intent before accepting another Memory write. Recovery
+never invents a later high water. Thus a
 disable that reached config commit cannot extend its old enabled epoch to
 restart time. Memory projection/drain and intent cleanup are idempotent.
 Re-enable requires an earlier disable drain to converge, then its own enabled
@@ -177,6 +189,9 @@ these invariants hold:
   one non-empty final `result_text`;
 - immutable `backend_dispatch_text` and the final result are valid, nonempty
   UTF-8 text of at most 256 KiB each;
+- `backend_input_shape="text_only"`; any Turn whose native backend request also
+  contains an out-of-band image, attachment, audio, file, or other non-text
+  input is excluded even when its dispatch string is nonempty;
 - the dispatch snapshot was admitted while one committed capture epoch was
   enabled, and the Turn settled inside that same epoch; a Turn crossing enable,
   disable, Clear, or reset is excluded;
@@ -200,18 +215,21 @@ Harness request therefore cannot coalesce with a callback even when both use the
 same trigger/backend/Session.
 
 After scheduled attribution, transcription, attachment/file formatting, and all
-other input transformations finish, the shared start boundary checks the
-controller-projected primary capture epoch without opening the Memory store. If
+other input transformations finish, the shared start boundary classifies the
+final native request as the closed `text_only | out_of_band_attachment`
+`backend_input_shape` and checks the controller-projected primary capture epoch
+without opening the Memory store. Only `text_only` requests are candidates. If
 that epoch is committed enabled, the exact UTF-8 text is at most 256 KiB, and the
 global primary snapshot budget remains below 128 MiB, one primary transaction
-reserves its byte count and persists `backend_dispatch_text`, digest, and capture
-epoch before invoking the native adapter. The adapter must send exactly that
-stored text; an automatic start retry reuses it instead of re-running a
-text-changing transform.
+reserves its byte count and persists `backend_dispatch_text`, digest, shape, and
+capture epoch before invoking the native adapter. The adapter must send exactly
+that stored text with no additional native input; an automatic start retry
+reuses the snapshot instead of re-running a text-changing transform.
 
-Disabled/transitioning epochs, oversized text, or an exhausted snapshot budget
-record only a closed omission reason and small counter; they never retain the
-text or block native dispatch. A successful config transition cannot retroactively
+Disabled/transitioning epochs, out-of-band attachment input, oversized text, or
+an exhausted snapshot budget record only a closed omission reason, input-shape
+marker, and small counter; they never retain text, attachment paths/bytes, or
+block native dispatch. A successful config transition cannot retroactively
 admit an in-flight Turn that omitted its snapshot. Persistence failure for a
 snapshot that was admitted still fails closed before native start, because the
 candidate could otherwise diverge from the adapter input. Backend-native
@@ -221,7 +239,8 @@ Agent-Memory candidate.
 The property is deliberately positive. Every terminal shape not satisfying the
 complete invariant is skipped, including failed, canceled, stopped/restarted,
 silent, missing-result, missing/guarded final-dispatch, epoch-crossing,
-malformed-evidence, oversized, accepted-steer, callback-class, and unbound turns.
+malformed-evidence, out-of-band attachment, oversized, accepted-steer,
+callback-class, and unbound turns.
 Admission logs only a closed
 reason and opaque source digest.
 
@@ -281,6 +300,15 @@ slug accepted by `is_new_stored_memory_project_id`; reserved values and legacy
 `p-...` workdir hashes are never new writes. `agent_id` partitions Agents and
 `project_id` partitions one Agent's learning. Search/list responses must match
 both before they cross the provider boundary.
+
+The owner UI derives one aggregate navigation/credential guard,
+`memory_roles_enabled = memory.enabled || memory.agent_track.enabled`. The
+Memory page remains visible and its recovery controls remain reachable whenever
+either role is enabled or a Memory recovery intent is pending, including the
+valid Agent-only state where Personal Memory is disabled. An explicit shared
+endpoint credential clear is accepted only when both roles will be disabled and
+no pending recovery requires that credential. Personal-only checks must never
+hide Agent status or authorize credential removal from an active Agent role.
 
 ### Explicit retrieval
 
@@ -366,7 +394,15 @@ The roles share the immutable installed EverOS artifact and environment-only
 endpoint credentials. Consequently the remote LLM/embedding service's account
 quota, concurrency allowance, and rate limits are an explicit external resource
 coupling: Agent traffic can throttle Personal traffic even though failures and
-state remain role-local. They do not share provider roots, sockets, process
+state remain role-local. Both roots and `memory.sqlite` also share the effective
+home volume, so local capacity is an explicit resource coupling: growth of the
+Agent EverOS root or index can consume the reserve and make later Agent or
+Personal writes fail even though paths are disjoint. The pre-claim free-space
+guard limits new Agent work but cannot quota or preempt growth caused by work
+already accepted inside EverOS. Status therefore reports free space and
+role-specific provider-root use, warns at the Agent reserve, and pauses new
+Agent claims while below it; this is observability and backpressure, not local
+capacity isolation. The roles do not share provider roots, sockets, process
 records, root sentinels, provider-root locks, supervisors, health snapshots,
 call-log ownership slots, or worker queues. All ownership records include the
 role plus exact root/socket pair so a stale chat record can never identify an
@@ -421,11 +457,15 @@ primary Avibe state schema:
   selected by the final execution route, deliberately without a foreign key;
 - `source_class TEXT`, constrained on new writes to `interactive`,
   `harness_request`, `callback`, `maintenance`, or `agent_callback`;
+- `backend_input_shape TEXT`, constrained on new writes to `text_only` or
+  `out_of_band_attachment` and derived from the final native request rather
+  than transport transcript metadata;
 - `backend_dispatch_text TEXT` and `backend_dispatch_sha256 TEXT`, the exact
   bounded final backend-facing input and digest;
 - `backend_dispatch_capture_epoch INTEGER` and
   `backend_dispatch_omission_reason TEXT`, the admitted epoch or a closed
-  `disabled | transition | oversized | budget` reason, never both; and
+  `disabled | transition | out_of_band_attachment | oversized | budget` reason,
+  never both; and
 - `terminal_sequence INTEGER`, with a unique partial index.
 
 The shared `MessageHandler`/dispatch boundary creates the same durable Delivery
@@ -456,13 +496,16 @@ fail-closed for Agent Memory but do not block ordinary execution.
 
 The primary schema also keeps a singleton snapshot-byte reservation capped at
 128 MiB. Immediately before the first native start call, after every
-shared/backend input transformation, a primary state transaction checks the
-committed capture epoch and per-row 256 KiB bound, reserves bytes, and
-compares-and-sets the admitted text/digest/epoch. The adapter receives that exact
-stored value. A retry must reuse it and a conflicting second value fails closed;
-Memory never derives candidate input from the earlier raw `dispatch_text`.
-When no snapshot is admitted, the same transaction writes only the closed
-omission reason and the adapter proceeds with its in-memory final text.
+shared/backend input transformation, a primary state transaction classifies the
+complete native input shape, checks the committed capture epoch and per-row 256
+KiB bound, reserves bytes, and compares-and-sets the admitted
+text/digest/shape/epoch. The adapter receives that exact stored text without
+additional native input. A retry must reuse it and a conflicting second value
+fails closed; Memory never derives candidate input from the earlier raw
+`dispatch_text`. When no snapshot is admitted, the same transaction writes only
+the closed shape/omission reason and the adapter proceeds with its in-memory
+native input. Out-of-band attachment metadata and bytes are never copied into
+the Memory source schema.
 Startup and periodic primary-state maintenance recompute the reservation from
 the UTF-8 byte lengths of actual nonempty snapshots before admitting more, so a
 crash cannot leak budget.
@@ -579,14 +622,16 @@ opaque selection token for that exact catalog owner; requests never accept a raw
 `agent_id`. Hard deletion therefore remains unconstrained and does not delete
 or orphan queued/provider data.
 
-The same controller `apply_agent_memory_settings` IPC owns every binding add,
-reassignment, and removal under the shared lifecycle lock. It first uses one
+The shared controller `apply_memory_settings` transaction owns every binding
+add, reassignment, and removal under the cross-process lifecycle/config lock;
+its Agent-role operation is `apply_agent_memory_settings`. It first uses one
 serialized primary state transaction to read the current committed
 terminal high water `H` and insert a prepared singleton
-`memory_agent_binding_cutover` intent containing the prior/desired config digests
-and `H`. Terminal settlement cannot interleave between that read and intent
-commit. The scanner is then fenced, V2 config is atomically replaced, and the
-intent is promoted to committed; terminal settlement performs no Memory/config
+`memory_agent_binding_cutover` intent containing the prior/desired Agent-block
+digests, whole-config revisions, and `H`. Terminal settlement cannot interleave
+between that read and intent commit. The scanner is then fenced, V2 config is
+atomically replaced, and the intent is promoted to committed; terminal
+settlement performs no Memory/config
 I/O and never waits for projection work. The UI does not write these bindings
 before contacting the controller.
 
@@ -679,7 +724,12 @@ responses, or credentials. Agent recorder failure degrades only the agent role.
   remote processing credentials do not provide quota isolation: Agent load can
   consume account concurrency/rate/quota and throttle Personal requests. Agent
   work remains bounded and backs off on throttling, but Avibe cannot partition
-  an endpoint provider's account budget. Explicit Clear, factory reset, and
+  an endpoint provider's account budget. The shared effective-home volume also
+  does not provide capacity isolation: post-admission EverOS Agent-root/index
+  growth can cross the free-space reserve and make later Personal or Agent local
+  writes fail. Role-specific paths still prevent state mixing or logical
+  corruption, but status must report this capacity coupling and new Agent claims
+  pause below the reserve. Explicit Clear, factory reset, and
   embedding-identity rebuild intentionally use the shared maintenance fence and
   can pause both roles until their idempotent operation converges.
 - Retrieval failure returns a closed Agent Memory error and never falls back to
@@ -736,13 +786,13 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; one controller IPC owns prepared settings cutovers, a failed Agent-role start retains a fenced retryable intent without snapshot admission, post-deletion reset high waters do not drift on recovery, and Clear accepts either never-created role as absent. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every Personal/Agent/endpoint Memory config writer uses one controller transaction with revision conflict detection through cutover cleanup; Agent-only enablement keeps navigation/recovery visible and forbids shared-credential clearing; a failed Agent-role start retains a fenced retryable intent without snapshot admission; post-deletion reset high waters do not drift on recovery; and Clear accepts either never-created role as absent. |
 | `MEMORY-AGENT-002` | Every semantically eligible non-steered completed Workbench, Slack, Discord, Telegram, Feishu/Lark, WeChat, or Harness Turn not durably declined by a specified snapshot/queue/disk guard is represented once by its exact post-transformation backend-dispatch/result pair. |
-| `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks and accepted live steers are excluded. |
+| `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks, accepted live steers are excluded, and any final native request with an out-of-band attachment fails closed without retaining attachment metadata or bytes. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
 | `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; capture and trusted-Turn CLI retrieval use the immutable executing Agent without blocking hard deletion, deleted owners remain UI-retrievable, and crash-safe prepared binding cutovers keep backlog in the project effective at settlement. |
 | `MEMORY-AGENT-006` | Malformed config, missing/pre-migration identity/source/final-dispatch snapshots, and missing project binding fail closed. |
-| `MEMORY-AGENT-007` | Agent-sidecar/local pipeline outage leaves chat and Personal Memory healthy; dual-root embedding rebuild preserves and fences both roots through partial failure, while shared remote endpoint throttling is reported as an external quota coupling without cross-role state corruption. |
+| `MEMORY-AGENT-007` | Agent-sidecar/local pipeline outage leaves chat and Personal Memory healthy; dual-root embedding rebuild preserves and fences both roots through partial failure; shared remote endpoint throttling and effective-home capacity exhaustion are reported as explicit resource couplings without cross-role state mixing. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
 | `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths; a read-only per-Agent project catalog keeps removed-binding output reachable. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
