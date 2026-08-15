@@ -763,11 +763,26 @@ class ModelHubService:
         self.store.save(canonical)
         return canonical
 
-    def _save_runtime_config(self, config: ModelHubConfig) -> bool:
+    def _save_projection_neutral(
+        self,
+        previous: ModelHubConfig,
+        updated: ModelHubConfig,
+    ) -> ModelHubConfig:
+        """Persist a synchronous mutation proven not to affect engine bindings."""
+
+        if self._bindings(previous) != self._bindings(updated):
+            raise AssertionError("projection-neutral mutation changed engine bindings")
+        return self._save_config(updated)
+
+    def _save_runtime_config(
+        self,
+        previous: ModelHubConfig,
+        updated: ModelHubConfig,
+    ) -> bool:
         """Best-effort persistence for runtime state during config recovery."""
 
         try:
-            self._save_config(config)
+            self._save_projection_neutral(previous, updated)
         except ValueError as exc:
             if "recovery warnings" not in str(exc):
                 raise
@@ -811,10 +826,16 @@ class ModelHubService:
     async def _commit_synced(self, previous: ModelHubConfig, updated: ModelHubConfig) -> None:
         """Persist the authoritative config before updating its engine projection."""
 
-        self._engine_synced = False
         updated = ModelHubConfig.from_payload(updated.to_payload())
         previous_bindings = self._bindings(previous)
         updated_bindings = self._bindings(updated)
+        # SourceBinding order is the engine-config serialization order. Agent
+        # Route hop order is not part of this projection, so a pure chain reorder
+        # compares equal and does not restart a healthy engine.
+        if previous_bindings == updated_bindings:
+            self._save_config(updated)
+            return
+        self._engine_synced = False
         self._save_config(updated)
         try:
             await self._sync_sources(updated, force_empty=bool(previous_bindings))
@@ -1319,10 +1340,11 @@ class ModelHubService:
             except OSError:
                 pass
 
-    def _mark_same_handle_reauth_needs_action(self, source_id: str) -> None:
+    async def _mark_same_handle_reauth_needs_action(self, source_id: str) -> None:
         # The engine may replace OAuth material behind the same opaque ref.
         # Without an old snapshot, fail closed instead of restoring stale supply.
-        config = self._clone_config(self.store.load())
+        previous = self.store.load()
+        config = self._clone_config(previous)
         source = self._source(config, source_id)
         source.models = [
             model
@@ -1333,7 +1355,7 @@ class ModelHubService:
             status="needs_action",
             detail_key="models.source.needs_action.oauth_expired",
         )
-        self._save_config(config)
+        await self._commit_synced(previous, config)
 
     async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
         if flow.credential_ref:
@@ -1840,7 +1862,8 @@ class ModelHubService:
         status: Literal["needs_action", "error"],
     ) -> list[dict]:
         async with self._mutation_lock:
-            config = self.store.load()
+            previous = self.store.load()
+            config = self._clone_config(previous)
             source = self._source(config, source_id)
             source.models = [
                 model
@@ -1856,7 +1879,7 @@ class ModelHubService:
                     else "models.source.error.unclassified"
                 ),
             )
-            self._save_config(config)
+            await self._commit_synced(previous, config)
             return self._would_interrupt(config)
 
     async def _materialize_reauth(
@@ -1892,7 +1915,8 @@ class ModelHubService:
                 completed = self._completed_reauth_result(binding)
                 if completed is not None:
                     return completed
-                config = self.store.load()
+                previous = self.store.load()
+                config = self._clone_config(previous)
                 source = self._source(config, binding.source_id)
                 if not self._source_matches_binding(source, binding):
                     raise ModelHubError("flow_not_found", status=404)
@@ -1919,7 +1943,7 @@ class ModelHubService:
                         status="error",
                         detail_key="models.source.error.unclassified",
                     )
-                    self._save_config(config)
+                    await self._commit_synced(previous, config)
                     interrupted_pairs = self._would_interrupt(config)
                     raise ModelHubError(
                         "discovery_failed",
@@ -1927,7 +1951,7 @@ class ModelHubService:
                         data={"interrupted_pairs": interrupted_pairs},
                     )
                 self._apply_discovered_models(source, manual, discovered)
-                self._save_config(config)
+                await self._commit_synced(previous, config)
                 interrupted_pairs = self._would_interrupt(config)
                 self._complete_reauth_flow(
                     flow_id,
@@ -1997,7 +2021,7 @@ class ModelHubService:
                                 replacement_ref,
                             )
                         elif replacement_ref == old_credential_ref:
-                            self._mark_same_handle_reauth_needs_action(source.id)
+                            await self._mark_same_handle_reauth_needs_action(source.id)
                         else:
                             await _rollback_replacement_before_settling(
                                 self,
@@ -2022,7 +2046,7 @@ class ModelHubService:
                                 replacement_ref,
                             )
                         elif replacement_ref == old_credential_ref:
-                            self._mark_same_handle_reauth_needs_action(source.id)
+                            await self._mark_same_handle_reauth_needs_action(source.id)
                         else:
                             await self._rollback_replacement(
                                 source.id,
@@ -2088,13 +2112,14 @@ class ModelHubService:
         except OSError:
             pass
 
-    def _fail_closed_hub_reauth(
+    async def _fail_closed_hub_reauth(
         self,
         binding: OAuthFlowBinding,
         *,
         config: ModelHubConfig | None = None,
     ) -> ModelHubConfig:
-        config = config or self.store.load()
+        previous = self._clone_config(config or self.store.load())
+        config = self._clone_config(previous)
         if binding.source_id is None:
             raise ModelHubError("flow_not_found", status=404)
         source = self._source(config, binding.source_id)
@@ -2109,7 +2134,7 @@ class ModelHubService:
             status="needs_action",
             detail_key="models.source.needs_action.oauth_expired",
         )
-        self._save_config(config)
+        await self._commit_synced(previous, config)
         return config
 
     async def _materialize_failed_hub_reauth(
@@ -2129,7 +2154,7 @@ class ModelHubService:
             RetainedMaterialDisposition.FLOW_SOURCE_REF,
             RetainedMaterialDisposition.UNKNOWN,
         }:
-            return self._fail_closed_hub_reauth(
+            return await self._fail_closed_hub_reauth(
                 binding,
                 config=config,
             )
@@ -2671,7 +2696,7 @@ class ModelHubService:
                     except OSError:
                         pass
             else:
-                self._save_config(config)
+                await self._commit_synced(previous, config)
             return {
                 "source": self._source_payload(source),
                 "removed_hops": removed_hops,
@@ -2990,7 +3015,7 @@ class ModelHubService:
                     status="error",
                     detail_key="models.source.error.unclassified",
                 )
-                self._save_config(config)
+                await self._commit_synced(previous, config)
                 self._record_event(
                     agent="system",
                     kind="needs_action",
@@ -3078,7 +3103,7 @@ class ModelHubService:
                     raise self._invalid_source_order()
                 seen.add(source_id)
             agent.sources.order = list(order)
-            self._save_config(config)
+            await self._commit_synced(previous, config)
             return self._agent_payload(config, agent)
 
     def get_agent_sources(self, backend: str) -> dict:
@@ -3167,7 +3192,7 @@ class ModelHubService:
                         "would_interrupt": interrupted,
                     },
                 )
-            self._save_config(config)
+            await self._commit_synced(previous, config)
             return {
                 "chain": self._agent_chain(config, backend, model_id),
                 "removed_hops": removed_hops,
@@ -3329,7 +3354,6 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
-            bindings_changed = False
             if agent.mode == "direct" and mode == "hub":
                 native_items = await asyncio.to_thread(
                     scan_native_configs,
@@ -3356,18 +3380,15 @@ class ModelHubService:
                     )
                     config.sources.append(source)
                     self._apply_source_placement(config, source)
-                    bindings_changed = True
             agent.mode = mode
-            if bindings_changed:
-                await self._commit_synced(previous, config)
-            else:
-                self._save_config(config)
+            await self._commit_synced(previous, config)
             committed = self.store.load()
             return self._agent_payload(committed, self._agent(committed, backend))
 
     async def reorder_agent_chains(self, backend: str) -> dict:
         async with self._mutation_lock:
-            config = self._clone_config(self.store.load())
+            previous = self.store.load()
+            config = self._clone_config(previous)
             agent = self._agent(config, backend)
             source_positions = {
                 source_id: position
@@ -3387,12 +3408,13 @@ class ModelHubService:
                     )
                 )
                 route.hops = tuple(hop for _, hop in indexed_hops)
-            self._save_config(config)
+            await self._commit_synced(previous, config)
             return self._agent_payload(config, agent)
 
     async def set_opencode_menu(self, menu: object) -> dict:
         async with self._mutation_lock:
-            config = self.store.load()
+            previous = self.store.load()
+            config = self._clone_config(previous)
             agent = config.agents["opencode"]
             try:
                 parsed_menu = ModelHubMenuConfig.from_payload(cast(dict, menu))
@@ -3409,7 +3431,7 @@ class ModelHubService:
                 raise ModelHubError("mapping_target_unavailable") from exc
             agent.menu = parsed.menu
             agent.routes = parsed.routes
-            self._save_config(config)
+            await self._commit_synced(previous, config)
             return self._agent_payload(config, agent)
 
     @staticmethod
@@ -3755,11 +3777,12 @@ class ModelHubService:
         )
         if unchanged:
             return False
+        previous = self._clone_config(config)
         source.state = ModelHubSourceStateConfig(
             status=status,
             detail_key=detail_key,
         )
-        persisted = self._save_runtime_config(config)
+        persisted = self._save_runtime_config(previous, config)
         if persisted and emit_event:
             self._record_event(
                 agent=cast(EventAgent, backend),
@@ -4069,10 +4092,10 @@ class ModelHubService:
                         status="needs_action",
                         detail_key="models.source.needs_action.oauth_expired",
                     )
-                self._save_config(config)
+                self._save_projection_neutral(previous, config)
 
                 def restore_after_spawn_failure() -> None:
-                    self._save_config(previous)
+                    self._save_projection_neutral(config, previous)
 
                 return restore_after_spawn_failure
 
@@ -4482,6 +4505,7 @@ class ModelHubService:
             return
         async with self._mutation_lock:
             config = self.store.load()
+            previous = self._clone_config(config)
             config_changed = False
             recovered_sources: list[ModelHubSourceConfig] = []
             for source_id in resolution.recoverable_source_ids:
@@ -4498,7 +4522,7 @@ class ModelHubService:
                 config_changed = True
                 recovered_sources.append(source)
             if config_changed:
-                if self._save_runtime_config(config):
+                if self._save_runtime_config(previous, config):
                     for source in recovered_sources:
                         self._record_event(
                             agent=cast(EventAgent, resolution.backend),
@@ -4528,13 +4552,14 @@ class ModelHubService:
             and _parse_datetime(source.state.retry_at) >= retry_at
         ):
             return False
+        previous = self._clone_config(config)
         already_cooling = source.state.status == "cooldown"
         source.state = ModelHubSourceStateConfig(
             status="cooldown",
             retry_at=retry_at.isoformat(),
             detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
         )
-        persisted = self._save_runtime_config(config)
+        persisted = self._save_runtime_config(previous, config)
         if persisted and not already_cooling and emit_event:
             self._record_event(
                 agent=agent,

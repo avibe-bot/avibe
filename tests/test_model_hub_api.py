@@ -1899,6 +1899,117 @@ def test_hub_to_direct_fallback_does_not_require_engine_sync(tmp_path):
     assert adapter.synced == []
 
 
+def test_public_mutation_surface_has_one_engine_projection_owner(tmp_path):
+    service_node = next(
+        node
+        for node in ast.parse(
+            Path("core/handlers/model_hub/service.py").read_text(encoding="utf-8")
+        ).body
+        if isinstance(node, ast.ClassDef) and node.name == "ModelHubService"
+    )
+    methods = {
+        node.name: node
+        for node in service_node.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def called_service_methods(method: ast.AST) -> set[str]:
+        calls = set()
+        for node in ast.walk(method):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
+                calls.add(node.func.attr)
+            elif (
+                node.func.attr == "save"
+                and isinstance(node.func.value, ast.Attribute)
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "self"
+                and node.func.value.attr == "store"
+            ):
+                calls.add("_save_config")
+        return calls
+
+    call_graph = {
+        name: called_service_methods(method) for name, method in methods.items()
+    }
+
+    def reachable(start: str) -> set[str]:
+        visited: set[str] = set()
+        pending = list(call_graph.get(start, ()))
+        while pending:
+            called = pending.pop()
+            if called in visited:
+                continue
+            visited.add(called)
+            pending.extend(call_graph.get(called, ()))
+        return visited
+
+    owners = {"_commit_synced", "_save_projection_neutral"}
+    public_mutations = {
+        name
+        for name in methods
+        if not name.startswith("_") and "_save_config" in reachable(name)
+    }
+    assert public_mutations
+    assert all(reachable(name) & owners for name in public_mutations), sorted(
+        name for name in public_mutations if not reachable(name) & owners
+    )
+
+    for name, method in methods.items():
+        if name in owners:
+            continue
+        parents = {
+            child: parent
+            for parent in ast.walk(method)
+            for child in ast.iter_child_nodes(parent)
+        }
+        for node in ast.walk(method):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Attribute)
+                or not isinstance(node.func.value, ast.Name)
+                or node.func.value.id != "self"
+                or node.func.attr != "_save_config"
+            ):
+                continue
+            ancestor = parents.get(node)
+            while ancestor is not None and not isinstance(ancestor, ast.ExceptHandler):
+                ancestor = parents.get(ancestor)
+            assert isinstance(ancestor, ast.ExceptHandler), (
+                f"{name} bypasses the engine-projection owner outside rollback"
+            )
+
+    service, store, adapter = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    _set_claude_route_fixture(
+        store,
+        ("src_first0001", "src_second001"),
+        model_id,
+    )
+    service._engine_synced = True
+    previous = store.config
+    reordered = service._clone_config(previous)
+    route = reordered.agents["claude"].routes[model_id]
+    route.hops = tuple(reversed(route.hops))
+
+    asyncio.run(service._commit_synced(previous, reordered))
+
+    assert adapter.synced == []
+    assert service._engine_synced is True
+
+    previous = store.config
+    changed = service._clone_config(previous)
+    changed.sources[0].models.append(
+        ModelHubModelConfig(id="claude-sonnet-4-6", provenance="manual")
+    )
+
+    asyncio.run(service._commit_synced(previous, changed))
+
+    assert len(adapter.synced) == 1
+    assert service._engine_synced is True
+
+
 def test_source_adoption_projection_is_sorted_by_backend_and_menu_model(tmp_path):
     service, store, _adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
@@ -1958,7 +2069,7 @@ def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_
 
 
 def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_path):
-    service, store, _adapter = _service(tmp_path)
+    service, store, adapter = _service(tmp_path)
     model_id = "claude-opus-4-6"
     original = _set_claude_route_fixture(
         store,
@@ -1969,6 +2080,7 @@ def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_pa
         "src_second001",
         "src_first0001",
     ]
+    service._engine_synced = True
 
     agent = asyncio.run(service.reorder_agent_chains("claude"))
     reordered = store.config.agents["claude"].routes[model_id].hops
@@ -1980,6 +2092,8 @@ def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_pa
     assert sorted((hop.source_id, hop.model_id) for hop in reordered) == sorted(
         (hop.source_id, hop.model_id) for hop in original
     )
+    assert adapter.synced == []
+    assert service._engine_synced is True
     assert agent["routes"][model_id]["hops"] == [
         {"source_id": "src_second001", "model_id": model_id},
         {"source_id": "src_first0001", "model_id": model_id},
