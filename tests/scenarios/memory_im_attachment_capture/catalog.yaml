@@ -48,3 +48,31 @@ scenarios:
     layer: scenario
     delivery_slice: 4
     test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_invalid_sibling_preserves_valid_attachment_and_leaves_no_memory_leak
+  - id: MEMORY-IM-ATTACH-005
+    name: Native Discord DM file shares reach Memory attachment admission
+    status: covered
+    kind: platform_contract
+    layer: scenario
+    delivery_slice: 5
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_enabled_platform_attachment_fact_reaches_memory_admission
+  - id: MEMORY-IM-ATTACH-006
+    name: Native Telegram DM document, photo, voice, and audio shares reach Memory attachment admission
+    status: covered
+    kind: platform_contract
+    layer: scenario
+    delivery_slice: 5
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_enabled_platform_attachment_fact_reaches_memory_admission
+  - id: MEMORY-IM-ATTACH-007
+    name: Native Lark DM file and image shares reach Memory attachment admission
+    status: covered
+    kind: platform_contract
+    layer: scenario
+    delivery_slice: 5
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_enabled_platform_attachment_fact_reaches_memory_admission
+  - id: MEMORY-IM-ATTACH-008
+    name: Native WeChat DM image, voice, file, and video shares reach Memory attachment admission
+    status: covered
+    kind: platform_contract
+    layer: scenario
+    delivery_slice: 5
+    test: tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py::test_enabled_platform_attachment_fact_reaches_memory_admission

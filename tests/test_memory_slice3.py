@@ -33,11 +33,15 @@ from core.memory.runtime import MemoryRuntime
 from core.memory.store import MemoryStore
 from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
+    is_ordinary_discord_attachment,
     is_ordinary_discord_text,
+    is_ordinary_feishu_attachment,
     is_ordinary_feishu_text,
     is_ordinary_slack_attachment,
     is_ordinary_slack_text,
+    is_ordinary_telegram_attachment,
     is_ordinary_telegram_text,
+    is_ordinary_wechat_attachment,
     is_ordinary_wechat_text,
 )
 
@@ -1506,6 +1510,164 @@ def test_im_adapters_normalize_native_ordinary_text_facts() -> None:
     assert is_ordinary_wechat_text({"item_list": [{"type": "TEXT"}]}, None) is True
     assert is_ordinary_wechat_text({"item_list": [{"type": 1}, {"type": 2}]}, None) is False
     assert is_ordinary_wechat_text({"item_list": [{"type": 1, "ref_msg": {"title": "quoted"}}]}, None) is False
+
+
+def test_im_adapters_normalize_native_ordinary_attachment_facts() -> None:
+    """MEMORY-IM-ATTACH-005..008: adapters publish only native ordinary shares."""
+
+    discord_file = FileAttachment(
+        name="diagram.png",
+        mimetype="image/png",
+        url="https://cdn.discord.test/diagram.png",
+    )
+    discord_message = SimpleNamespace(
+        author=SimpleNamespace(bot=False),
+        edited_at=None,
+        attachments=[object()],
+        embeds=[],
+        components=[],
+        stickers=[],
+        sticker_items=[],
+        webhook_id=None,
+        flags=SimpleNamespace(forwarded=False),
+        message_snapshots=(),
+        is_system=lambda: False,
+    )
+    assert is_ordinary_discord_attachment(discord_message, [discord_file]) is True
+    for field, value in (
+        ("embeds", [object()]),
+        ("components", [object()]),
+        ("sticker_items", [object()]),
+        ("webhook_id", "webhook-1"),
+        ("message_snapshots", [object()]),
+    ):
+        setattr(discord_message, field, value)
+        assert is_ordinary_discord_attachment(discord_message, [discord_file]) is False
+        setattr(discord_message, field, None)
+    discord_message.author.bot = True
+    assert is_ordinary_discord_attachment(discord_message, [discord_file]) is False
+
+    telegram_file = FileAttachment(
+        name="telegram-file.bin",
+        mimetype="application/octet-stream",
+        url="native-file",
+    )
+    for native_field, native_value in (
+        ("document", {"file_id": "document"}),
+        ("photo", [{"file_id": "small"}, {"file_id": "large"}]),
+        ("voice", {"file_id": "voice"}),
+        ("audio", {"file_id": "audio"}),
+    ):
+        telegram_message = {
+            "from": {"id": 42, "is_bot": False},
+            "media_group_id": "album-1",
+            native_field: native_value,
+        }
+        assert is_ordinary_telegram_attachment(telegram_message, [telegram_file]) is True
+    for rejected_field in ("video", "animation", "sticker"):
+        telegram_message = {
+            "from": {"id": 42, "is_bot": False},
+            "document": {"file_id": "document"},
+            rejected_field: {"file_id": "decorated"},
+        }
+        assert is_ordinary_telegram_attachment(telegram_message, [telegram_file]) is False
+    telegram_message = {
+        "from": {"id": 42, "is_bot": False},
+        "document": {"file_id": "document"},
+        "forward_origin": {"type": "user"},
+    }
+    assert is_ordinary_telegram_attachment(telegram_message, [telegram_file]) is False
+
+    feishu_file = FileAttachment(
+        name="report.pdf",
+        mimetype="application/octet-stream",
+        url="https://open.feishu.test/report.pdf",
+    )
+    feishu_event = {
+        "sender": {"sender_type": "user"},
+        "message": {"message_type": "file"},
+    }
+    assert (
+        is_ordinary_feishu_attachment(
+            feishu_event,
+            {"file_key": "file-key", "file_name": "report.pdf"},
+            [feishu_file],
+            shared_text=None,
+        )
+        is True
+    )
+    assert (
+        is_ordinary_feishu_attachment(
+            feishu_event,
+            {"file_key": ""},
+            [feishu_file],
+            shared_text=None,
+        )
+        is False
+    )
+    feishu_event["message"]["message_type"] = "image"
+    assert (
+        is_ordinary_feishu_attachment(
+            feishu_event,
+            {"image_key": "image-key"},
+            [feishu_file],
+            shared_text=None,
+        )
+        is True
+    )
+    feishu_event["message"]["message_type"] = "media"
+    assert (
+        is_ordinary_feishu_attachment(
+            feishu_event,
+            {"file_key": "media-key"},
+            [feishu_file],
+            shared_text=None,
+        )
+        is False
+    )
+
+    wechat_files = [
+        FileAttachment(name="voice.silk", mimetype="audio/silk", url="voice-query"),
+        FileAttachment(name="video.mp4", mimetype="video/mp4", url="video-query"),
+    ]
+    wechat_message = {
+        "from_user_id": "user-1",
+        "item_list": [
+            {"type": 1, "text_item": {"text": "remember these"}},
+            {
+                "type": 3,
+                "voice_item": {"media": {"encrypt_query_param": "voice-query"}},
+            },
+            {
+                "type": 5,
+                "video_item": {"media": {"encrypt_query_param": "video-query"}},
+            },
+        ],
+    }
+    assert is_ordinary_wechat_attachment(wechat_message, wechat_files) is True
+    wechat_message["item_list"][0]["ref_msg"] = {"title": "forwarded"}
+    assert is_ordinary_wechat_attachment(wechat_message, wechat_files) is False
+    for item_type, media_field in (
+        (2, "image_item"),
+        (3, "voice_item"),
+        (4, "file_item"),
+        (5, "video_item"),
+    ):
+        direct_message = {
+            "item_list": [
+                {
+                    "type": item_type,
+                    media_field: {
+                        "media": {"encrypt_query_param": "native-media"}
+                    },
+                }
+            ]
+        }
+        assert is_ordinary_wechat_attachment(direct_message, wechat_files) is True
+        direct_message["item_list"][0][media_field]["media"][
+            "encrypt_query_param"
+        ] = ""
+        assert is_ordinary_wechat_attachment(direct_message, wechat_files) is False
 
 
 def _slack_dm_event(**overrides) -> dict:

@@ -5,11 +5,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
+from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from core.memory.types import RecallItems, RecallPolicy, memory_item_payload
+from modules.im.base import FileAttachment
+from modules.im.message_facts import (
+    is_ordinary_discord_attachment,
+    is_ordinary_feishu_attachment,
+    is_ordinary_telegram_attachment,
+    is_ordinary_wechat_attachment,
+)
 from tests.scenario_harness.memory_im_attachments import (
     PNG_BYTES,
     PRINCIPAL,
@@ -204,3 +213,111 @@ def test_invalid_sibling_preserves_valid_attachment_and_leaves_no_memory_leak(
     assert len(harness.provider.call_log) == 1
     assert harness.memory_bundle_entries == ()
     assert not tuple(harness.home.rglob("*.part"))
+
+
+class _ScenarioPrincipals:
+    def principal_for_user_key(self, user_key: str) -> str:
+        assert user_key.split(":", 1)[0] in {"discord", "telegram", "lark", "wechat"}
+        return PRINCIPAL
+
+
+class _ScenarioBindings:
+    def is_enabled_user(self, platform: str, user_id: str) -> bool:
+        return platform in {"discord", "telegram", "lark", "wechat"} and user_id == "U1"
+
+
+def _platform_attachment_fact(platform: str, file: FileAttachment) -> bool:
+    if platform == "discord":
+        message = SimpleNamespace(
+            author=SimpleNamespace(bot=False),
+            edited_at=None,
+            attachments=[object()],
+            embeds=[],
+            components=[],
+            stickers=[],
+            sticker_items=[],
+            webhook_id=None,
+            flags=SimpleNamespace(forwarded=False),
+            message_snapshots=(),
+            is_system=lambda: False,
+        )
+        return is_ordinary_discord_attachment(message, [file])
+    if platform == "telegram":
+        return is_ordinary_telegram_attachment(
+            {
+                "from": {"id": "U1", "is_bot": False},
+                "document": {"file_id": "native-file", "file_name": file.name},
+            },
+            [file],
+        )
+    if platform == "lark":
+        return is_ordinary_feishu_attachment(
+            {
+                "sender": {"sender_type": "user"},
+                "message": {"message_type": "file"},
+            },
+            {"file_key": "native-file", "file_name": file.name},
+            [file],
+            shared_text=None,
+        )
+    return is_ordinary_wechat_attachment(
+        {
+            "from_user_id": "U1",
+            "item_list": [
+                {
+                    "type": 4,
+                    "file_item": {
+                        "file_name": file.name,
+                        "media": {"encrypt_query_param": "native-file"},
+                    },
+                }
+            ],
+        },
+        [file],
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "platform"),
+    [
+        pytest.param("MEMORY-IM-ATTACH-005", "discord", id="MEMORY-IM-ATTACH-005"),
+        pytest.param("MEMORY-IM-ATTACH-006", "telegram", id="MEMORY-IM-ATTACH-006"),
+        pytest.param("MEMORY-IM-ATTACH-007", "lark", id="MEMORY-IM-ATTACH-007"),
+        pytest.param("MEMORY-IM-ATTACH-008", "wechat", id="MEMORY-IM-ATTACH-008"),
+    ],
+)
+def test_enabled_platform_attachment_fact_reaches_memory_admission(
+    scenario_id: str,
+    platform: str,
+) -> None:
+    """Scenarios MEMORY-IM-ATTACH-005..008 cover each newly enabled adapter."""
+
+    suffix_by_platform = {
+        "discord": "005",
+        "telegram": "006",
+        "lark": "007",
+        "wechat": "008",
+    }
+    assert scenario_id.endswith(suffix_by_platform[platform])
+    file = FileAttachment(
+        name="evidence.pdf",
+        mimetype="application/pdf",
+        url="native-file",
+    )
+    admission = CaptureAdmission(
+        principals=_ScenarioPrincipals(),
+        bindings=_ScenarioBindings(),
+    )
+    facts = InboundTurnFacts(
+        platform=platform,
+        user_id="U1",
+        message_id="native-message",
+        session_id="stable-session",
+        files=[file],
+        is_dm=True,
+        is_ordinary_attachment=_platform_attachment_fact(platform, file),
+        memory_enabled=True,
+    )
+
+    assert facts.is_ordinary_attachment is True
+    assert admission.admits_attachment_turn(facts) is True

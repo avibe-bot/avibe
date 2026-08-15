@@ -14,6 +14,27 @@ Avibe Memory distills eligible Workbench and private-IM messages into a
 per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
 Processing Record, current profile, search results, and settings.
 
+## IM attachment capture
+
+Memory can extract supported attachments from bound one-to-one conversations on
+Slack, Discord, Telegram, Lark, and WeChat. Capture becomes available only when
+Memory is enabled and the Multimodal LLM endpoint under **Settings > Memory** is
+fully configured. It does not change the files delivered to the Agent.
+
+Only direct, ordinary files shared by a human are eligible. Bot, system,
+forwarded, edited, quoted, rich, and unrecognized native message shapes are
+excluded. Avibe then validates each eligible file against one shared format and
+content policy. Supported formats are plain text, Markdown, CSV/TSV, VTT, PDF,
+bitmap images, audio, HTML, and EML. Unsupported or malformed files are skipped
+independently, so eligible text and valid siblings can still be captured.
+
+Each turn is limited to 8 captured attachments, 25 MiB per attachment, and
+100 MiB in total. Admitted files are copied into private Avibe storage until the
+durable Memory delivery settles. Their extracted content can be sent to the
+configured multimodal provider, so configure that endpoint according to your
+data-handling requirements. Clearing Memory Data removes retained local
+attachment bundles but cannot remove copies already accepted by a provider.
+
 ## Processed episode listing
 
 `vibe memory list` reads only valid, active processed episodes for the current

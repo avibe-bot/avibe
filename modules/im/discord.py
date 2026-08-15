@@ -18,7 +18,7 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
-from .message_facts import is_ordinary_discord_text
+from .message_facts import is_ordinary_discord_attachment, is_ordinary_discord_text
 from .download_target import open_download_target
 from config.v2_config import DiscordConfig
 from .formatters import DiscordFormatter
@@ -1114,6 +1114,7 @@ class DiscordBot(BaseIMClient):
             platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
             files=files,
             is_ordinary_text=is_ordinary_discord_text(message, files),
+            is_ordinary_attachment=is_ordinary_discord_attachment(message, files),
         )
 
         if self.on_message_callback:

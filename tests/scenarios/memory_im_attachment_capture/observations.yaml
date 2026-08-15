@@ -22,3 +22,14 @@ observations:
     observation: The existing Avibe sidecar already admits confined pinned file URIs for the exact memory add route, while current IM admission rejects file turns before Memory acquisition.
     evidence:
       avibe_commit: c21bf9268417c9d857ea275fe9f7e95023809311
+  - id: MEMORY-IM-ATTACH-OBS-004
+    scenarios:
+      - MEMORY-IM-ATTACH-005
+      - MEMORY-IM-ATTACH-007
+    observation: >-
+      The Lark adapter passes the literal platform name lark through its inbound
+      context, while the repository has no fixture proving whether an ordinary
+      Discord upload carries an automatic embed; Discord therefore remains
+      fail-closed for embed-bearing messages pending the Incus matrix.
+    evidence:
+      avibe_commit: 063aebd29713615e63ec828da94c4c8b339b6647

@@ -320,7 +320,7 @@ def test_missing_multimodal_skips_attachment_only_turn() -> None:
         {"is_dm": False},
         {"is_ordinary_attachment": False},
         {"is_ordinary_attachment": None},
-        {"platform": "discord", "is_ordinary_attachment": True},
+        {"platform": "email", "is_ordinary_attachment": True},
     ],
 )
 def test_denied_attachment_turn_never_reads_the_lease(

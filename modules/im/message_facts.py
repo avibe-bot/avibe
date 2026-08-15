@@ -150,6 +150,36 @@ def is_ordinary_discord_text(message: Any, files: Optional[list[FileAttachment]]
     )
 
 
+def is_ordinary_discord_attachment(
+    message: Any,
+    files: Optional[list[FileAttachment]],
+) -> bool:
+    """Classify a direct human Discord upload from native message facts."""
+
+    try:
+        is_system = message.is_system() if callable(getattr(message, "is_system", None)) else False
+    except Exception:
+        return False
+    flags = getattr(message, "flags", None)
+    # The repository has no fixture proving whether ordinary uploads receive an
+    # automatic embed. Keep that unverified shape closed until the Incus matrix.
+    has_unverified_attachment_embeds = bool(getattr(message, "embeds", None))
+    return bool(
+        files
+        and getattr(message, "attachments", None)
+        and getattr(getattr(message, "author", None), "bot", None) is False
+        and getattr(message, "edited_at", None) is None
+        and not has_unverified_attachment_embeds
+        and not getattr(message, "components", None)
+        and not getattr(message, "stickers", None)
+        and not getattr(message, "sticker_items", None)
+        and getattr(message, "webhook_id", None) is None
+        and not bool(getattr(flags, "forwarded", False))
+        and not getattr(message, "message_snapshots", None)
+        and not is_system
+    )
+
+
 def is_ordinary_telegram_text(message: dict[str, Any], files: list[FileAttachment]) -> bool:
     sender = message.get("from") or {}
     return not any(
@@ -162,6 +192,46 @@ def is_ordinary_telegram_text(message: dict[str, Any], files: list[FileAttachmen
             message.get("is_system"),
             message.get("system"),
             message.get("type") in {"system", "system_message"},
+        )
+    )
+
+
+def is_ordinary_telegram_attachment(
+    message: dict[str, Any],
+    files: list[FileAttachment],
+) -> bool:
+    """Classify one direct Telegram file-bearing message without album grouping."""
+
+    sender = message.get("from") or {}
+    native_shapes = tuple(
+        value
+        for value in (
+            message.get("document"),
+            message.get("photo"),
+            message.get("voice"),
+            message.get("audio"),
+        )
+        if value
+    )
+    return bool(
+        files
+        and len(native_shapes) == 1
+        and sender.get("is_bot") is False
+        and not any(
+            (
+                message.get("edit_date"),
+                message.get("forward_origin"),
+                message.get("forward_from"),
+                message.get("sender_chat"),
+                message.get("via_bot"),
+                message.get("video"),
+                message.get("animation"),
+                message.get("sticker"),
+                message.get("video_note"),
+                message.get("is_system"),
+                message.get("system"),
+                message.get("type") in {"system", "system_message"},
+            )
         )
     )
 
@@ -180,6 +250,32 @@ def is_ordinary_feishu_text(
         and not files
         and not shared_text
         and not any(message.get(key) for key in ("file", "image", "media", "edited", "forwarded"))
+    )
+
+
+def is_ordinary_feishu_attachment(
+    event: dict[str, Any],
+    content: dict[str, Any],
+    files: Optional[list[FileAttachment]],
+    *,
+    shared_text: Optional[str],
+) -> bool:
+    """Classify a direct human Feishu/Lark file or image message."""
+
+    sender = event.get("sender") or {}
+    message = event.get("message") or {}
+    message_type = message.get("message_type")
+    native_key = content.get("file_key") if message_type == "file" else None
+    if message_type == "image":
+        native_key = content.get("image_key")
+    return bool(
+        sender.get("sender_type") == "user"
+        and message_type in {"file", "image"}
+        and isinstance(native_key, str)
+        and native_key.strip()
+        and files
+        and not shared_text
+        and not any(message.get(key) for key in ("edited", "forwarded"))
     )
 
 
@@ -214,4 +310,40 @@ def is_ordinary_wechat_text(msg: dict[str, Any], files: Optional[list[FileAttach
         )
         and not files
         and not any(msg.get(key) for key in ("is_system", "system", "edited", "forwarded"))
+    )
+
+
+def is_ordinary_wechat_attachment(
+    msg: dict[str, Any],
+    files: Optional[list[FileAttachment]],
+) -> bool:
+    """Classify direct iLink media from the original item-list shape."""
+
+    items = msg.get("item_list")
+    if not isinstance(items, list) or not items or not files:
+        return False
+    media_fields = {
+        2: "image_item",
+        3: "voice_item",
+        4: "file_item",
+        5: "video_item",
+    }
+    has_direct_media = False
+    for item in items:
+        if not isinstance(item, dict) or item.get("ref_msg"):
+            return False
+        item_type = item.get("type")
+        if item_type in (1, "TEXT", "text"):
+            continue
+        media_field = media_fields.get(item_type)
+        if media_field is None:
+            return False
+        item_data = item.get(media_field)
+        media = item_data.get("media") if isinstance(item_data, dict) else None
+        query = media.get("encrypt_query_param") if isinstance(media, dict) else None
+        if not isinstance(query, str) or not query.strip():
+            return False
+        has_direct_media = True
+    return has_direct_media and not any(
+        msg.get(key) for key in ("is_system", "system", "edited", "forwarded")
     )

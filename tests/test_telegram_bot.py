@@ -210,6 +210,27 @@ def test_extract_files_includes_voice_and_audio_messages() -> None:
     ]
 
 
+def test_photo_context_publishes_ordinary_attachment_fact_from_largest_photo() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = bot._build_message_context(
+        {
+            "message_id": 79,
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": False},
+            "media_group_id": "album-1",
+            "photo": [
+                {"file_id": "small", "file_size": 10},
+                {"file_id": "large", "file_size": 42},
+            ],
+        }
+    )
+
+    assert context is not None
+    assert context.is_ordinary_attachment is True
+    assert context.files is not None
+    assert [file.url for file in context.files] == ["large"]
+
+
 def test_plain_group_sessions_are_channel_scoped() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
 
