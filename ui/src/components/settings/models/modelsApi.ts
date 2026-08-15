@@ -6,7 +6,7 @@
 // Methods unwrap the frozen envelope ({ok:true, …} | {ok:false, error}) and
 // throw an Error carrying the machine code on failure, so callers work with
 // plain domain objects.
-import { apiFetch } from '@/lib/apiFetch';
+import { apiFetch, isApiFetchDeadlineAbort } from '@/lib/apiFetch';
 import { MODELS_API_MODE } from './featureFlags';
 import {
   buildMockAgents,
@@ -272,23 +272,16 @@ export const apiFailure = (
       }
     : null;
 
-const MODEL_HUB_REQUEST_DEADLINE_MS = 30_000;
-const MODEL_HUB_EXTERNAL_REQUEST_DEADLINE_MS = 120_000;
-
-const requestDeadlineMs = (path: string): number =>
-  /\/(?:refresh|probe)$/.test(path) || path.startsWith('/api/models/oauth/status/')
-    ? MODEL_HUB_EXTERNAL_REQUEST_DEADLINE_MS
-    : MODEL_HUB_REQUEST_DEADLINE_MS;
-
-const isDeadlineAbort = (error: unknown): boolean =>
-  Boolean(error && typeof error === 'object' && 'name' in error && error.name === 'TimeoutError');
+// Keep this aligned with vibe/model_hub_client.py:_RPC_TIMEOUT_SECONDS. Every
+// Model Hub RPC shares that server-side ceiling; the browser adds no route guess.
+const MODEL_HUB_REQUEST_DEADLINE_MS = 300_000;
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await apiFetch(path, init, { deadlineMs: requestDeadlineMs(path) });
+    res = await apiFetch(path, init, { deadlineMs: MODEL_HUB_REQUEST_DEADLINE_MS });
   } catch (error) {
-    if (!isDeadlineAbort(error)) throw error;
+    if (!isApiFetchDeadlineAbort(error)) throw error;
     // The deadline says the answer did not arrive, not whether the route wrote.
     throw new ApiCallError('bad_response', `Request deadline exceeded for ${path}`, false);
   }

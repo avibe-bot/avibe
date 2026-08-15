@@ -7,7 +7,11 @@ const remoteAuth = vi.hoisted(() => ({
 
 vi.mock('./remoteAuth', () => remoteAuth);
 
-import { apiFetch, recoverRemoteAuthFromSessionProbe } from './apiFetch';
+import {
+  apiFetch,
+  isApiFetchDeadlineAbort,
+  recoverRemoteAuthFromSessionProbe,
+} from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
   beforeEach(() => {
@@ -244,12 +248,14 @@ describe('apiFetch remote auth recovery', () => {
     );
 
     const request = apiFetch('/api/models/sources', {}, { deadlineMs: 1_000 });
-    const rejected = expect(request).rejects.toMatchObject({ name: 'TimeoutError' });
+    const failure = request.catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(999);
     expect(issuedSignal?.aborted).toBe(false);
 
     await vi.advanceTimersByTimeAsync(1);
-    await rejected;
+    const error = await failure;
+    expect(error).toMatchObject({ name: 'TimeoutError' });
+    expect(isApiFetchDeadlineAbort(error)).toBe(true);
   });
 
   it('lets a caller abort before the deadline', async () => {
@@ -264,7 +270,7 @@ describe('apiFetch remote auth recovery', () => {
         })),
     );
     const controller = new AbortController();
-    const callerReason = new DOMException('caller stopped waiting', 'AbortError');
+    const callerReason = new DOMException('caller stopped waiting', 'TimeoutError');
 
     const request = apiFetch('/api/models/sources', { signal: controller.signal }, { deadlineMs: 1_000 });
     const rejected = expect(request).rejects.toBe(callerReason);
@@ -273,6 +279,7 @@ describe('apiFetch remote auth recovery', () => {
     await rejected;
     expect(issuedSignal).not.toBe(controller.signal);
     expect(issuedSignal?.reason).toBe(callerReason);
+    expect(isApiFetchDeadlineAbort(callerReason)).toBe(false);
   });
 
   it('fires the deadline while a shared CSRF fetch is in flight', async () => {
@@ -294,24 +301,47 @@ describe('apiFetch remote auth recovery', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('keeps a caller signal connected after fetch returns', async () => {
+  it.each([
+    ['success', false, false],
+    ['throw', false, true],
+    ['success with a caller signal', true, false],
+    ['throw with a caller signal', true, true],
+  ])('disposes deadline resources after request %s', async (_label, withCaller, shouldThrow) => {
     vi.useFakeTimers();
     let issuedSignal: AbortSignal | undefined;
+    const fetchError = new Error('request failed');
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
         issuedSignal = init?.signal ?? undefined;
+        if (shouldThrow) throw fetchError;
         return Response.json({ ok: true });
       }),
     );
-    const controller = new AbortController();
-    const callerReason = new DOMException('dialog closed', 'AbortError');
+    const controller = withCaller ? new AbortController() : null;
+    const removeEventListener = controller
+      ? vi.spyOn(controller.signal, 'removeEventListener')
+      : null;
 
-    await apiFetch('/api/models/sources', { signal: controller.signal }, { deadlineMs: 1_000 });
-    controller.abort(callerReason);
+    const request = apiFetch(
+      '/api/models/sources',
+      { signal: controller?.signal },
+      { deadlineMs: 1_000 },
+    );
+    if (shouldThrow) {
+      await expect(request).rejects.toBe(fetchError);
+    } else {
+      await expect(request).resolves.toMatchObject({ status: 200 });
+    }
 
-    expect(issuedSignal).not.toBe(controller.signal);
-    expect(issuedSignal).toMatchObject({ aborted: true, reason: callerReason });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(issuedSignal?.aborted).toBe(false);
+    if (controller) {
+      expect(issuedSignal).not.toBe(controller.signal);
+      expect(removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function));
+      controller.abort(new DOMException('settled request', 'AbortError'));
+      expect(issuedSignal?.aborted).toBe(false);
+    }
   });
 
   it('evicts a stalled shared CSRF fetch after a deadline-bound caller aborts', async () => {

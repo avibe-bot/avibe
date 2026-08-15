@@ -13,6 +13,18 @@ export type ApiFetchOptions = {
 };
 
 let csrfTokenPromise: Promise<string> | null = null;
+// Preserve owned-deadline identity across the Promise boundary without adding
+// a new public error type to the callers' failure taxonomy.
+const deadlineAbortReasons = new WeakSet<object>();
+
+export const isApiFetchDeadlineAbort = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && deadlineAbortReasons.has(error);
+
+type DeadlineSignalHandle = {
+  signal: AbortSignal | undefined;
+  isOwnDeadline(reason: unknown): boolean;
+  dispose(): void;
+};
 
 function readCookie(name: string): string | null {
   if (typeof document === 'undefined') {
@@ -138,36 +150,65 @@ function canReplayRequest(input: RequestInfo | URL, body: BodyInit | null | unde
 const signalWithDeadline = (
   callerSignal: AbortSignal | null | undefined,
   deadlineMs: number | undefined,
-): AbortSignal | undefined => {
-  if (deadlineMs === undefined) return callerSignal ?? undefined;
+): DeadlineSignalHandle => {
+  if (deadlineMs === undefined) {
+    return {
+      signal: callerSignal ?? undefined,
+      isOwnDeadline: () => false,
+      dispose: () => undefined,
+    };
+  }
   if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
     throw new TypeError('apiFetch deadlineMs must be a positive finite number');
   }
-  if (callerSignal?.aborted) return callerSignal;
+  if (callerSignal?.aborted) {
+    return {
+      signal: callerSignal,
+      isOwnDeadline: () => false,
+      dispose: () => undefined,
+    };
+  }
 
+  const deadlineReason = new DOMException(
+    `Request exceeded its ${deadlineMs}ms deadline`,
+    'TimeoutError',
+  );
   const deadlineController = new AbortController();
   const deadlineTimer = globalThis.setTimeout(() => {
-    deadlineController.abort(new DOMException(
-      `Request exceeded its ${deadlineMs}ms deadline`,
-      'TimeoutError',
-    ));
+    deadlineController.abort(deadlineReason);
   }, deadlineMs);
-  if (!callerSignal) return deadlineController.signal;
+  if (!callerSignal) {
+    return {
+      signal: deadlineController.signal,
+      isOwnDeadline: (reason) => reason === deadlineReason,
+      dispose: () => globalThis.clearTimeout(deadlineTimer),
+    };
+  }
 
   const composedController = new AbortController();
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    globalThis.clearTimeout(deadlineTimer);
+    callerSignal.removeEventListener('abort', abortFromCaller);
+    deadlineController.signal.removeEventListener('abort', abortFromDeadline);
+  };
   const abortFromCaller = () => abortFrom(callerSignal);
   const abortFromDeadline = () => abortFrom(deadlineController.signal);
   const abortFrom = (source: AbortSignal) => {
-    callerSignal.removeEventListener('abort', abortFromCaller);
-    deadlineController.signal.removeEventListener('abort', abortFromDeadline);
-    if (source === callerSignal) globalThis.clearTimeout(deadlineTimer);
+    dispose();
     composedController.abort(
       source.reason ?? new DOMException('request aborted', 'AbortError'),
     );
   };
   callerSignal.addEventListener('abort', abortFromCaller, { once: true });
   deadlineController.signal.addEventListener('abort', abortFromDeadline, { once: true });
-  return composedController.signal;
+  return {
+    signal: composedController.signal,
+    isOwnDeadline: (reason) => reason === deadlineReason,
+    dispose,
+  };
 };
 
 export async function apiFetch(
@@ -175,52 +216,60 @@ export async function apiFetch(
   init: RequestInit = {},
   options: ApiFetchOptions = {},
 ): Promise<Response> {
-  const method = (init.method || 'GET').toUpperCase();
-  const signal = signalWithDeadline(init.signal, options.deadlineMs);
-  const nextInit: RequestInit = { ...init, signal };
-  const headers = new Headers(init.headers || {});
+  const deadline = signalWithDeadline(init.signal, options.deadlineMs);
+  try {
+    const method = (init.method || 'GET').toUpperCase();
+    const nextInit: RequestInit = { ...init, signal: deadline.signal };
+    const headers = new Headers(init.headers || {});
 
-  // Be explicit about wanting JSON so endpoints that double as SPA
-  // mountpoints (e.g. /agents) keep returning JSON for programmatic
-  // callers regardless of how the runtime guesses the default Accept.
-  if (!headers.has('Accept')) {
-    headers.set('Accept', 'application/json');
-  }
+    // One wall-clock deadline covers CSRF acquisition, the initial request,
+    // and the one CSRF replay rather than restarting for each phase.
+    if (!headers.has('Accept')) {
+      headers.set('Accept', 'application/json');
+    }
 
-  let csrfToken = '';
-  if (MUTATING_METHODS.has(method)) {
-    csrfToken = await ensureCsrfToken(signal);
-    headers.set(CSRF_HEADER_NAME, csrfToken);
-  }
+    let csrfToken = '';
+    if (MUTATING_METHODS.has(method)) {
+      csrfToken = await ensureCsrfToken(deadline.signal);
+      headers.set(CSRF_HEADER_NAME, csrfToken);
+    }
 
-  nextInit.headers = headers;
-  let response = await fetch(input, nextInit);
-  // The CSRF guard rejects before the endpoint runs, so this exact response is
-  // safe to replay once. It covers a cookie/header race or a stale page without
-  // turning arbitrary 403s or non-replayable request streams into retries.
-  if (
-    csrfToken
-    && canReplayRequest(input, init.body)
-    && await isInvalidCsrfResponse(response.clone())
-  ) {
-    const recoveredToken = await refreshRejectedCsrfToken(signal);
-    // Cookies are shared across tabs while the acquisition promise is not.
-    // Read once more at the replay boundary in case another tab won the race.
-    csrfToken = readCookie(CSRF_COOKIE_NAME) || recoveredToken;
-    headers.set(CSRF_HEADER_NAME, csrfToken);
-    response = await fetch(input, { ...nextInit, headers });
+    nextInit.headers = headers;
+    let response = await fetch(input, nextInit);
+    // The CSRF guard rejects before the endpoint runs, so this exact response is
+    // safe to replay once. It covers a cookie/header race or a stale page without
+    // turning arbitrary 403s or non-replayable request streams into retries.
+    if (
+      csrfToken
+      && canReplayRequest(input, init.body)
+      && await isInvalidCsrfResponse(response.clone())
+    ) {
+      const recoveredToken = await refreshRejectedCsrfToken(deadline.signal);
+      // Cookies are shared across tabs while the acquisition promise is not.
+      // Read once more at the replay boundary in case another tab won the race.
+      csrfToken = readCookie(CSRF_COOKIE_NAME) || recoveredToken;
+      headers.set(CSRF_HEADER_NAME, csrfToken);
+      response = await fetch(input, { ...nextInit, headers });
+    }
+    // Global remote-access auth recovery. The AuthGuard validates the session
+    // once and then stops re-running on ordinary navigation (so it doesn't
+    // re-mount the shell on every sidebar click). If the Avibe Cloud cookie
+    // expires after that, no component re-checks auth — but the server starts
+    // answering /api/* with a remote login/authorization-refresh 401. Detect it
+    // here and trigger the same full-page login redirect the guard uses, so the
+    // user lands on the login flow instead of a wall of silently-failing fetches.
+    if (response.status === 401) {
+      void maybeRedirectOnRemoteAuthExpiry(response.clone());
+    }
+    return response;
+  } catch (error) {
+    if (deadline.isOwnDeadline(error) && typeof error === 'object' && error !== null) {
+      deadlineAbortReasons.add(error);
+    }
+    throw error;
+  } finally {
+    deadline.dispose();
   }
-  // Global remote-access auth recovery. The AuthGuard validates the session
-  // once and then stops re-running on ordinary navigation (so it doesn't
-  // re-mount the shell on every sidebar click). If the Avibe Cloud cookie
-  // expires after that, no component re-checks auth — but the server starts
-  // answering /api/* with a remote login/authorization-refresh 401. Detect it
-  // here and trigger the same full-page login redirect the guard uses, so the
-  // user lands on the login flow instead of a wall of silently-failing fetches.
-  if (response.status === 401) {
-    void maybeRedirectOnRemoteAuthExpiry(response.clone());
-  }
-  return response;
 }
 
 let redirectingForRemoteAuth = false;
