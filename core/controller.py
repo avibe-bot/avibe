@@ -2511,10 +2511,15 @@ class Controller:
             attachment_selection = None
             if status not in {"ready", "not_configured", "unavailable"}:
                 status = "not_configured"
+                generation = facts.attachment_config_generation
                 if (
-                    platform == WORKBENCH_PLATFORM
-                    or facts.attachment_config_generation is not None
+                    platform != WORKBENCH_PLATFORM
+                    and not isinstance(generation, bool)
+                    and isinstance(generation, int)
+                    and generation >= 0
                 ):
+                    status = "ready"
+                elif platform == WORKBENCH_PLATFORM:
                     status = "unavailable"
                     read_status = getattr(
                         observed_runtime,
