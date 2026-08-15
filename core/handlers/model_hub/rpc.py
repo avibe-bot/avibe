@@ -62,6 +62,9 @@ async def dispatch_model_hub_rpc(
             payload.get("backend"),
             payload.get("sources"),
         )
+    if operation == "reorder_agent_chains":
+        await _refresh_agent_presence(service)
+        return await service.reorder_agent_chains(payload.get("backend"))
     if operation == "set_agent_mode":
         await _refresh_agent_presence(service)
         return await service.set_agent_mode(payload.get("backend"), payload.get("mode"))

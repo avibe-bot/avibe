@@ -191,7 +191,9 @@ def matching_v1_model_id(
     """Return one concrete observed model for the frozen add-time matching-v1."""
 
     observed_models = tuple(
-        model for model in source.models if model.provenance == "discovered"
+        model
+        for model in source.models
+        if model.provenance == "discovered" and not model.retired
     )
 
     if backend == "opencode":
@@ -298,7 +300,10 @@ def inspect_exact_hop(
         )
 
     configuration_eligible = source_eligible_for_backend(source, backend)
-    inventory_member = any(model.id == hop.model_id for model in source.models)
+    inventory_member = any(
+        model.id == hop.model_id and not model.retired
+        for model in source.models
+    )
     channel_eligible = supply_channel is None or source.supply_channel == supply_channel
     supply_eligible = configuration_eligible and inventory_member and channel_eligible
     runnable = supply_eligible and source_runnable(
