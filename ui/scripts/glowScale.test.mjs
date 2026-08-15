@@ -85,6 +85,21 @@ const rungs = [...CSS.matchAll(/^\s*--shadow-glow-(?<role>[a-z]+)-(?<accent>[a-z
   (match) => ({ ...match.groups, token: `--shadow-glow-${match.groups.role}-${match.groups.accent}` })
 );
 
+// Every name the runtime validator will sanction, which is a wider set than the
+// one above can read. `validate:theme` accepts any `--shadow-glow-*` declared
+// in `@theme` -- managed is a PLACE -- while `rungs` requires a role AND an
+// accent, so `--shadow-glow-rogue: 0 0 93px red` was silently absent from every
+// assertion in this file and `shadow-[var(--shadow-glow-rogue)]` passed both
+// guards carrying geometry from nowhere.
+//
+// That gap is the enumeration failure this file's own header warns about, one
+// level up: the rules below are stated as properties, but they were applied to
+// whichever declarations a regex happened to match. A grammar that skips what
+// it cannot parse reports a clean scale by not looking at the exception.
+const MANAGED = [...CSS.matchAll(/^\s*(?<token>--shadow-glow-[a-z0-9-]+):/gm)].map(
+  (match) => match.groups.token
+);
+
 const sized = rungs.filter((rung) => !(rung.role in OFF_RULE));
 
 // The accent values as the dark theme declares them, which is what these tokens
@@ -121,6 +136,23 @@ describe('the accent glow scale', () => {
     // Guards the two greps below: a regex that silently matched nothing would
     // make every assertion here vacuously true.
     expect(sized.length).toBeGreaterThan(0);
+  });
+
+  // The bridge between what the validator manages and what this file checks.
+  // Without it, a name off the grammar is not a failing rung -- it is no rung at
+  // all, and every `it.each` below simply never runs for it.
+  it('reads every managed glow name as a rung', () => {
+    expect(MANAGED.length).toBeGreaterThan(0);
+    expect(MANAGED.filter((token) => !rungs.some((rung) => rung.token === token))).toEqual([]);
+  });
+
+  // And the role a name parses into has to be one the scale defines. `role in
+  // ROLE_BLUR` already decides which blur is asserted, but its else-branch --
+  // "then it must carry a themed blur" -- describes `cta`, so an invented role
+  // spelled with `var(--…)` would satisfy it. A role is a name for a size; a
+  // name for no size is not a role.
+  it.each(rungs)('$token names a role the scale defines', ({ role }) => {
+    expect(role in ROLE_BLUR || role in OFF_RULE, `${role} is on neither the blur scale nor the off-rule list`).toBe(true);
   });
 
   it.each(sized)('$token is centred with spread = -blur/4', ({ value }) => {

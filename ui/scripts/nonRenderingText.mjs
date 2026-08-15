@@ -226,14 +226,62 @@ const NON_RENDERING_KINDS = new Set([
 // correct where kind cannot be: `className={'shadow-[0_0_93px_red]'}` is the
 // same `StringLiteral` in a `JsxExpression`, and it renders, because its
 // expression belongs to an attribute rather than to the element's children.
+//
+// And a position is reached, not adjoined. `{show ? 'box-shadow: …' : ''}` is
+// the same copy in the same place, but the literal's parent is the conditional
+// rather than the expression, so requiring a DIRECT `JsxExpression` parent
+// answered "is this copy" with "is this copy written without a branch" -- and
+// failed displayed text for containing the string it was displaying. What has
+// to be walked is the chain of operators that hand a value onward unchanged,
+// because that chain is exactly how the literal becomes the element's text.
+const HANDS_VALUE_ONWARD = (node, parent) => {
+  switch (parent.kind) {
+    case ts.SyntaxKind.ParenthesizedExpression:
+      return true;
+    // The branches render; the condition is read.
+    case ts.SyntaxKind.ConditionalExpression:
+      return node === parent.whenTrue || node === parent.whenFalse;
+    case ts.SyntaxKind.BinaryExpression:
+      switch (parent.operatorToken.kind) {
+        // Either side of a concatenation ends up in the output, and either side
+        // of `||` / `??` can be the value that survives.
+        case ts.SyntaxKind.PlusToken:
+        case ts.SyntaxKind.BarBarToken:
+        case ts.SyntaxKind.QuestionQuestionToken:
+          return true;
+        // `cond && 'text'` renders its right side only; the left is a test.
+        case ts.SyntaxKind.AmpersandAmpersandToken:
+          return node === parent.right;
+        default:
+          return false;
+      }
+    default:
+      return false;
+  }
+};
+
+// Deny by default, which is the safe direction here: an operator this does not
+// know stops the walk, so the span stays in the scan and a real glow is still
+// caught. Walking through anything at all -- a call, an arrow function, a
+// property assignment -- would be the opposite, blanking
+// `{items.map((i) => <span style={{ boxShadow: '0 0 93px red' }} />)}` because
+// it is somewhere under a JSX child.
 const isJsxChild = (node) => {
   if (node.kind === ts.SyntaxKind.JsxText) return true;
-  const inExpression = node.kind === ts.SyntaxKind.StringLiteral
+  const isLiteral = node.kind === ts.SyntaxKind.StringLiteral
     || node.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral;
-  return inExpression
-    && node.parent?.kind === ts.SyntaxKind.JsxExpression
-    && (node.parent.parent?.kind === ts.SyntaxKind.JsxElement
-      || node.parent.parent?.kind === ts.SyntaxKind.JsxFragment);
+  if (!isLiteral) return false;
+
+  let child = node;
+  let parent = node.parent;
+  while (parent && HANDS_VALUE_ONWARD(child, parent)) {
+    child = parent;
+    parent = parent.parent;
+  }
+
+  return parent?.kind === ts.SyntaxKind.JsxExpression
+    && (parent.parent?.kind === ts.SyntaxKind.JsxElement
+      || parent.parent?.kind === ts.SyntaxKind.JsxFragment);
 };
 
 // Except in the one element where JSX children are not copy. `<style>` hands

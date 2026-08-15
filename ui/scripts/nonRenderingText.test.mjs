@@ -36,6 +36,18 @@ const NON_RENDERING = [
   // -- a child of a JSX element -- and not the node kind, so listing `JsxText`
   // and leaving the braces around it alone blanked one spelling of one thing.
   ['a string a JSX element renders as copy', 'probe.tsx', `const a = <div>{'box-shadow: ${GLOW}'}</div>;\n`],
+  // The same copy, in the same place, reached through the operators that hand a
+  // value onward. Requiring the literal's DIRECT parent to be the expression
+  // asked whether the copy was written without a branch, which is not a
+  // question about whether it renders as text -- and every one of these failed
+  // `validate:theme` for displaying the string it was documenting.
+  ['copy in a conditional branch', 'probe.tsx', `const a = <div>{x ? 'box-shadow: ${GLOW}' : ''}</div>;\n`],
+  ['copy in the other conditional branch', 'probe.tsx', `const a = <div>{x ? '' : 'box-shadow: ${GLOW}'}</div>;\n`],
+  ['copy guarded by &&', 'probe.tsx', `const a = <div>{x && 'box-shadow: ${GLOW}'}</div>;\n`],
+  ['copy defaulted with ??', 'probe.tsx', `const a = <div>{x ?? 'box-shadow: ${GLOW}'}</div>;\n`],
+  ['copy concatenated with a value', 'probe.tsx', `const a = <div>{'box-shadow: ${GLOW}' + x}</div>;\n`],
+  ['copy inside parentheses', 'probe.tsx', `const a = <div>{('box-shadow: ${GLOW}')}</div>;\n`],
+  ['copy in a fragment', 'probe.tsx', `const a = <>{x ? 'box-shadow: ${GLOW}' : ''}</>;\n`],
   // A pattern, not a value. Nothing assigns a regex literal to a style, so it
   // describes CSS in exactly the sense a comment does.
   ['a regular expression literal', 'probe.ts', `export const RE = /box-shadow: ${GLOW}/;\n`],
@@ -56,6 +68,16 @@ const RENDERING = [
   // ATTRIBUTE, not of an element, so it is a class name on its way to Tailwind
   // rather than words on a page.
   ['a class name written as an expression', 'probe.tsx', "const a = <div className={'shadow-[0_0_93px_red]'} />;\n", '0_0_93px_red'],
+  // Walking to the JSX position rather than checking one parent has to keep
+  // that half true: an attribute is still an attribute at the end of a branch.
+  ['a class name chosen by a conditional', 'probe.tsx', "const a = <div className={x ? 'shadow-[0_0_93px_red]' : ''} />;\n", '0_0_93px_red'],
+  // The limit of the walk, and the reason it is an allowlist. This literal sits
+  // under a JSX child, but a call and an arrow function stand between them, and
+  // what comes out the other end is an element that draws rather than text.
+  ['a style inside a mapped element', 'probe.tsx', `const a = <div>{xs.map((x) => <span style={{ boxShadow: '${GLOW}' }} />)}</div>;\n`, GLOW],
+  // A condition is read, not rendered. Blanking it would erase a declaration
+  // that a comparison merely happens to mention next to one that draws.
+  ['a glow tested in a condition', 'probe.tsx', `const a = <div>{s === 'box-shadow: ${GLOW}' ? 'y' : 'n'}</div>;\n`, GLOW],
   ['an inline style object', 'probe.tsx', `const a = <div style={{ boxShadow: '${GLOW}' }} />;\n`, GLOW],
   ['a template literal', 'probe.ts', `const a = { boxShadow: \`${GLOW}\` };\n`, GLOW],
   ['a CSSOM setter', 'probe.ts', `el.style.setProperty('box-shadow', '${GLOW}');\n`, GLOW],
