@@ -19,7 +19,7 @@ observability issue, not in this checklist.
 
 ## Preconditions
 
-Do not start the 15-minute clock until all of these are true:
+Do not start the 20-minute clock until all of these are true:
 
 1. The authorized local Incus `master` target is healthy and still has its prior
    product state. This checklist requires a separately provisioned five-platform
@@ -69,21 +69,26 @@ production data.
 Use different markers for every platform. Keep a local table mapping each pair
 and marker to its platform; do not put that table in chat.
 
-## 15-minute acceptance flow
+## 20-minute acceptance flow
 
-Send the ten fixtures first, then wait once. Idle flush is tracked per session,
-so waiting after the final send covers every platform without mutating any
-session-owned state.
+Send the ten fixtures first, then wait once. The worker delivers the capture rows
+serially, and a session's idle-flush clock starts only after its add succeeds.
+The shared wait therefore budgets for both ingestion and the per-session idle
+window without mutating any session-owned state.
 
 1. In **Memory > Processing Record**, record the newest entry timestamp for each
    bound platform user. This is the per-user high-water mark for the run.
 2. Within about two minutes, send each platform's accepted PNG and rejected SVG
    as described in the table. The order within a platform does not affect the
    result; finish all ten sends before waiting.
-3. Do not send another message in any tested session for at least **5 minutes 30
-   seconds after the final fixture**. The wait derives from
-   `core/memory/coordinator.py`'s `IDLE_FLUSH_TIMEOUT = 5 minutes`, with 30 seconds
-   of scheduling margin. `MAX_UNFLUSHED_AGE = 30 minutes` and
+3. Do not send another message in any tested session for at least **10 minutes 30
+   seconds after the final fixture**. The first five minutes are the worst-case
+   ingestion budget for ten serial rows: `core/memory/worker.py` drains rows one
+   at a time and `core/memory/coordinator.py` bounds each provider add with
+   `ADD_TIMEOUT_SECONDS = 30`. Only after each successful add does
+   `MemoryStore.settle_add_ack()` set that session's idle deadline. The next five
+   minutes derive from `IDLE_FLUSH_TIMEOUT = 5 minutes`, followed by 30 seconds of
+   scheduling margin. `MAX_UNFLUSHED_AGE = 30 minutes` and
    `MAX_UNFLUSHED_MESSAGES = 100` are fallback bounds, not the expected trigger
    for this two-message-per-platform run.
 4. Refresh **Processing Record** and inspect all ten outcomes. Recheck that **Call
@@ -93,10 +98,10 @@ session-owned state.
 This flow deliberately does **not** use `/new`. That command tears down the Agent
 session and pauses session-bound tasks and watches
 (`core/handlers/command_handlers.py`), which conflicts with the long-lived
-`master` environment's state-preservation boundary. The shared idle window avoids
-those mutations and keeps the expected wall time near 15 minutes: roughly two
-minutes to send, 5.5 minutes idle, and the remaining time to inspect and record
-results.
+`master` environment's state-preservation boundary. The shared ingestion-plus-idle
+window avoids those mutations and keeps the expected wall time near 20 minutes:
+roughly two minutes to send, 10.5 minutes for serial ingestion plus idle, and the
+remaining time for the bounded flush, inspection, and result recording.
 
 The processing log is the primary evidence because it covers every user and
 project on the installation; **Memory > Search** is scoped to the current
@@ -145,7 +150,7 @@ post-baseline entry conditions in the table decide them.
 ## Fixture collection plan
 
 This is an optional, separately authorized engineering follow-up, not a phase of
-the 15-minute UI acceptance flow. The ten manual messages can inform which
+the 20-minute UI acceptance flow. The ten manual messages can inform which
 fixtures are most valuable, but they do not provide the Lark `media` or WeChat
 bot/self/system samples below. Do not block or complete the acceptance result on
 these fixture decisions unless the collector was separately authorized and run.
