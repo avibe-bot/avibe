@@ -509,6 +509,49 @@ def read_codex_relay_marker(marker: object) -> Optional[Dict[str, str]]:
     return {"base_url": base_url.strip(), "provider_id": provider_id.strip()}
 
 
+def _tokens_bag_is_usable(tokens: object) -> bool:
+    """True when the OAuth token bag carries at least one usable token.
+
+    Mirrors the migration scanner's predicate (any non-blank
+    ``access_token`` / ``refresh_token`` / ``id_token``), so a bag with
+    only blank strings or unrelated metadata reads as signed out —
+    matching how ``apply_codex_auth`` treats it.
+    """
+    if not isinstance(tokens, dict) or not tokens:
+        return False
+    return any(
+        isinstance(tokens.get(field), str) and tokens[field].strip()
+        for field in ("access_token", "refresh_token", "id_token")
+    )
+
+
+def persist_codex_relay_marker(marker: Optional[Dict[str, str]]) -> bool:
+    """Durably record (or clear) the OAuth-transition relay marker in V2Config.
+
+    Split out so both OAuth write paths — the controller's
+    ``AgentAuthService._persist_backend_auth_mode`` and the Settings API
+    ``save_codex_auth`` — can persist a fresh capture BEFORE the
+    destructive ``apply_codex_auth(oauth)`` cleanup destroys the on-disk
+    relay evidence (#1450). A later V2Config failure in the owning flow
+    then cannot lose the capture. Returns ``True`` when the write
+    landed; ``False`` (never raises) so callers can degrade to "recovery
+    lost, OAuth proceeds".
+    """
+    from config.v2_config import CONFIG_LOCK, V2Config
+
+    try:
+        with CONFIG_LOCK:
+            try:
+                config = V2Config.load()
+            except FileNotFoundError:
+                config = V2Config.default()
+            config.agents.codex.oauth_relay_marker = marker
+            config.save()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def read_codex_api_key(home: Path | None = None) -> Optional[str]:
     """Return the API key currently stored in ``auth.json``, if any.
 
@@ -604,7 +647,14 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
     auth_data = _load_auth(auth_path)
     toml_data = _load_toml(config_path)
     api_key = auth_data.get("OPENAI_API_KEY")
-    has_chatgpt_tokens = isinstance(auth_data.get("tokens"), dict)
+    # An unusable token bag is "signed out", not live OAuth evidence:
+    # the predicate mirrors the migration scanner (at least one of
+    # access_token / refresh_token / id_token non-blank), and
+    # ``apply_codex_auth`` treats a bag without usable tokens as
+    # unsigned-in. The marker gates rely on this field to mean "OAuth
+    # credentials are actually present".
+    tokens_bag = auth_data.get("tokens")
+    has_chatgpt_tokens = _tokens_bag_is_usable(tokens_bag)
     chatgpt_account = _extract_chatgpt_account(auth_data) if has_chatgpt_tokens else None
 
     providers = toml_data.get("model_providers")

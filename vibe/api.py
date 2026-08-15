@@ -9755,6 +9755,20 @@ def remove_backend_api_key(backend: str) -> dict:
                 config.save()
     except Exception as exc:  # noqa: BLE001
         logger.warning("V2Config clear during remove-key failed for %s: %s", backend, exc)
+        # The disk key is already gone (the user-visible truth — report
+        # success), but the persisted V2Config copy (cached key/base_url/
+        # relay marker) may still hold stale auth state (#1451). Surface
+        # it as a notice so the UI can say "removed, but saved settings
+        # may be stale" instead of silently claiming a clean wipe.
+        # Append: an earlier ``cleared_custom_relay_pointer`` notice from
+        # ``apply_codex_auth`` is still true and must survive.
+        notices = notices + [
+            {
+                "code": "v2_clear_failed",
+                "backend": backend,
+                "detail": str(exc),
+            }
+        ]
 
     # Both backends keep runtime state in the controller. Codex owns a
     # persistent app-server; Claude owns cached SDK sessions and a loaded
@@ -9874,17 +9888,23 @@ def get_codex_auth() -> dict:
     # cleanup destroys the on-disk evidence) is the only recovery
     # source: it is consumed verbatim, with no ambient-state inference —
     # dormant sections and stale caches surface nothing. The marker is
-    # only consulted while the disk shows OAuth as the live mode AND the
+    # only consulted while the disk shows live OAuth credentials AND the
     # credential store actually exposes the live state to us: once an
     # API key exists in ``auth.json`` (e.g. the user ran ``codex login
     # --with-api-key`` outside Avibe) the live disk configuration is
-    # authoritative, and when ``cli_auth_credentials_store`` is
-    # ``auto``/``keyring`` the key may live in the OS keychain instead —
-    # ``has_api_key`` is a file-only signal there, so an external
-    # official-key switch is indistinguishable from OAuth and a leftover
-    # marker must not reroute a pasted key to the relay it remembers.
+    # authoritative; when ``cli_auth_credentials_store`` is
+    # ``auto``/``keyring`` the key may live in the OS keychain instead
+    # (file-only ``has_api_key`` can't see it); and when the tokens are
+    # gone too (e.g. ``codex logout`` during the OAuth window) the user
+    # has signed out of the relay entirely (#1453) — in all three cases
+    # the leftover marker must not surface or reroute a pasted key to
+    # the relay it remembers.
     relay_marker = None
-    if not disk_state.get("has_api_key") and disk_state.get("file_store_active"):
+    if (
+        not disk_state.get("has_api_key")
+        and disk_state.get("file_store_active")
+        and disk_state.get("has_chatgpt_tokens")
+    ):
         relay_marker = read_codex_relay_marker(raw_relay_marker)
     if relay_marker:
         effective_base_url: str | None = disk_state.get("base_url") or relay_marker["base_url"]
@@ -10033,14 +10053,22 @@ def save_codex_auth(payload: dict) -> dict:
     # the OAuth cleanup destroyed the on-disk evidence. Consumed
     # verbatim — a plain cached ``base_url`` is NOT a recovery source
     # (it is only the user's last saved preference and may be stale).
-    # Gated on the live state being knowable AND OAuth: an API key in
+    # Gated on live OAuth credentials being observable: an API key in
     # ``auth.json`` (e.g. ``codex login --with-api-key`` outside Avibe)
-    # means the live disk configuration already won, and a non-file
-    # credential store (``auto``/``keyring``) hides the key in the OS
-    # keychain where our file-only ``has_api_key`` can't see it — either
-    # way the leftover marker must not reroute a pasted key to the relay
-    # it remembers.
+    # means the live disk configuration already won; a non-file
+    # credential store hides the key in the OS keychain; and cleared
+    # tokens (``codex logout`` in the OAuth window) mean the user signed
+    # out of the relay (#1453). In all three cases the leftover marker
+    # must not reroute a pasted key to the relay it remembers.
+    #
+    # ``#1449``: an ``auth_mode="oauth"`` save through this endpoint is
+    # itself an OAuth transition for non-React clients — capture the
+    # live relay identity before ``apply_codex_auth`` destroys it, with
+    # the same retention semantics as the controller path.
     marker = None
+    captured_oauth_relay: Optional[dict] = None
+    observed_api_key_auth = False
+    codex_disk_state: dict = {}
     try:
         from vibe.codex_config import read_codex_auth_state, read_codex_relay_marker
 
@@ -10052,11 +10080,45 @@ def save_codex_auth(payload: dict) -> dict:
                 raw_marker = getattr(marker_codex, "oauth_relay_marker", None)
             except Exception:
                 raw_marker = None
-        if not codex_disk_state.get("has_api_key") and codex_disk_state.get("file_store_active"):
+        if (
+            not codex_disk_state.get("has_api_key")
+            and codex_disk_state.get("file_store_active")
+            and codex_disk_state.get("has_chatgpt_tokens")
+        ):
             marker = read_codex_relay_marker(raw_marker)
+        if auth_mode == "oauth":
+            live_base_url = codex_disk_state.get("base_url")
+            if isinstance(live_base_url, str) and live_base_url.strip():
+                live_provider_id = codex_disk_state.get("active_provider_id")
+                captured_oauth_relay = {
+                    "base_url": live_base_url.strip(),
+                    "provider_id": live_provider_id
+                    if isinstance(live_provider_id, str) and live_provider_id.strip()
+                    else "",
+                }
+            else:
+                observed_api_key_auth = bool(codex_disk_state.get("has_api_key"))
     except Exception:
         logger.debug("Codex relay marker read failed", exc_info=True)
         marker = None
+
+    # Durability (#1450): a fresh capture — or the official-key
+    # transition's clear — is persisted BEFORE ``apply_codex_auth(oauth)``
+    # destroys the on-disk relay evidence, so a later V2Config failure
+    # cannot lose the transition state. A failed pre-persist only costs
+    # switch-back recovery, never the save.
+    if auth_mode == "oauth" and (captured_oauth_relay is not None or observed_api_key_auth):
+        try:
+            from vibe.codex_config import persist_codex_relay_marker
+
+            # ``None`` here is deliberate for the official-key case: the
+            # pre-persist records the transition's marker-clear.
+            if not persist_codex_relay_marker(captured_oauth_relay):
+                logger.warning(
+                    "Codex relay marker pre-persist failed; switch-back recovery may be lost"
+                )
+        except Exception:
+            logger.warning("Codex relay marker pre-persist raised", exc_info=True)
 
     if base_url_present:
         effective_base_url = base_url_change
@@ -10073,14 +10135,20 @@ def save_codex_auth(payload: dict) -> dict:
         if not effective_base_url and marker:
             effective_base_url = marker["base_url"]
 
-    # Provider-identity restore hint: when the resolved relay matches the
-    # marker (explicit form value pre-populated from it, or the omitted
-    # fallback) and the captured provider section still exists on disk
-    # with the same URL, ``apply_codex_auth`` re-points ``model_provider``
-    # at that section instead of rebuilding a managed provider — the
-    # user's own ``wire_api`` / provider settings survive the round trip.
+    # Provider-identity restore hint: only when the marker actually
+    # SUPPLIED the resolved URL — the omitted-``base_url`` fallback, or
+    # an explicit form value pre-populated from the marker-backed state
+    # while the disk chain itself carries no URL. When the disk chain
+    # resolved the same URL (the user activated a different provider
+    # section with an identical relay during the OAuth window), the
+    # live pointer wins and must not be re-pointed at the marker's
+    # provider.
     restore_provider_id: Optional[str] = None
-    if marker is not None and effective_base_url == marker["base_url"]:
+    if (
+        marker is not None
+        and effective_base_url == marker["base_url"]
+        and codex_disk_state.get("base_url") != effective_base_url
+    ):
         restore_provider_id = marker["provider_id"]
 
     from vibe.codex_config import apply_codex_auth
@@ -10111,13 +10179,34 @@ def save_codex_auth(payload: dict) -> dict:
         config.agents.codex.auth_mode = auth_mode
         config.agents.codex.api_key = api_key if auth_mode == "api_key" else None
         config.agents.codex.base_url = effective_base_url
-        # An explicit API-key save consumes the OAuth-transition marker:
-        # the user just chose their endpoint (restored from the marker or
-        # typed fresh), so the one-shot recovery record is spent. OAuth
-        # saves keep it — a later switch-back still needs the recovery.
+        # Marker lifecycle on save: an explicit API-key save consumes
+        # the OAuth-transition marker (the user just chose their
+        # endpoint — restored, typed fresh, or official-only); an OAuth
+        # save applies the same retention semantics as the controller
+        # path (#1449): fresh capture overwrites, the official-key
+        # transition clears, a repeated pure-OAuth save retains.
+        # A failed save here only loses the V2Config mirror — the
+        # durable marker state was already recorded by the pre-persist
+        # above, and the on-disk codex files are authoritative.
         if auth_mode == "api_key":
             config.agents.codex.oauth_relay_marker = None
-        config.save()
+        elif captured_oauth_relay is not None:
+            config.agents.codex.oauth_relay_marker = captured_oauth_relay
+        elif observed_api_key_auth:
+            config.agents.codex.oauth_relay_marker = None
+        try:
+            config.save()
+        except Exception:
+            # The on-disk codex files are authoritative and the durable
+            # marker state was pre-persisted, but the V2Config mirror
+            # (auth_mode / base_url intent the controller reloads via
+            # ``_load_backend_runtime_config``) did NOT land — surface a
+            # partial-failure notice instead of silently reporting
+            # success while runtime reconciliation sees stale config.
+            logger.warning("V2Config mirror write failed during codex auth save", exc_info=True)
+            notices = notices + [
+                {"code": "v2_mirror_save_failed", "detail": "saved to codex files but not to Avibe config"}
+            ]
 
     restart_result = restart_backend(
         "codex",

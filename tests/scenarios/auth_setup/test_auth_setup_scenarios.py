@@ -2331,9 +2331,17 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         self._codex_home_env.start()
         self.addCleanup(self._codex_home_env.stop)
 
-        # Seed the pre-OAuth state: API-key auth against a relay.
+        # Seed the pre-OAuth state: API-key auth against a relay. The
+        # token blob makes the post-OAuth state carry live OAuth
+        # credentials — the marker gate requires them.
         (codex_home / "auth.json").write_text(
-            json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-relay"}),
+            json.dumps(
+                {
+                    "auth_mode": "apikey",
+                    "OPENAI_API_KEY": "sk-relay",
+                    "tokens": {"id_token": "seed"},
+                }
+            ),
             encoding="utf-8",
         )
         self._seed_hand_rolled_relay()

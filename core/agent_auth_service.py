@@ -3860,6 +3860,23 @@ class AgentAuthService:
             captured_codex_relay, observed_codex_api_key_auth = (
                 self._capture_codex_relay_for_oauth()
             )
+            # Durability (#1450): a fresh capture — or the official-key
+            # transition's clear (``None`` marker) — is persisted BEFORE
+            # the cleanup below destroys the on-disk relay evidence. If
+            # the owning V2Config write later fails, the transition state
+            # has already landed; a failed pre-persist only costs relay
+            # recovery, never the OAuth flow itself.
+            if captured_codex_relay is not None or observed_codex_api_key_auth:
+                try:
+                    from vibe.codex_config import persist_codex_relay_marker
+
+                    if not persist_codex_relay_marker(captured_codex_relay):
+                        logger.warning(
+                            "Codex relay marker pre-persist failed; "
+                            "switch-back recovery may be lost"
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.warning("Codex relay marker pre-persist raised", exc_info=True)
             await self._clear_codex_api_key_for_oauth()
         try:
             config = getattr(self.controller, "config", None)
