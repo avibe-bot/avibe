@@ -293,7 +293,7 @@ async def test_materializer_fails_closed_when_lease_directory_is_replaced(
 
 
 @pytest.mark.asyncio
-async def test_materializer_preserves_typed_size_reason_and_localizes_display(
+async def test_materializer_rejects_declared_oversize_before_adapter(
     tmp_path: Path,
 ) -> None:
     context = MessageContext(
@@ -301,6 +301,31 @@ async def test_materializer_preserves_typed_size_reason_and_localizes_display(
         channel_id="D1",
         platform="telegram",
         files=[FileAttachment("large.pdf", "application/pdf", url="ref", size=20)],
+    )
+
+    client = _StubClient({"large.pdf": b"small"})
+    batch = await InboundAttachmentMaterializer(effective_home=tmp_path / "home").materialize(
+        context,
+        client,
+        max_bytes=10,
+        language="zh",
+    )
+
+    assert client.calls == []
+    assert batch.errors == ("file_too_large",)
+    assert batch.display_errors == ("附件“large.pdf”超过附件大小限制。",)
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_materializer_preserves_adapter_typed_size_reason(
+    tmp_path: Path,
+) -> None:
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="telegram",
+        files=[FileAttachment("large.pdf", "application/pdf", url="ref")],
     )
 
     batch = await InboundAttachmentMaterializer(effective_home=tmp_path / "home").materialize(

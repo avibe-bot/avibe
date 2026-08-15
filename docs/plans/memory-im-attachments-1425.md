@@ -76,8 +76,9 @@ verified lease descriptor. Replacing the directory entry during materialization
 fails closed and cannot redirect writes outside the private lease.
 Each published record binds its original device/inode. Memory selection and
 durable pinning reopen that record relative to a duplicated retained lease
-descriptor and reject inode mismatches, so replacing the public lease pathname
-cannot substitute bytes after materialization.
+descriptor and reject inode mismatches. The record also binds a materialization
+SHA-256 that durable pinning verifies while copying, so neither public pathname
+replacement nor same-inode modification can substitute bytes after acquisition.
 
 The message handler materializes before scheduling Memory capture. Agent delivery
 and Memory retain independent lease references, so Agent cleanup, retry, or
@@ -89,7 +90,9 @@ downloads with declared, response-header, and streamed-byte limits. Telegram is
 changed to a bounded-to-disk Bot API download; it must not buffer the entire file
 before checking the limit. WeChat checks declared size before acquisition and
 bounds ciphertext/decrypted output while writing; a post-download-only check is
-not sufficient.
+not sufficient. The shared materializer normalizes non-negative integer declared
+sizes and rejects an over-limit item before creating a partial or invoking any
+platform adapter.
 
 `core/memory/im_attachments.py` accepts only shared-materializer leases. It checks
 declared size before retaining a Memory consumer and checks final size, MIME,

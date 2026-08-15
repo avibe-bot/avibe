@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import os
 import re
@@ -33,6 +34,7 @@ class _LeasedAttachmentRecord:
     path: Path
     device: int
     inode: int
+    sha256: str
 
 
 class _LeaseState:
@@ -242,6 +244,9 @@ class InboundAttachmentMaterializer:
             )
 
         safe_name = _sanitize_filename(attachment.name)
+        declared_size = _normalized_declared_size(attachment.size)
+        if max_bytes is not None and declared_size is not None and declared_size > max_bytes:
+            return _materialization_failure("file_too_large", attachment.name, language)
         final_name = f"{index:02d}-{safe_name}"
         partial_name = f"{final_name}.part"
         file_info = _download_info(context, attachment)
@@ -307,6 +312,7 @@ class InboundAttachmentMaterializer:
             published_names.add(final_name)
             os.fchmod(partial_fd, 0o600)
             published_info = os.fstat(partial_fd)
+            published_sha256 = _sha256_fd(partial_fd)
             final_path = lease_dir / final_name
             snapshot = FileAttachment(
                 name=name,
@@ -317,11 +323,12 @@ class InboundAttachmentMaterializer:
             outcome = snapshot, _LeasedAttachmentRecord(
                 name=name,
                 mimetype=mimetype,
-                declared_size=attachment.size,
+                declared_size=declared_size,
                 size=size,
                 path=final_path,
                 device=published_info.st_dev,
                 inode=published_info.st_ino,
+                sha256=published_sha256,
             )
             materialized = True
             return outcome
@@ -452,6 +459,12 @@ def _materialization_failure(
     )
 
 
+def _normalized_declared_size(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _directory_open_flags() -> int:
     no_follow = getattr(os, "O_NOFOLLOW", None)
     if no_follow is None:
@@ -501,6 +514,18 @@ def _write_all(descriptor: int, content: bytes) -> None:
         if written <= 0:
             raise OSError("attachment write made no progress")
         view = view[written:]
+
+
+def _sha256_fd(descriptor: int) -> str:
+    position = os.lseek(descriptor, 0, os.SEEK_CUR)
+    digest = hashlib.sha256()
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+    finally:
+        os.lseek(descriptor, position, os.SEEK_SET)
+    return digest.hexdigest()
 
 
 def _unlink_at_quietly(parent_fd: int, name: str) -> None:

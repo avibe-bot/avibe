@@ -280,7 +280,7 @@ class AttachmentPinStore:
                 total_bytes = 0
                 try:
                     for index, source in enumerate(source_items):
-                        source_fd, source_info = self._open_source(
+                        source_fd, source_info, source_sha256 = self._open_source(
                             source,
                             source_root=source_root,
                             allowed_records=allowed_records,
@@ -294,6 +294,7 @@ class AttachmentPinStore:
                                 stage_fd,
                                 filename,
                                 total_before=total_bytes,
+                                expected_sha256=source_sha256,
                             )
                         finally:
                             os.close(source_fd)
@@ -601,7 +602,7 @@ class AttachmentPinStore:
         source_root: Path,
         allowed_records: dict[Path, _LeasedAttachmentRecord] | None,
         source_lease: InboundAttachmentLease | None,
-    ) -> tuple[int, os.stat_result]:
+    ) -> tuple[int, os.stat_result, str | None]:
         source_path = _path_from_file_uri(source.uri)
         if allowed_records is not None and source_path not in allowed_records:
             raise AttachmentPinError(
@@ -632,7 +633,8 @@ class AttachmentPinStore:
                 current = {record.path: record for record in current_records}.get(source_path)
                 if current_root != source_root or current != allowed_records[source_path]:
                     raise ValueError("attachment source lease changed")
-                return open_leased_attachment_record(directory_fd, current)
+                descriptor, info = open_leased_attachment_record(directory_fd, current)
+                return descriptor, info, current.sha256
             except (TypeError, ValueError) as error:
                 raise AttachmentPinError(
                     "memory_invalid_input",
@@ -652,7 +654,7 @@ class AttachmentPinStore:
         finally:
             os.close(current_fd)
         try:
-            return file_fd, os.fstat(file_fd)
+            return file_fd, os.fstat(file_fd), None
         except OSError as error:
             os.close(file_fd)
             raise AttachmentPinError(
@@ -986,6 +988,7 @@ def _copy_source_file(
     filename: str,
     *,
     total_before: int,
+    expected_sha256: str | None,
 ) -> tuple[int, str]:
     if source_info.st_size > MAX_PINNED_ATTACHMENT_BYTES:
         raise AttachmentPinError("memory_input_too_large", "attachment exceeds the file size limit")
@@ -1036,6 +1039,12 @@ def _copy_source_file(
                     "memory_invalid_input",
                     "attachment source changed while it was pinned",
                 )
+            observed_sha256 = digest.hexdigest()
+            if expected_sha256 is not None and observed_sha256 != expected_sha256:
+                raise AttachmentPinError(
+                    "memory_invalid_input",
+                    "attachment source content changed after materialization",
+                )
             destination_info = os.fstat(destination_fd)
             _require_private_file(destination_info, "pinned attachment")
             if destination_info.st_size != copied:
@@ -1050,7 +1059,7 @@ def _copy_source_file(
             raise _storage_failure(error, "pinned attachment could not be written") from error
     finally:
         os.close(destination_fd)
-    return copied, digest.hexdigest()
+    return copied, observed_sha256
 
 
 def _read_source_chunk(descriptor: int) -> bytes:

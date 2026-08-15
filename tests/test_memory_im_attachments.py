@@ -242,3 +242,27 @@ async def test_pin_reads_original_inode_after_lease_entry_is_replaced(tmp_path: 
     os.rmdir(lease_dir)
     moved.rename(lease_dir)
     batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_pin_rejects_same_inode_same_size_content_replacement(tmp_path: Path) -> None:
+    home = tmp_path / "avibe-home"
+    batch = await _materialize(
+        home,
+        [("notes.txt", "text/plain", b"original", 8)],
+    )
+    selected = select_memory_attachments(batch.lease)
+    source = Path(selected.attachments[0].uri.removeprefix("file://"))
+    original_inode = source.stat().st_ino
+    source.write_bytes(b"tampered")
+    source.chmod(0o600)
+    assert source.stat().st_ino == original_inode
+
+    with pytest.raises(Exception) as changed:
+        AttachmentPinStore(effective_home=home).pin(
+            selected.attachments,
+            source_lease=batch.lease,
+        )
+
+    assert getattr(changed.value, "error", None) == "memory_invalid_input"
+    batch.lease.release()
