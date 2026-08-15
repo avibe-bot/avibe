@@ -303,6 +303,96 @@ const isStyleElementChild = (node, tree) => {
   return false;
 };
 
+// The other half of that question, and the half a byte scan gets wrong in the
+// opposite direction: `<style>` is where a TypeScript file's text IS CSS, and
+// everywhere else it is text ABOUT CSS.
+//
+// Reading every `.ts` file as though it were a stylesheet failed
+// `const example = 'box-shadow: 0 0 93px red'` -- documentation, a log line, a
+// diagnostic string -- as a rendered glow. Nothing assigns it, no browser parses
+// it, and the guard blocked a pull request for containing a sentence. The same
+// class as the comment and the regex literal above, arriving at the one node
+// kind that can also be real.
+//
+// So the rule is where the text is handed to a CSS parser, not what the text
+// spells. A string reaches one three ways beyond `<style>`: `.style.cssText`
+// takes a whole declaration list, `setAttribute('style', …)` takes the same list
+// through the attribute, and `insertRule` takes a whole rule. Each names CSS at
+// the point of use, which is the same place `styleWrite.mjs` answers the CSSOM
+// question -- at the target, because a name never can.
+//
+// What this cannot follow is a value that arrives through a variable:
+// `const rule = '…'; el.style.cssText = rule` hands CSS to CSS with no literal
+// at the sink to read. That is the dataflow limit this scan has everywhere --
+// the same one that leaves an aliased style object unread -- and it is recorded
+// as such rather than papered over by treating every string as a stylesheet.
+const HANDS_TEXT_TO_CSS = (node, tree) => {
+  const parent = node.parent;
+  if (!parent) return false;
+
+  if (parent.kind === ts.SyntaxKind.BinaryExpression) {
+    return parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && node === parent.right
+      && /(^|\.)cssText$/.test(parent.left.getText(tree));
+  }
+
+  if (parent.kind === ts.SyntaxKind.CallExpression) {
+    const callee = parent.expression.getText(tree);
+    const [first, second] = parent.arguments;
+    if (/(^|\.)setAttribute$/.test(callee)) {
+      return node === second && /^(['"`])style\1$/.test(first?.getText(tree) ?? '');
+    }
+    return /(^|\.)insertRule$/.test(callee) && parent.arguments.includes(node);
+  }
+
+  return false;
+};
+
+// A literal's CSS is its CONTENTS, so the quotes come off: they are not CSS, and
+// leaving them in makes the parser read the opening one as the start of a
+// selector. A template's backticks come off for the same reason, and what a
+// substitution leaves behind is deliberately not repaired -- `${x}` sits in a
+// value, where a CSS parser reads it as an ordinary token, and where it does not,
+// the range simply stays scannable.
+const cssTextRange = (node, tree) => [node.getStart(tree) + 1, node.getEnd() - 1];
+
+const CSS_TEXT_KINDS = new Set([
+  ts.SyntaxKind.StringLiteral,
+  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+  ts.SyntaxKind.TemplateExpression,
+]);
+
+// Every stretch of a file whose text is CSS, in that file's own coordinates. A
+// `.css` file is CSS end to end; a TypeScript file is CSS only where it hands
+// text to a parser.
+//
+// `<style>` is answered by the ELEMENT rather than by its children, which is the
+// difference between a rule and a list of the ways a rule can be written. Its
+// children are CSS however they are spelled -- bare text, a string in an
+// expression, a template with substitutions, several of those in a row -- and
+// asking each child kind in turn is how the JSX half of this module has been
+// wrong before. Everything between the tags is CSS because that is what the tag
+// means.
+function cssRangesIn(source, file) {
+  if (file.endsWith('.css')) return source.length > 0 ? [[0, source.length]] : [];
+
+  const tree = parseSource(source, file);
+  const ranges = [];
+
+  const visit = (node) => {
+    if (node.kind === ts.SyntaxKind.JsxElement
+      && node.openingElement?.tagName?.getText(tree) === 'style') {
+      ranges.push([node.openingElement.getEnd(), node.closingElement.getStart(tree)]);
+    } else if (CSS_TEXT_KINDS.has(node.kind) && HANDS_TEXT_TO_CSS(node, tree)) {
+      ranges.push(cssTextRange(node, tree));
+    }
+    node.getChildren(tree).forEach(visit);
+  };
+  visit(tree);
+
+  return ranges;
+}
+
 // One parse of one file, shared. `styleWrite.mjs` needs the same tree to answer
 // where a style value ends, and parsing is the expensive part of this scan --
 // the cache keys on the exact source text, so a caller that hands over the same
@@ -391,6 +481,7 @@ const rendersAtAll = (file) => !NON_RENDERING_FILES.test(file.replaceAll('\\', '
 export {
   blankCssComments,
   blankTypeScriptComments,
+  cssRangesIn,
   parseSource,
   rendersAtAll,
   typeScriptComments,

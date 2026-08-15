@@ -12,7 +12,13 @@ import {
 import { SHADOW_KEY, isStyleWrite, propertyExpression, valueArgument } from './styleWrite.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { colourRegistrationsIn, customPropertiesIn } from './customProperties.mjs';
-import { parseSource, rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
+import { declarationSpansIn, declaresAt } from './cssDeclarations.mjs';
+import {
+  cssRangesIn,
+  parseSource,
+  rendersAtAll,
+  withoutNonRenderingText,
+} from './nonRenderingText.mjs';
 
 const html = fs.readFileSync('index.html', 'utf8');
 const css = fs.readFileSync('src/index.css', 'utf8');
@@ -679,9 +685,28 @@ const SHADOW_CHANNELS = [
   // `.ts` files scanned alongside the CSS -- and a shadow value of its own never
   // contains one, so the quotes cost nothing to stop at and stop the closing one
   // from being read as part of the colour.
+  //
+  // A property name followed by a colon is the SPELLING of a declaration, and
+  // this channel used to treat it as one wherever it appeared. Two things are
+  // spelled that way and declare nothing: a pseudo-class on a class named after
+  // a property -- `.box-shadow:hover { color: red }`, whose `hover { color: red`
+  // went to the shadow classifier and failed valid CSS -- and any sentence in a
+  // `.ts` file, where `const example = 'box-shadow: 0 0 93px red'` is text about
+  // CSS rather than CSS. Both are answered by asking where the match IS instead
+  // of what it looks like, and both parsers already know: `cssDeclarations.mjs`
+  // says which offsets a stylesheet declares at, `nonRenderingText.mjs` says
+  // which stretches of a TypeScript file are a stylesheet at all.
+  //
+  // The match is still claimed, and refused with a reason rather than dropped.
+  // Claiming keeps the completeness check honest -- the mention matcher counts
+  // this spelling, so a channel that stopped matching it would turn a false
+  // positive into a different failure with a stranger message -- and refusing it
+  // through `provablyNotAShadow` says what is actually true: not that the value
+  // is innocent, but that there is no declaration here to have a value.
   {
     pattern: new RegExp(`(?<!\\[)${CSS_SHADOW_PROPERTY}\\s*:([^;}'"\`]*)`, PROPERTY_FLAGS),
-    valuesOf: (match) => [match[1]],
+    valuesOf: (match, tree, declares) => (declares(match.index) ? [match[1]] : []),
+    provablyNotAShadow: (match, tree, declares) => !declares(match.index),
   },
   // `filter: drop-shadow(0 0 4px …)`. Matched at the FUNCTION rather than at the
   // property, because the property is not the thing there is only one of: a drop
@@ -965,6 +990,25 @@ function assertGlowsReadThroughTokens(root) {
     // so the memo makes it the same tree rather than a second parse. CSS has no
     // tree here and no channel that asks for one.
     const tree = file.endsWith('.css') ? null : parseSource(raw, file);
+
+    // And where the file DECLARES, for the one channel whose spelling a selector
+    // and a sentence can both wear. Two parsers answer it between them: which
+    // stretches of this file are CSS at all, then which offsets inside those
+    // stretches CSS declares at, folded back into the coordinates of the file
+    // they came from.
+    //
+    // The file AS WRITTEN, like the tree above and for a sharper reason. Blanking
+    // preserves offsets but not grammar -- a blanked `@media (…)` is an `@`
+    // followed by spaces, which is not a stylesheet any parser will read -- so
+    // asking the blanked text would fail every parse and, deny-by-default, call
+    // the whole file a declaration. Nothing is lost by asking the real text:
+    // blanking has already been applied to the matches themselves, so a span that
+    // does not render produces no match to ask about.
+    const declarations = cssRangesIn(raw, file).reduce(
+      (spans, [start, end]) => declarationSpansIn(raw.slice(start, end), start, spans),
+      [],
+    );
+    const declares = (index) => declaresAt(declarations, index);
     const claimed = [];
 
     for (const { pattern, valuesOf, provablyNotAShadow } of SHADOW_CHANNELS) {
@@ -977,9 +1021,9 @@ function assertGlowsReadThroughTokens(root) {
         // case: the expression holds no string literal, so there is no value to
         // test, and moving a literal into a constant would slip the gate. A
         // channel that claims a mention owes a value, and owing nothing fails.
-        const values = valuesOf(match, tree).filter((value) => value && value.trim());
+        const values = valuesOf(match, tree, declares).filter((value) => value && value.trim());
         if (values.length === 0) {
-          if (provablyNotAShadow?.(match, tree)) continue;
+          if (provablyNotAShadow?.(match, tree, declares)) continue;
           unreadable.push(`${file}:${source.slice(0, match.index).split('\n').length}: ${
             match[0].split('\n')[0].slice(0, 80)}`);
           continue;

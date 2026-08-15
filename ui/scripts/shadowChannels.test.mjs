@@ -178,6 +178,41 @@ describe('the shadow channels and the completeness matcher', () => {
     expect(loop).not.toContain('mention.index >= start');
   });
 
+  // The sixth quantity, and the one the pattern is structurally unable to hold:
+  // WHETHER A MATCH DECLARES ANYTHING. `.box-shadow:hover { color: red }` is a
+  // selector and `const example = 'box-shadow: …'` is a sentence, and both spell
+  // a declaration exactly -- so the channel failed correct CSS and correct
+  // TypeScript, which is CI blocking a pull request that was never wrong.
+  //
+  // A declaration is a POSITION in a grammar, so the parsers that already read
+  // these files decide it and the channel asks. Asserted as "asks" rather than
+  // as any particular tightening, because the three rounds before this one each
+  // answered a position question with a narrower character class and each bought
+  // one round.
+  //
+  // And it refuses through `provablyNotAShadow`, which is not a detail: a
+  // channel that stopped MATCHING would leave the mention matcher counting a
+  // span nothing claims, turning this false positive into the unscanned-channel
+  // failure one file over. Claiming the span and proving it declares nothing is
+  // the difference between "no glow here" and "nobody looked".
+  it('asks a parser whether a CSS declaration declares anything', () => {
+    const declaration = eachChannel().find((channel) =>
+      channel.trimStart().startsWith('new RegExp(`(?<!\\\\[)${CSS_SHADOW_PROPERTY}')
+    );
+
+    expect(declaration, 'the CSS declaration channel is no longer spelled this way').toBeDefined();
+    expect(declaration).toContain('declares(match.index)');
+    expect(declaration).toContain('provablyNotAShadow');
+  });
+
+  // Both hooks, or the refusal above lands in the wrong branch: `valuesOf`
+  // yielding nothing without a `provablyNotAShadow` that agrees is reported as
+  // unreadable, which is the same false positive wearing a different message.
+  it('hands that answer to both of a channel\'s readers', () => {
+    expect(SCAN).toContain('valuesOf(match, tree, declares)');
+    expect(SCAN).toContain('provablyNotAShadow?.(match, tree, declares)');
+  });
+
   it('measures a style write with the very key the channel reads it by', () => {
     expect(mention()).toContain('SHADOW_KEY');
 

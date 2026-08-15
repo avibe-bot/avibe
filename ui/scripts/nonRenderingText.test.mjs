@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { intendedFiles } from './lintPolicy.mjs';
-import { rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
+import { cssRangesIn, rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
 import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // `validate:theme` reads whole source files with regular expressions, so the set
@@ -224,5 +224,66 @@ describe('rendersAtAll', () => {
     'src/__mocks__/server.ts',
   ])('skips %s', (file) => {
     expect(rendersAtAll(file)).toBe(false);
+  });
+});
+
+// The other half of "what is CSS", and the half the scan got wrong in the
+// opposite direction from everything above. Blanking answers WHICH TEXT CANNOT
+// RENDER; this answers WHICH TEXT IS A STYLESHEET -- and reading every `.ts`
+// file as though it were one failed `const example = 'box-shadow: 0 0 93px red'`,
+// a sentence, as a rendered glow.
+//
+// The rule is where the text is handed to a CSS parser, not what the text
+// spells. So the cases are stated as sinks and non-sinks: a string that reaches
+// a parser is CSS wherever it is written, and one that does not is prose however
+// exactly it quotes a declaration.
+describe('cssRangesIn', () => {
+  // The CSS a file contains, read back through the ranges, so a case says what
+  // it means -- `['box-shadow: 0 0 93px red']` -- instead of comparing offsets.
+  const cssIn = (source, file) => cssRangesIn(source, file)
+    .map(([start, end]) => source.slice(start, end).trim());
+
+  // Each row carries what it should extract, because the interesting one does
+  // not extract the same text as the others: a template with a substitution
+  // reaches a CSS parser with the `${…}` still in it, and that is what makes it
+  // a separate node kind rather than a spelling of the two above.
+  it.each([
+    ['an assignment to .style.cssText', 'probe.ts', `el.style.cssText = 'box-shadow: ${GLOW}';`, `box-shadow: ${GLOW}`],
+    ['a template assigned to .style.cssText', 'probe.ts', `el.style.cssText = \`box-shadow: ${GLOW}\`;`, `box-shadow: ${GLOW}`],
+    ['setAttribute with the style attribute', 'probe.ts', `el.setAttribute('style', 'box-shadow: ${GLOW}');`, `box-shadow: ${GLOW}`],
+    ['a template with a substitution', 'probe.ts', 'el.style.cssText = `box-shadow: 0 0 93px ${c}`;', 'box-shadow: 0 0 93px ${c}'],
+  ])('reads %s as CSS', (_label, file, source, css) => {
+    expect(cssIn(source, file)).toEqual([css]);
+  });
+
+  it.each([
+    ['a plain string', 'probe.ts', `const example = 'box-shadow: ${GLOW}';`],
+    ['a documented constant', 'probe.ts', `export const EXAMPLE = \`box-shadow: ${GLOW}\`;`],
+    ['a string passed to something else', 'probe.ts', `log('box-shadow: ${GLOW}');`],
+    // The attribute is what makes `setAttribute` a CSS sink, not the method.
+    ['setAttribute with another attribute', 'probe.ts', `el.setAttribute('title', 'box-shadow: ${GLOW}');`],
+    ['page copy', 'probe.tsx', `const a = <code>box-shadow: ${GLOW}</code>;`],
+  ])('reads %s as text about CSS', (_label, file, source) => {
+    expect(cssIn(source, file)).toEqual([]);
+  });
+
+  // `<style>` is answered by the ELEMENT, not by its children, and this is why:
+  // its children are CSS however they are spelled, and asking each child kind in
+  // turn is how the JSX half of this module has been wrong before. A rule that
+  // enumerates spellings is missing the one nobody wrote down.
+  it.each([
+    ['bare text', `<style>.a { box-shadow: ${GLOW} }</style>`],
+    ['a string in an expression', `<style>{'.a { box-shadow: ${GLOW} }'}</style>`],
+    ['a template with a substitution', '<style>{`.a { box-shadow: 0 0 93px ${c} }`}</style>'],
+  ])('reads a <style> child written as %s as CSS', (_label, element) => {
+    expect(cssIn(`const a = ${element};`, 'probe.tsx').join('')).toContain('box-shadow');
+  });
+
+  // A `.css` file is CSS end to end, which is the boundary case a suffix test
+  // gets right and an empty file gets wrong: a range of length zero is a range,
+  // and a caller folding it would parse an empty stylesheet forever.
+  it('reads a stylesheet whole', () => {
+    expect(cssRangesIn('.a { color: red }', 'probe.css')).toEqual([[0, 17]]);
+    expect(cssRangesIn('', 'probe.css')).toEqual([]);
   });
 });

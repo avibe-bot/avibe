@@ -46,7 +46,16 @@ const shadowLayers = (value) => splitTopLevel(value, (char) => char === ',');
 const layerParts = (layer) => splitTopLevel(layer, (char) => char === '_' || /\s/.test(char));
 
 const CSS_WIDE_KEYWORDS = new Set(['none', 'inherit', 'initial', 'unset', 'revert', 'revert-layer']);
-const GLOW_TOKEN = /^--shadow-glow-/;
+
+// Which names this layer owns. Exported because two separate things decide what
+// a managed glow is -- the runtime check below, which sanctions a literal for
+// living under such a name, and the scale test, which asserts every such name is
+// on the ladder -- and they were spelled apart. The test re-derived the rule as
+// `--shadow-glow-[a-z0-9-]+`, which is a NARROWER set: `--shadow-glow-cta_mint`
+// is a legal custom property that this file sanctions and that file could not
+// see, so an off-ladder radius under it passed both. A name is not two things,
+// so it is written once and read by both.
+export const GLOW_TOKEN = /^--shadow-glow-/;
 const VAR_REFERENCE = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([\s\S]*))?\)$/;
 // A length this scan can read is a literal. These two spell the ways one can
 // arrive without being readable: computed, or named. Neither is rejected for

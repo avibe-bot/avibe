@@ -8,6 +8,7 @@ import postcss from 'postcss';
 import { customPropertiesIn } from './customProperties.mjs';
 import { intendedFiles } from './lintPolicy.mjs';
 import { typeScriptComments } from './nonRenderingText.mjs';
+import { GLOW_TOKEN } from './shadowLayer.mjs';
 import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // `validate:theme` already forces every glow in the tree to be a
@@ -96,9 +97,25 @@ const rungs = [...CSS.matchAll(/^\s*--shadow-glow-(?<role>[a-z]+)-(?<accent>[a-z
 // level up: the rules below are stated as properties, but they were applied to
 // whichever declarations a regex happened to match. A grammar that skips what
 // it cannot parse reports a clean scale by not looking at the exception.
-const MANAGED = [...CSS.matchAll(/^\s*(?<token>--shadow-glow-[a-z0-9-]+):/gm)].map(
-  (match) => match.groups.token
-);
+//
+// Which is why the widening is not another regex. A hand-written one closed the
+// role-and-accent gap and opened a smaller one in the same shape:
+// `--shadow-glow-[a-z0-9-]+` omits `_`, a character CSS allows in a custom
+// property and the validator sanctions without noticing, so
+// `--shadow-glow-rogue_name: 0 0 93px red` was again absent from every assertion
+// here while `shadow-[var(--shadow-glow-rogue_name)]` passed `validate:theme`.
+// The set is therefore read the way the validator reads it -- `@theme` walked
+// with a parser, names matched with the validator's OWN pattern -- so the two
+// cannot disagree about what a managed name is, whatever it is spelled with.
+const MANAGED = (() => {
+  const names = [];
+  postcss.parse(CSS).walkAtRules('theme', (rule) => {
+    rule.walkDecls((decl) => {
+      if (GLOW_TOKEN.test(decl.prop)) names.push(decl.prop);
+    });
+  });
+  return names;
+})();
 
 const sized = rungs.filter((rung) => !(rung.role in OFF_RULE));
 
