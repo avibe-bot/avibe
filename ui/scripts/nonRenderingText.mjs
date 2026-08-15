@@ -105,7 +105,13 @@ const CONDITION_AT_RULES = new Set(['supports', 'media', 'container']);
 // already fails the scan loudly rather than degrading into a silent miss here.
 function atRuleNames(source) {
   const names = new Map();
-  postcss.parse(source).walkAtRules((rule) => names.set(rule.source.start.offset, rule.name));
+  // Case-folded, because CSS keywords are ASCII case-insensitive and
+  // `@SUPPORTS (filter: drop-shadow(…))` is the same rule as `@supports`. A
+  // case-sensitive lookup missed it, kept the prelude, and the drop-shadow
+  // channel read a FEATURE TEST -- text whose entire purpose is to ask whether
+  // a value is supported -- as an applied glow. That is the false-positive
+  // direction: a stylesheet spelled in valid CSS fails the gate.
+  postcss.parse(source).walkAtRules((rule) => names.set(rule.source.start.offset, rule.name.toLowerCase()));
   return names;
 }
 

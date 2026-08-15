@@ -252,6 +252,47 @@ describe('the accent glow scale', () => {
     expect(value.trim(), OFF_RULE[role].why).toMatch(OFF_RULE[role].holds);
   });
 
+  // Which comments count as design glow annotations, and what each one measures.
+  //
+  // A wash is `0 y<n>px`, and the card scale owns those; this scale is only ever
+  // centred, so an annotation naming a y-offset is not its. The offset can be
+  // written before or after the blur -- welCard puts it after -- so the whole
+  // comment is the unit, not a window around the word, which is why these are
+  // parsed rather than grepped.
+  //
+  // `blur` also names things that are not shadows -- a backdrop filter, a
+  // privacy blur on a screenshot -- and reading `blur 10` out of one of those
+  // would fail this suite over a number no shadow ever wanted. So the comment
+  // must also name what it is measuring. A sigil (`@design-glow`) would be
+  // sharper, but only until the annotation that forgets to carry it: that turns
+  // this false positive into a silent miss, which is the worse direction.
+  // Naming the shadow is what a design annotation already does -- every
+  // contributing one in this tree says "glow" or "shadow" -- so the marker
+  // maintains itself.
+  //
+  // A function rather than three lines inside the loop, because the whole-tree
+  // test can only ever report that some number leaked in; it cannot say which
+  // comment shape let it. The probes below say that.
+  const ANNOTATED_BLUR = (comment) => {
+    const blur = comment.match(/\bblur (?<blur>\d+)/);
+    if (!blur) return null;
+    if (!/\b(glow|shadow)\b/i.test(comment)) return null;
+    if (/\by\d/.test(comment)) return null;
+    return Number(blur.groups.blur);
+  };
+
+  it.each([
+    ['a glow annotation', '// diagPulse: mint glow, blur 16', 16],
+    ['a shadow annotation', '/* StepCard shadow at blur 48 */', 48],
+    ['either word cased as prose', '// Glow: blur 24', 24],
+    ['a backdrop filter', '// the sheet sits over a backdrop blur 10 panel', null],
+    ['a privacy blur', '// screenshots ship with the avatar under blur 12', null],
+    ['a wash, which the card scale owns', '// welCard: glow 0 y4px blur 64', null],
+    ['a comment naming no blur at all', '// mint glow at #5BFFA070', null],
+  ])('reads %s', (_, comment, expected) => {
+    expect(ANNOTATED_BLUR(comment)).toBe(expected);
+  });
+
   // The rule fixes the shape of a rung; it does not decide which blurs exist.
   // That is design.pen's, and the annotations are how it reaches the source: a
   // component that names `blur 24` and then renders a 32px glow has been
@@ -264,13 +305,8 @@ describe('the accent glow scale', () => {
     for (const relative of intendedFiles(UI_ROOT, { extensions: ['.ts', '.tsx'] })) {
       const source = fs.readFileSync(new URL(relative, new URL(UI_ROOT, 'file:')), 'utf8');
       for (const comment of typeScriptComments(source, relative)) {
-        const blur = comment.match(/\bblur (?<blur>\d+)/);
-        // A wash is `0 y<n>px`, and the card scale owns those; this scale is
-        // only ever centred, so an annotation naming a y-offset is not its. The
-        // offset can be written before or after the blur -- welCard puts it
-        // after -- so the whole comment is the unit, not a window around the
-        // word, which is why these are parsed rather than grepped.
-        if (blur && !/\by\d/.test(comment)) annotated.add(Number(blur.groups.blur));
+        const blur = ANNOTATED_BLUR(comment);
+        if (blur !== null) annotated.add(blur);
       }
     }
 

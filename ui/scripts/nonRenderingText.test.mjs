@@ -195,6 +195,19 @@ describe('withoutNonRenderingText', () => {
     expect(withoutNonRenderingText(condition, 'probe.css')).not.toContain('93px');
   });
 
+  // CSS keywords are ASCII case-insensitive, so the case a stylesheet is
+  // written in is not a fact about what it means. Matching the name literally
+  // read `@SUPPORTS` as a name this scan has no opinion about, kept its
+  // prelude, and reported a FEATURE TEST -- text whose whole purpose is to ask
+  // whether a value is supported -- as an applied glow. That is the
+  // false-positive direction: valid CSS failing the gate, which is worse than a
+  // miss because it stops work that was correct.
+  it.each(['@supports', '@Supports', '@SUPPORTS'])('reads %s as the same condition', (spelling) => {
+    const condition = `${spelling} (box-shadow: 0 0 93px red) {\n  .a { color: red; }\n}\n`;
+
+    expect(withoutNonRenderingText(condition, 'probe.css')).not.toContain('93px');
+  });
+
   it('is applied to every extension the scan reads', () => {
     const scan = fs.readFileSync(new URL('validate-theme.mjs', import.meta.url), 'utf8');
     const extensions = scan.match(/extensions:\s*\[([^\]]*)\]/g) ?? [];
