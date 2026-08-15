@@ -25,9 +25,12 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    ownership record, lifecycle supervisor, health projection, and retention
    slot. No reconcile or maintenance operation may mode-flip an existing root.
 2. The durable source is `session_turns`, joined to `agent_sessions`, not
-   Harness-specific `agent_runs`. Both interactive and Harness turns are
-   eligible under the same rules. Each new Turn snapshots the exact executing
-   `agents.id`; mutable Session routing is not execution identity.
+   Harness-specific `agent_runs`. The shared execution owner is extended to
+   create these rows for Workbench and every supported IM transport as well as
+   Harness dispatch; platform transcript mirroring is not a trajectory source.
+   All interactive and Harness turns use the same eligibility rules. Each new
+   Turn snapshots the exact executing `agents.id`; mutable Session routing is
+   not execution identity.
 3. A controller-owned background scanner copies eligible terminal turns into a
    separate schema-v4 queue. Terminal settlement and backend adapters do no
    Memory I/O and await no Memory work.
@@ -56,8 +59,9 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    digest, or cancels it when the prior digest remains. Clear and factory reset
    retain their documented primary-state destructive-recovery cutover. The
    Memory scan state is an idempotent projection of those records. There is no
-   historical, disabled-period, or post-reset replay in v1; only turns settling
-   inside a committed enabled epoch are candidates.
+   historical, disabled-period, or post-reset replay in v1; only turns admitted
+   at dispatch and settling inside the same committed enabled epoch are
+   candidates.
 
 ## Product Contract
 
@@ -87,7 +91,8 @@ The owner Settings surface explains that eligible Agent inputs and results may
 be sent to the configured Memory processing endpoints, that accepted processing
 may produce no case or skill, and that the feature inherits the documented
 EverOS 1.2.3 limitations. The source set is fixed to eligible completed Agent
-Turns, including interactive and Harness turns; v1 has no source-type selector.
+Turns from Workbench, Slack, Discord, Telegram, Feishu/Lark, WeChat, and Harness;
+v1 has no source-type or platform selector.
 The disclosure also states that the exact backend dispatch and final result are
 trajectory content: user/Agent-authored identifiers and Avibe-injected time,
 source-Session, username, or user-id attribution lines present in those texts
@@ -98,9 +103,17 @@ for later-settling Turns, while already-settled backlog through its committed
 cutover remains eligible under the old project.
 
 Enabling requires the installed Memory runtime, complete processing endpoints,
-and at least one explicit project binding. Under the agent-capture lifecycle
-lock, an enable/disable Settings write first uses one serialized primary state
-transaction to read terminal high water `H` and insert a singleton prepared
+and at least one explicit project binding. The UI validates the candidate but
+does not persist `agent_track` settings itself. It sends the candidate plus its
+expected prior config digest to one authenticated controller IPC operation,
+`apply_agent_memory_settings`. The controller owns the complete
+capture/binding/config/claim transition under the same lifecycle lock used by
+scanner, Clear, and reset orchestration; a process-local UI lock is not a
+correctness boundary. If the controller is unavailable, the request fails before
+any mutation.
+
+The controller first uses one serialized primary state transaction to read
+terminal high water `H` and insert a singleton prepared
 `memory_agent_capture_cutover` intent with a new capture epoch, prior and desired
 config digests, desired enabled state, and `H`. Terminal settlement cannot
 interleave between that read and intent commit. The scanner is fenced, then the
@@ -152,6 +165,9 @@ these invariants hold:
   one non-empty final `result_text`;
 - immutable `backend_dispatch_text` and the final result are valid, nonempty
   UTF-8 text of at most 256 KiB each;
+- the dispatch snapshot was admitted while one committed capture epoch was
+  enabled, and the Turn settled inside that same epoch; a Turn crossing enable,
+  disable, Clear, or reset is excluded;
 - no accepted live-steer Delivery is linked to the Turn; v1 excludes steered
   Turns because their accepted instruction text is not durably available after
   materialization and cannot satisfy the exact two-message contract;
@@ -172,17 +188,29 @@ Harness request therefore cannot coalesce with a callback even when both use the
 same trigger/backend/Session.
 
 After scheduled attribution, transcription, attachment/file formatting, and all
-other input transformations finish, the shared start boundary persists
-`backend_dispatch_text` plus its digest before invoking the native adapter. The
-adapter must send exactly that stored text. A failed persistence makes no native
-call; an automatic start retry reuses the snapshot instead of re-running a
-text-changing transform. Backend-native acceptance can therefore never precede
-the durable exact input used by Agent Memory.
+other input transformations finish, the shared start boundary checks the
+controller-projected primary capture epoch without opening the Memory store. If
+that epoch is committed enabled, the exact UTF-8 text is at most 256 KiB, and the
+global primary snapshot budget remains below 128 MiB, one primary transaction
+reserves its byte count and persists `backend_dispatch_text`, digest, and capture
+epoch before invoking the native adapter. The adapter must send exactly that
+stored text; an automatic start retry reuses it instead of re-running a
+text-changing transform.
+
+Disabled/transitioning epochs, oversized text, or an exhausted snapshot budget
+record only a closed omission reason and small counter; they never retain the
+text or block native dispatch. A successful config transition cannot retroactively
+admit an in-flight Turn that omitted its snapshot. Persistence failure for a
+snapshot that was admitted still fails closed before native start, because the
+candidate could otherwise diverge from the adapter input. Backend-native
+acceptance can therefore never precede the durable exact input used by an
+Agent-Memory candidate.
 
 The property is deliberately positive. Every terminal shape not satisfying the
 complete invariant is skipped, including failed, canceled, stopped/restarted,
-silent, missing-result, missing-final-dispatch, malformed-evidence, oversized,
-accepted-steer, callback-class, and unbound turns. Admission logs only a closed
+silent, missing-result, missing/guarded final-dispatch, epoch-crossing,
+malformed-evidence, oversized, accepted-steer, callback-class, and unbound turns.
+Admission logs only a closed
 reason and opaque source digest.
 
 The v1 trajectory has exactly two ordered messages:
@@ -260,9 +288,14 @@ is never retrieval identity. It accepts no caller-supplied Turn id, raw
 Omitting `--project` uses the Session workdir's current explicit binding. An
 explicit value must be either that binding or an exact project retained in this
 executing Agent's read-only project catalog; without either, access fails closed.
-The owner Settings UI may select an installed Agent and one exact current or
-cataloged historical project. It may search and list `agent_case` and
-`agent_skill` with the same per-kind and response-size bounds.
+The owner Settings UI may select an installed Agent or a read-only deleted-Agent
+tombstone and one exact current or cataloged historical project. A deleted
+selector is synthesized from the opaque project catalog and labelled `Deleted
+Agent <opaque-suffix>`; it exposes neither the former raw Agent id nor a
+caller-controlled provider filter. The CLI remains bound to its executing Turn,
+so deleted-Agent retrieval is an owner-UI-only operation. Both surfaces search
+and list `agent_case` and `agent_skill` with the same per-kind and response-size
+bounds.
 
 Results are provider-neutral records labelled `case` or `skill`. Every skill in
 human-readable, JSON, and UI search/list output includes its `updated_at` as a
@@ -280,17 +313,17 @@ prompt and `vibe memory search/list` contracts remain byte-for-byte unchanged by
 the new CLI examples and parser registration.
 
 Memory status also reports a content-free skill-count observation for each
-installed Agent across that Agent's current and cataloged historical projects.
-An explicit
-status refresh may advance one durable, stable-order sampling cursor at most
+installed or cataloged deleted Agent across that Agent's current and cataloged
+historical projects. An explicit status refresh may advance one durable,
+stable-order sampling cursor at most
 once per 60 seconds. One sampler batch issues at most 32 scoped `total_count`
 requests with concurrency at most two, caches only count/observed-at metadata,
 and resumes at the next Agent/project pair; status rendering never fans out its
 own provider reads. An Agent count is complete only after all of its current
 retrievable projects have been observed in the same sampling generation;
-otherwise it is `unknown` or explicitly stale. Removed Agents invalidate their
-cache; binding removal keeps observations through the retained project catalog
-entry.
+otherwise it is `unknown` or explicitly stale. Hard deletion relabels but does
+not invalidate a cataloged Agent's cache; binding removal likewise retains
+observations through the project catalog entry.
 
 A complete count reports `normal` for 0-7, `approaching` for 8-10, and `risk`
 above 10. The hint says explicitly that this total is a conservative proxy:
@@ -377,8 +410,19 @@ primary Avibe state schema:
 - `source_class TEXT`, constrained on new writes to `interactive`,
   `harness_request`, `callback`, `maintenance`, or `agent_callback`;
 - `backend_dispatch_text TEXT` and `backend_dispatch_sha256 TEXT`, the exact
-  final backend-facing input and digest; and
+  bounded final backend-facing input and digest;
+- `backend_dispatch_capture_epoch INTEGER` and
+  `backend_dispatch_omission_reason TEXT`, the admitted epoch or a closed
+  `disabled | transition | oversized | budget` reason, never both; and
 - `terminal_sequence INTEGER`, with a unique partial index.
+
+The shared `MessageHandler`/dispatch boundary creates the same durable Delivery
+and Turn owner for Workbench and every supported IM execution before native
+dispatch. IM adapters continue to provide transport context and transcript
+mirroring, but no adapter-specific mirror row is a Memory source.
+`persist_silent_terminal` remains activity evidence rather than a trajectory;
+the shared owner now also settles the corresponding IM Turn. Harness uses its
+existing durable path.
 
 The initial Delivery claim/Turn creation transaction snapshots
 `executing_agent_id` from the resolved execution route, including an explicit
@@ -398,11 +442,18 @@ Delivery can queue; batching compatibility and Turn claim use the column rather
 than reparsing later mutable metadata. Pre-migration/missing classes remain
 fail-closed for Agent Memory but do not block ordinary execution.
 
-Immediately before the first native start call, after every shared/backend input
-transformation, a primary state transaction compares-and-sets
-`backend_dispatch_text` and its SHA-256 digest. The adapter receives that exact
+The primary schema also keeps a singleton snapshot-byte reservation capped at
+128 MiB. Immediately before the first native start call, after every
+shared/backend input transformation, a primary state transaction checks the
+committed capture epoch and per-row 256 KiB bound, reserves bytes, and
+compares-and-sets the admitted text/digest/epoch. The adapter receives that exact
 stored value. A retry must reuse it and a conflicting second value fails closed;
-Memory never derives input from the earlier raw `dispatch_text`.
+Memory never derives candidate input from the earlier raw `dispatch_text`.
+When no snapshot is admitted, the same transaction writes only the closed
+omission reason and the adapter proceeds with its in-memory final text.
+Startup and periodic primary-state maintenance recompute the reservation from
+the UTF-8 byte lengths of actual nonempty snapshots before admitting more, so a
+crash cannot leak budget.
 
 The transaction that first settles a Turn terminal assigns one greater than the
 maximum non-NULL `terminal_sequence` (or `1` when none exists) while holding
@@ -412,6 +463,17 @@ Consequently sequence order is settlement commit order even when wall time
 moves backward or UUIDs sort in another order. `terminal_at` remains display
 metadata and is never a scanner cursor. Pre-migration Turn rows retain `NULL`
 for every new field and are not backfilled.
+
+Terminal settlement in a disabled or different capture epoch clears any
+snapshot and releases its byte reservation in the same primary transaction.
+For an eligible terminal Turn, the scanner clears the primary snapshot and
+releases the reservation after its enqueue, duplicate, guarded decline, or
+closed skip is durable. A crash between the Memory-store decision and that
+cleanup is repaired idempotently by comparing terminal sequence with the durable
+scanner cursor. Abandoned-Turn recovery uses the same cleanup. Clear and factory
+reset bulk-scrub every terminal snapshot through their post-deletion high water
+before scan state is recreated. Thus the primary duplicate is bounded while
+live and does not survive final disposition or destructive reset.
 
 The primary state schema also adds bounded singleton
 `memory_agent_capture_cutover` and `memory_agent_binding_cutover` recovery
@@ -492,14 +554,23 @@ only with the Agent root's Clear/factory reset, or a future explicit
 provider-data deletion contract. A catalog entry does not claim that EverOS
 produced output.
 
-Under the agent-capture lifecycle lock, every add, reassignment, or removal first
-uses one serialized primary state transaction to read the current committed
+Installed Agents are joined to catalog owners by recomputing their opaque
+`agent_id`. A catalog owner with no live join remains a read-only deleted-Agent
+tombstone instead of becoming unreachable. Owner Settings issues a bounded
+opaque selection token for that exact catalog owner; requests never accept a raw
+`agent_id`. Hard deletion therefore remains unconstrained and does not delete
+or orphan queued/provider data.
+
+The same controller `apply_agent_memory_settings` IPC owns every binding add,
+reassignment, and removal under the shared lifecycle lock. It first uses one
+serialized primary state transaction to read the current committed
 terminal high water `H` and insert a prepared singleton
 `memory_agent_binding_cutover` intent containing the prior/desired config digests
 and `H`. Terminal settlement cannot interleave between that read and intent
 commit. The scanner is then fenced, V2 config is atomically replaced, and the
 intent is promoted to committed; terminal settlement performs no Memory/config
-I/O and never waits for projection work.
+I/O and never waits for projection work. The UI does not write these bindings
+before contacting the controller.
 
 When one Settings save changes both `enabled` and bindings, that same primary
 writer transaction records the capture and binding intents at one shared `H`.
@@ -626,8 +697,9 @@ repair, or rewrite any skill.
 1. **Spec:** this contract plus the canonical product/recovery documentation.
    No runtime behavior changes.
 2. **Infrastructure:** schema v4, config/identity/project-binding primitives,
-   dual-root lifecycle, provider port, role-specific sidecar/recorder contracts,
-   and focused migrations/fixtures. Capture remains inactive.
+   platform-neutral Workbench/IM/Harness Turn ownership, dual-root lifecycle,
+   provider port, role-specific sidecar/recorder contracts, and focused
+   migrations/fixtures. Capture remains inactive.
 3. **Capture:** durable scanner/read port, admission, enqueue, worker/delivery,
    lifecycle composition, and degradation tests.
 4. **Retrieval:** scoped CLI/internal API, owner Settings enablement/binding,
@@ -646,17 +718,17 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; pre-config primary-state capture intents make enable/disable/reset cutovers crash-atomic with Turn settlement without recovery-time boundary drift, and Clear accepts either never-created role as absent. |
-| `MEMORY-AGENT-002` | Every semantically eligible non-steered completed interactive or Harness Turn not durably declined by a specified resource guard is represented once by its exact post-transformation backend-dispatch/result pair. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; one controller IPC owns prepared settings cutovers, post-deletion reset high waters do not drift on recovery, and Clear accepts either never-created role as absent. |
+| `MEMORY-AGENT-002` | Every semantically eligible non-steered completed Workbench, Slack, Discord, Telegram, Feishu/Lark, WeChat, or Harness Turn not durably declined by a specified snapshot/queue/disk guard is represented once by its exact post-transformation backend-dispatch/result pair. |
 | `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks and accepted live steers are excluded. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
-| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; capture and trusted-Turn CLI retrieval use the immutable executing Agent without blocking hard deletion, and crash-safe prepared binding cutovers keep backlog in the project effective at settlement. |
+| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; capture and trusted-Turn CLI retrieval use the immutable executing Agent without blocking hard deletion, deleted owners remain UI-retrievable, and crash-safe prepared binding cutovers keep backlog in the project effective at settlement. |
 | `MEMORY-AGENT-006` | Malformed config, missing/pre-migration identity/source/final-dispatch snapshots, and missing project binding fail closed. |
 | `MEMORY-AGENT-007` | Agent-sidecar/local pipeline outage leaves chat and Personal Memory healthy; shared remote endpoint throttling is reported as an external quota coupling without cross-role state corruption. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
 | `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths; a read-only per-Agent project catalog keeps removed-binding output reachable. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
-| `MEMORY-AGENT-011` | Queue/disk exhaustion skips durably, and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
+| `MEMORY-AGENT-011` | Per-row/global primary snapshot guards plus queue/disk exhaustion skip durably; primary copies are scrubbed after disposition/reset, and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
 | `MEMORY-AGENT-012` | Skill retrieval exposes exact freshness/maturity metadata, while the request-budgeted status sampler reports non-blocking per-Agent count hints at 8 and 11 skills. |
 | `MEMORY-AGENT-013` | Opt-in disclosure models raw attribution bytes in exact trajectory content without allowing them to become Memory identity or scope. |
 

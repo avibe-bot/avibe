@@ -23,14 +23,17 @@ Agent Memory is a separate, off-by-default track for completed Agent Turns. When
 the owner explicitly enables it and binds a source workdir to `default` or a
 named Memory project, Avibe asynchronously sends the exact post-transformation
 backend dispatch text and successful final result to a dedicated EverOS
-agent-mode root. The Turn durably records that final text before native start.
-Interactive and Harness turns use the same admission rule and
-snapshot the final executing `agents.id` when the Turn starts; later Session
-routing or Agent hard deletion cannot change its Memory partition. Delivery
-batching keeps ordinary Harness work separate from callbacks. Accepted-live-
-steer, failed, canceled, silent, missing-snapshot, oversized, malformed,
-callback, maintenance, and unbound turns are skipped without delaying or
-changing the Turn result.
+agent-mode root. A candidate Turn that passes the enabled-epoch and storage
+guards durably records that final text before native start.
+The shared durable Turn owner covers Workbench, Slack, Discord, Telegram,
+Feishu/Lark, WeChat, and Harness executions under the same admission rule and
+snapshots the final executing `agents.id` when the Turn starts; later Session
+routing or Agent hard deletion cannot change its Memory partition. Platform
+transcript mirrors are not capture sources. Delivery batching keeps ordinary
+Harness work separate from callbacks. Accepted-live-steer, failed, canceled,
+silent, missing/guarded-snapshot, epoch-crossing, oversized, malformed, callback,
+maintenance, and unbound turns are skipped without delaying or changing the
+Turn result.
 
 Because the input is the exact backend dispatch, it can contain identifiers in
 user/Agent-authored text and Avibe-injected time, source-Session, username, or
@@ -38,13 +41,16 @@ user-id attribution lines. Enabling Agent Memory discloses that those content
 bytes are retained locally and sent to the configured processing endpoints;
 they never become structural Memory ownership, scope, or provider paths.
 
-Each enable or disable first atomically records a prepared completed-Turn high
-water and capture intent in the primary state transaction that orders Turn
-settlement, then replaces V2 config. Recovery commits that exact boundary only
-when config has the desired digest, or cancels it when the prior digest remains;
-it never advances the boundary to restart time. Clear and Reinitialize record
-the same cutover before destructive work. The Memory scan state projects that
-exact cutover. Turns
+The Settings UI sends Agent-track changes to one controller IPC operation; it
+does not save that config block itself. Under the same controller lifecycle lock
+used by scanner, Clear, and reset, each enable or disable first atomically records
+a prepared completed-Turn high water and capture intent in the primary state
+transaction that orders Turn settlement, then replaces V2 config. Recovery
+commits that exact boundary only when config has the desired digest, or cancels
+it when the prior digest remains; it never advances the boundary to restart
+time. Clear and Reinitialize record their capture high water after destructive
+deletion completes and before scan-state recreation. The Memory scan state
+projects that exact cutover. Turns
 completed before first enable, during a later disabled interval, or before a
 destructive reset are not backfilled. The owner's workdir/project bindings
 remain in Memory settings across Clear and Reinitialize; the reset runtime
@@ -86,13 +92,21 @@ The Agent queue independently caps nonterminal work at 500 rows and requires at
 least 512 MiB free before admission; guarded turns are counted without retaining
 their text. Scrubbed terminal tombstones retain at most 90 days and the newest
 100,000 rows.
+Final-dispatch snapshots are admitted only while a committed capture epoch is
+enabled, at most 256 KiB per Turn and 128 MiB total in primary state. A Turn must
+settle in that same epoch. Disabled/transitioning, oversized, and over-budget
+dispatches retain only an omission reason and still execute normally. Admitted
+primary snapshots are scrubbed after durable enqueue/skip, disabled settlement,
+abandonment, Clear, or Reinitialize.
 
 Agent cases and skills are available only through explicit, scoped Agent Memory
 search/list operations in the CLI or owner Settings UI. CLI ownership comes from
 the trusted current Turn's immutable executing-Agent snapshot, not mutable
 Session routing. A read-only per-Agent project catalog keeps already-enqueued or
 later-delivered data and existing provider data retrievable after its last
-workdir binding is removed. Returned skill content is untrusted text: Avibe does
+workdir binding is removed. If the Agent is hard-deleted, owner Settings retains
+an opaque read-only `Deleted Agent` selector; CLI retrieval remains bound to the
+current executing Turn. Returned skill content is untrusted text: Avibe does
 not install or execute it and never injects it into an Agent prompt. Each
 displayed skill includes its last-updated timestamp and maturity score. Memory
 status reports a non-blocking per-Agent skill-count hint:
