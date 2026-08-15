@@ -330,6 +330,7 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
             "reason": "memory_sidecar_unavailable",
         },
         "health": None,
+        "attachment_capture": {"status": "not_configured"},
     }
     assert asyncio.run(runtime.maintenance_payload()) == {
         "status": "ok",
@@ -3427,6 +3428,44 @@ async def test_runtime_reconciliation_rolls_sidecar_for_rerank_configuration(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_runtime_reconciliation_rolls_sidecar_for_multimodal_configuration(
+    memory_runtime_factory,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig(
+            "https://embed.example.test/v1", "embed", "embed-key"
+        ),
+    )
+    initial = MemoryConfig(enabled=True, processing=processing)
+    runtime = memory_runtime_factory(
+        initial,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+    )
+    assert (await runtime.reconcile(initial))["ok"] is True
+
+    configured = replace(
+        initial,
+        processing=replace(
+            processing,
+            multimodal=MemoryEndpointConfig(
+                "https://vision.example.test/v1",
+                "vision-model",
+                "vision-key",
+            ),
+        ),
+    )
+    assert (await runtime.reconcile(configured))["ok"] is True
+
+    assert len(factory.supervised) == 2
+    assert factory.supervised[0].stopped is True
+    assert factory.supervised[1].settings.multimodal_model == "vision-model"
+    assert factory.supervised[1].settings.multimodal_api_key == "vision-key"
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_runtime_preflight_failure_keeps_existing_sidecar_running(
     monkeypatch,
     memory_runtime_factory,
@@ -3595,7 +3634,14 @@ async def test_status_preserves_everos_disabled_recorder_state(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = MemoryConfig(
         enabled=True,
-        processing=_processing_config(),
+        processing=replace(
+            _processing_config(),
+            multimodal=MemoryEndpointConfig(
+                "https://vision.example.test/v1",
+                "vision-model",
+                "vision-key",
+            ),
+        ),
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
@@ -3626,10 +3672,12 @@ async def test_status_preserves_everos_disabled_recorder_state(
         return snapshot
 
     monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
-    assert (await runtime.status_payload())["health"]["recorder"] == {
+    status = await runtime.status_payload()
+    assert status["health"]["recorder"] == {
         "state": "disabled",
         "reason": None,
     }
+    assert status["attachment_capture"] == {"status": "ready"}
     await memory_runtime_factory.close(runtime)
 
 
@@ -5408,6 +5456,11 @@ def test_runtime_builds_insight_reader_from_injected_paths(
                 base_url="https://embed.example.test/v1",
                 api_key="opaque-embedding-key",
             ),
+            multimodal=MemoryEndpointConfig(
+                base_url="https://vision.example.test/v1",
+                model="vision-model",
+                api_key="opaque-vision-key",
+            ),
         )
     )
 
@@ -5422,11 +5475,59 @@ def test_runtime_builds_insight_reader_from_injected_paths(
     assert runtime._insight_reader._provider_base_urls == (
         "https://llm.example.test/v1",
         "https://embed.example.test/v1",
+        "https://vision.example.test/v1",
     )
     assert set(runtime._insight_reader._exact_redaction_values) == {
         "opaque-llm-key",
         "opaque-embedding-key",
+        "opaque-vision-key",
     }
+
+
+def test_multimodal_preflight_records_under_redacted_provider_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        memory_runtime,
+        "record_preflight_call",
+        lambda _path, **kwargs: observed.update(kwargs),
+    )
+    runtime = MemoryRuntime(
+        MemoryConfig(),
+        store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+        effective_home=tmp_path,
+    )
+
+    runtime._record_preflight_call(
+        side="multimodal",
+        model="vision-model",
+        request={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,synthetic"},
+                        }
+                    ],
+                }
+            ]
+        },
+        response={"choices": [{"message": {"content": "OK"}}]},
+        failure=None,
+        base_url="https://vision.example.test/v1",
+        api_key="vision-secret",
+        started_at_ms=1,
+        duration_ms=2,
+    )
+
+    assert observed["kind"] == "multimodal_llm"
+    assert observed["provider_base_urls"] == ("https://vision.example.test/v1",)
+    assert observed["exact_redaction_values"] == ("vision-secret",)
 
 
 async def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes(

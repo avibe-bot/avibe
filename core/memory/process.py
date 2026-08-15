@@ -77,6 +77,7 @@ async def _probe_stderr_tail(task: asyncio.Task[bytes] | None, *, settings: Ever
                     settings.llm_base_url,
                     settings.embedding_base_url,
                     settings.rerank_base_url,
+                    settings.multimodal_base_url,
                 ) if value
             ),
             exact_values=tuple(
@@ -84,6 +85,7 @@ async def _probe_stderr_tail(task: asyncio.Task[bytes] | None, *, settings: Ever
                     settings.llm_api_key,
                     settings.embedding_api_key,
                     settings.rerank_api_key,
+                    settings.multimodal_api_key,
                 ) if value
             ),
         )
@@ -135,6 +137,9 @@ class EverOSProcessSettings:
     rerank_base_url: str | None = None
     rerank_model: str | None = None
     rerank_api_key: str | None = field(default=None, repr=False)
+    multimodal_base_url: str | None = None
+    multimodal_model: str | None = None
+    multimodal_api_key: str | None = field(default=None, repr=False)
     timezone: str | None = None
     call_log_db_path: Path | None = None
 
@@ -2381,6 +2386,7 @@ def _write_memory_child_config(
             "",
             "[multimodal]",
             f"file_uri_allow_dirs = [{_toml_string(str(attachments_root))}]",
+            "file_uri_max_bytes = 26214400",
             "",
         )
     )
@@ -2433,9 +2439,11 @@ def _memory_child_environment(
         "EVEROS_LLM__BASE_URL": settings.llm_base_url,
         "EVEROS_LLM__MODEL": settings.llm_model,
         "EVEROS_LLM__API_KEY": settings.llm_api_key,
-        "EVEROS_MULTIMODAL__BASE_URL": settings.llm_base_url,
-        "EVEROS_MULTIMODAL__MODEL": settings.llm_model,
-        "EVEROS_MULTIMODAL__API_KEY": settings.llm_api_key,
+        # Workbench keeps one compatibility cycle of implicit LLM inheritance.
+        # IM capture is gated separately by the explicit persisted endpoint.
+        "EVEROS_MULTIMODAL__BASE_URL": settings.multimodal_base_url or settings.llm_base_url,
+        "EVEROS_MULTIMODAL__MODEL": settings.multimodal_model or settings.llm_model,
+        "EVEROS_MULTIMODAL__API_KEY": settings.multimodal_api_key or settings.llm_api_key,
         "EVEROS_EMBEDDING__BASE_URL": settings.embedding_base_url,
         "EVEROS_EMBEDDING__MODEL": settings.embedding_model,
         "EVEROS_EMBEDDING__API_KEY": settings.embedding_api_key,
@@ -3459,6 +3467,13 @@ def _validate_generated_config(
     )
     if any(rerank_settings) and not all(rerank_settings):
         raise RuntimeError("Generated EverOS config received partial rerank settings")
+    multimodal_settings = (
+        settings.multimodal_base_url,
+        settings.multimodal_model,
+        settings.multimodal_api_key,
+    )
+    if any(multimodal_settings) and not all(multimodal_settings):
+        raise RuntimeError("Generated EverOS config received partial multimodal settings")
     if (
         everos.get("memory", {}).get("timezone") != timezone
         or everos.get("memorize", {}).get("mode") != "chat"
@@ -3467,6 +3482,8 @@ def _validate_generated_config(
         or everos.get("rerank", {}).get("model") != ""
         or everos.get("rerank", {}).get("base_url") != ""
         or "api_key" in everos.get("rerank", {})
+        or everos.get("multimodal", {}).get("file_uri_max_bytes") != 26214400
+        or "api_key" in everos.get("multimodal", {})
         or ome.get("strategies", {}).get("reflect_episodes", {}).get("enabled") is not False
         or ome.get("strategies", {}).get("extract_foresight", {}).get("enabled") is not False
     ):

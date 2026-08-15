@@ -308,11 +308,14 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
             "",
             "[multimodal]",
             f'file_uri_allow_dirs = ["{attachment_pin_root(tmp_path)}"]',
+            "file_uri_max_bytes = 26214400",
             "",
         )
     )
 
     assert environment["EVEROS_LLM__API_KEY"] == "llm-secret"
+    # Workbench keeps its legacy implicit LLM inheritance for one cycle. IM
+    # capture still requires an explicit persisted multimodal endpoint.
     assert environment["EVEROS_MULTIMODAL__BASE_URL"] == environment["EVEROS_LLM__BASE_URL"]
     assert environment["EVEROS_MULTIMODAL__MODEL"] == environment["EVEROS_LLM__MODEL"]
     assert environment["EVEROS_MULTIMODAL__API_KEY"] == "llm-secret"
@@ -330,6 +333,36 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     assert generated == expected_generated
     assert str(attachment_pin_root(tmp_path)) in generated
     assert "AVIBE_MEMORY_CALL_LOG_DB" not in environment
+
+
+def test_configured_multimodal_stays_env_only_and_independent_from_llm(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(),
+        timezone="UTC",
+        multimodal_base_url="https://vision.example.test/v1",
+        multimodal_model="vision-model",
+        multimodal_api_key="vision-secret",
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=settings,
+    )
+    process._prepare_owned_directories()
+    process._write_generated_config()
+
+    environment = process._child_environment()
+    generated = (tmp_path / "memory" / "generated" / "everos.toml").read_text(
+        encoding="utf-8"
+    )
+    parsed = memory_process.tomllib.loads(generated)
+
+    assert environment["EVEROS_MULTIMODAL__BASE_URL"] == settings.multimodal_base_url
+    assert environment["EVEROS_MULTIMODAL__MODEL"] == "vision-model"
+    assert environment["EVEROS_MULTIMODAL__API_KEY"] == "vision-secret"
+    assert environment["EVEROS_MULTIMODAL__MODEL"] != environment["EVEROS_LLM__MODEL"]
+    assert parsed["multimodal"]["file_uri_max_bytes"] == 25 * 1024 * 1024
+    assert "vision-secret" not in generated
 
 
 def test_configured_rerank_stays_env_only_when_env_overrides_toml(tmp_path: Path) -> None:

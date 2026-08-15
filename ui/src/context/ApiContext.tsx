@@ -1850,6 +1850,7 @@ export type MemoryProcessingConfig = {
   llm: MemoryEndpointConfig;
   embedding: MemoryEndpointConfig;
   rerank?: MemoryEndpointConfig;
+  multimodal?: MemoryEndpointConfig;
 };
 
 export type MemorySettings = {
@@ -1876,12 +1877,13 @@ export type MemorySettingsPatch = {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
     rerank?: MemoryEndpointPatch;
+    multimodal?: MemoryEndpointPatch;
   };
   confirm_rebuild?: boolean;
 };
 
 export type MemoryFailureDiagnostic = {
-  side?: 'embedding' | 'llm' | 'rerank';
+  side?: 'embedding' | 'llm' | 'rerank' | 'multimodal';
   http_status?: number | null;
   provider_error_code?: string | null;
   message?: string;
@@ -1911,6 +1913,9 @@ export type MemoryStatus = {
     disabled_features: string[];
     cascade: Record<string, unknown> | null;
     recorder: Record<string, unknown> | null;
+  };
+  attachment_capture?: {
+    status: 'ready' | 'not_configured' | 'unavailable';
   };
 };
 

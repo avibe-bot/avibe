@@ -121,6 +121,43 @@ def test_memory_settings_key_clear_removes_the_optional_rerank_endpoint() -> Non
     assert candidate.memory.processing.rerank is None
 
 
+def test_memory_settings_patch_accepts_and_clears_multimodal_endpoint() -> None:
+    current = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    target, confirm_rebuild = ui_memory_routes._memory_settings_patch(
+        current,
+        {
+            "processing": {
+                "multimodal": {
+                    "base_url": "https://vision.example.test/v1",
+                    "model": "vision-model",
+                    "api_key": "vision-secret",
+                }
+            }
+        },
+    )
+    configured = ui_memory_routes._memory_candidate_config(current, target)
+
+    assert confirm_rebuild is False
+    assert configured.memory.processing.multimodal == MemoryEndpointConfig(
+        "https://vision.example.test/v1",
+        "vision-model",
+        "vision-secret",
+    )
+
+    cleared_target, _ = ui_memory_routes._memory_settings_patch(
+        configured,
+        {"processing": {"multimodal": {"api_key": None}}},
+    )
+    cleared = ui_memory_routes._memory_candidate_config(configured, cleared_target)
+    assert cleared.memory.processing.multimodal is None
+
+
 def _save_config(tmp_path) -> None:
     V2Config(
         mode="self_host",
@@ -217,6 +254,87 @@ def test_enabled_rerank_change_runs_typed_preflight_before_persisting(
     }
     assert get_config_path().read_bytes() == config_before
     assert V2Config.load().memory.processing.rerank is None
+
+
+def test_enabled_multimodal_change_runs_typed_preflight_before_persisting(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """MEMORY-IM-ATTACH-001: enabling the endpoint is admitted fail-closed."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(
+        MemoryConfig(
+            enabled=True,
+            processing=MemoryProcessingConfig(
+                llm=MemoryEndpointConfig(
+                    "https://llm.example.test/v1", "chat", "llm-key"
+                ),
+                embedding=MemoryEndpointConfig(
+                    "https://embed.example.test/v1", "embed", "embed-key"
+                ),
+            ),
+        )
+    )
+    from config.paths import get_config_path
+
+    config_before = get_config_path().read_bytes()
+
+    async def preflight(*, payload: dict, user_key: str):
+        multimodal = payload["memory"]["processing"]["multimodal"]
+        assert user_key == "avibe:local"
+        assert multimodal["model"] == "vision-model"
+        assert multimodal["api_key"] == "vision-secret"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_multimodal_unavailable",
+                "diagnostic": {
+                    "side": "multimodal",
+                    "http_status": 401,
+                    "provider_error_code": "invalid_key",
+                    "message": "provider_error",
+                },
+            },
+        }
+
+    async def unexpected_reconcile():
+        pytest.fail("failed multimodal admission must not reconcile or persist")
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    monkeypatch.setattr(internal_client, "reconcile_memory", unexpected_reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {
+                "multimodal": {
+                    "base_url": "https://vision.example.test/v1",
+                    "model": "vision-model",
+                    "api_key": "vision-secret",
+                }
+            }
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_multimodal_unavailable",
+        "diagnostic": {
+            "side": "multimodal",
+            "http_status": 401,
+            "provider_error_code": "invalid_key",
+            "message": "provider_error",
+        },
+    }
+    assert get_config_path().read_bytes() == config_before
+    assert V2Config.load().memory.processing.multimodal is None
 
 
 def _save_remote_config(tmp_path) -> V2Config:

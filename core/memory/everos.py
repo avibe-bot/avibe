@@ -59,6 +59,10 @@ _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
 _PREFLIGHT_TIMEOUT_SECONDS = 5.0
 _PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
+_PREFLIGHT_IMAGE_DATA_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 _PROFILE_QUERY = "profile"
 _MAX_LIST_PAGE_SIZE = 20
 _EVEROS_EXACT_SORT_WINDOW = 20_000
@@ -151,6 +155,7 @@ class MemoryPreflightFailure:
         "memory_embedding_unavailable",
         "memory_llm_unavailable",
         "memory_rerank_unavailable",
+        "memory_multimodal_unavailable",
     ]
     diagnostic: MemoryPreflightDiagnostic
 
@@ -187,6 +192,9 @@ class EverOSPort:
         rerank_base_url: str | None = None,
         rerank_model: str | None = None,
         rerank_api_key: str | None = None,
+        multimodal_base_url: str | None = None,
+        multimodal_model: str | None = None,
+        multimodal_api_key: str | None = None,
         processing_health_check: Callable[[], Awaitable[bool]] | None = None,
         sidecar_timeout_seconds: float = _SIDECAR_TIMEOUT_SECONDS,
         add_timeout_seconds: float = _ADD_TIMEOUT_SECONDS,
@@ -204,6 +212,9 @@ class EverOSPort:
         self._rerank_base_url = _normalized_endpoint_url(rerank_base_url)
         self._rerank_model = _optional_string(rerank_model)
         self._rerank_api_key = _optional_string(rerank_api_key)
+        self._multimodal_base_url = _normalized_endpoint_url(multimodal_base_url)
+        self._multimodal_model = _optional_string(multimodal_model)
+        self._multimodal_api_key = _optional_string(multimodal_api_key)
         self._processing_health_check = processing_health_check
         self._sidecar_timeout_seconds = _positive_timeout(sidecar_timeout_seconds, _SIDECAR_TIMEOUT_SECONDS)
         self._add_timeout_seconds = _positive_timeout(add_timeout_seconds, _ADD_TIMEOUT_SECONDS)
@@ -563,15 +574,23 @@ class EverOSPort:
                 payload={"model": self._embedding_model, "input": "memory health check"},
                 validator=_valid_embedding_probe_response,
             )
-            if not healthy or not self._rerank_configured():
-                return healthy
-            return await self._probe_processing_endpoint(
-                base_url=self._rerank_base_url,
-                api_key=self._rerank_api_key,
-                path=self._rerank_model or "",
-                payload={"queries": ["OK"], "documents": ["OK"]},
-                validator=_valid_rerank_probe_response,
-            )
+            if healthy and self._rerank_configured():
+                healthy = await self._probe_processing_endpoint(
+                    base_url=self._rerank_base_url,
+                    api_key=self._rerank_api_key,
+                    path=self._rerank_model or "",
+                    payload={"queries": ["OK"], "documents": ["OK"]},
+                    validator=_valid_rerank_probe_response,
+                )
+            if healthy and self._multimodal_configured():
+                healthy = await self._probe_processing_endpoint(
+                    base_url=self._multimodal_base_url,
+                    api_key=self._multimodal_api_key,
+                    path="chat/completions",
+                    payload=_multimodal_preflight_payload(self._multimodal_model),
+                    validator=_valid_chat_probe_response,
+                )
+            return healthy
 
     async def preflight(self) -> MemoryPreflightResult:
         """Run one bounded request for each configured processing endpoint."""
@@ -592,6 +611,17 @@ class EverOSPort:
                     self._rerank_model or "",
                     {"queries": ["OK"], "documents": ["OK"]},
                     _valid_rerank_probe_response,
+                )
+            )
+        if self._multimodal_configured():
+            checks.append(
+                (
+                    "multimodal",
+                    self._multimodal_base_url,
+                    self._multimodal_api_key,
+                    "chat/completions",
+                    _multimodal_preflight_payload(self._multimodal_model),
+                    _valid_chat_probe_response,
                 )
             )
         first_failure = None
@@ -646,6 +676,15 @@ class EverOSPort:
 
     def _rerank_configured(self) -> bool:
         return all((self._rerank_base_url, self._rerank_model, self._rerank_api_key))
+
+    def _multimodal_configured(self) -> bool:
+        return all(
+            (
+                self._multimodal_base_url,
+                self._multimodal_model,
+                self._multimodal_api_key,
+            )
+        )
 
     async def _search_data(
         self,
@@ -982,6 +1021,7 @@ class EverOSPort:
                 "llm": self._llm_model,
                 "embedding": self._embedding_model,
                 "rerank": self._rerank_model,
+                "multimodal": self._multimodal_model,
             }.get(side)
             self._preflight_call_recorder(
                 side=side,
@@ -1469,17 +1509,41 @@ def _valid_rerank_probe_response(value: Any) -> bool:
     )
 
 
+def _multimodal_preflight_payload(model: str | None) -> dict[str, Any]:
+    """Build a minimal synthetic vision request containing no user data."""
+
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Reply with OK."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _PREFLIGHT_IMAGE_DATA_URI},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 1,
+        "temperature": 0,
+    }
+
+
 def _preflight_error_name(
-    side: Literal["llm", "embedding", "rerank"],
+    side: Literal["llm", "embedding", "rerank", "multimodal"],
 ) -> Literal[
     "memory_llm_unavailable",
     "memory_embedding_unavailable",
     "memory_rerank_unavailable",
+    "memory_multimodal_unavailable",
 ]:
     return {
         "llm": "memory_llm_unavailable",
         "embedding": "memory_embedding_unavailable",
         "rerank": "memory_rerank_unavailable",
+        "multimodal": "memory_multimodal_unavailable",
     }[side]
 
 

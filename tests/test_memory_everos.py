@@ -1340,6 +1340,107 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
     assert "model" not in recorded[-1]["request"]
 
 
+def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
+    """MEMORY-IM-ATTACH-001: opt-in is admitted with synthetic image data only."""
+
+    requests: list[httpx.Request] = []
+    recorded: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "OK"}}]},
+        )
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            multimodal_base_url="https://vision.example.test/v1",
+            multimodal_model="vision-model",
+            multimodal_api_key="vision-secret",
+            preflight_call_recorder=lambda **kwargs: recorded.append(kwargs),
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests] == [
+        "/v1/chat/completions",
+        "/v1/embeddings",
+        "/v1/chat/completions",
+    ]
+    payload = json.loads(requests[-1].content)
+    assert payload["model"] == "vision-model"
+    assert payload["messages"][0]["content"][0] == {
+        "type": "text",
+        "text": "Reply with OK.",
+    }
+    image_url = payload["messages"][0]["content"][1]["image_url"]["url"]
+    assert image_url.startswith("data:image/png;base64,")
+    assert len(image_url) < 256
+    assert requests[-1].headers["authorization"] == "Bearer vision-secret"
+    assert recorded[-1]["side"] == "multimodal"
+    assert recorded[-1]["model"] == "vision-model"
+
+
+def test_processing_preflight_returns_typed_multimodal_failure() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        if call_count == 3:
+            return httpx.Response(401, json={"error": {"code": "invalid_key"}})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "OK"}}]},
+        )
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            multimodal_base_url="https://vision.example.test/v1",
+            multimodal_model="vision-model",
+            multimodal_api_key="vision-secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert result.failure is not None
+    assert result.failure.error == "memory_multimodal_unavailable"
+    assert result.failure.diagnostic.side == "multimodal"
+    assert result.failure.diagnostic.http_status == 401
+    assert result.failure.diagnostic.provider_error_code == "invalid_key"
+
+
 def test_processing_preflight_returns_typed_rerank_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions"):

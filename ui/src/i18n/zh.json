@@ -1633,6 +1633,7 @@
     "memory_embedding_unavailable": "Embedding 提供商不可用",
     "memory_llm_unavailable": "LLM 提供商不可用",
     "memory_rerank_unavailable": "重排序服务商不可用",
+    "memory_multimodal_unavailable": "附件处理服务商不可用",
     "provider_request_timed_out": "提供商请求超时。",
     "provider_response_too_large": "提供商响应超过安全限制。",
     "provider_unavailable": "提供商不可用。",
@@ -4417,6 +4418,10 @@
       "rerankHelp": "记忆功能用这个模型为高级召回结果评分。填写重排序接口地址、模型名称和 API Key 后即可启用。",
       "rerankHelpLabel": "关于重排序模型",
       "rerankClearLabel": "移除重排序端点",
+      "multimodalTitle": "IM 附件处理模型（可选）",
+      "multimodalHelp": "完整配置后，已绑定私聊中的合规附件会发送到这个兼容 OpenAI 格式的视觉模型端点，用于记忆捕获。",
+      "multimodalHelpLabel": "关于 IM 附件处理",
+      "multimodalClearLabel": "关闭 IM 附件捕获",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "模型",
@@ -4436,7 +4441,7 @@
       "disclosure": [
         "开启后，你的 Workbench 消息和已授权用户的私聊消息会被提炼成记忆。Agent 也可能在未明确要求的情况下主动保存长期信息，包括偏好、纠偏、决策，以及它从文件、转发或共享内容等非纯文本内容中发现的、关于你的设备或账户的长期事实。",
         "本地 Memory 队列会在等待处理时保留原始消息和附件副本。如果一次提交需要人工恢复，即使处理停止，这些副本也可能继续保留。",
-        "提炼记忆时，消息内容会发送到上面配置的模型接口处理，使用搜索时搜索查询也会发送给相应的服务商。这些接口与 Agent 使用的模型是分开的，对方会按其自身政策处理数据。",
+        "提炼记忆时，消息内容会发送到上面配置的模型接口处理，使用搜索时搜索查询也会发送给相应的服务商。配置 IM 附件处理端点后，已绑定私聊中的合规附件也会发送给该服务商。这些接口与 Agent 使用的模型是分开的，对方会按其自身政策处理数据。",
         "Avibe 的本地 Memory 存储保留在这台机器上，其中包括本安装所有用户和项目的脱敏模型调用诊断。诊断仍可能包含敏感对话内容，最多保留 14 天或 5,000 次调用。发送到模型接口的副本不在此本地存储中。关闭记忆只是暂停记录，不会删除已有数据。",
         "「清理记忆数据」会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、记忆条目和待处理的消息。它无法撤回已发送给模型接口的内容，也不会触碰原始聊天记录。",
         "不同平台的账号各自拥有独立的记忆，互不关联。"
@@ -4452,7 +4457,8 @@
       "rebuildCompleted": "记忆索引重建完成。",
       "rebuildFailed": "记忆索引重建失败。",
       "embeddingIdentityHint": "更改向量模型接口地址或模型会重建本地索引，已有记忆不会丢失。",
-      "rerankIdentityHint": "三个字段全部留空时，记忆功能会继续使用标准搜索层级。"
+      "rerankIdentityHint": "三个字段全部留空时，记忆功能会继续使用标准搜索层级。",
+      "multimodalIdentityHint": "完整填写接口地址、模型和 API Key 即表示选择启用；三个字段全部留空时，IM 附件捕获保持关闭。"
     },
     "clear": {
       "button": "清理记忆数据",

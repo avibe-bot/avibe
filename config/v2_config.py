@@ -1011,6 +1011,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
         path = match.group(1)
         if path.startswith("memory.processing.rerank"):
             return "memory.rerank"
+        if path.startswith("memory.processing.multimodal"):
+            return "memory.multimodal"
         if path == "platform":
             return "platforms"
         if path.startswith("agents."):
@@ -1022,6 +1024,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     lowered = message.lower()
     if "memory rerank endpoint" in lowered:
         return "memory.rerank"
+    if "memory multimodal endpoint" in lowered:
+        return "memory.multimodal"
     if "unsupported enabled platform" in lowered:
         return "platforms"
     for platform_id in supported_platform_ids():
@@ -1145,6 +1149,13 @@ def _reset_recoverable_config_section(
         if not isinstance(processing, dict):
             return False
         processing.pop("rerank", None)
+        return True
+    if section == "memory.multimodal":
+        memory = payload.get("memory")
+        processing = memory.get("processing") if isinstance(memory, dict) else None
+        if not isinstance(processing, dict):
+            return False
+        processing.pop("multimodal", None)
         return True
     if section == "runtime":
         # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
@@ -1672,6 +1683,7 @@ class MemoryProcessingConfig:
     llm: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
     embedding: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
     rerank: Optional[MemoryEndpointConfig] = None
+    multimodal: Optional[MemoryEndpointConfig] = None
 
     def validate(self) -> None:
         self.llm.validate(name="llm")
@@ -1683,6 +1695,20 @@ class MemoryProcessingConfig:
             elif not self.rerank.complete():
                 raise ValueError(
                     "Memory rerank endpoint must include base_url, model, and api_key"
+                )
+        if self.multimodal is not None:
+            self.multimodal.validate(name="multimodal")
+            if not any(
+                (
+                    self.multimodal.base_url,
+                    self.multimodal.model,
+                    self.multimodal.api_key,
+                )
+            ):
+                self.multimodal = None
+            elif not self.multimodal.complete():
+                raise ValueError(
+                    "Memory multimodal endpoint must include base_url, model, and api_key"
                 )
 
 
@@ -1825,6 +1851,8 @@ def memory_config_to_payload(
     }
     if memory.processing.rerank is not None:
         processing["rerank"] = endpoint_payload(memory.processing.rerank)
+    if memory.processing.multimodal is not None:
+        processing["multimodal"] = endpoint_payload(memory.processing.multimodal)
     payload = {
         "enabled": memory.enabled,
         "processing": processing,
@@ -1867,6 +1895,12 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
             processing_payload["rerank"],
             name="memory.processing.rerank",
         )
+    multimodal_payload = None
+    if "multimodal" in processing_payload:
+        multimodal_payload = _optional_memory_object(
+            processing_payload["multimodal"],
+            name="memory.processing.multimodal",
+        )
     diagnostics_payload = _optional_memory_object(
         payload.get("diagnostics", {}),
         name="memory.diagnostics",
@@ -1906,6 +1940,16 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
                     **_filter_dataclass_fields(MemoryEndpointConfig, rerank_payload)
                 )
                 if rerank_payload is not None
+                else None
+            ),
+            multimodal=(
+                MemoryEndpointConfig(
+                    **_filter_dataclass_fields(
+                        MemoryEndpointConfig,
+                        multimodal_payload,
+                    )
+                )
+                if multimodal_payload is not None
                 else None
             ),
         ),

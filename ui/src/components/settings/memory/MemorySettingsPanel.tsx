@@ -175,6 +175,7 @@ export const MemorySettingsPanel: React.FC<{
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
   const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+  const [multimodalDraft, setMultimodalDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRebuildOpen, setConfirmRebuildOpen] = useState(false);
@@ -186,6 +187,7 @@ export const MemorySettingsPanel: React.FC<{
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
     setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+    setMultimodalDraft(draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   }, [settings]);
 
   const rebuildRequired = settings.rebuild_required === true;
@@ -215,11 +217,19 @@ export const MemorySettingsPanel: React.FC<{
       false,
       true,
     );
-    if (llmPatch || embeddingPatch || rerankPatch) {
+    const multimodalPatch = buildEndpointPatch(
+      multimodalDraft,
+      settings.processing.multimodal ?? EMPTY_ENDPOINT,
+      allowClear,
+      false,
+      true,
+    );
+    if (llmPatch || embeddingPatch || rerankPatch || multimodalPatch) {
       patch.processing = {};
       if (llmPatch) patch.processing.llm = llmPatch;
       if (embeddingPatch) patch.processing.embedding = embeddingPatch;
       if (rerankPatch) patch.processing.rerank = rerankPatch;
+      if (multimodalPatch) patch.processing.multimodal = multimodalPatch;
     }
     return patch;
   };
@@ -276,7 +286,8 @@ export const MemorySettingsPanel: React.FC<{
         const validationFailure =
           failure.error === 'memory_embedding_unavailable' ||
           failure.error === 'memory_llm_unavailable' ||
-          failure.error === 'memory_rerank_unavailable';
+          failure.error === 'memory_rerank_unavailable' ||
+          failure.error === 'memory_multimodal_unavailable';
         if (!validationFailure || failure.rebuild_required === true) {
           onReloadSettings();
           onReloadMaintenance();
@@ -418,6 +429,19 @@ export const MemorySettingsPanel: React.FC<{
         identityHint={t('memory.settings.rerankIdentityHint')}
         canClearKey={canClearKeys}
         clearKeyLabel={t('memory.settings.rerankClearLabel')}
+      />
+
+      <EndpointFields
+        title={t('memory.settings.multimodalTitle')}
+        help={t('memory.settings.multimodalHelp')}
+        helpLabel={t('memory.settings.multimodalHelpLabel')}
+        draft={multimodalDraft}
+        original={settings.processing.multimodal ?? EMPTY_ENDPOINT}
+        onChange={setMultimodalDraft}
+        disabled={busy}
+        identityHint={t('memory.settings.multimodalIdentityHint')}
+        canClearKey={canClearKeys}
+        clearKeyLabel={t('memory.settings.multimodalClearLabel')}
       />
 
       {error ? (

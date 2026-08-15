@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from config import paths
 from config.v2_config import (
@@ -768,12 +768,14 @@ class MemoryRuntime:
             self._insight_reader = None
             return
         rerank = config.processing.rerank
+        multimodal = config.processing.multimodal
         base_urls = tuple(
             value
             for value in (
                 config.processing.llm.base_url,
                 config.processing.embedding.base_url,
                 rerank.base_url if rerank else None,
+                multimodal.base_url if multimodal else None,
             )
             if value
         )
@@ -783,6 +785,7 @@ class MemoryRuntime:
                 config.processing.llm.api_key,
                 config.processing.embedding.api_key,
                 rerank.api_key if rerank else None,
+                multimodal.api_key if multimodal else None,
             )
             if value
         )
@@ -1312,7 +1315,11 @@ class MemoryRuntime:
 
     async def status_payload(self) -> dict[str, Any]:
         runtime = await self._processing_record.read_status()
-        return _runtime_health_payload(runtime)
+        payload = _runtime_health_payload(runtime)
+        payload["attachment_capture"] = {
+            "status": _attachment_capture_status(self._config, payload.get("health")),
+        }
+        return payload
 
     async def failure_log_payload(
         self,
@@ -2421,6 +2428,21 @@ class MemoryRuntime:
             rerank_base_url=(candidate.processing.rerank.base_url if candidate.processing.rerank else None),
             rerank_model=(candidate.processing.rerank.model if candidate.processing.rerank else None),
             rerank_api_key=(candidate.processing.rerank.api_key if candidate.processing.rerank else None),
+            multimodal_base_url=(
+                candidate.processing.multimodal.base_url
+                if candidate.processing.multimodal
+                else None
+            ),
+            multimodal_model=(
+                candidate.processing.multimodal.model
+                if candidate.processing.multimodal
+                else None
+            ),
+            multimodal_api_key=(
+                candidate.processing.multimodal.api_key
+                if candidate.processing.multimodal
+                else None
+            ),
             preflight_call_recorder=self._record_preflight_call,
         )
         return (await provider.preflight()).payload()
@@ -2442,7 +2464,7 @@ class MemoryRuntime:
             self._call_log_db_path,
             started_at_ms=started_at_ms,
             duration_ms=duration_ms,
-            kind=side,
+            kind="multimodal_llm" if side == "multimodal" else side,
             model=model,
             request=request,
             response=response,
@@ -3630,6 +3652,7 @@ class MemoryRuntime:
 
 def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
     rerank = config.processing.rerank
+    multimodal = config.processing.multimodal
     return {
         "llm_base_url": config.processing.llm.base_url,
         "llm_model": config.processing.llm.model,
@@ -3640,7 +3663,33 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
         "rerank_base_url": rerank.base_url if rerank else None,
         "rerank_model": rerank.model if rerank else None,
         "rerank_api_key": rerank.api_key if rerank else None,
+        "multimodal_base_url": multimodal.base_url if multimodal else None,
+        "multimodal_model": multimodal.model if multimodal else None,
+        "multimodal_api_key": multimodal.api_key if multimodal else None,
     }
+
+
+def _attachment_capture_status(
+    config: MemoryConfig,
+    health: object,
+) -> Literal["ready", "not_configured", "unavailable"]:
+    """Project explicit IM attachment-capture readiness from config and health."""
+
+    if config.processing.multimodal is None:
+        return "not_configured"
+    if not config.enabled:
+        return "unavailable"
+    if not isinstance(health, dict):
+        return "unavailable"
+    capabilities = health.get("capabilities")
+    disabled = health.get("disabled_features")
+    if not isinstance(capabilities, dict) or not isinstance(disabled, list):
+        return "unavailable"
+    if any(feature in disabled for feature in ("multimodal_llm", "parser")):
+        return "unavailable"
+    if capabilities.get("multimodal_llm") is not True or capabilities.get("parser") is not True:
+        return "unavailable"
+    return "ready"
 
 
 def _active_compatible_root_formats(artifact_manager: MemoryArtifactPort) -> tuple[str, ...]:

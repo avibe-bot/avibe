@@ -403,6 +403,7 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
                     "cascade": {},
                     "recorder": {},
                 },
+                "attachment_capture": {"status": "ready"},
             },
         },
     )
@@ -411,6 +412,7 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
     assert capsys.readouterr().out.splitlines() == [
         "记忆来源：数据已过期",
         "EverOS 1.2.3：正常",
+        "IM 附件捕获：可用",
         "来源原因：记忆 sidecar 不可用",
     ]
 
