@@ -4,6 +4,7 @@ import ast
 import asyncio
 import inspect
 import json
+import re
 import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
+    RuntimePlatformUnsupportedError,
     SOURCE_PROTOCOLS,
     SourceObservation,
 )
@@ -130,6 +132,7 @@ class FakeAdapter:
         self.orphan_cleanup_succeeds = False
         self.cancel_disposition = RetainedMaterialDisposition.NONE
         self.start_calls = 0
+        self.install_calls = 0
         self.credential_count = 0
         self.observation: SourceObservation | None = None
         self.observed_protocol_orders: list[tuple[str, ...]] = []
@@ -138,6 +141,13 @@ class FakeAdapter:
         self.discovery_credential_refs: list[str] = []
 
     async def ensure_installed(self):
+        return await self.status()
+
+    async def install(self):
+        self.install_calls += 1
+        return await self.status()
+
+    async def recover_installation(self):
         return await self.status()
 
     async def start(self):
@@ -641,6 +651,23 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
     assert calls == [("runtime_start", None)]
 
 
+def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"contract_version": 5, "status": {"health": "installing"}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+
+    runtime = asyncio.run(ModelHubRemoteService().runtime_install())
+
+    assert runtime["status"]["health"] == "installing"
+    assert calls == [("runtime_install", None)]
+
+
 def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
@@ -650,6 +677,46 @@ def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
 
     assert runtime["status"]["health"] == "ok"
     assert adapter.start_calls == 1
+
+
+def test_runtime_install_is_allowlisted_by_controller_rpc(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    class InstallingAdapter(FakeAdapter):
+        async def install(self):
+            self.install_calls += 1
+            return EngineStatus(
+                health=EngineHealth.INSTALLING,
+                installed_version=None,
+                verified=False,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+        async def status(self):
+            return EngineStatus(
+                health=EngineHealth.NOT_INSTALLED,
+                installed_version=None,
+                verified=False,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    adapter = InstallingAdapter()
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    runtime = asyncio.run(dispatch_model_hub_rpc(service, "runtime_install", {}))
+
+    assert runtime["status"]["health"] == "installing"
+    assert adapter.install_calls == 1
 
 
 def test_runtime_status_reports_observed_not_installed_state(tmp_path):
@@ -683,7 +750,132 @@ def test_runtime_status_reports_observed_not_installed_state(tmp_path):
         "listening": None,
         "health": "not_installed",
         "last_check": None,
+        "error_key": None,
     }
+
+
+def test_runtime_install_enters_one_idempotent_server_owned_job(tmp_path):
+    class InstallingAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.health = EngineHealth.NOT_INSTALLED
+
+        async def install(self):
+            self.install_calls += 1
+            self.health = EngineHealth.INSTALLING
+            return await self.status()
+
+        async def status(self):
+            return EngineStatus(
+                health=self.health,
+                installed_version=None,
+                verified=False,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    adapter = InstallingAdapter()
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    first = asyncio.run(service.runtime_install())
+    repeated = asyncio.run(service.runtime_install())
+    reloaded = asyncio.run(service.runtime_status())
+
+    assert adapter.install_calls == 1
+    assert first == repeated == reloaded
+    assert first["host_platform"]
+    assert first["status"] == {
+        "installed_version": None,
+        "verified": False,
+        "listening": None,
+        "health": "installing",
+        "last_check": None,
+        "error_key": None,
+    }
+    _assert_valid("runtime-dependency.schema.json", first)
+
+
+@pytest.mark.parametrize(
+    "health",
+    [
+        EngineHealth.NOT_STARTED,
+        EngineHealth.OK,
+        EngineHealth.DEGRADED,
+        EngineHealth.DOWN,
+        EngineHealth.INSTALLING,
+    ],
+)
+def test_runtime_install_preserves_every_non_installable_state(tmp_path, health):
+    class ExistingRuntimeAdapter(FakeAdapter):
+        async def install(self):
+            raise AssertionError("only not_installed may start installation")
+
+        async def status(self):
+            installed = health is not EngineHealth.INSTALLING
+            return EngineStatus(
+                health=health,
+                installed_version="v7.2.95" if installed else None,
+                verified=installed,
+                listen_host="127.0.0.1",
+                listen_port=15220 if health is EngineHealth.OK else None,
+                last_check_iso=None,
+            )
+
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=ExistingRuntimeAdapter(),
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    runtime = asyncio.run(service.runtime_install())
+
+    assert runtime["status"]["health"] == health.value
+
+
+def test_runtime_install_rejects_unsupported_server_host_without_mutation(
+    monkeypatch,
+    tmp_path,
+):
+    class NotInstalledAdapter(FakeAdapter):
+        async def install(self):
+            raise RuntimePlatformUnsupportedError
+
+        async def status(self):
+            return EngineStatus(
+                health=EngineHealth.NOT_INSTALLED,
+                installed_version=None,
+                verified=False,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    monkeypatch.setattr(
+        "core.managed_runtime.runtime_platform_tag",
+        lambda: "win32-x64",
+    )
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=NotInstalledAdapter(),
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.runtime_install())
+
+    assert exc_info.value.code == "runtime_platform_unsupported"
+    assert exc_info.value.status == 422
 
 
 def test_discovery_probe_failure_is_not_reported_as_engine_down(tmp_path):
@@ -1376,6 +1568,7 @@ def test_ui_model_hub_rpc_preserves_structured_guard_data():
         ("POST", "/api/models/migration/scan"),
         ("POST", "/api/models/migration/apply"),
         ("GET", "/api/models/runtime/status"),
+        ("POST", "/api/models/runtime/install"),
         ("POST", "/api/models/runtime/start"),
     ],
 )
@@ -1449,6 +1642,54 @@ def test_final_model_hub_route_surface_has_observe_refresh_and_no_saved_test_rou
     assert "POST" in routes["/api/models/sources/{source_id}/refresh"]
     assert all(not path.endswith("/test") for path in routes)
     assert all("/mappings" not in path for path in routes)
+
+
+def test_models_live_api_calls_only_registered_server_routes():
+    source = Path("ui/src/components/settings/models/modelsApi.ts").read_text(
+        encoding="utf-8"
+    )
+    live_api = source.split("const liveApi: ModelsApi = {", 1)[1].split(
+        "// ── Mock client",
+        1,
+    )[0]
+    path_pattern = re.compile(
+        r"'(?P<single>/api/models/[^']*)'|`(?P<template>/api/models/[^`]*)`"
+    )
+
+    path_matches = list(path_pattern.finditer(live_api))
+    assert len(path_matches) == len(re.findall(r"\bcall(?:<|\()", live_api))
+
+    client_routes = set()
+    for match in path_matches:
+        raw_path = match.group("single") or match.group("template")
+        path = re.sub(r"\$\{[^}]*\?[^}]+\}", "", raw_path)
+        path = path.split("?", 1)[0]
+        path = re.sub(r"\$\{[^}]+\}", "{param}", path)
+        next_entry = re.search(
+            r"^  [A-Za-z][A-Za-z0-9]*:",
+            live_api[match.end() :],
+            re.MULTILINE,
+        )
+        entry_tail = (
+            live_api[match.end() : match.end() + next_entry.start()]
+            if next_entry
+            else live_api[match.end() :]
+        )
+        method_match = re.search(r"jsonInit\('(POST|PUT|PATCH|DELETE)'", entry_tail)
+        client_routes.add((method_match.group(1) if method_match else "GET", path))
+
+    server_routes = {
+        (
+            method,
+            re.sub(r"\{[^}]+\}", "{param}", route.path),
+        )
+        for route in app.routes
+        if route.path.startswith("/api/models/")
+        for method in (route.methods or ())
+    }
+
+    assert client_routes
+    assert client_routes <= server_routes
 
 
 def test_unsaved_observation_route_returns_valid_result_and_revokes_transient_ref(
@@ -4336,6 +4577,63 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert adapter.start_calls == 1
     assert runtime["contract_version"] == 5
     _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_install_route_is_reachable_and_persists_installing(
+    monkeypatch,
+    tmp_path,
+):
+    class InstallingAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.health = EngineHealth.NOT_INSTALLED
+
+        async def install(self):
+            self.install_calls += 1
+            self.health = EngineHealth.INSTALLING
+            return await self.status()
+
+        async def status(self):
+            return EngineStatus(
+                health=self.health,
+                installed_version=None,
+                verified=False,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    adapter = InstallingAdapter()
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    rejected = client.post("/api/models/runtime/install", base_url=base_url)
+    accepted = client.post(
+        "/api/models/runtime/install",
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+    repeated = client.post(
+        "/api/models/runtime/install",
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+    reloaded = client.get("/api/models/runtime/status", base_url=base_url)
+
+    assert rejected.status_code == 403
+    assert accepted.status_code == repeated.status_code == reloaded.status_code == 200
+    assert adapter.install_calls == 1
+    assert accepted.get_json()["runtime"] == repeated.get_json()["runtime"]
+    assert repeated.get_json()["runtime"] == reloaded.get_json()["runtime"]
+    assert reloaded.get_json()["runtime"]["status"]["health"] == "installing"
 
 
 def test_runtime_start_route_requires_remote_session(monkeypatch, tmp_path):

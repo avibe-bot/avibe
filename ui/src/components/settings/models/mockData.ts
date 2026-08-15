@@ -356,6 +356,7 @@ export function buildMockRuntime(): RuntimeDependency {
     contract_version: 5,
     manifest: {
       name: 'cliproxyapi',
+      resolution: 'resolved',
       version: 'v7.2.95',
       source_sha: 'f71ec0eb6776854457892452cf28c47f0d658251',
       assets: [],

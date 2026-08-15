@@ -75,6 +75,12 @@ class EngineSupervisor:
             self._stop_locked()
             self._start_locked()
 
+    def note_installation_settled(self) -> None:
+        """Expose a newly verified binary as lazy-started, not previously down."""
+        with self._lock:
+            if not self._is_running_locked():
+                self._start_attempted = False
+
     def invalidate_configs(self) -> None:
         """Remove secret-bearing configs and recreate one only for a live engine."""
         with self._lock:
@@ -92,23 +98,47 @@ class EngineSupervisor:
         with self._lock:
             managed = self.installer.status()
             installed = bool(managed.get("installed"))
+            install_state_reader = getattr(self.installer, "install_state", None)
+            install_state = install_state_reader() if callable(install_state_reader) else None
             listening = None
             if self._is_running_locked() and self._connection is not None:
                 parsed_port = int(self._connection.base_url.rsplit(":", 1)[1])
                 listening = {"host": "127.0.0.1", "port": parsed_port}
                 health = "ok" if self._healthy_locked() else "degraded"
+            elif install_state and install_state.get("state") == "installing":
+                health = "installing"
+            elif install_state and install_state.get("state") == "not_installed":
+                health = "not_installed"
             elif installed:
                 health = "down" if self._start_attempted else "not_started"
             else:
-                health = "down" if self._start_attempted else "not_installed"
+                # A missing or unverifiable binary remains installable even
+                # after an earlier start attempt exposed its absence.
+                health = "not_installed"
+            host_platform_reader = getattr(self.installer, "host_platform", None)
+            host_platform = (
+                host_platform_reader()
+                if callable(host_platform_reader)
+                else str(managed.get("platform") or "")
+            )
             return {
+                "host_platform": host_platform,
                 "manifest": self.installer.contract_manifest(),
                 "status": {
-                    "installed_version": managed.get("version") if installed else None,
-                    "verified": installed,
+                    "installed_version": (
+                        managed.get("version")
+                        if installed and health != "installing"
+                        else None
+                    ),
+                    "verified": installed and health != "installing",
                     "listening": listening,
                     "health": health,
                     "last_check": self._last_check,
+                    "error_key": (
+                        install_state.get("error_key")
+                        if health == "not_installed" and install_state
+                        else None
+                    ),
                 },
             }
 
@@ -124,15 +154,15 @@ class EngineSupervisor:
 
     def _start_locked(self) -> EngineConnection:
         self._start_attempted = True
-        install = self.installer.ensure()
-        if not install.get("ok"):
-            reason = str(install.get("reason") or "engine_install_failed")
+        managed = self.installer.status()
+        binary = self.installer.resolve_engine_path()
+        if binary is None:
+            reason = str(managed.get("reason") or "engine_not_installed")
             raise EngineUnavailableError("models.engine.install_failed", reason=reason)
-        binary = Path(str(install["path"]))
-        install_id = Path(str(install.get("install_dir") or binary.parent)).name
+        install_id = Path(str(managed.get("install_dir") or binary.parent)).name
         instance_dir, runtime_secrets = self.state_store.prepare_instance(
             install_id,
-            rotate=bool(install.get("changed")),
+            rotate=False,
         )
         port = self._port_allocator()
         config_path = instance_dir / "config.yaml"
@@ -177,7 +207,10 @@ class EngineSupervisor:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
-                logger.info("Model Hub engine started on 127.0.0.1 with managed version %s", install.get("version"))
+                logger.info(
+                    "Model Hub engine started on 127.0.0.1 with managed version %s",
+                    managed.get("version"),
+                )
                 return connection
             time.sleep(0.05)
         self._stop_locked()

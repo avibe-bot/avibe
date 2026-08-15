@@ -1186,7 +1186,9 @@ export class MockStore {
     this.runtime.status.health = 'installing';
     this.runtime.status.error_key = null;
     setTimeout(() => {
-      this.runtime.status.installed_version = this.runtime.manifest.version;
+      this.runtime.status.installed_version = this.runtime.manifest.resolution === 'unresolved'
+        ? null
+        : this.runtime.manifest.version;
       this.runtime.status.verified = true;
       this.runtime.status.health = 'not_started';
     }, 1200);

@@ -471,21 +471,30 @@ export type OAuthFlow = {
 // ── runtime-dependency.schema.json ──────────────────────────────────────
 export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed' | 'installing';
 
+type RuntimeManifestAsset = {
+  platform: 'darwin-arm64' | 'darwin-x64' | 'linux-amd64' | 'linux-arm64';
+  url: string;
+  size_bytes: number;
+  sha256: string;
+};
+
+export type RuntimeManifest = {
+  name: 'cliproxyapi';
+  resolution: 'unresolved';
+  assets: [];
+} | {
+  name: 'cliproxyapi';
+  resolution: 'resolved' | 'unsupported';
+  version: string;
+  source_sha: string;
+  assets: RuntimeManifestAsset[];
+};
+
 export type RuntimeDependency = {
   contract_version: typeof CONTRACT_VERSION;
   /** Server host platform, never the browser platform. */
   host_platform?: string;
-  manifest: {
-    name: 'cliproxyapi';
-    version: string;
-    source_sha: string;
-    assets: Array<{
-      platform: 'darwin-arm64' | 'darwin-x64' | 'linux-amd64' | 'linux-arm64';
-      url: string;
-      size_bytes: number;
-      sha256: string;
-    }>;
-  };
+  manifest: RuntimeManifest;
   status: {
     installed_version?: string | null;
     verified: boolean;

@@ -48,6 +48,7 @@ from .adapter import (
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
+    RuntimePlatformUnsupportedError,
     ObservationDiscovery,
     ObservationOutcome,
     SOURCE_PROTOCOLS,
@@ -195,6 +196,12 @@ class V2ModelHubConfigStore:
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
+
+    async def install(self) -> EngineStatus:
+        return await self.status()
+
+    async def recover_installation(self) -> EngineStatus:
+        return await self.status()
 
     async def ensure_installed(self) -> EngineStatus:
         return await self.status()
@@ -528,9 +535,11 @@ def _runtime_payload(status: EngineStatus) -> dict:
     # Import lazily to avoid the runtime adapter's dependency back on this service module.
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
+    manager = EngineRuntimeManager()
     return {
         "contract_version": 5,
-        "manifest": EngineRuntimeManager().contract_manifest(),
+        "host_platform": status.host_platform or manager.host_platform(),
+        "manifest": manager.contract_manifest(),
         "status": {
             "installed_version": status.installed_version,
             "verified": status.verified,
@@ -541,6 +550,11 @@ def _runtime_payload(status: EngineStatus) -> dict:
             ),
             "health": status.health.value,
             "last_check": status.last_check_iso,
+            "error_key": (
+                status.error_key
+                if status.health is EngineHealth.NOT_INSTALLED
+                else None
+            ),
         },
     }
 
@@ -599,6 +613,8 @@ class ModelHubService:
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
         self._engine_preparation_failed = False
+        self._runtime_install_reconcile_lock = asyncio.Lock()
+        self._runtime_install_reconciled = False
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -664,6 +680,8 @@ class ModelHubService:
             raise ModelHubError("mode_switch_blocked", status=409) from None
         except ModelDiscoveryError:
             raise ModelHubError("discovery_failed", status=502) from None
+        except RuntimePlatformUnsupportedError:
+            raise ModelHubError("runtime_platform_unsupported", status=422) from None
         except EngineUnavailableError:
             raise ModelHubError("engine_down", status=503) from None
         except NativeOAuthUnavailableError:
@@ -881,6 +899,22 @@ class ModelHubService:
         }:
             return replace(status, health=EngineHealth.DOWN)
         return status
+
+    async def reconcile_runtime_installation(self) -> EngineStatus | None:
+        if self._runtime_install_reconciled:
+            return None
+        async with self._runtime_install_reconcile_lock:
+            if self._runtime_install_reconciled:
+                return None
+            recover = getattr(self.adapter, "recover_installation", None)
+            recovered = None
+            if callable(recover):
+                recovered = await self._engine_call(recover())
+            self._runtime_install_reconciled = True
+            return recovered if isinstance(recovered, EngineStatus) else None
+
+    async def stop(self) -> None:
+        await self.adapter.stop()
 
     @staticmethod
     def _credential_was_already_revoked(error: Exception) -> bool:
@@ -4269,10 +4303,25 @@ class ModelHubService:
                         raise ModelHubError("engine_down", status=503) from None
 
     async def runtime_status(self) -> dict:
-        status = await self._engine_call(self.adapter.status())
+        status = await self.reconcile_runtime_installation()
+        if status is None:
+            status = await self._engine_call(self.adapter.status())
         return _runtime_payload(self._runtime_status_after_demand(status))
 
+    async def runtime_install(self) -> dict:
+        status = await self.reconcile_runtime_installation()
+        if status is None:
+            status = await self._engine_call(self.adapter.status())
+        status = self._runtime_status_after_demand(status)
+        if status.health is not EngineHealth.NOT_INSTALLED:
+            return _runtime_payload(status)
+        install = getattr(self.adapter, "install", None)
+        if not callable(install):
+            raise ModelHubError("engine_down", status=503)
+        return _runtime_payload(await self._engine_call(install()))
+
     async def runtime_start(self) -> dict:
+        await self.reconcile_runtime_installation()
         await self._prepare_engine_for_demand()
         status = await self._engine_call(self.adapter.start())
         return _runtime_payload(status)
