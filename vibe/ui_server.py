@@ -5502,6 +5502,12 @@ def _web_push_user_key() -> str:
 
     Remote-access sessions carry a subject claim; purely local UI sessions do
     not yet have a user identity, so they share the local install namespace.
+    Subscription identity is durable (#1434): a still-valid session cookie
+    keeps attributing subscriptions and test sends to its subject across
+    sliding-session renewal. Confirmed revocation is enforced by
+    ``parse_session_cookie`` itself (signature, expiry, and current
+    authorization revision), so no separate interactive-refresh cutoff is
+    applied here.
     """
 
     config = _load_remote_access_config()
@@ -5512,15 +5518,47 @@ def _web_push_user_key() -> str:
             payload = remote_access.parse_session_cookie(
                 config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)
             )
-            if (
-                payload
-                and not remote_access.session_needs_authorization_refresh(payload)
-                and payload.get("sub")
-            ):
+            if payload and payload.get("sub"):
                 return f"remote:{payload['sub']}"
         except Exception:
             logger.debug("web push: could not resolve remote user key", exc_info=True)
     return "local"
+
+
+def _web_push_normal_delivery_diagnostics() -> dict:
+    """Explain the normal-path authorization gates for the calling owner.
+
+    The Web Push test send skips the authorization gates that normal inbox
+    delivery applies. Reporting the same evaluation here lets a user see why a
+    test notification arrives while a normal one does not, without exposing
+    protected content or credentials.
+    """
+
+    from core import web_push_notifications
+
+    user_key = _web_push_user_key()
+    try:
+        evaluation = web_push_notifications.evaluate_delivery_authorization_for_context(
+            user_key,
+            getattr(g, "authorization_context", None),
+        )
+    except Exception:
+        logger.debug("web push: normal delivery evaluation failed", exc_info=True)
+        evaluation = {
+            "user_key": user_key,
+            "policy": "unknown",
+            "authorized": None,
+            "disposition": None,
+            "reason": "evaluation_unavailable",
+        }
+    try:
+        evaluation["recent_deliveries"] = web_push_notifications.recent_delivery_dispositions(
+            user_key=user_key,
+        )
+    except Exception:
+        logger.debug("web push: recent delivery lookup failed", exc_info=True)
+        evaluation["recent_deliveries"] = []
+    return evaluation
 
 
 def _workbench_memory_user_id() -> str | None:
@@ -5591,6 +5629,7 @@ def web_push_status():
             "public_key": keys.public_key,
             "subscription_count": subscription_count,
             "current_subscription_enabled": current_subscription is not None,
+            "normal_delivery": _web_push_normal_delivery_diagnostics(),
         }
     )
 
@@ -5690,7 +5729,14 @@ def web_push_test():
                 disable=status_code in {404, 410},
             )
         failed += 1
-    return jsonify({"ok": failed == 0, "sent": sent, "failed": failed})
+    return jsonify(
+        {
+            "ok": failed == 0,
+            "sent": sent,
+            "failed": failed,
+            "normal_delivery": _web_push_normal_delivery_diagnostics(),
+        }
+    )
 
 
 @app.route("/api/cli/detect")

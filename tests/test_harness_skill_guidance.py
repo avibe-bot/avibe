@@ -170,6 +170,25 @@ def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_sta
     assert "independent wake signal" in body
     assert "single wake/no-wake" in body
     assert "caught up or reseeded" in body
+    assert "Omit `--sha`" in body
+    assert "Use `--forever` and one" in body
+    assert "never reseed or replace its state between rounds" in body
+    preferred_section = body.split("### Preferred PR + CI watch", 1)[1]
+    preferred_forever_command = preferred_section.split('vibe watch add \\\n', 1)[
+        1
+    ].split("```", 1)[0]
+    supervisor, waiter = preferred_forever_command.split("  -- \\\n", 1)
+    assert "--timeout 0" in supervisor
+    assert "--timeout 0" in waiter
+    generic_forever_command = body.split('  --name "Monitor PR 151 reviews"', 1)[1].split(
+        "```", 1
+    )[0]
+    supervisor, waiter = generic_forever_command.split("  -- \\\n", 1)
+    assert "--timeout 0" in supervisor
+    assert "--timeout 0" in waiter
+    assert "both sides of the `--` command separator" in body
+    assert "six quiet hours" in body
+    assert '--workflow lint' in body
 
 
 def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
@@ -185,5 +204,12 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
 
     assert "the `pr-delivery-loop` skill for every implementation task" in agents
     assert "use the `background-watch-hook` skill" in agents
+    assert "one durable `--forever` combined PR/CI Watch" in agents
+    assert "one durable `--forever` combined PR watch" in body
+    assert "omit `--sha`" in body
+    assert "per-cycle `--timeout 0`" in body
+    assert "disable the Watch's per-cycle timeout" in agents
+    assert "Never reseed" in body
+    assert "never use `--forever`" not in body
     assert (ROOT / "skills/background-watch-hook/scripts/wait_pr.py").is_file()
     assert (ROOT / "skills/background-watch-hook/scripts/wait_action.py").is_file()
