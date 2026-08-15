@@ -503,16 +503,26 @@ class ManagedWatchStore:
         one to the file backend is a caller bug -- see ``sqlite_backend``.
 
         EVERY way this write can fail to land reloads the mirror (HFR-271). Callers may
-        pass either the cached object or a detached candidate; a landed write publishes
-        that whole object to the mirror in one dictionary assignment. If the write does
-        not stick, its mutation must not either. Reloading on the ``False`` return alone
-        was half the job -- a raised exception rolls the transaction back just as
-        completely, and left the process serving edits the database never accepted.
-        ``reconcile_watches`` chooses which watches keep running from this dict,
-        ``_read_state`` derives the NEXT compare-and-set's expectation from it, and
-        ``_watch_store_call`` swallows the exception, so nothing downstream would ever
-        have corrected it.
+        pass either the cached object or a detached candidate; a landed detached write
+        replaces the cached object's complete namespace in one assignment. That keeps
+        existing references current without exposing a field-by-field transition. If
+        the write does not stick, its mutation must not either. Reloading on the
+        ``False`` return alone was half the job -- a raised exception rolls the
+        transaction back just as completely, and left the process serving edits the
+        database never accepted. ``reconcile_watches`` chooses which watches keep
+        running from this dict, ``_read_state`` derives the NEXT compare-and-set's
+        expectation from it, and ``_watch_store_call`` swallows the exception, so
+        nothing downstream would ever have corrected it.
         """
+
+        def _publish_snapshot() -> None:
+            cached = self._watches.get(watch.id)
+            if cached is None:
+                self._watches[watch.id] = watch
+            elif cached is not watch:
+                # One namespace swap preserves object identity and makes every field
+                # in the persisted snapshot visible at the same publication point.
+                cached.__dict__ = watch.__dict__
 
         try:
             if self._sqlite is None:
@@ -521,7 +531,7 @@ class ManagedWatchStore:
                         "a file-backed watch store cannot commit a queued run with the watch row"
                     )
                 self._save(replacement=watch)
-                self._watches[watch.id] = watch
+                _publish_snapshot()
                 _publish_watch_definitions_updated()
                 return True
             if queued_run is None:
@@ -539,7 +549,7 @@ class ManagedWatchStore:
             self._reload_after_lost_write(watch.id)
             raise
         if landed:
-            self._watches[watch.id] = watch
+            _publish_snapshot()
             _publish_watch_definitions_updated()
             return True
         self.load()

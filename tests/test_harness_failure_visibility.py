@@ -12416,6 +12416,7 @@ def test_watch_cycle_outcome_pair_is_published_atomically(
     assert not writer_errors
     visible_after = store.get_watch(watch.id)
     assert visible_after is not None
+    assert visible_after is visible_before
     assert (visible_after.last_exit_code, visible_after.last_error) == next_outcome
     persisted_after = ManagedWatchStore(tmp_path / "watches.json").get_watch(watch.id)
     assert persisted_after is not None
