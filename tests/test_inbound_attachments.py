@@ -29,6 +29,16 @@ class _StubClient:
         return FileDownloadResult(True)
 
 
+class _LegacyPathClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def download_file_to_path(self, file_info, target_path):
+        self.calls += 1
+        Path(target_path).write_bytes(b"legacy")
+        return FileDownloadResult(True)
+
+
 @pytest.mark.asyncio
 async def test_materializer_publishes_one_private_reference_counted_lease(tmp_path: Path) -> None:
     home = tmp_path / "avibe-home"
@@ -134,3 +144,26 @@ async def test_materializer_adoption_preserves_agent_owned_files(tmp_path: Path)
     batch.lease.release()
 
     assert path.read_bytes() == b"notes"
+
+
+@pytest.mark.asyncio
+async def test_materializer_preserves_legacy_two_argument_path_clients(tmp_path: Path) -> None:
+    home = tmp_path / "avibe-home"
+    client = _LegacyPathClient()
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("legacy.txt", "text/plain", url="ref", size=6)],
+    )
+
+    batch = await InboundAttachmentMaterializer(effective_home=home).materialize(
+        context,
+        client,
+        max_bytes=10,
+        timeout_seconds=7,
+    )
+
+    assert client.calls == 1
+    assert batch.attachments[0].size == 6
+    batch.lease.release()

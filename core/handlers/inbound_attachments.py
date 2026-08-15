@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import re
 import secrets
@@ -221,8 +222,11 @@ class InboundAttachmentMaterializer:
                 result = await stream_download(
                     file_info,
                     str(partial_path),
-                    max_bytes=max_bytes,
-                    timeout_seconds=timeout_seconds,
+                    **_supported_download_options(
+                        stream_download,
+                        max_bytes=max_bytes,
+                        timeout_seconds=timeout_seconds,
+                    ),
                 )
                 if not isinstance(result, FileDownloadResult):
                     result = FileDownloadResult(bool(result))
@@ -313,6 +317,30 @@ def _download_info(context: MessageContext, attachment: FileAttachment) -> dict[
         if key not in {"name", "mimetype", "url", "content", "local_path", "size"}:
             info[key] = value
     return info
+
+
+def _supported_download_options(
+    download: Any,
+    *,
+    max_bytes: int | None,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Pass optional bounds only to clients whose method contract accepts them."""
+
+    try:
+        parameters = inspect.signature(download).parameters
+    except (TypeError, ValueError):
+        return {}
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    options: dict[str, Any] = {}
+    if accepts_kwargs or "max_bytes" in parameters:
+        options["max_bytes"] = max_bytes
+    if accepts_kwargs or "timeout_seconds" in parameters:
+        options["timeout_seconds"] = timeout_seconds
+    return options
 
 
 def _sanitize_filename(name: object) -> str:
