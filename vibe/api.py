@@ -9700,18 +9700,20 @@ def get_codex_auth() -> dict:
     except Exception:
         configured_mode = None
         configured_base_url = None
+    from vibe.codex_config import verify_codex_relay_marker
 
-    # Disk-first with the V2Config capture as fallback. The disk chain
-    # (active provider → managed → legacy) is what a live Codex launch
-    # would use. After an OAuth transition clears the provider pointer,
-    # the user's relay section is orphaned and unreadable on disk — the
-    # V2Config value captured at that transition
+    # Disk-first with a verified V2Config capture as fallback. The disk
+    # chain (active provider → managed → legacy) is what a live Codex
+    # launch would use. After an OAuth transition clears the provider
+    # pointer, the user's relay section is orphaned and unreadable on
+    # disk — the V2Config value captured at that transition
     # (``AgentAuthService._persist_backend_auth_mode``) is the persisted
-    # recovery marker, so the Settings form still pre-populates and the
-    # next API-key save restores the relay instead of silently sending
-    # the key to ``api.openai.com``.
-    if isinstance(configured_base_url, str) and configured_base_url.strip():
-        effective_base_url: str | None = disk_state.get("base_url") or configured_base_url.strip()
+    # recovery marker. The marker is only honored when the disk still
+    # carries a provider section with the same URL, so a URL the user
+    # removed from ``config.toml`` is not resurrected from a stale cache.
+    configured_relay = verify_codex_relay_marker(configured_base_url)
+    if configured_relay:
+        effective_base_url: str | None = disk_state.get("base_url") or configured_relay
     else:
         effective_base_url = disk_state.get("base_url")
 
@@ -9872,6 +9874,19 @@ def save_codex_auth(payload: dict) -> dict:
                     stored_codex = getattr(getattr(existing_cfg, "agents", None), "codex", None)
                     effective_base_url = getattr(stored_codex, "base_url", None) or None
                 except Exception:
+                    effective_base_url = None
+            if effective_base_url:
+                # Cache values are only honored when the disk still
+                # carries a matching provider section (the orphaned
+                # OAuth shape). A URL the user deleted from
+                # ``config.toml`` must not come back from the cache —
+                # saving through that path also clears the stale cache.
+                try:
+                    from vibe.codex_config import verify_codex_relay_marker
+
+                    effective_base_url = verify_codex_relay_marker(effective_base_url)
+                except Exception:
+                    logger.debug("Codex cached base_url verification failed", exc_info=True)
                     effective_base_url = None
 
     from vibe.codex_config import apply_codex_auth

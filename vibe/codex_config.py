@@ -441,6 +441,37 @@ def apply_codex_auth(
     return {"notices": notices}
 
 
+def verify_codex_relay_marker(
+    configured_base_url: Optional[str], home: Path | None = None
+) -> Optional[str]:
+    """Return ``configured_base_url`` only when the disk still corroborates it.
+
+    The V2Config ``agents.codex.base_url`` doubles as the OAuth-transition
+    relay marker, but a cache value alone is not proof the relay still
+    exists: the user may have removed the URL from ``config.toml`` while
+    the cache still holds it. Recovery (Settings pre-population, the
+    omitted-``base_url`` save fallback) must only honor the marker when
+    some provider section on disk still carries the exact same URL —
+    which is precisely the orphaned-section shape the OAuth pointer-clear
+    leaves behind. Anything else reads as "the user removed it" and
+    returns ``None`` so callers fall through to no relay.
+    """
+    if not isinstance(configured_base_url, str) or not configured_base_url.strip():
+        return None
+    target = configured_base_url.strip()
+    config_path, _ = get_codex_config_paths(home)
+    providers = _load_toml(config_path).get("model_providers")
+    if not isinstance(providers, dict):
+        return None
+    for section in providers.values():
+        if not isinstance(section, dict):
+            continue
+        raw = section.get("base_url")
+        if isinstance(raw, str) and raw.strip() == target:
+            return target
+    return None
+
+
 def read_codex_api_key(home: Path | None = None) -> Optional[str]:
     """Return the API key currently stored in ``auth.json``, if any.
 

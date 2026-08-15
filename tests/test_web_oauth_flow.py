@@ -362,6 +362,12 @@ def test_codex_oauth_success_clears_api_key_state(
     assert codex_cfg.base_url == "https://relay.example/v1"
     assert saves == ["saved"]
 
+    # A repeated OAuth transition captures nothing (the pointer is
+    # already gone) and must RETAIN the marker rather than erase it —
+    # erasing would lose the relay for the eventual switch-back.
+    _run(service._invoke_post_web_success_hook("codex"))
+    assert codex_cfg.base_url == "https://relay.example/v1"
+
 
 def test_post_web_success_hook_swallows_exceptions(
     service: AgentAuthService,

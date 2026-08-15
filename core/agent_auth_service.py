@@ -3877,22 +3877,26 @@ class AgentAuthService:
                         # Retain (or capture) the relay URL as the OAuth
                         # transition's recovery marker — Codex's OAuth
                         # runtime never reads V2Config.base_url; only the
-                        # Settings UI and the next API-key save do.
-                        target.base_url = captured_codex_relay
+                        # Settings UI and the next API-key save do. A
+                        # repeated OAuth transition captures nothing (the
+                        # pointer is already gone), so never overwrite an
+                        # existing marker with an empty capture; only an
+                        # explicit API-key save or sign-out clears it.
+                        target.base_url = captured_codex_relay or getattr(
+                            target, "base_url", None
+                        )
                     saver()
             except ImportError:
-                if needs_mode_write:
-                    target.auth_mode = auth_mode
-                if needs_marker_write:
-                    target.auth_mode_set = True
-                if needs_codex_oauth_cleanup:
-                    target.api_key = None
-                    # Retain (or capture) the relay URL as the OAuth
-                    # transition's recovery marker — Codex's OAuth runtime
-                    # never reads V2Config.base_url; only the Settings UI
-                    # and the next API-key save do.
-                    target.base_url = captured_codex_relay
-                saver()
+                    if needs_mode_write:
+                        target.auth_mode = auth_mode
+                    if needs_marker_write:
+                        target.auth_mode_set = True
+                    if needs_codex_oauth_cleanup:
+                        target.api_key = None
+                        target.base_url = captured_codex_relay or getattr(
+                            target, "base_url", None
+                        )
+                    saver()
             if loaded_config is not None and config is not None:
                 compat_target = getattr(config, backend, None)
                 if compat_target is not None:
@@ -3902,7 +3906,11 @@ class AgentAuthService:
                         setattr(compat_target, "auth_mode_set", True)
                     if needs_codex_oauth_cleanup:
                         setattr(compat_target, "api_key", None)
-                        setattr(compat_target, "base_url", captured_codex_relay)
+                        setattr(
+                            compat_target,
+                            "base_url",
+                            captured_codex_relay or getattr(compat_target, "base_url", None),
+                        )
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",
