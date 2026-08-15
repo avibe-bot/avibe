@@ -43,4 +43,16 @@ describe('mutation settlement fences', () => {
     expect(detail).toContain('settlement.source');
     expect(detail).toContain('settlement.gone');
   });
+
+  it('carries the surface landing verdict through every Source settlement', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const page = readFileSync(resolve(here, 'SettingsModelsPage.tsx'), 'utf8');
+    const refresh = page.slice(page.indexOf('const refresh = React.useCallback'), page.indexOf('\n\n  const trackSourceMutation'));
+    const settlement = page.slice(page.indexOf('const trackSourceMutation'), page.indexOf('\n\n  React.useEffect', page.indexOf('const trackSourceMutation')));
+
+    expect(refresh).toMatch(/Promise<SourceMutationLanding>/);
+    expect(refresh).toMatch(/\? 'landed'\s*:\s*'degraded'/);
+    expect(settlement).toMatch(/Promise<SourceMutationLanding>/);
+    expect(settlement).toMatch(/return reconcile \? refresh\(\) : 'landed'/);
+  });
 });

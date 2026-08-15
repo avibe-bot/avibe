@@ -1,0 +1,182 @@
+{
+  "display_names": [
+    {
+      "id": "ordinary",
+      "value": "Relay key",
+      "valid": true
+    },
+    {
+      "id": "empty",
+      "value": "",
+      "valid": false,
+      "reason": "displayNameRequired"
+    },
+    {
+      "id": "too_long",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false,
+      "reason": "displayNameTooLong"
+    },
+    {
+      "id": "credential_material",
+      "value": "sk-test-never-persist-this",
+      "valid": false,
+      "reason": "displayNameCredential"
+    }
+  ],
+  "base_urls": [
+    {
+      "id": "https_trailing_slash",
+      "value": "https://relay.example/v2/",
+      "valid": true,
+      "client_rejects": false,
+      "normalized": "https://relay.example/v2"
+    },
+    {
+      "id": "uppercase_scheme",
+      "value": "HTTPS://relay.example/v2/",
+      "valid": true,
+      "client_rejects": false,
+      "normalized": "https://relay.example/v2"
+    },
+    {
+      "id": "safe_query",
+      "value": "https://relay.example/v2?api-version=2026-08-15",
+      "valid": true,
+      "client_rejects": false,
+      "normalized": "https://relay.example/v2?api-version=2026-08-15"
+    },
+    {
+      "id": "explicit_default_port",
+      "value": "https://relay.example:443/v1",
+      "valid": true,
+      "client_rejects": false,
+      "normalized": "https://relay.example:443/v1"
+    },
+    {
+      "id": "uppercase_host",
+      "value": "https://Relay.Example/v1",
+      "valid": true,
+      "client_rejects": false,
+      "normalized": "https://Relay.Example/v1"
+    },
+    {
+      "id": "bad_scheme",
+      "value": "ftp://relay.example/v2",
+      "valid": false,
+      "client_rejects": false
+    },
+    {
+      "id": "userinfo",
+      "value": "https://user:password@relay.example/v2",
+      "valid": false,
+      "client_rejects": false
+    },
+    {
+      "id": "fragment",
+      "value": "https://relay.example/v2#token",
+      "valid": false,
+      "client_rejects": false
+    },
+    {
+      "id": "missing_authority",
+      "value": "https:relay.example",
+      "valid": false,
+      "client_rejects": false
+    },
+    {
+      "id": "single_slash_authority",
+      "value": "https:/relay.example",
+      "valid": false,
+      "client_rejects": false
+    },
+    {
+      "id": "credential_query",
+      "value": "https://relay.example/v2?access_token=do-not-store",
+      "valid": false,
+      "client_rejects": true,
+      "reason": "baseUrlCredential"
+    },
+    {
+      "id": "credential_pattern",
+      "value": "https://relay.example/sk-test-never-persist-this",
+      "valid": false,
+      "client_rejects": true,
+      "reason": "baseUrlCredential"
+    }
+  ],
+  "empty_targets": [
+    {
+      "id": "anthropic_anthropic",
+      "vendor": "anthropic",
+      "protocol": "anthropic",
+      "server_valid": true
+    },
+    {
+      "id": "anthropic_openai_responses",
+      "vendor": "anthropic",
+      "protocol": "openai_responses",
+      "server_valid": false
+    },
+    {
+      "id": "anthropic_openai_chat",
+      "vendor": "anthropic",
+      "protocol": "openai_chat",
+      "server_valid": false
+    },
+    {
+      "id": "openai_anthropic",
+      "vendor": "openai",
+      "protocol": "anthropic",
+      "server_valid": false
+    },
+    {
+      "id": "openai_openai_responses",
+      "vendor": "openai",
+      "protocol": "openai_responses",
+      "server_valid": true
+    },
+    {
+      "id": "openai_openai_chat",
+      "vendor": "openai",
+      "protocol": "openai_chat",
+      "server_valid": true
+    },
+    {
+      "id": "codex_anthropic",
+      "vendor": "codex",
+      "protocol": "anthropic",
+      "server_valid": false
+    },
+    {
+      "id": "codex_openai_responses",
+      "vendor": "codex",
+      "protocol": "openai_responses",
+      "server_valid": true
+    },
+    {
+      "id": "codex_openai_chat",
+      "vendor": "codex",
+      "protocol": "openai_chat",
+      "server_valid": false
+    },
+    {
+      "id": "custom_anthropic",
+      "vendor": "custom",
+      "protocol": "anthropic",
+      "server_valid": false
+    },
+    {
+      "id": "custom_openai_responses",
+      "vendor": "custom",
+      "protocol": "openai_responses",
+      "server_valid": false
+    },
+    {
+      "id": "custom_openai_chat",
+      "vendor": "custom",
+      "protocol": "openai_chat",
+      "server_valid": false
+    }
+  ]
+}

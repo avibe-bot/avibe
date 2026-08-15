@@ -42,10 +42,12 @@ export const createSourceCreatedDelivery = () => {
 
 export type SourceInventorySnapshot = { snapshot: number; sources: Source[] };
 
+export type SourceMutationLanding = 'landed' | 'degraded';
+
 export type SourceMutationSettlement = {
-  source: (source: Source) => Promise<void>;
-  gone: (sourceId: string, inventory?: SourceInventorySnapshot) => Promise<void>;
-  unread: () => Promise<void>;
+  source: (source: Source) => Promise<SourceMutationLanding>;
+  gone: (sourceId: string, inventory?: SourceInventorySnapshot) => Promise<SourceMutationLanding>;
+  unread: () => Promise<SourceMutationLanding>;
   release: () => void;
   readInventory: () => Promise<SourceInventorySnapshot>;
 };

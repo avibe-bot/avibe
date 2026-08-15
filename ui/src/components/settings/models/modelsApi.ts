@@ -63,6 +63,15 @@ export type CredentialReplacement = {
   removed_hops: RouteHopRef[];
   interrupted: SupplyGap[];
 };
+export type SourcePatched = {
+  source: Source;
+  removed_hops: RouteHopRef[];
+  interrupted: SupplyGap[];
+};
+export type SourceDeleted = {
+  removed_hops: RouteHopRef[];
+  interrupted: SupplyGap[];
+};
 export type GuardConfirmation = {
   force: true;
   would_remove_hops: RouteHopRef[];
@@ -100,14 +109,14 @@ export type ModelsApi = {
   observeApiKeySource(draft: ApiKeySourceObservation, signal?: AbortSignal): Promise<SourceObservation>;
   createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated>;
   /** Rename / re-point a source (display_name, base_url). */
-  patchSource(id: string, patch: SourcePatch): Promise<Source>;
+  patchSource(id: string, patch: SourcePatch): Promise<SourcePatched>;
   /** Re-run discovery on a hub source; resolves with the updated source and count.
    *  Contractually ALSO the recovery test: run on a needs_action / error source
    *  it clears the blocker and returns the source to standby. v3 adds no second
    *  「recover」 endpoint, so this is the whole retry affordance. */
   refreshSource(id: string, confirmation?: GuardConfirmation): Promise<SourceRefresh>;
   /** Delete a source. A destructive retry echoes the server's exact guard plan. */
-  deleteSource(id: string, confirmation?: GuardConfirmation): Promise<void>;
+  deleteSource(id: string, confirmation?: GuardConfirmation): Promise<SourceDeleted>;
   /** Replace the credential of a hub-channel api_key source. The normal guarded
    *  mutation tail reports every route hop removed and model interrupted. */
   replaceCredential(id: string, body: CredentialReplace): Promise<CredentialReplacement>;
@@ -363,6 +372,28 @@ const credentialReplacement = (r: CredentialReplacementResponse): CredentialRepl
   interrupted: supplyGaps(r.interrupted),
 });
 
+type SourcePatchedResponse = {
+  source?: Source;
+  removed_hops?: RouteHopRef[];
+  interrupted?: SupplyGap[];
+} & Source;
+
+const sourcePatched = (r: SourcePatchedResponse): SourcePatched => ({
+  source: (r.source ?? r) as Source,
+  removed_hops: routeHopRefs(r.removed_hops),
+  interrupted: supplyGaps(r.interrupted),
+});
+
+type SourceDeletedResponse = {
+  removed_hops?: RouteHopRef[];
+  interrupted?: SupplyGap[];
+};
+
+const sourceDeleted = (r: SourceDeletedResponse): SourceDeleted => ({
+  removed_hops: routeHopRefs(r.removed_hops),
+  interrupted: supplyGaps(r.interrupted),
+});
+
 /** The oauth terminal envelope, unwrapped without discarding either tail. */
 export type OAuthResultResponse = { flow?: OAuthFlow } & OAuthFlow &
   AdoptionTail & {
@@ -412,15 +443,15 @@ const liveApi: ModelsApi = {
   // and no later read can put it back: `/agents` shows today's orders, not which
   // of them this commit changed.
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
-  patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
+  patchSource: (id, patch) => call<SourcePatchedResponse>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then(sourcePatched),
   refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
-  deleteSource: (id, confirmation) => call(
+  deleteSource: (id, confirmation) => call<SourceDeletedResponse>(
     `/api/models/sources/${encodeURIComponent(id)}${confirmation ? '?force=true' : ''}`,
     jsonInit('DELETE', confirmation ? {
       would_remove_hops: confirmation.would_remove_hops,
       would_interrupt: confirmation.would_interrupt,
     } : undefined),
-  ).then(() => undefined),
+  ).then(sourceDeleted),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
   // and carry no `contract_version` — the same closed-body rule as putAgentSources.
@@ -493,7 +524,8 @@ const listedModelIdsForPlacement = (agent: AgentSupply): string[] => {
   return [...new Set(values)];
 };
 
-class MockStore {
+/** Exported so tests can assert mock/live contract parity over the seeded store. */
+export class MockStore {
   sources = buildMockSources();
   agents = buildMockAgents(this.sources);
   events = buildMockEvents();
@@ -686,17 +718,23 @@ class MockStore {
    * Reporting per (backend, model) with the Agents that run it is also what makes
    * the confirm copy nameable — 「删除后 pm 将没有可用来源」.
    */
-  private wouldInterrupt(candidate: Source[]): SupplyGap[] {
+  private wouldInterrupt(candidate: Source[], removedHops: RouteHopRef[] = []): SupplyGap[] {
     const byId = new Map(candidate.map((s) => [s.id, s]));
+    const removed = new Set(removedHops.map((hop) =>
+      `${hop.backend}\u0000${hop.menu_model}\u0000${hop.source_id}\u0000${hop.model_id}`));
     const gaps: SupplyGap[] = [];
     for (const a of this.agents) {
       if (a.mode !== 'hub') continue;
       const model = a.selected_model_id;
       if (!model) continue;
       const hops = a.routes?.[model]?.hops ?? [];
-      const survives = hops
-        .map((hop) => byId.get(hop.source_id))
-        .some((s) => s !== undefined && isRunnable(s));
+      const survives = hops.some((hop) => {
+        if (removed.has(`${a.backend}\u0000${model}\u0000${hop.source_id}\u0000${hop.model_id}`)) return false;
+        const source = byId.get(hop.source_id);
+        return source !== undefined
+          && source.models.some((entry) => entry.id === hop.model_id && entry.retired !== true)
+          && isRunnable(source);
+      });
       if (survives) continue;
       gaps.push({
         backend: a.backend,
@@ -709,16 +747,53 @@ class MockStore {
 
   deleteSource(id: string, confirmation?: GuardConfirmation) {
     this.syncAgents();
+    const removedHops: RouteHopRef[] = this.agents.flatMap((agent) =>
+      Object.entries(agent.routes ?? {}).flatMap(([menuModel, route]) =>
+        route.hops.flatMap((hop, index) => hop.source_id === id
+          ? [{
+              backend: agent.backend,
+              menu_model: menuModel,
+              source_id: hop.source_id,
+              model_id: hop.model_id,
+              position: index + 1,
+            }]
+          : [])));
     const remaining = this.sources.filter((s) => s.id !== id);
-    // `source_last_supplier` — the code the contract actually sends here.
-    // `mode_switch_blocked` belongs to the mode route, and a client written
-    // against it retried nothing on a real refusal.
     const gaps = this.wouldInterrupt(remaining);
-    if (gaps.length > 0 && !confirmation)
-      throw new ApiCallError('source_last_supplier', undefined, true, gaps);
+    const confirmed = confirmation !== undefined
+      && JSON.stringify(confirmation.would_remove_hops) === JSON.stringify(removedHops)
+      && JSON.stringify(confirmation.would_interrupt) === JSON.stringify(gaps);
+    if ((removedHops.length > 0 || gaps.length > 0) && !confirmed) {
+      // Routed deletion wins over last-supplier: this mirrors delete_source's
+      // `_require_guard_plan(error=...)` choice, not the mode-switch route.
+      throw new ApiCallError(
+        removedHops.length > 0 ? 'source_in_route_chain' : 'source_last_supplier',
+        undefined,
+        true,
+        gaps,
+        [],
+        removedHops,
+      );
+    }
     this.sources = remaining;
-    // Orders and the rollup are recomputed on the next read (syncAgents).
-    return delay(undefined);
+    for (const agent of this.agents) {
+      if (agent.sources) {
+        agent.sources = {
+          ...agent.sources,
+          order: agent.sources.order.filter((sourceId) => sourceId !== id),
+        };
+      }
+      if (agent.routes) {
+        agent.routes = Object.fromEntries(
+          Object.entries(agent.routes).map(([menuModel, route]) => [
+            menuModel,
+            { hops: route.hops.filter((hop) => hop.source_id !== id) },
+          ]),
+        );
+      }
+    }
+    this.syncAgents();
+    return delay({ removed_hops: removedHops, interrupted: gaps });
   }
 
   replaceCredential(id: string, body: CredentialReplace) {
@@ -1294,11 +1369,91 @@ class MockStore {
   }
 
   patchSource(id: string, patch: SourcePatch) {
-    const source = this.sources.find((s) => s.id === id);
+    this.syncAgents();
+    const sourceIndex = this.sources.findIndex((s) => s.id === id);
+    const source = this.sources[sourceIndex];
     if (!source) throw new ApiCallError('source_not_found');
-    if (typeof patch.display_name === 'string') source.display_name = patch.display_name;
-    if ('base_url' in patch && source.kind === 'api_key') source.base_url = patch.base_url ?? null;
-    return delay(structuredClone(source), 300);
+    const candidate = structuredClone(source);
+    if (typeof patch.display_name === 'string') candidate.display_name = patch.display_name;
+    const nextBaseUrl = patch.base_url ?? null;
+    const endpointChanged = 'base_url' in patch && (source.base_url ?? null) !== nextBaseUrl;
+    if (!endpointChanged) {
+      this.sources[sourceIndex] = candidate;
+      return delay({ source: structuredClone(candidate), removed_hops: [], interrupted: [] }, 300);
+    }
+    if (source.kind !== 'api_key' || source.supply_channel !== 'hub' || !source.credential_ref) {
+      throw new ApiCallError('discovery_failed');
+    }
+
+    // A target from the visual fixture rediscovers that target's known inventory;
+    // any other endpoint gets the fake server's deterministic vendor inventory.
+    const seededInventory = buildMockSources().find((item) =>
+      item.kind === 'api_key'
+      && item.vendor === source.vendor
+      && item.protocol === source.protocol
+      && (item.base_url ?? null) === nextBaseUrl);
+    const discoveredIds = seededInventory
+      ? seededInventory.models.filter((model) => model.origin === 'discovered').map((model) => model.id)
+      : Array.from({ length: mockDiscoveredCount(source.vendor) }, (_, index) => `${source.vendor}-model-${index + 1}`);
+    const previousById = new Map(source.models.map((model) => [model.id, model]));
+    const manualModels = candidate.models.filter((model) => model.origin === 'manual');
+    const manualIds = new Set(manualModels.map((model) => model.id));
+    const discoveredAt = new Date().toISOString();
+    candidate.base_url = nextBaseUrl;
+    candidate.credential_ref = rid('cred');
+    candidate.models = [
+      ...discoveredIds.filter((modelId) => !manualIds.has(modelId)).map((modelId) => {
+        const previous = previousById.get(modelId);
+        return {
+          id: modelId,
+          display_name: previous?.display_name ?? null,
+          origin: 'discovered' as const,
+          reasoning_efforts: [...(previous?.reasoning_efforts ?? [])],
+          discovered_at: discoveredAt,
+        };
+      }),
+      ...manualModels,
+    ];
+    candidate.last_discovered_at = discoveredAt;
+    candidate.state = { status: 'standby', retry_at: null, detail_key: null };
+    const candidateModelIds = new Set(candidate.models.filter((model) => model.retired !== true).map((model) => model.id));
+    const removedHops: RouteHopRef[] = this.agents.flatMap((agent) =>
+      Object.entries(agent.routes ?? {}).flatMap(([menuModel, route]) =>
+        route.hops.flatMap((hop, index) => hop.source_id === id && !candidateModelIds.has(hop.model_id)
+          ? [{ backend: agent.backend, menu_model: menuModel, ...hop, position: index + 1 }]
+          : [])));
+    const candidateSources = this.sources.map((item, index) => index === sourceIndex ? candidate : item);
+    const gaps = this.wouldInterrupt(candidateSources, removedHops);
+    const confirmed = patch.force === true
+      && JSON.stringify(patch.would_remove_hops) === JSON.stringify(removedHops)
+      && JSON.stringify(patch.would_interrupt) === JSON.stringify(gaps);
+    if ((removedHops.length > 0 || gaps.length > 0) && !confirmed) {
+      throw new ApiCallError(
+        removedHops.length > 0 ? 'source_model_in_route_chain' : 'source_last_supplier',
+        undefined,
+        true,
+        gaps,
+        [],
+        removedHops,
+      );
+    }
+
+    this.sources[sourceIndex] = candidate;
+    const removed = new Set(removedHops.map((hop) =>
+      `${hop.backend}\u0000${hop.menu_model}\u0000${hop.source_id}\u0000${hop.model_id}`));
+    for (const agent of this.agents) {
+      agent.routes = Object.fromEntries(
+        Object.entries(agent.routes ?? {}).map(([menuModel, route]) => [
+          menuModel,
+          {
+            hops: route.hops.filter((hop) =>
+              !removed.has(`${agent.backend}\u0000${menuModel}\u0000${hop.source_id}\u0000${hop.model_id}`)),
+          },
+        ]),
+      );
+    }
+    this.syncAgents();
+    return delay({ source: structuredClone(candidate), removed_hops: removedHops, interrupted: gaps }, 300);
   }
 
   refreshSource(id: string, _confirmation?: GuardConfirmation) {

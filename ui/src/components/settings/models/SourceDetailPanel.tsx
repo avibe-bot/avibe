@@ -10,7 +10,26 @@ import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
+import { classifyModelHubFailure } from './asyncLifetime';
+import { Field } from './dialogFields';
 import { GuardImpact } from './GuardImpact';
+import {
+  assessSourceEdit,
+  canEditSourceEndpoint,
+  holdsCommittedImpact,
+  manageActions,
+  MANAGE_DESTINATION,
+  MANAGE_LABEL_KEY,
+  SOURCE_EDIT_REASON_KEY,
+  transitionManageStage,
+} from './manage';
+import type {
+  ManageGuardPlan,
+  ManageKind,
+  ManageStage,
+  SourceEditDraft,
+} from './manage';
 import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { handOffProviderTab } from './providerTab';
@@ -20,7 +39,7 @@ import { sourceStatePresentation } from './sourceStatePresentation';
 import { tierMutationPayload, type TierMutationIntent } from './tierMutation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
-import type { RouteHopRef, Source, SuppliedModel, SupplyGap } from './types';
+import type { RouteHopRef, Source, SourcePatch, SuppliedModel, SupplyGap } from './types';
 
 const ManualModelMenu: React.FC<{
   model: SuppliedModel;
@@ -43,15 +62,65 @@ const ManualModelMenu: React.FC<{
   );
 };
 
-type GuardedAction =
-  | { kind: 'refetch'; hops: RouteHopRef[]; gaps: SupplyGap[] }
-  | { kind: 'remove'; model: SuppliedModel; hops: RouteHopRef[]; gaps: SupplyGap[] };
+const SourceManageMenu: React.FC<{
+  source: Source;
+  busy: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+}> = ({ source, busy, onEdit, onDelete }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = React.useState(false);
+  const label = t('settings.models.sourceDetail.manage.label', { source: source.display_name }) as string;
+  const activate = (kind: ManageKind) => {
+    setOpen(false);
+    if (kind === 'edit_source') onEdit();
+    else onDelete();
+  };
+  return (
+    <ResponsiveMenu
+      open={open}
+      onOpenChange={setOpen}
+      sheetTitle={source.display_name}
+      className="w-44"
+      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="grid size-8 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
+    >
+      {manageActions().map((kind) => (
+        <button
+          key={kind}
+          type="button"
+          role="menuitem"
+          data-manage-kind={kind}
+          data-manage-destination={MANAGE_DESTINATION[kind]}
+          className={cn(
+            'flex w-full items-center rounded-md px-2.5 py-2 text-left text-[12px] font-semibold hover:bg-surface-2',
+            kind === 'delete_source' && 'text-destructive-ink hover:bg-destructive/[0.08]',
+          )}
+          onClick={() => activate(kind)}
+        >
+          {t(MANAGE_LABEL_KEY[kind])}
+        </button>
+      ))}
+    </ResponsiveMenu>
+  );
+};
 
-const confirmGuardPlan = (guard: Pick<GuardedAction, 'hops' | 'gaps'>): GuardConfirmation => ({
+type GuardedAction =
+  | { kind: 'refetch'; plan: ManageGuardPlan }
+  | { kind: 'removeModel'; model: SuppliedModel; plan: ManageGuardPlan };
+
+const confirmGuardPlan = (plan: ManageGuardPlan): GuardConfirmation => ({
   force: true,
-  would_remove_hops: guard.hops,
-  would_interrupt: guard.gaps,
+  would_remove_hops: plan.hops,
+  would_interrupt: plan.gaps,
 });
+
+const GUARD_COPY_KIND: Record<GuardedAction['kind'], 'refetch' | 'removeModel'> = {
+  refetch: 'refetch',
+  removeModel: 'removeModel',
+};
+
+const committedPlan = (hops: RouteHopRef[], gaps: SupplyGap[]): ManageGuardPlan | null =>
+  hops.length > 0 || gaps.length > 0 ? { hops, gaps } : null;
 
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
@@ -225,14 +294,40 @@ export const SourceDetailPanel: React.FC<{
   const [busy, setBusy] = React.useState(false);
   const [confirmingReauth, setConfirmingReauth] = React.useState(false);
   const [replacingKey, setReplacingKey] = React.useState(false);
+  const [manageStage, dispatchManageStage] = React.useReducer(transitionManageStage, { kind: 'idle' });
+  const committedImpactReleaseRef = React.useRef<(() => void) | null>(null);
   const [manualDraft, setManualDraft] = React.useState<{ modelId: string; tiers: string[]; failed: boolean; retryRead: boolean } | null>(null);
   const [guard, setGuard] = React.useState<GuardedAction | null>(null);
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
   const [refetchFailed, setRefetchFailed] = React.useState(false);
   const [removeFailure, setRemoveFailure] = React.useState<{ modelId: string; retryRead: boolean } | null>(null);
   const models = source.models;
+  const editDraft = 'draft' in manageStage ? manageStage.draft : null;
+  const editAssessment = editDraft
+    ? assessSourceEdit(source, editDraft)
+    : { valid: false as const, patch: null, reason: null };
+  const releaseCommittedImpact = React.useCallback(() => {
+    const release = committedImpactReleaseRef.current;
+    committedImpactReleaseRef.current = null;
+    release?.();
+  }, []);
 
-  const guardedFailure = (error: unknown): { hops: RouteHopRef[]; gaps: SupplyGap[] } | null => {
+  React.useEffect(() => {
+    if (!holdsCommittedImpact(manageStage)) releaseCommittedImpact();
+  }, [manageStage, releaseCommittedImpact]);
+  React.useEffect(() => () => releaseCommittedImpact(), [releaseCommittedImpact]);
+
+  const beginEdit = () => {
+    dispatchManageStage({
+      type: 'begin_edit',
+      draft: { displayName: source.display_name, baseUrl: source.base_url ?? '' },
+    });
+  };
+  const beginDelete = () => {
+    dispatchManageStage({ type: 'begin_delete' });
+  };
+
+  const guardedFailure = (error: unknown): ManageGuardPlan | null => {
     const failure = apiFailure(error);
     if (!failure || (failure.wouldRemoveHops.length === 0 && failure.wouldInterrupt.length === 0)) return null;
     return { hops: failure.wouldRemoveHops, gaps: failure.wouldInterrupt };
@@ -257,7 +352,7 @@ export const SourceDetailPanel: React.FC<{
         else {
           const refusal = guardedFailure(error);
           if (refusal) {
-            setGuard({ kind: 'refetch', ...refusal });
+            setGuard({ kind: 'refetch', plan: refusal });
             settlement.release();
           } else {
             setRefetchFailed(true);
@@ -387,18 +482,265 @@ export const SourceDetailPanel: React.FC<{
         else {
           const refusal = guardedFailure(error);
           if (refusal) {
-            setGuard({ kind: 'remove', model, ...refusal });
+            setGuard({ kind: 'removeModel', model, plan: refusal });
             settlement.release();
           } else await reconcileRemoval(latest.id, model, settlement);
         }
       }
     }).finally(() => setBusy(false));
   };
+  const holdCommittedImpact = (
+    kind: 'edit' | 'delete',
+    plan: ManageGuardPlan,
+    settle: Extract<ManageStage, { kind: 'committed_edit_impact' }>['complete'],
+  ) => new Promise<void>((resolve) => {
+    setBusy(false);
+    committedImpactReleaseRef.current = resolve;
+    dispatchManageStage({ type: 'commit_impact', action: kind, plan, complete: settle });
+  });
+  const reconcileEditWrite = async (
+    before: Source,
+    draft: SourceEditDraft,
+    patch: SourcePatch,
+    plan: ManageGuardPlan | null,
+    settlement: SourceMutationSettlement,
+  ) => {
+    const reconciliation = await reconcileUnknownWrite(
+      settlement.readInventory,
+      ({ sources, snapshot }) => {
+        const current = sources.find((item) => item.id === before.id);
+        if (!current) return { kind: 'gone', sources, snapshot } satisfies SourceReconciliation;
+        const displayNameCommitted = patch.display_name === undefined
+          || current.display_name === patch.display_name;
+        const baseUrlCommitted = patch.base_url === undefined
+          || current.base_url === patch.base_url;
+        return displayNameCommitted && baseUrlCommitted
+          ? { kind: 'source', source: current } satisfies SourceReconciliation
+          : undefined;
+      },
+    );
+    if (reconciliation.kind === 'committed') {
+      const current = reconciliation.value.kind === 'source'
+        ? reconciliation.value.source
+        : null;
+      if (current && plan) {
+        await holdCommittedImpact(
+          'edit',
+          plan,
+          () => settlement.source(current),
+        );
+      } else {
+        dispatchManageStage({ type: 'settled' });
+        await applyReconciliation(before.id, reconciliation.value, settlement);
+      }
+      return;
+    }
+    settlement.release();
+    dispatchManageStage({
+      type: 'fail_edit',
+      draft,
+      patch,
+      plan,
+      forced: plan !== null,
+      retryRead: reconciliation.kind === 'unread',
+      before,
+    });
+  };
+  const reconcileDeleteWrite = async (
+    before: Source,
+    plan: ManageGuardPlan | null,
+    settlement: SourceMutationSettlement,
+  ) => {
+    const reconciliation = await reconcileUnknownWrite(
+      settlement.readInventory,
+      ({ sources, snapshot }) => sources.some((item) => item.id === before.id)
+        ? undefined
+        : { sources, snapshot },
+    );
+    if (reconciliation.kind === 'committed') {
+      if (plan) {
+        await holdCommittedImpact(
+          'delete',
+          plan,
+          () => settlement.gone(before.id, reconciliation.value),
+        );
+      } else {
+        dispatchManageStage({ type: 'settled' });
+        await settlement.gone(before.id, reconciliation.value);
+      }
+      return;
+    }
+    settlement.release();
+    dispatchManageStage({
+      type: 'fail_delete',
+      plan,
+      forced: plan !== null,
+      retryRead: reconciliation.kind === 'unread',
+      before,
+    });
+  };
+  const submitEdit = (draft: SourceEditDraft, patch: SourcePatch, plan: ManageGuardPlan | null) => {
+    if (busy) return Promise.resolve();
+    const forced = plan !== null;
+    dispatchManageStage({
+      type: 'submit_edit',
+      draft,
+      patch,
+      plan,
+      surface: forced ? 'guard' : 'edit',
+    });
+    setBusy(true);
+    return trackMutation(async (latest, settlement) => {
+      try {
+        const answer = await modelsApi.patchSource(
+          latest.id,
+          plan ? { ...patch, ...confirmGuardPlan(plan) } : patch,
+        );
+        const impact = committedPlan(answer.removed_hops, answer.interrupted);
+        if (impact) await holdCommittedImpact('edit', impact, () => settlement.source(answer.source));
+        else {
+          dispatchManageStage({ type: 'settled' });
+          await settlement.source(answer.source);
+        }
+      } catch (error) {
+        const failure = apiFailure(error);
+        if (failure?.code === 'source_not_found') {
+          dispatchManageStage({ type: 'settled' });
+          await settlement.gone(latest.id);
+        } else if (classifyModelHubFailure(failure) === 'inconclusive') {
+          await reconcileEditWrite(latest, draft, patch, plan, settlement);
+        } else {
+          const refusal = guardedFailure(error);
+          if (refusal) {
+            dispatchManageStage({ type: 'guard_edit', draft, patch, plan: refusal });
+            settlement.release();
+          } else {
+            dispatchManageStage({
+              type: 'fail_edit',
+              draft,
+              patch,
+              plan,
+              forced,
+              retryRead: false,
+              before: latest,
+            });
+            settlement.release();
+          }
+        }
+      }
+    }).finally(() => setBusy(false));
+  };
+  const submitDelete = (plan: ManageGuardPlan | null) => {
+    if (busy) return Promise.resolve();
+    const forced = plan !== null;
+    dispatchManageStage({ type: 'submit_delete', plan });
+    setBusy(true);
+    return trackMutation(async (latest, settlement) => {
+      try {
+        const answer = await modelsApi.deleteSource(
+          latest.id,
+          plan ? confirmGuardPlan(plan) : undefined,
+        );
+        const impact = committedPlan(answer.removed_hops, answer.interrupted);
+        if (impact) await holdCommittedImpact('delete', impact, () => settlement.gone(latest.id));
+        else {
+          dispatchManageStage({ type: 'settled' });
+          await settlement.gone(latest.id);
+        }
+      } catch (error) {
+        const failure = apiFailure(error);
+        if (failure?.code === 'source_not_found') {
+          dispatchManageStage({ type: 'settled' });
+          await settlement.gone(latest.id);
+        } else if (classifyModelHubFailure(failure) === 'inconclusive') {
+          await reconcileDeleteWrite(latest, plan, settlement);
+        } else {
+          const refusal = guardedFailure(error);
+          if (refusal) {
+            dispatchManageStage({ type: 'guard_delete', plan: refusal });
+            settlement.release();
+          } else {
+            dispatchManageStage({ type: 'fail_delete', plan, forced, retryRead: false, before: latest });
+            settlement.release();
+          }
+        }
+      }
+    }).finally(() => setBusy(false));
+  };
+  const retryEditRead = (failed: Extract<ManageStage, { kind: 'edit_failed' }>) => {
+    if (busy) return Promise.resolve();
+    dispatchManageStage({ type: 'retry' });
+    setBusy(true);
+    return trackMutation(async (_latest, settlement) => {
+      await reconcileEditWrite(
+        failed.before,
+        failed.draft,
+        failed.patch,
+        failed.plan,
+        settlement,
+      );
+    }).finally(() => setBusy(false));
+  };
+  const retryDeleteRead = (failed: Extract<ManageStage, { kind: 'delete_failed' }>) => {
+    if (busy) return Promise.resolve();
+    dispatchManageStage({ type: 'retry' });
+    setBusy(true);
+    return trackMutation(async (_latest, settlement) => {
+      await reconcileDeleteWrite(failed.before, failed.plan, settlement);
+    }).finally(() => setBusy(false));
+  };
+  const submitEditDialog = () => {
+    if (!editDraft || !editAssessment.valid || !editAssessment.patch) return;
+    if (manageStage.kind === 'edit_failed' && manageStage.retryRead) {
+      void retryEditRead(manageStage);
+      return;
+    }
+    const retryPlan = manageStage.kind === 'edit_failed' && manageStage.forced
+      ? manageStage.plan
+      : null;
+    void submitEdit(editDraft, editAssessment.patch, retryPlan);
+  };
+  const retryDelete = () => {
+    if (manageStage.kind !== 'delete_failed') return;
+    if (manageStage.retryRead) {
+      void retryDeleteRead(manageStage);
+      return;
+    }
+    void submitDelete(manageStage.forced ? manageStage.plan : null);
+  };
+  const cancelManage = () => {
+    if (busy) return;
+    dispatchManageStage({ type: 'cancel' });
+  };
+  const dismissUnresolvedManage = () => {
+    if (busy) return;
+    dispatchManageStage({ type: 'dismiss_unresolved' });
+  };
+  const completeManageImpact = () => {
+    if (busy || (
+      manageStage.kind !== 'committed_edit_impact'
+      && manageStage.kind !== 'committed_delete_impact'
+    )) return;
+    const complete = manageStage.complete;
+    setBusy(true);
+    void complete()
+      .then((verdict) => dispatchManageStage({ type: 'land', verdict }))
+      .catch(() => dispatchManageStage({ type: 'land', verdict: 'degraded' }))
+      .finally(() => setBusy(false));
+  };
+  const editManageDraft = (draft: SourceEditDraft) => {
+    dispatchManageStage({ type: 'edit_draft', draft });
+  };
+  const confirmManage = () => {
+    if (manageStage.kind === 'confirming_edit') {
+      void submitEdit(manageStage.draft, manageStage.patch, manageStage.plan);
+    }
+    if (manageStage.kind === 'confirming_delete') void submitDelete(manageStage.plan);
+  };
   const confirmGuard = () => {
     if (!guard) return;
-    const confirmation = confirmGuardPlan(guard);
-    if (guard.kind === 'refetch') void refetch(confirmation);
-    else void remove(guard.model, confirmation);
+    if (guard.kind === 'refetch') void refetch(confirmGuardPlan(guard.plan));
+    if (guard.kind === 'removeModel') void remove(guard.model, confirmGuardPlan(guard.plan));
   };
   const adoptedBackends = [...new Set((source.adopted_by ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
   const state = sourceStatePresentation(source.state, 'detail', i18n.language, now, {
@@ -412,6 +754,23 @@ export const SourceDetailPanel: React.FC<{
   // not a special case that can fall out of destination-completeness checks.
   const repair = repairAction(source);
   const repairDestination = repair ? REPAIR_DESTINATION[repair] : null;
+  const editDialogOpen = manageStage.kind === 'editing'
+    || manageStage.kind === 'edit_failed'
+    || (manageStage.kind === 'submitting_edit' && manageStage.surface === 'edit');
+  const manageGuardOpen = manageStage.kind === 'confirming_edit'
+    || manageStage.kind === 'confirming_delete'
+    || manageStage.kind === 'submitting_delete'
+    || (manageStage.kind === 'submitting_edit' && manageStage.surface === 'guard')
+    || manageStage.kind === 'committed_edit_impact'
+    || manageStage.kind === 'committed_delete_impact';
+  const manageImpact = manageStage.kind === 'committed_edit_impact'
+    || manageStage.kind === 'committed_delete_impact'
+    ? manageStage
+    : null;
+  const manageUnresolved = (manageStage.kind === 'edit_failed' || manageStage.kind === 'delete_failed')
+    && manageStage.retryRead;
+  const managePlan = 'plan' in manageStage ? manageStage.plan : null;
+  const manageCopyKind = manageStage.kind.includes('edit') ? 'editSource' : 'deleteSource';
 
   return (
     <div className="model-hub-source-detail">
@@ -430,11 +789,13 @@ export const SourceDetailPanel: React.FC<{
           {repairDestination === 'replace_key_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
           {source.supply_channel === 'hub' && <Button variant="outline" size="sm" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
           {source.kind === 'api_key' && <Button variant="secondary" size="sm" className="model-hub-source-action model-hub-ink-mint" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
+          <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
       {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
       {result && result.added.length === 0 && result.removed.length === 0 && <p className="model-hub-status-mint rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
       {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.sourceDetail.fail.refetch')}</p>}
+      {manageStage.kind === 'delete_failed' && <p data-manage-failure="delete" data-manage-retry-read={String(manageStage.retryRead)} className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.fail.verifyDeleteSource' : 'settings.models.sourceDetail.fail.deleteSource')} <button type="button" disabled={busy} onClick={retryDelete} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button> <button type="button" disabled={busy} onClick={manageStage.retryRead ? dismissUnresolvedManage : cancelManage} className="font-semibold underline underline-offset-2">{t(manageStage.retryRead ? 'settings.models.sourceDetail.dismissUnverified' : 'common.cancel')}</button></p>}
       <section className="model-hub-source-table overflow-hidden border border-border bg-surface">
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
           <span>{t('settings.models.sourceDetail.col.id')}</span><span>{t('settings.models.sourceDetail.col.entry')}</span><span className="flex items-center gap-1">{t('settings.models.sourceDetail.col.tiers')}<Info className="size-3" /></span><span />
@@ -516,19 +877,83 @@ export const SourceDetailPanel: React.FC<{
         trackMutation={trackMutation}
         onClose={() => setReplacingKey(false)}
       />
-      <DialogPrimitive.Root open={guard !== null} onOpenChange={(open) => !open && !busy && setGuard(null)}>
+      <DialogPrimitive.Root
+        open={editDialogOpen}
+        onOpenChange={(open) => { if (!open) cancelManage(); }}
+      >
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />
-          <DialogPrimitive.Content className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-border-strong bg-surface outline-none">
+          <DialogPrimitive.Content
+            className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-border-strong bg-surface outline-none"
+            onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
+            onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          >
+            <form className="contents" onSubmit={(event) => {
+              event.preventDefault();
+              submitEditDialog();
+            }}>
+              <header className="model-hub-guard-head">
+                <div className="flex items-center justify-between gap-3">
+                  <DialogPrimitive.Title className="model-hub-guard-title text-foreground">{t('settings.models.sourceDetail.edit.title', { source: source.display_name })}</DialogPrimitive.Title>
+                  <DialogPrimitive.Close asChild><Button type="button" variant="ghost" size="icon" className="model-hub-guard-close" disabled={busy || manageUnresolved} aria-label={t('settings.models.sourceDetail.edit.cancel')} title={t('settings.models.sourceDetail.edit.cancel')}><X aria-hidden /></Button></DialogPrimitive.Close>
+                </div>
+                <DialogPrimitive.Description className="model-hub-guard-subtitle">{t(`settings.models.sourceKind.${source.kind}`)} · {t(PROTOCOL_COPY_KEYS[source.protocol])}</DialogPrimitive.Description>
+              </header>
+              {editDraft && <div className="model-hub-guard-body">
+                <Field label={t('settings.models.sourceDetail.edit.name')}>
+                  {(id) => <Input id={id} autoFocus value={editDraft.displayName} disabled={busy} aria-invalid={editAssessment.reason?.startsWith('displayName') || undefined} onChange={(event) => editManageDraft({ ...editDraft, displayName: event.target.value })} />}
+                </Field>
+                {canEditSourceEndpoint(source) && <Field label={t('settings.models.sourceDetail.edit.baseUrl')} mono>
+                  {(id) => <Input id={id} type="text" inputMode="url" autoComplete="url" spellCheck={false} value={editDraft.baseUrl} disabled={busy} aria-invalid={editAssessment.reason?.startsWith('baseUrl') || undefined} className="font-mono" onChange={(event) => editManageDraft({ ...editDraft, baseUrl: event.target.value })} />}
+                </Field>}
+                <p className="model-hub-guard-hint"><Info aria-hidden />{t('settings.models.sourceDetail.edit.hint')}</p>
+                {editAssessment.reason && <p data-source-edit-validation className="text-[11.5px] text-destructive-ink">{t(SOURCE_EDIT_REASON_KEY[editAssessment.reason])}</p>}
+                {manageStage.kind === 'edit_failed' && <p data-manage-failure="edit" data-manage-retry-read={String(manageStage.retryRead)} className="text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.edit.verifyFail' : 'settings.models.sourceDetail.edit.fail')}</p>}
+              </div>}
+              <footer className="model-hub-guard-foot">
+                <Button type="button" variant="outline" className="model-hub-guard-action" onClick={manageUnresolved ? dismissUnresolvedManage : cancelManage} disabled={busy}>{t(manageUnresolved ? 'settings.models.sourceDetail.dismissUnverified' : 'settings.models.sourceDetail.edit.cancel')}</Button>
+                <Button type="submit" className="model-hub-guard-action" disabled={busy || !editAssessment.valid || !editAssessment.patch}>{busy && <Loader2 className="animate-spin" />}{t(busy ? 'settings.models.sourceDetail.edit.saving' : manageStage.kind === 'edit_failed' && manageStage.retryRead ? 'settings.models.sourceDetail.retry' : 'settings.models.sourceDetail.edit.save')}</Button>
+              </footer>
+            </form>
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
+      <DialogPrimitive.Root open={guard !== null || manageGuardOpen} onOpenChange={(open) => {
+        if (!open && !busy) {
+          if (manageGuardOpen) cancelManage();
+          else setGuard(null);
+        }
+      }}>
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />
+          <DialogPrimitive.Content
+            className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-border-strong bg-surface outline-none"
+            onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
+            onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          >
             <header className="model-hub-guard-head">
               <div className="flex items-center justify-between gap-3">
-                <DialogPrimitive.Title className="model-hub-guard-title text-foreground">{t(`settings.models.guard.title.${guard?.kind === 'remove' ? 'removeModel' : 'refetch'}`, { model: guard?.kind === 'remove' ? guard.model.id : undefined, source: source.display_name })}</DialogPrimitive.Title>
-                <DialogPrimitive.Close asChild><Button type="button" variant="ghost" size="icon" className="model-hub-guard-close" disabled={busy} aria-label={t('settings.models.guard.cancel')} title={t('settings.models.guard.cancel')}><X aria-hidden /></Button></DialogPrimitive.Close>
+                <DialogPrimitive.Title className="model-hub-guard-title text-foreground">{manageImpact
+                  ? t(`settings.models.sourceDetail.${manageImpact.kind === 'committed_edit_impact' ? 'edit' : 'remove'}.impact.title`)
+                  : manageGuardOpen
+                    ? t(`settings.models.guard.title.${manageCopyKind}`, { source: source.display_name })
+                    : t(`settings.models.guard.title.${guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`, { model: guard?.kind === 'removeModel' ? guard.model.id : undefined, source: source.display_name })}</DialogPrimitive.Title>
+                <DialogPrimitive.Close asChild><Button type="button" variant="ghost" size="icon" className="model-hub-guard-close" disabled={busy || (manageImpact !== null && !manageImpact.landingFailed)} onClick={manageImpact?.landingFailed ? dismissUnresolvedManage : undefined} aria-label={t(manageImpact?.landingFailed ? 'settings.models.sourceDetail.dismissUnverified' : manageImpact ? `settings.models.sourceDetail.${manageImpact.kind === 'committed_edit_impact' ? 'edit' : 'remove'}.impact.done` : 'settings.models.guard.cancel')} title={t(manageImpact?.landingFailed ? 'settings.models.sourceDetail.dismissUnverified' : manageImpact ? `settings.models.sourceDetail.${manageImpact.kind === 'committed_edit_impact' ? 'edit' : 'remove'}.impact.done` : 'settings.models.guard.cancel')}><X aria-hidden /></Button></DialogPrimitive.Close>
               </div>
-              <DialogPrimitive.Description className="model-hub-guard-subtitle">{t(`settings.models.guard.subtitle.${guard?.kind === 'remove' ? 'removeModel' : 'refetch'}`)}</DialogPrimitive.Description>
+              <DialogPrimitive.Description className="model-hub-guard-subtitle">{manageImpact
+                ? t(`settings.models.sourceDetail.${manageImpact.kind === 'committed_edit_impact' ? 'edit' : 'remove'}.impact.detail`)
+                : manageGuardOpen
+                  ? t(`settings.models.guard.subtitle.${manageCopyKind}`)
+                  : t(`settings.models.guard.subtitle.${guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`)}</DialogPrimitive.Description>
             </header>
-            {guard && <div className="model-hub-guard-body"><GuardImpact hops={guard.hops} gaps={guard.gaps} /></div>}
-            <footer className="model-hub-guard-foot"><Button variant="outline" className="model-hub-guard-action" onClick={() => setGuard(null)} disabled={busy}>{t('settings.models.guard.cancel')}</Button><Button variant="destructive" className="model-hub-guard-action" onClick={confirmGuard} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(`settings.models.guard.confirm.${guard?.kind === 'remove' ? 'removeModel' : 'refetch'}`)}</Button></footer>
+            {manageImpact && <div className="model-hub-guard-body"><GuardImpact hops={manageImpact.plan.hops} gaps={manageImpact.plan.gaps} committed />{manageImpact.landingFailed && <p data-manage-impact-failure className="text-[11.5px] text-destructive-ink">{t('settings.models.sourceDetail.impact.refreshFail')}</p>}</div>}
+            {!manageImpact && manageGuardOpen && managePlan && <div className="model-hub-guard-body"><GuardImpact hops={managePlan.hops} gaps={managePlan.gaps} /></div>}
+            {!manageGuardOpen && guard?.plan && <div className="model-hub-guard-body"><GuardImpact hops={guard.plan.hops} gaps={guard.plan.gaps} /></div>}
+            {manageImpact
+              ? <footer className="model-hub-guard-foot">{manageImpact.landingFailed && <Button type="button" variant="outline" className="model-hub-guard-action" onClick={dismissUnresolvedManage} disabled={busy}>{t('settings.models.sourceDetail.dismissUnverified')}</Button>}<Button className="model-hub-guard-action" onClick={completeManageImpact} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(manageImpact.landingFailed ? 'settings.models.sourceDetail.retry' : `settings.models.sourceDetail.${manageImpact.kind === 'committed_edit_impact' ? 'edit' : 'remove'}.impact.done`)}</Button></footer>
+              : manageGuardOpen
+                ? <footer className="model-hub-guard-foot"><Button variant="outline" className="model-hub-guard-action" onClick={cancelManage} disabled={busy}>{t('settings.models.guard.cancel')}</Button><Button variant="destructive" className="model-hub-guard-action" onClick={confirmManage} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(`settings.models.guard.confirm.${manageCopyKind}`)}</Button></footer>
+                : <footer className="model-hub-guard-foot"><Button variant="outline" className="model-hub-guard-action" onClick={() => setGuard(null)} disabled={busy}>{t('settings.models.guard.cancel')}</Button><Button variant="destructive" className="model-hub-guard-action" onClick={confirmGuard} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(`settings.models.guard.confirm.${guard ? GUARD_COPY_KIND[guard.kind] : 'refetch'}`)}</Button></footer>}
           </DialogPrimitive.Content>
         </DialogPrimitive.Portal>
       </DialogPrimitive.Root>

@@ -79,9 +79,9 @@ const renderDialog = (onClose = vi.fn(), onAdded = vi.fn()) => {
 const replacementSettlement = (
   overrides: Partial<SourceMutationSettlement> = {},
 ): SourceMutationSettlement => ({
-  source: vi.fn().mockResolvedValue(undefined),
-  gone: vi.fn().mockResolvedValue(undefined),
-  unread: vi.fn().mockResolvedValue(undefined),
+  source: vi.fn().mockResolvedValue('landed'),
+  gone: vi.fn().mockResolvedValue('landed'),
+  unread: vi.fn().mockResolvedValue('landed'),
   release: vi.fn(),
   readInventory: vi.fn().mockResolvedValue({ snapshot: 1, sources: [blockedSource] }),
   ...overrides,
@@ -91,9 +91,9 @@ const neverResolvingSettlement = (
   overrides: Partial<SourceMutationSettlement> = {},
 ): SourceMutationSettlement => ({
   ...replacementSettlement(),
-  source: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
-  gone: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
-  unread: vi.fn().mockReturnValue(new Promise<void>(() => undefined)),
+  source: vi.fn().mockReturnValue(new Promise<never>(() => undefined)),
+  gone: vi.fn().mockReturnValue(new Promise<never>(() => undefined)),
+  unread: vi.fn().mockReturnValue(new Promise<never>(() => undefined)),
   ...overrides,
 });
 

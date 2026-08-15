@@ -9,8 +9,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
-import { createPendingWrites } from './asyncLifetime';
-import { modelsApi } from './modelsApi';
+import { classifyModelHubFailure, createPendingWrites } from './asyncLifetime';
+import { MANAGE_DESTINATION, type ManageKind } from './manage';
+import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
@@ -38,6 +39,55 @@ const source: Source = {
   models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
 };
 
+const heldHops = [{
+  backend: 'claude' as const,
+  menu_model: 'claude-opus-4-6',
+  position: 1,
+  source_id: source.id,
+  model_id: 'model-a',
+}];
+const heldGaps = [{
+  backend: 'claude' as const,
+  model_id: 'claude-opus-4-6',
+  agents: ['Release bot'],
+}];
+
+const guardRefusal = () => new ApiCallError(
+  'source_last_supplier',
+  undefined,
+  true,
+  heldGaps,
+  [],
+  heldHops,
+  409,
+);
+
+type UnknownWriteAction = 'edit' | 'delete';
+const UNKNOWN_WRITE_CASES = (['edit', 'delete'] as const).flatMap((action) =>
+  ([false, true] as const).flatMap((forced) =>
+    (['committed', 'absent', 'unread'] as const).map((outcome) => ({ action, forced, outcome }))));
+
+const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean) => {
+  await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+  if (action === 'edit') {
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Unknown edit');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    if (forced) {
+      await userEvent.click(await screen.findByRole('button', { name: /^Save anyway$|^仍要保存$/i }));
+    }
+    return;
+  }
+
+  await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+  await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+  if (forced) {
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除来源$/i }));
+  }
+};
+
 const noReauth = () => {
   throw new Error('this source has no re-login entry to reach');
 };
@@ -63,9 +113,9 @@ const deferred = <T,>() => {
 let sourceSnapshot = 0;
 const beginSourceSnapshot = () => ++sourceSnapshot;
 const settlement = (overrides: Partial<SourceMutationSettlement> = {}): SourceMutationSettlement => ({
-  source: vi.fn().mockResolvedValue(undefined),
-  gone: vi.fn().mockResolvedValue(undefined),
-  unread: vi.fn().mockResolvedValue(undefined),
+  source: vi.fn().mockResolvedValue('landed'),
+  gone: vi.fn().mockResolvedValue('landed'),
+  unread: vi.fn().mockResolvedValue('landed'),
   release: vi.fn(),
   readInventory: async () => ({ snapshot: beginSourceSnapshot(), sources: await modelsApi.listSources() }),
   ...overrides,
@@ -97,9 +147,9 @@ const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; scheduler?: 
     const latest = currentRef.current;
     if (!latest) throw new Error('Source is gone');
     return work(latest, settlement({
-      source: async (echoed) => { currentRef.current = echoed; setCurrent(echoed); await reconcile(); },
-      gone: async () => { currentRef.current = null; setCurrent(null); await reconcile(); },
-      unread: async () => { await reconcile(); },
+      source: async (echoed) => { currentRef.current = echoed; setCurrent(echoed); await reconcile(); return 'landed'; },
+      gone: async () => { currentRef.current = null; setCurrent(null); await reconcile(); return 'landed'; },
+      unread: async () => { await reconcile(); return 'landed'; },
     }));
   });
   return current
@@ -149,6 +199,601 @@ describe('SourceDetailPanel', () => {
     renderPanel([{ backend: 'claude', menu_model: 'claude-opus-4-6' }]);
     expect(screen.getByText(/^In use$|^使用中$/i)).toBeTruthy();
   });
+
+  // The capability set is discovered from its total destination Record. A new
+  // management kind therefore fails here until the rendered panel exposes a
+  // trigger carrying that exact destination.
+  it('gives every management capability a reachable declared destination', async () => {
+    const view = renderPanel();
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+
+    const declared = Object.keys(MANAGE_DESTINATION) as ManageKind[];
+    const triggers = [...view.container.ownerDocument.querySelectorAll<HTMLElement>('[data-manage-kind]')];
+    expect(new Set(triggers.map((trigger) => trigger.dataset.manageKind))).toEqual(new Set(declared));
+    for (const kind of declared) {
+      const trigger = triggers.find((candidate) => candidate.dataset.manageKind === kind);
+      expect(trigger?.dataset.manageDestination).toBe(MANAGE_DESTINATION[kind]);
+    }
+  });
+
+  it('edits the display name and endpoint through the source mutation queue', async () => {
+    const updated = { ...source, display_name: 'Relay key', base_url: 'https://relay.example/v2' };
+    const patch = vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
+      source: updated,
+      removed_hops: [],
+      interrupted: [],
+    });
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    const endpoint = screen.getByLabelText(/^Base URL$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Relay key');
+    await userEvent.clear(endpoint);
+    await userEvent.type(endpoint, 'https://relay.example/v2/');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledWith(source.id, {
+      display_name: 'Relay key',
+      base_url: 'https://relay.example/v2/',
+    }));
+    expect(await screen.findByRole('heading', { name: 'Relay key' })).toBeTruthy();
+  });
+
+  it('explains client validation instead of leaving a mute disabled save', async () => {
+    renderEchoPanel();
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+
+    const endpoint = screen.getByLabelText(/^Base URL$/i);
+    await userEvent.clear(endpoint);
+    await userEvent.type(endpoint, 'https://relay.example/v2?access_token=do-not-store');
+    expect(screen.getByText(/Remove credentials|移除凭据/i)).toBeTruthy();
+    expect((screen.getByRole('button', { name: /^Save$|^保存$/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('leaves URL acceptance to the server and renders its named failure in the editor', async () => {
+    const patch = vi.spyOn(modelsApi, 'patchSource')
+      .mockRejectedValueOnce(new ApiCallError('discovery_failed'));
+    renderEchoPanel();
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+
+    const endpoint = screen.getByLabelText(/^Base URL$/i);
+    await userEvent.clear(endpoint);
+    await userEvent.type(endpoint, 'https:relay.example');
+    const save = screen.getByRole('button', { name: /^Save$|^保存$/i }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    await userEvent.click(save);
+
+    await waitFor(() => expect(patch).toHaveBeenCalledWith(source.id, { base_url: 'https:relay.example' }));
+    expect(await screen.findByText(/source was not saved|来源没有保存上/i)).toBeTruthy();
+    expect(screen.getByDisplayValue('https:relay.example')).toBeTruthy();
+  });
+
+  it('renders the proved protocol through its product-facing locale key', async () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceDetailPanel
+          source={{ ...source, vendor: 'custom', protocol: 'openai_chat' }}
+          trackMutation={immediateTrack}
+          onReauth={noReauth}
+        />
+      </I18nextProvider>,
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+
+    expect(screen.getByText(/OpenAI Chat Completions/i)).toBeTruthy();
+    expect(screen.queryByText('openai_chat')).toBeNull();
+  });
+
+  it('holds a committed edit impact envelope until the user completes the report', async () => {
+    const updated = { ...source, display_name: 'Impacted source' };
+    vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
+      source: updated,
+      removed_hops: [{ backend: 'claude', menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }],
+      interrupted: [{ backend: 'claude', model_id: 'claude-opus-4-6', agents: ['Release bot'] }],
+    });
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, updated.display_name);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    const impactDialog = await screen.findByRole('dialog', { name: /source was updated|来源已更新/i });
+    expect(screen.queryByRole('heading', { name: updated.display_name })).toBeNull();
+    const done = within(impactDialog)
+      .getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    expect(done).toBeTruthy();
+    await userEvent.click(done!);
+    expect(await screen.findByRole('heading', { name: updated.display_name })).toBeTruthy();
+  });
+
+  it('echoes a non-empty server plan exactly when deleting a source', async () => {
+    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 2, source_id: source.id, model_id: 'model-a' }];
+    const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url.startsWith(`/api/models/sources/${source.id}`)) {
+        requests.push({ url, init });
+        if (requests.length === 1) {
+          return Response.json({ error: 'source_in_route_chain', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
+        }
+        return Response.json({ removed_hops: hops, interrupted: gaps });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    expect(await screen.findAllByText(/claude-opus-4-6/)).toHaveLength(2);
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0].url).not.toContain('force=true');
+    expect(requests[0].init?.body).toBeUndefined();
+    expect(requests[1].url).toContain('?force=true');
+    expect(JSON.parse(String(requests[1].init?.body))).toEqual({
+      would_remove_hops: hops,
+      would_interrupt: gaps,
+    });
+    expect(screen.queryByTestId('source-gone')).toBeNull();
+    const impactDialog = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
+    const done = within(impactDialog)
+      .getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    expect(done).toBeTruthy();
+    await userEvent.click(done!);
+    expect(await screen.findByTestId('source-gone')).toBeTruthy();
+  });
+
+  it('sends no force when deleting a source with an empty server plan', async () => {
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === `/api/models/sources/${source.id}`) {
+        requests.push({ url, init });
+        return Response.json({ removed_hops: [], interrupted: [] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+
+    expect(await screen.findByTestId('source-gone')).toBeTruthy();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe(`/api/models/sources/${source.id}`);
+    expect(requests[0].init?.body).toBeUndefined();
+  });
+
+  it('keeps a refused deletion visible and offers a retry', async () => {
+    let requests = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === `/api/models/sources/${source.id}`) {
+        requests += 1;
+        return Response.json({ error: 'discovery_failed' }, { status: 503 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+
+    expect(await screen.findByRole('heading', { name: source.display_name })).toBeTruthy();
+    const retry = await screen.findByRole('button', { name: /^Try again$|^重试$/i });
+    await userEvent.click(retry);
+    await waitFor(() => expect(requests).toBe(2));
+    expect(await screen.findByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
+  });
+
+  it('returns an edit guard cancellation to the held draft', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === `/api/models/sources/${source.id}`) {
+        return Response.json({
+          error: 'source_last_supplier',
+          would_remove_hops: [{ backend: 'claude', menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }],
+          would_interrupt: [],
+        }, { status: 409 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Held draft');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    const guardDialog = await screen.findByRole('dialog', { name: /save changes|保存.*更改/i });
+    const cancel = within(guardDialog)
+      .getAllByRole('button', { name: /^Cancel$|^取消$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    expect(cancel).toBeTruthy();
+    await userEvent.click(cancel!);
+
+    expect(await screen.findByDisplayValue('Held draft')).toBeTruthy();
+  });
+
+  it('returns a failed forced edit to its held draft and visible error', async () => {
+    let attempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === `/api/models/sources/${source.id}`) {
+        attempts += 1;
+        if (attempts === 1) {
+          return Response.json({
+            error: 'source_last_supplier',
+            would_remove_hops: [{ backend: 'claude', menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }],
+            would_interrupt: [],
+          }, { status: 409 });
+        }
+        return Response.json({ error: 'discovery_failed' }, { status: 503 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Held failure');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Save anyway$|^仍要保存$/i }));
+
+    expect(await screen.findByDisplayValue('Held failure')).toBeTruthy();
+    expect(screen.getByText(/source was not saved|来源没有保存上/i)).toBeTruthy();
+  });
+
+  it('retries a failed forced delete with the exact held server plan', async () => {
+    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
+    const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url.startsWith(`/api/models/sources/${source.id}`)) {
+        requests.push({ url, init });
+        if (requests.length === 1) return Response.json({ error: 'source_in_route_chain', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
+        if (requests.length === 2) return Response.json({ error: 'discovery_failed' }, { status: 503 });
+        return Response.json({ removed_hops: [], interrupted: [] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Try again$|^重试$/i }));
+
+    await waitFor(() => expect(requests).toHaveLength(3));
+    for (const request of requests.slice(1)) {
+      expect(request.url).toContain('?force=true');
+      expect(JSON.parse(String(request.init?.body))).toEqual({
+        would_remove_hops: hops,
+        would_interrupt: gaps,
+      });
+    }
+    expect(await screen.findByTestId('source-gone')).toBeTruthy();
+  });
+
+  it.each(UNKNOWN_WRITE_CASES)(
+    'reconciles an unknown $action write (forced=$forced, outcome=$outcome) from one authoritative read',
+    async ({ action, forced, outcome }) => {
+      const unknownFailure = action === 'edit'
+        ? new ApiCallError('http_502', undefined, false, heldGaps, [], heldHops, 502)
+        : new TypeError('response lost');
+      if (action === 'edit') {
+        const mutation = vi.spyOn(modelsApi, 'patchSource');
+        if (forced) mutation.mockRejectedValueOnce(guardRefusal());
+        mutation.mockRejectedValueOnce(unknownFailure);
+      } else {
+        const mutation = vi.spyOn(modelsApi, 'deleteSource');
+        if (forced) mutation.mockRejectedValueOnce(guardRefusal());
+        mutation.mockRejectedValueOnce(unknownFailure);
+      }
+
+      const updated = { ...source, display_name: 'Unknown edit' };
+      const inventory = vi.spyOn(modelsApi, 'listSources');
+      if (outcome === 'unread') inventory.mockRejectedValueOnce(new Error('inventory unavailable'));
+      else if (outcome === 'committed') inventory.mockResolvedValueOnce(action === 'edit' ? [updated] : []);
+      else inventory.mockResolvedValueOnce([source]);
+
+      renderEchoPanel();
+      await submitManagementWrite(action, forced);
+      await waitFor(() => expect(inventory).toHaveBeenCalledOnce());
+
+      if (outcome === 'committed' && forced) {
+        const impact = await screen.findByRole('dialog', {
+          name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+        });
+        expect(impact.textContent).toContain('claude-opus-4-6');
+        const done = within(impact)
+          .getAllByRole('button', { name: /^Done$|^完成$/i })
+          .find((button) => button.classList.contains('model-hub-guard-action'));
+        expect(done).toBeTruthy();
+        await userEvent.click(done!);
+      }
+
+      if (outcome === 'committed') {
+        if (action === 'edit') expect(await screen.findByRole('heading', { name: 'Unknown edit' })).toBeTruthy();
+        else expect(await screen.findByTestId('source-gone')).toBeTruthy();
+        return;
+      }
+
+      const failure = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(`[data-manage-failure="${action}"]`);
+        expect(node).toBeTruthy();
+        return node!;
+      });
+      expect(failure.dataset.manageRetryRead).toBe(String(outcome === 'unread'));
+      if (outcome === 'unread') expect(failure.textContent).toMatch(/Could not verify|无法确认/i);
+      else expect(failure.textContent).toMatch(/was not saved|was not removed|没有保存上|没有移除/i);
+    },
+  );
+
+  it.each([
+    { outcome: 'requested', rereadBaseUrl: 'https://requested.example/v2', committed: true },
+    { outcome: 'third-party', rereadBaseUrl: 'https://other.example/v3', committed: false },
+    { outcome: 'unchanged', rereadBaseUrl: source.base_url, committed: false },
+  ])(
+    'confirms an endpoint write only when the reread value is $outcome',
+    async ({ rereadBaseUrl, committed }) => {
+      const requestedBaseUrl = 'https://requested.example/v2';
+      const patch = vi.spyOn(modelsApi, 'patchSource')
+        .mockRejectedValueOnce(new TypeError('response lost'));
+      const inventory = vi.spyOn(modelsApi, 'listSources')
+        .mockResolvedValueOnce([{ ...source, base_url: rereadBaseUrl }]);
+      renderEchoPanel();
+
+      await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+      await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+      const endpoint = screen.getByLabelText(/^Base URL$/i);
+      await userEvent.clear(endpoint);
+      await userEvent.type(endpoint, requestedBaseUrl);
+      await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+      await waitFor(() => expect(inventory).toHaveBeenCalledOnce());
+      expect(patch).toHaveBeenCalledWith(source.id, { base_url: requestedBaseUrl });
+      if (committed) {
+        expect(await screen.findByText(/requested\.example/)).toBeTruthy();
+        expect(document.querySelector('[data-manage-failure="edit"]')).toBeNull();
+      } else {
+        const failure = await waitFor(() => {
+          const node = document.querySelector<HTMLElement>('[data-manage-failure="edit"]');
+          expect(node).toBeTruthy();
+          return node!;
+        });
+        expect(failure.dataset.manageRetryRead).toBe('false');
+        expect(failure.textContent).toMatch(/was not saved|没有保存上/i);
+      }
+    },
+  );
+
+  it('rereads instead of issuing another PATCH while an unknown edit remains unresolved', async () => {
+    const patch = vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(new TypeError('response lost'));
+    const inventory = vi.spyOn(modelsApi, 'listSources')
+      .mockRejectedValueOnce(new Error('inventory unavailable'))
+      .mockResolvedValueOnce([source]);
+    renderEchoPanel();
+
+    await submitManagementWrite('edit', false);
+    await waitFor(() => expect(inventory).toHaveBeenCalledOnce());
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.type(name, ' still fenced');
+    await userEvent.keyboard('{Escape}');
+    expect(screen.getByDisplayValue('Unknown edit still fenced')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: /^Try again$|^重试$/i }));
+    await waitFor(() => expect(inventory).toHaveBeenCalledTimes(2));
+    expect(patch).toHaveBeenCalledOnce();
+  });
+
+  it.each(['edit', 'delete'] as const)(
+    'keeps the exact committed $action impact mounted until settlement lands',
+    async (action) => {
+      const reconcile = vi.fn()
+        .mockResolvedValueOnce('degraded')
+        .mockResolvedValueOnce('landed');
+      const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
+      const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
+      if (action === 'edit') {
+        vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
+          source: { ...source, display_name: 'Unknown edit' },
+          removed_hops: hops,
+          interrupted: gaps,
+        });
+      } else {
+        vi.spyOn(modelsApi, 'deleteSource').mockResolvedValueOnce({
+          removed_hops: hops,
+          interrupted: gaps,
+        });
+      }
+      const trackMutation: TrackSourceMutation = (work) => work(source, settlement({
+        source: reconcile,
+        gone: reconcile,
+      }));
+      render(
+        <ToastProvider>
+          <I18nextProvider i18n={i18n}>
+            <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
+          </I18nextProvider>
+        </ToastProvider>,
+      );
+
+      await submitManagementWrite(action, false);
+      const impact = await screen.findByRole('dialog', {
+        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+      });
+      const committedEvidence = () => Array.from(impact.querySelectorAll('.model-hub-guard-hop'))
+        .map((node) => node.textContent);
+      const evidenceBeforeRetry = committedEvidence();
+      expect(impact.textContent).toContain(hops[0].menu_model);
+      expect(impact.textContent).toContain(gaps[0].agents[0]);
+
+      const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
+        .find((button) => button.classList.contains('model-hub-guard-action'));
+      expect(done).toBeTruthy();
+      await userEvent.click(done!);
+      expect(await within(impact).findByText(/could not be refreshed|暂时无法刷新/i)).toBeTruthy();
+      expect(committedEvidence()).toEqual(evidenceBeforeRetry);
+      expect(within(impact).getAllByRole('button', { name: /Dismiss unverified result|放弃未验证结果/i })
+        .some((button) => button.classList.contains('model-hub-guard-action'))).toBe(true);
+
+      await userEvent.click(within(impact).getByRole('button', { name: /^Try again$|^重试$/i }));
+      await waitFor(() => expect(screen.queryByRole('dialog', {
+        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+      })).toBeNull());
+      expect(reconcile).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('releases tracked work when degraded impact is explicitly dismissed', async () => {
+    const reconcile = vi.fn().mockResolvedValueOnce('degraded');
+    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
+    vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
+      source: { ...source, display_name: 'Dismissible impact' },
+      removed_hops: hops,
+      interrupted: [],
+    });
+    let tracked: Promise<unknown> | undefined;
+    let trackedSettled = false;
+    const trackMutation: TrackSourceMutation = (work) => {
+      const operation = work(source, settlement({ source: reconcile }));
+      tracked = operation;
+      void operation.then(
+        () => { trackedSettled = true; },
+        () => { trackedSettled = true; },
+      );
+      return operation;
+    };
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await submitManagementWrite('edit', false);
+    const impact = await screen.findByRole('dialog', { name: /source was updated|来源已更新/i });
+    const closeBeforeLanding = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-close'));
+    expect(closeBeforeLanding).toBeTruthy();
+    expect((closeBeforeLanding as HTMLButtonElement).disabled).toBe(true);
+    const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    await userEvent.click(done!);
+
+    const dismissButtons = await within(impact).findAllByRole('button', { name: /Dismiss unverified result|放弃未验证结果/i });
+    expect(dismissButtons.some((button) => button.classList.contains('model-hub-guard-action'))).toBe(true);
+    const dismissClose = dismissButtons.find((button) => button.classList.contains('model-hub-guard-close'));
+    expect(dismissClose).toBeTruthy();
+    expect((dismissClose as HTMLButtonElement).disabled).toBe(false);
+    expect(trackedSettled).toBe(false);
+    await userEvent.click(dismissClose!);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was updated|来源已更新/i })).toBeNull());
+    expect(tracked).toBeDefined();
+    await tracked;
+    expect(trackedSettled).toBe(true);
+  });
+
+  it('releases tracked work when delete settlement unmounts the impact holder', async () => {
+    vi.spyOn(modelsApi, 'deleteSource').mockResolvedValueOnce({
+      removed_hops: heldHops,
+      interrupted: heldGaps,
+    });
+    let tracked: Promise<unknown> | undefined;
+    let trackedSettled = false;
+    let view: ReturnType<typeof render> | null = null;
+    const gone = vi.fn(async () => {
+      view?.unmount();
+      return 'degraded' as const;
+    });
+    const trackMutation: TrackSourceMutation = (work) => {
+      const operation = work(source, settlement({ gone }));
+      tracked = operation;
+      void operation.then(
+        () => { trackedSettled = true; },
+        () => { trackedSettled = true; },
+      );
+      return operation;
+    };
+    view = render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await submitManagementWrite('delete', false);
+    const impact = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
+    const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    expect(done).toBeTruthy();
+    expect(trackedSettled).toBe(false);
+    await userEvent.click(done!);
+
+    await waitFor(() => expect(gone).toHaveBeenCalledOnce());
+    expect(tracked).toBeDefined();
+    // Completeness comes from the total stage predicate, not from remembering
+    // each UI event that can stop holding the committed-impact stage.
+    await tracked;
+    expect(trackedSettled).toBe(true);
+  });
+
+  it.each((['edit', 'delete'] as const).flatMap((action) => [
+    { action, code: 'engine_down', serverNamed: true },
+    { action, code: 'bad_response', serverNamed: false },
+    { action, code: 'discovery_failed', serverNamed: true },
+  ]))(
+    'rereads after $action exactly when the shared classifier marks $code inconclusive',
+    async ({ action, code, serverNamed }) => {
+      const failure = new ApiCallError(code, undefined, serverNamed);
+      if (action === 'edit') vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(failure);
+      else vi.spyOn(modelsApi, 'deleteSource').mockRejectedValueOnce(failure);
+      const inventory = vi.spyOn(modelsApi, 'listSources');
+      const inconclusive = classifyModelHubFailure(failure) === 'inconclusive';
+      if (inconclusive) inventory.mockResolvedValueOnce([source]);
+
+      renderEchoPanel();
+      await submitManagementWrite(action, false);
+
+      const failureSurface = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(`[data-manage-failure="${action}"]`);
+        expect(node).toBeTruthy();
+        return node!;
+      });
+      expect(failureSurface.dataset.manageRetryRead).toBe('false');
+      expect(inventory).toHaveBeenCalledTimes(inconclusive ? 1 : 0);
+    },
+  );
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
     render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
@@ -237,8 +882,9 @@ describe('SourceDetailPanel', () => {
   it('orders every full-Source mutation family through the same Source queue', async () => {
     const writes = createPendingWrites(() => {});
     const started: string[] = [];
-    const gates = ['tier', 'refetch', 'add', 'remove'].map(() => deferred<void>());
-    const runs = ['tier', 'refetch', 'add', 'remove'].map((name, index) => writes.track(source.id, async () => {
+    const families = ['tier', 'refetch', 'add', 'remove', 'edit', 'delete'];
+    const gates = families.map(() => deferred<void>());
+    const runs = families.map((name, index) => writes.track(source.id, async () => {
       started.push(name);
       await gates[index].promise;
     }));
@@ -246,7 +892,7 @@ describe('SourceDetailPanel', () => {
     await waitFor(() => expect(started).toEqual(['tier']));
     for (let index = 0; index < gates.length; index += 1) {
       gates[index].resolve();
-      await waitFor(() => expect(started).toEqual(['tier', 'refetch', 'add', 'remove'].slice(0, index + 2)));
+      await waitFor(() => expect(started).toEqual(families.slice(0, index + 2)));
     }
     await Promise.all(runs);
   });
@@ -256,7 +902,20 @@ describe('SourceDetailPanel', () => {
     expect(detail).toMatch(/const refetch = \(confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const addManualModel = \(\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const remove = \(model: SuppliedModel, confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
+    expect(detail).toMatch(/const submitEdit = \(draft: SourceEditDraft, patch: SourcePatch, plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
+    expect(detail).toMatch(/const submitDelete = \(plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const commit = async[\s\S]*?setSaving\(true\)[\s\S]*?trackMutation\(async \(latest, settlement\)[\s\S]*?tierMutationPayload\(latest/);
+  });
+
+  it('routes every JSX management gesture through the stage authority', () => {
+    const detail = readFileSync(join(process.cwd(), 'src/components/settings/models/SourceDetailPanel.tsx'), 'utf8');
+    const jsx = detail.slice(detail.lastIndexOf('\n  return ('));
+    expect(detail).toContain('React.useReducer(transitionManageStage');
+    expect(jsx).not.toMatch(/setManageStage|dispatchManageStage\(\{\s*type:\s*['"](?:begin|submit|guard|fail|commit|settled)/);
+    expect(jsx).toMatch(/editManageDraft/);
+    expect(jsx).toMatch(/cancelManage/);
+    expect(jsx).toMatch(/dismissUnresolvedManage/);
+    expect(jsx).toMatch(/completeManageImpact/);
   });
 
   it('keeps Source entities behind one generation authority without an adoption side cache', () => {

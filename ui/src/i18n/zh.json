@@ -1283,6 +1283,43 @@
           "refetch": "重新拉取",
           "addModel": "添加模型"
         },
+        "manage": {
+          "label": "管理 {{source}}",
+          "edit": "编辑来源",
+          "remove": "移除来源"
+        },
+        "edit": {
+          "title": "编辑 {{source}}",
+          "name": "显示名称",
+          "baseUrl": "Base URL",
+          "hint": "协议保持不变。更改 Base URL 可能改变可用型号和路由；应用前会先让你确认影响。",
+          "cancel": "取消",
+          "save": "保存",
+          "saving": "保存中…",
+          "fail": "来源没有保存上",
+          "verifyFail": "无法确认来源是否已保存",
+          "validation": {
+            "displayNameRequired": "请输入显示名称",
+            "displayNameTooLong": "最多输入 64 个字符",
+            "displayNameCredential": "显示名称不能包含凭据",
+            "baseUrlCredential": "请从 Base URL 中移除凭据和疑似凭据的查询参数"
+          },
+          "impact": {
+            "title": "来源已更新，部分供给受到影响",
+            "detail": "以下路由或型号已被移除或中断。",
+            "done": "完成"
+          }
+        },
+        "remove": {
+          "impact": {
+            "title": "来源已移除，部分供给受到影响",
+            "detail": "以下是这次移除实际影响的路由和型号。",
+            "done": "完成"
+          }
+        },
+        "impact": {
+          "refreshFail": "变更已经提交，但模型页面暂时无法刷新。请再次重试对账。"
+        },
         "refetch": {
           "added": "新增",
           "removed_one": "本次拉取移除了 {{count}} 个型号：{{models}}",
@@ -1296,9 +1333,12 @@
           "refetch": "拉取没有回来，下面是这一页最后一次真的读到的列表",
           "tier": "档位没保存上",
           "addModel": "这个型号没添加上",
-          "removeModel": "这个型号没移除掉"
+          "removeModel": "这个型号没移除掉",
+          "deleteSource": "这个来源没有移除掉",
+          "verifyDeleteSource": "无法确认这个来源是否已移除"
         },
         "retry": "重试",
+        "dismissUnverified": "忽略未确认的结果",
         "search": "搜索型号 ID",
         "col": {
           "id": "型号 ID",
@@ -1352,19 +1392,25 @@
           "refetch": "重新拉取 {{source}} 的型号",
           "removeModel": "从 {{source}} 移除 {{model}}",
           "saveRoute": "保存 {{menuModel}} 的路由链",
-          "replaceKey": "更换 {{source}} 的 Key"
+          "replaceKey": "更换 {{source}} 的 Key",
+          "editSource": "保存 {{source}} 的更改？",
+          "deleteSource": "移除 {{source}}？"
         },
         "subtitle": {
           "refetch": "这次拉取会让部分型号从这个来源的清单里消失。",
           "removeModel": "这个型号会从这个来源的清单里消失。",
           "saveRoute": "这次保存会让已配置的型号没有可用来源",
-          "replaceKey": "这次更换会改变这个来源的型号清单。"
+          "replaceKey": "这次更换会改变这个来源的型号清单。",
+          "editSource": "更改端点可能改变这个来源的型号清单和路由。",
+          "deleteSource": "这会从所有正在使用它的 Agent 和路由中移除该来源。"
         },
         "confirm": {
           "refetch": "仍要拉取",
           "removeModel": "仍要移除",
           "saveRoute": "仍要保存",
-          "replaceKey": "仍要更换"
+          "replaceKey": "仍要更换",
+          "editSource": "仍要保存",
+          "deleteSource": "移除来源"
         }
       },
       "repair": {
