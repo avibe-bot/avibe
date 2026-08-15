@@ -1,6 +1,6 @@
 # Memory Plugin System
 
-> Status: implemented beta
+> Status: Personal Memory implemented beta; Agent Memory approved for implementation
 >
 > This is the canonical product and architecture contract for the complete
 > Memory plugin system, including the final behavior from
@@ -8,16 +8,22 @@
 > technical, POC, and follow-up documents are retained in Git history only.
 
 Memory is an optional built-in Avibe capability backed by an independently
-packaged EverOS runtime. It captures eligible human input into a local queue,
-processes that queue outside the chat response path, and exposes user-scoped
-profile, search, status, and explicit Agent writes.
+packaged EverOS runtime. Personal Memory captures eligible human input into a
+local queue and exposes user-scoped profile, search, status, and explicit Agent
+writes. The separately enabled Agent Memory track copies eligible completed
+Agent Turns into an isolated provider root for explicit case/skill retrieval.
+Both tracks process work outside the chat and Agent response paths.
 
 The core product invariants are:
 
 - normal chat never waits for Memory processing and continues when Memory fails;
 - installing the runtime never enables Memory, and startup never downloads it;
-- every captured or recalled item is scoped to one derived user principal;
-- automatic capture accepts human input only, never assistant or tool output;
+- every Personal Memory item is scoped to one derived user principal, and every
+  Agent Memory item to one opaque Agent id plus exact project;
+- Personal Memory automatic capture accepts human input only, never assistant
+  or tool output;
+- Agent Memory is off by default and accepts only completed durable Turn
+  trajectories through its separate queue and agent-mode provider root;
 - Agents recall only through an explicit, capability-gated CLI call; there is no
   automatic prompt injection;
 - configuration and destructive operations remain in the local Settings UI;
@@ -25,6 +31,9 @@ The core product invariants are:
   instructions; and
 - runtime code, Avibe queue state, and provider data have separate ownership and
   deletion boundaries.
+
+The Agent Memory implementation contract, including its accepted EverOS 1.2.3
+limitations, is [`memory-agent-track-1424.md`](./memory-agent-track-1424.md).
 
 ## Product Surface
 
@@ -104,6 +113,12 @@ and provider session references include the principal and current clear epoch.
 This is isolation, not identity linking. The same person on two platforms has
 two principals unless a future product explicitly introduces account linking.
 There is no shared install-wide pool, workspace memory, or group memory.
+
+This principal model and the capture table above govern Personal Memory only.
+Opt-in Agent Memory reads completed `session_turns` after settlement, admits
+interactive and Harness turns under a separate positive contract, and partitions
+output by an opaque HMAC-derived Agent id plus an explicit new-style Memory
+project binding. It does not create or read a Personal Memory principal.
 
 The local Settings page always reads `avibe:local`. Authenticated remote
 Workbench users and IM users access only their own principal through an eligible
@@ -200,14 +215,15 @@ State is split under the effective `AVIBE_HOME` (normally `~/.avibe`):
 state/memory/memory.sqlite       # Avibe queue and operational metadata
 memory/everos-root/              # sentinel-owned provider data
 memory/.rt/everos.sock           # private sidecar socket
-memory/generated/                # generated non-secret provider config
+memory/everos-agent-root/        # optional isolated Agent Memory provider data
+memory/.rt/everos-agent.sock     # optional private Agent Memory sidecar socket
+memory/generated/{chat,agent}/   # role-pinned non-secret provider configs
 runtime/memory/                  # downloaded immutable runtimes and active pointer
 ```
 
-The SQLite store has only `memory_meta` and `memory_capture_queue`. The initial
-schema is edited in place because Memory has not shipped; old development state
-from an earlier branch revision must be reset explicitly rather than through a
-silent startup migration.
+Schema v3 introduced the durable Personal Memory project catalog. Schema v4
+adds separate Agent trajectory, scan-cursor, and opaque project-binding tables;
+it does not overload `memory_capture_queue` or rewrite schema-v3 user rows.
 
 The root sentinel binds a random `provider_root_id`, provider id, root format,
 and artifact fingerprint. Clear and runtime activation refuse missing,
@@ -279,10 +295,10 @@ never logged or serialized as errors.
 
 ### Disable and re-enable
 
-Disable closes capture and content reads, pauses the worker, and stops the
-sidecar. It preserves queued rows, tombstones, provider data, and stored endpoint
-credentials. Status and Clear all remain available. Re-enable starts the same
-verified runtime and resumes pending work.
+Disabling Personal Memory closes user capture/content reads and stops its worker
+and chat sidecar. Disabling Agent Memory independently stops its scanner, worker,
+and agent sidecar. Both preserve their queues and provider data. Neither toggle
+mode-flips or deletes the other root.
 
 Changing only an API key is allowed without replacing the vector space.
 Changing the embedding endpoint or model while provider data exists is rejected.
@@ -295,10 +311,10 @@ Clear all is local-Settings-only, CSRF-protected, explicitly confirmed, and
 idempotent. Under the shared lifecycle lock it:
 
 1. records `clear_in_progress` and advances the epoch;
-2. pauses claims and stops the owned sidecar;
-3. validates and removes children of the exact sentinel-owned provider root
+2. pauses both role workers/scanner and stops each owned sidecar;
+3. validates and removes children of both exact sentinel-owned provider roots
    without following links;
-4. removes every queue row and recreates an empty owned root; and
+4. removes every user/agent queue row and recreates empty owned roots; and
 5. clears the recovery marker and restarts Memory only if it remains enabled.
 
 Startup resumes an interrupted clear before opening Memory. A restart failure
@@ -312,10 +328,10 @@ not remove the installed `memory-runtime`.
 
 ## Managed Runtime and Release
 
-The production provider is official EverOS 1.1.3 behind the internal adapter.
+The production provider is official EverOS 1.2.3 behind the internal adapter.
 The independently built `memory-runtime` pins:
 
-- EverOS 1.1.3;
+- EverOS 1.2.3;
 - Python 3.12.12;
 - uv 0.9.18; and
 - the reviewed `scripts/memory_runtime/uv.lock` digest.
@@ -359,12 +375,13 @@ with different content.
   as that account's remote Workbench messages. The install-wide settings,
   diagnostics, runtime restart, and Clear all controls remain owner operations
   protected by the signed Cloud session and same-origin/CSRF checks.
-- The controller socket and EverOS socket are owner-only Unix-domain sockets in
-  mode `0600`; the sidecar has no TCP listener and is not exposed through remote
-  access.
-- The sidecar accepts only health plus the exact add, flush, search, and get
-  shapes used by Avibe. Principals must match `u-[0-9a-f]{32}`, and file URIs
-  must stay inside the Workbench attachment root.
+- The controller socket and both role-specific EverOS sockets are owner-only
+  Unix-domain sockets in mode `0600`; neither sidecar has a TCP listener or is
+  exposed through remote access.
+- Each sidecar accepts only health plus its exact add, flush, search, and get
+  shapes. Chat principals match `u-[0-9a-f]{32}`; Agent owners match
+  `a-[0-9a-f]{32}`. File URIs are chat-only and must stay inside the Workbench
+  attachment root.
 - Child environment variables are allowlisted. Outside Avibe's owner-only
   config, API keys reach the provider only through the sidecar environment;
   generated files contain no secrets, and proxy/TLS override variables are not
@@ -379,11 +396,14 @@ platform identities belong to the same human.
 
 ## Deliberate Non-goals
 
-The beta does not include automatic recall, assistant-message capture,
+The beta does not include automatic recall, Personal Memory assistant-message
+capture, tool-rich Agent trajectories,
 group/workspace/shared memory, cross-platform identity linking,
 registered backend-specific Memory tools, item-level edit/delete, export/import,
 provider migration, editable provider Markdown, exactly-once provider delivery,
-or agent-driven configuration and Clear all. Each requires a separate product
+or agent-driven configuration and Clear all. Extracted Agent skills are never
+installed, executed, or prompt-injected. Each omitted capability requires a
+separate product
 and migration contract rather than placeholder interfaces in this system.
 
 ## Verification Contract

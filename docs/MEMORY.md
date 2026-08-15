@@ -14,6 +14,37 @@ Avibe Memory distills eligible Workbench and private-IM messages into a
 per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
 Processing Record, current profile, search results, and settings.
 
+## Planned Agent Memory beta
+
+This track remains unavailable until the #1424 implementation slices land. The
+contract below records the behavior those slices must deliver.
+
+Agent Memory is a separate, off-by-default track for completed Agent Turns. When
+the owner explicitly enables it and binds a source workdir to `default` or a
+named Memory project, Avibe asynchronously sends the exact Agent dispatch text
+and successful final result to a dedicated EverOS agent-mode root. Interactive
+and Harness turns use the same admission rule. Failed, canceled, silent,
+legacy-Agent, oversized, malformed, callback, maintenance, and unbound turns are
+skipped without delaying or changing the Turn result.
+
+The existing Personal Memory root remains pinned to chat mode. Agent Memory has
+its own provider root, socket, lifecycle/health slot, scanner, and queue. An
+agent-track failure cannot alter user capture or Personal Memory processing.
+
+Agent cases and skills are available only through explicit, scoped Agent Memory
+search/list operations in the CLI or owner Settings UI. Returned skill content
+is untrusted text: Avibe does not install or execute it and never injects it into
+an Agent prompt. A successful add/flush means the trajectory was processed, not
+that EverOS necessarily produced a case or skill.
+
+EverOS 1.2.3 may produce zero output through quality gates. Skill retirement is
+not implemented; sanitized skill-name collisions can overwrite a prior file;
+and clusters above ten indexed skills retain an upstream stale-index clobber
+risk. The track is isolated so these accepted limitations cannot corrupt
+Personal Memory. See
+[`memory-agent-track-1424.md`](plans/memory-agent-track-1424.md) for the complete
+contract.
+
 ## Processed episode listing
 
 `vibe memory list` reads only valid, active processed episodes for the current
@@ -128,8 +159,9 @@ finish before starting another one.
 
 Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data or the
 call-log database is corrupt. Clear Memory Data records a durable intent marker, then
-removes only the queue, provider data, call log, and pinned attachments through their
-idempotent deletion primitives. Clear is irreversible; it does not delete
+removes the Personal and Agent Memory queues, both owned provider roots, role-owned call
+logs, and pinned attachments through their idempotent deletion primitives. Clear is
+irreversible; it does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs or
 user-created snapshots); it is not a secure wipe.
@@ -182,7 +214,7 @@ Retired backup and snapshot residue is also cleaned best effort and never blocks
 
 ### Reinitialize Memory
 
-When Memory state is corrupt beyond rebuild, use **Reinitialize Memory** beside Repair on the Memory Runtime card in Settings > Dependencies. The action remains visible but unavailable until the pinned `memory-runtime` artifact is installed and ready; repair that artifact first when it is invalid. The confirmation pauses for five seconds and explains that it will delete local Memory data and related operational state before attempting to start a brand-new Memory engine. It also warns that startup can fail after deletion and the old data will not be restored. The mixed-purpose storage locations are labeled **Primary Memory storage** and **Memory state storage**; their technical paths, `<effective_home>/memory` and `<effective_home>/state/memory`, remain available as secondary details.
+When Memory state is corrupt beyond rebuild, use **Reinitialize Memory** beside Repair on the Memory Runtime card in Settings > Dependencies. The action remains visible but unavailable until the pinned `memory-runtime` artifact is installed and ready; repair that artifact first when it is invalid. The confirmation pauses for five seconds and explains that it will delete local Memory data and related operational state, including both Personal and Agent Memory roots, before attempting to start brand-new enabled Memory engines. It also warns that startup can fail after deletion and the old data will not be restored. The mixed-purpose storage locations are labeled **Primary Memory storage** and **Memory state storage**; their technical paths, `<effective_home>/memory` and `<effective_home>/state/memory`, remain available as secondary details.
 
 Reinitialize Memory keeps Memory settings, credentials, and the installed artifact. The request waits for its final result and reports the two storage locations independently, so a partial deletion is shown as partial rather than claimed as a clean success. A durable internal `factory_reset` recovery intent makes retry idempotent after a crash; while that intent is pending, other Memory controls remain disabled and the action is labeled **Retry initialization**. Reinitialize Memory is not a secure wipe and does not remove original chats or copies already sent to remote endpoints.
 
