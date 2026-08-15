@@ -211,8 +211,15 @@ def test_save_codex_auth_restores_relay_from_oauth_marker(
         json.dumps({"tokens": {"id_token": "x"}, "auth_mode": "chatgpt"}),
         encoding="utf-8",
     )
-    # Pointer cleared by the OAuth pass; nothing chain-readable on disk.
-    (codex_home / "config.toml").write_text('model = "gpt-5.4"\n', encoding="utf-8")
+    # Pointer cleared by the OAuth pass; the relay section survives
+    # orphaned so the restore can re-point at it.
+    (codex_home / "config.toml").write_text(
+        "[model_providers.OpenAI]\n"
+        'name = "OpenAI"\n'
+        'base_url = "https://relay.example/v1"\n'
+        'wire_api = "responses"\n',
+        encoding="utf-8",
+    )
 
     fake_codex = types.SimpleNamespace(
         auth_mode="oauth",
@@ -228,15 +235,50 @@ def test_save_codex_auth_restores_relay_from_oauth_marker(
     result = api.save_codex_auth({"auth_mode": "api_key", "api_key": "sk-relay"})
     assert result.get("ok") is True
 
-    # The managed provider the next codex app-server launch will use
-    # carries the restored relay pointer.
+    # The captured user-owned provider is restored (pointer + its own
+    # settings survive); the one-shot recovery record is spent.
     toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    pointer = [line for line in toml.splitlines() if line.startswith("model_provider")]
+    assert pointer == ['model_provider = "OpenAI"']
     assert 'base_url = "https://relay.example/v1"' in toml
-    assert 'model_provider = "openai-managed"' in toml
-    # The one-shot recovery record is spent; the preference now carries
-    # the restored value.
     assert fake_codex.oauth_relay_marker is None
     assert fake_codex.base_url == "https://relay.example/v1"
+
+
+def test_save_codex_auth_ignores_marker_after_external_api_key_switch(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """``codex login --with-api-key`` outside Avibe puts a live API key
+    on disk; from that moment the live disk configuration is
+    authoritative and a leftover OAuth marker must not reroute the
+    freshly logged-in key to the relay it remembers."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-official"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text('model = "gpt-5.4"\n', encoding="utf-8")
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://relay.example/v1"},
+    )
+    fake_agents = types.SimpleNamespace(codex=fake_codex)
+    fake_config = types.SimpleNamespace(agents=fake_agents, save=lambda: None)
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    state = api.get_codex_auth()
+    assert state["base_url"] is None
+
+    result = api.save_codex_auth({"auth_mode": "api_key", "api_key": "sk-official"})
+    assert result.get("ok") is True
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert "https://relay.example/v1" not in toml
 
 
 def test_get_codex_auth_uses_oauth_marker_when_disk_chain_empty(

@@ -713,7 +713,7 @@ def _deep_merge_dicts(base: dict, patch: dict) -> dict:
     return merged
 
 
-_AGENT_AUTH_FIELDS = ("auth_mode", "api_key", "base_url")
+_AGENT_AUTH_FIELDS = ("auth_mode", "api_key", "base_url", "oauth_relay_marker")
 
 
 def _strip_agent_auth_fields(payload: dict) -> dict:
@@ -9708,8 +9708,15 @@ def get_codex_auth() -> dict:
     # ``AgentAuthService._persist_backend_auth_mode`` before the OAuth
     # cleanup destroys the on-disk evidence) is the only recovery
     # source: it is consumed verbatim, with no ambient-state inference —
-    # dormant sections and stale caches surface nothing.
-    relay_marker = read_codex_relay_marker(raw_relay_marker)
+    # dormant sections and stale caches surface nothing. The marker is
+    # only consulted while the disk shows OAuth as the live mode: once
+    # an API key exists in ``auth.json`` (e.g. the user ran
+    # ``codex login --with-api-key`` outside Avibe), the live disk
+    # configuration is authoritative and a leftover marker must not
+    # reroute that key to the relay it remembers.
+    relay_marker = None
+    if not disk_state.get("has_api_key"):
+        relay_marker = read_codex_relay_marker(raw_relay_marker)
     if relay_marker:
         effective_base_url: str | None = disk_state.get("base_url") or relay_marker["base_url"]
     else:
@@ -9853,6 +9860,32 @@ def save_codex_auth(payload: dict) -> dict:
     # the cache is empty, drops the relay entirely — sending a relay API
     # key to ``api.openai.com`` and surfacing as a confusing 401 after
     # an auth-mode switch.
+    # Explicit OAuth-transition marker: the relay identity recorded when
+    # the OAuth cleanup destroyed the on-disk evidence. Consumed
+    # verbatim — a plain cached ``base_url`` is NOT a recovery source
+    # (it is only the user's last saved preference and may be stale).
+    # Gated on the disk showing OAuth as the live mode: an API key that
+    # appeared in ``auth.json`` (e.g. ``codex login --with-api-key``
+    # outside Avibe) means the live disk configuration already won and
+    # the leftover marker must not reroute that key to the relay it
+    # remembers.
+    marker = None
+    try:
+        from vibe.codex_config import read_codex_auth_state, read_codex_relay_marker
+
+        with CONFIG_LOCK:
+            try:
+                marker_cfg = load_config()
+                marker_codex = getattr(getattr(marker_cfg, "agents", None), "codex", None)
+                raw_marker = getattr(marker_codex, "oauth_relay_marker", None)
+            except Exception:
+                raw_marker = None
+        if not read_codex_auth_state().get("has_api_key"):
+            marker = read_codex_relay_marker(raw_marker)
+    except Exception:
+        logger.debug("Codex relay marker read failed", exc_info=True)
+        marker = None
+
     if base_url_present:
         effective_base_url = base_url_change
     else:
@@ -9865,35 +9898,28 @@ def save_codex_auth(payload: dict) -> dict:
                 effective_base_url = disk_base_url.strip()
         except Exception:
             logger.debug("Codex disk base_url read failed", exc_info=True)
-        if not effective_base_url:
-            # Explicit OAuth-transition marker fallback: the relay
-            # identity recorded when the OAuth cleanup destroyed the
-            # on-disk evidence. Consumed verbatim — a plain cached
-            # ``base_url`` is NOT a recovery source (it is only the
-            # user's last saved preference and may be stale).
-            try:
-                from vibe.codex_config import read_codex_relay_marker
+        if not effective_base_url and marker:
+            effective_base_url = marker["base_url"]
 
-                with CONFIG_LOCK:
-                    try:
-                        existing_cfg = load_config()
-                        stored_codex = getattr(getattr(existing_cfg, "agents", None), "codex", None)
-                        raw_marker = getattr(stored_codex, "oauth_relay_marker", None)
-                    except Exception:
-                        raw_marker = None
-                marker = read_codex_relay_marker(raw_marker)
-                if marker:
-                    effective_base_url = marker["base_url"]
-            except Exception:
-                logger.debug("Codex relay marker read failed", exc_info=True)
-                effective_base_url = None
+    # Provider-identity restore hint: when the resolved relay matches the
+    # marker (explicit form value pre-populated from it, or the omitted
+    # fallback) and the captured provider section still exists on disk
+    # with the same URL, ``apply_codex_auth`` re-points ``model_provider``
+    # at that section instead of rebuilding a managed provider — the
+    # user's own ``wire_api`` / provider settings survive the round trip.
+    restore_provider_id: Optional[str] = None
+    if marker is not None and effective_base_url == marker["base_url"]:
+        restore_provider_id = marker["provider_id"]
 
     from vibe.codex_config import apply_codex_auth
 
     notices: list = []
     try:
         result = apply_codex_auth(
-            auth_mode=auth_mode, api_key=api_key, base_url=effective_base_url
+            auth_mode=auth_mode,
+            api_key=api_key,
+            base_url=effective_base_url,
+            restore_provider_id=restore_provider_id,
         )
         if isinstance(result, dict):
             raw_notices = result.get("notices")

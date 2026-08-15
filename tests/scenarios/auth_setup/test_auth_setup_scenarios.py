@@ -2413,15 +2413,25 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
 
         # Step 4 — launch config: the next ``codex app-server`` process
-        # reads these files; the managed provider must carry the relay,
-        # and the one-shot marker is consumed.
+        # reads these files. The captured provider identity is restored:
+        # the hand-rolled section keeps its own settings and the pointer;
+        # the managed shape rebuilds the managed provider. Either way
+        # the relay URL survives, and the one-shot marker is consumed.
         toml = (self.home / ".codex" / "config.toml").read_text(encoding="utf-8")
-        self.assertIn('model_provider = "openai-managed"', toml)
-        self.assertIn('base_url = "https://relay.example/v1"', toml)
-        self.assertIn("supports_websockets = false", toml)
         auth = json.loads((self.home / ".codex" / "auth.json").read_text(encoding="utf-8"))
         self.assertEqual(auth["OPENAI_API_KEY"], "sk-relay-2")
         self.assertEqual(auth["auth_mode"], "apikey")
+        if self._expected_provider_id == "openai-managed":
+            self.assertIn('model_provider = "openai-managed"', toml)
+            self.assertIn('base_url = "https://relay.example/v1"', toml)
+            self.assertIn("supports_websockets = false", toml)
+        else:
+            pointer = [line for line in toml.splitlines() if line.startswith("model_provider")]
+            self.assertEqual(pointer, ['model_provider = "OpenAI"'])
+            self.assertIn('base_url = "https://relay.example/v1"', toml)
+            # The user's provider settings survive the round trip.
+            self.assertIn('wire_api = "responses"', toml)
+            self.assertNotIn("[model_providers.openai-managed]", toml)
         self.assertIsNone(self.codex_cfg.oauth_relay_marker)
 
         ScenarioExpect.step_history(
