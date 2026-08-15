@@ -212,8 +212,13 @@ def test_save_codex_auth_restores_relay_from_oauth_marker(
         encoding="utf-8",
     )
     # Pointer cleared by the OAuth pass; the relay section survives
-    # orphaned so the restore can re-point at it.
+    # orphaned so the restore can re-point at it. The file credential
+    # store is pinned by the API-key save that configured the relay and
+    # survives the OAuth transition — without it the live mode is
+    # unknowable and the marker is gated off.
     (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\n'
+        "\n"
         "[model_providers.OpenAI]\n"
         'name = "OpenAI"\n'
         'base_url = "https://relay.example/v1"\n'
@@ -292,7 +297,9 @@ def test_get_codex_auth_uses_oauth_marker_when_disk_chain_empty(
     codex_home = tmp_path / ".codex"
     codex_home.mkdir(parents=True, exist_ok=True)
     (codex_home / "auth.json").write_text("{}", encoding="utf-8")
-    (codex_home / "config.toml").write_text('model = "gpt-5.4"\n', encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\nmodel = "gpt-5.4"\n', encoding="utf-8"
+    )
 
     fake_codex = types.SimpleNamespace(
         auth_mode="oauth",
@@ -410,3 +417,44 @@ def test_remove_backend_api_key_clears_codex_relay_marker(
     assert result.get("ok") is True
     assert fake_codex.api_key is None
     assert fake_codex.oauth_relay_marker is None
+
+
+def test_marker_ignored_when_credentials_may_live_in_keyring(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """With ``cli_auth_credentials_store`` at ``auto``/``keyring`` an
+    external official-key switch leaves no ``OPENAI_API_KEY`` in
+    ``auth.json`` (it lives in the OS keychain), so the file-only
+    ``has_api_key`` gate can't see it. The marker must not be consumed
+    while the store hides the live mode — otherwise Settings
+    pre-populates the abandoned relay and sends a pasted official key
+    to it."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    # Keyring store: no file key, no tokens — live mode unknowable.
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "auto"\nmodel = "gpt-5.4"\n',
+        encoding="utf-8",
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=lambda: None
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    state = api.get_codex_auth()
+    assert state["base_url"] is None
+
+    result = api.save_codex_auth({"auth_mode": "api_key", "api_key": "sk-official"})
+    assert result.get("ok") is True
+    toml = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert "https://stale.example/v1" not in toml

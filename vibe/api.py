@@ -9715,13 +9715,17 @@ def get_codex_auth() -> dict:
     # cleanup destroys the on-disk evidence) is the only recovery
     # source: it is consumed verbatim, with no ambient-state inference —
     # dormant sections and stale caches surface nothing. The marker is
-    # only consulted while the disk shows OAuth as the live mode: once
-    # an API key exists in ``auth.json`` (e.g. the user ran
-    # ``codex login --with-api-key`` outside Avibe), the live disk
-    # configuration is authoritative and a leftover marker must not
-    # reroute that key to the relay it remembers.
+    # only consulted while the disk shows OAuth as the live mode AND the
+    # credential store actually exposes the live state to us: once an
+    # API key exists in ``auth.json`` (e.g. the user ran ``codex login
+    # --with-api-key`` outside Avibe) the live disk configuration is
+    # authoritative, and when ``cli_auth_credentials_store`` is
+    # ``auto``/``keyring`` the key may live in the OS keychain instead —
+    # ``has_api_key`` is a file-only signal there, so an external
+    # official-key switch is indistinguishable from OAuth and a leftover
+    # marker must not reroute a pasted key to the relay it remembers.
     relay_marker = None
-    if not disk_state.get("has_api_key"):
+    if not disk_state.get("has_api_key") and disk_state.get("file_store_active"):
         relay_marker = read_codex_relay_marker(raw_relay_marker)
     if relay_marker:
         effective_base_url: str | None = disk_state.get("base_url") or relay_marker["base_url"]
@@ -9870,15 +9874,18 @@ def save_codex_auth(payload: dict) -> dict:
     # the OAuth cleanup destroyed the on-disk evidence. Consumed
     # verbatim — a plain cached ``base_url`` is NOT a recovery source
     # (it is only the user's last saved preference and may be stale).
-    # Gated on the disk showing OAuth as the live mode: an API key that
-    # appeared in ``auth.json`` (e.g. ``codex login --with-api-key``
-    # outside Avibe) means the live disk configuration already won and
-    # the leftover marker must not reroute that key to the relay it
-    # remembers.
+    # Gated on the live state being knowable AND OAuth: an API key in
+    # ``auth.json`` (e.g. ``codex login --with-api-key`` outside Avibe)
+    # means the live disk configuration already won, and a non-file
+    # credential store (``auto``/``keyring``) hides the key in the OS
+    # keychain where our file-only ``has_api_key`` can't see it — either
+    # way the leftover marker must not reroute a pasted key to the relay
+    # it remembers.
     marker = None
     try:
         from vibe.codex_config import read_codex_auth_state, read_codex_relay_marker
 
+        codex_disk_state = read_codex_auth_state()
         with CONFIG_LOCK:
             try:
                 marker_cfg = load_config()
@@ -9886,7 +9893,7 @@ def save_codex_auth(payload: dict) -> dict:
                 raw_marker = getattr(marker_codex, "oauth_relay_marker", None)
             except Exception:
                 raw_marker = None
-        if not read_codex_auth_state().get("has_api_key"):
+        if not codex_disk_state.get("has_api_key") and codex_disk_state.get("file_store_active"):
             marker = read_codex_relay_marker(raw_marker)
     except Exception:
         logger.debug("Codex relay marker read failed", exc_info=True)

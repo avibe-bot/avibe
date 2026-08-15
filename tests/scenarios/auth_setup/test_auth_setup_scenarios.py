@@ -2282,10 +2282,14 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
     """
 
     def _seed_hand_rolled_relay(self) -> None:
+        # The file credential store pin comes from the API-key save
+        # that configured the relay (or codex's own login) and survives
+        # the OAuth transition — the marker gate requires it.
         (self.home / ".codex" / "config.toml").write_text(
             "\n".join(
                 [
                     'model_provider = "OpenAI"',
+                    'cli_auth_credentials_store = "file"',
                     "",
                     "[model_providers.OpenAI]",
                     'name = "OpenAI"',
