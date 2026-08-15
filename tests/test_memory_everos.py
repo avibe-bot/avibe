@@ -1266,6 +1266,51 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
     assert all(request.headers["authorization"].startswith("Bearer ") for request in requests)
 
 
+def test_processing_health_runs_all_configured_checks_concurrently(monkeypatch) -> None:
+    provider = EverOSPort(
+        Path("/tmp/everos.sock"),
+        llm_base_url="https://llm.example.test/v1",
+        llm_model="chat-model",
+        llm_api_key="llm-secret",
+        embedding_base_url="https://embed.example.test/v1",
+        embedding_model="embedding-model",
+        embedding_api_key="embedding-secret",
+        rerank_base_url="https://rerank.example.test/v1/inference",
+        rerank_model="rerank-model",
+        rerank_api_key="rerank-secret",
+        multimodal_base_url="https://vision.example.test/v1",
+        multimodal_model="vision-model",
+        multimodal_api_key="vision-secret",
+    )
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+    started = 0
+
+    async def probe(**_kwargs) -> bool:
+        nonlocal started
+        started += 1
+        if started == 4:
+            all_started.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(provider, "_probe_processing_endpoint", probe)
+
+    async def run() -> tuple[bool, bool]:
+        task = asyncio.create_task(provider.processing_healthy())
+        entered_together = True
+        try:
+            await asyncio.wait_for(all_started.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            entered_together = False
+        release.set()
+        return entered_together, await task
+
+    entered_together, healthy = asyncio.run(run())
+    assert entered_together is True
+    assert healthy is True
+
+
 def test_processing_preflight_projects_sanitized_provider_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions"):

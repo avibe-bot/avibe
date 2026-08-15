@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.memory import everos
+from core.memory.everos import MULTIMODAL_EXPLICIT_ENV
 from core.memory import sidecar
 from core.memory.sidecar import (
     _RecorderHealthProjection,
@@ -720,6 +721,7 @@ def test_processing_probe_builds_the_adapter_from_child_environment_only(monkeyp
     monkeypatch.setenv("EVEROS_MULTIMODAL__BASE_URL", "https://vision.example.test/v1")
     monkeypatch.setenv("EVEROS_MULTIMODAL__MODEL", "vision-model")
     monkeypatch.setenv("EVEROS_MULTIMODAL__API_KEY", "vision-secret")
+    monkeypatch.setenv(MULTIMODAL_EXPLICIT_ENV, "1")
     monkeypatch.setattr(everos, "EverOSPort", _Provider)
 
     assert _processing_healthy_from_child_environment() is True
@@ -738,3 +740,30 @@ def test_processing_probe_builds_the_adapter_from_child_environment_only(monkeyp
         "multimodal_model": "vision-model",
         "multimodal_api_key": "vision-secret",
     }
+
+
+def test_processing_probe_omits_legacy_multimodal_fallback_without_explicit_marker(
+    monkeypatch,
+) -> None:
+    received: dict[str, object] = {}
+
+    class _Provider:
+        def __init__(self, _socket_path, **kwargs) -> None:
+            received.update(kwargs)
+
+        async def processing_healthy(self) -> bool:
+            return True
+
+    monkeypatch.setenv("EVEROS_LLM__BASE_URL", "https://llm.example.test/v1")
+    monkeypatch.setenv("EVEROS_LLM__MODEL", "text-model")
+    monkeypatch.setenv("EVEROS_LLM__API_KEY", "llm-secret")
+    monkeypatch.setenv("EVEROS_EMBEDDING__BASE_URL", "https://embed.example.test/v1")
+    monkeypatch.setenv("EVEROS_EMBEDDING__MODEL", "embed-model")
+    monkeypatch.setenv("EVEROS_EMBEDDING__API_KEY", "embedding-secret")
+    monkeypatch.setenv("EVEROS_MULTIMODAL__BASE_URL", "https://llm.example.test/v1")
+    monkeypatch.setenv("EVEROS_MULTIMODAL__MODEL", "text-model")
+    monkeypatch.setenv("EVEROS_MULTIMODAL__API_KEY", "llm-secret")
+    monkeypatch.setattr(everos, "EverOSPort", _Provider)
+
+    assert _processing_healthy_from_child_environment() is True
+    assert not any(key.startswith("multimodal_") for key in received)

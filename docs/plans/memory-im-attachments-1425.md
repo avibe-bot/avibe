@@ -151,6 +151,25 @@ and clear semantics as rerank. Status continues to project EverOS
 capture availability line. Configuration remains UI-only; no CLI config flags are
 added.
 
+### Review-loop closure decision
+
+After review of head `cf66a808`, the orchestrator approved one whole-model closure
+for the repeated multimodal health-probe root-cause class. The recurrence came from
+environment provenance ambiguity: the same `EVEROS_MULTIMODAL__*` values can mean
+either an explicit IM opt-in or the one-cycle Workbench compatibility fallback.
+
+- An Avibe-private marker is present only for a complete explicit multimodal
+  triple. The probe child checks multimodal only when that marker is present;
+  the normal sidecar keeps the fallback variables for Workbench compatibility.
+- Fixed synthetic provider health checks run concurrently, so every request keeps
+  its 8-second bound while the complete check remains inside the existing
+  20-second child deadline.
+- Attachment capture reports ready only from a current available runtime health
+  observation. Cached stale health and unavailable health report unavailable;
+  absent explicit configuration still reports not configured.
+
+This closure adds no persistent field, sidecar route, or provider payload shape.
+
 ## Scenario contract
 
 The canonical capability is `memory_im_attachment_capture` under

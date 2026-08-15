@@ -63,6 +63,7 @@ _PREFLIGHT_IMAGE_DATA_URI = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+MULTIMODAL_EXPLICIT_ENV = "AVIBE_MEMORY_MULTIMODAL_EXPLICIT"
 _PROFILE_QUERY = "profile"
 _MAX_LIST_PAGE_SIZE = 20
 _EVEROS_EXACT_SORT_WINDOW = 20_000
@@ -556,41 +557,49 @@ class EverOSPort:
                     return False
             if not self._processing_configured():
                 return False
-            healthy = await self._probe_processing_endpoint(
-                base_url=self._llm_base_url,
-                api_key=self._llm_api_key,
-                path="chat/completions",
-                payload={
-                    "model": self._llm_model,
-                    "messages": [{"role": "user", "content": "Reply with OK."}],
-                    "max_tokens": 1,
-                    "temperature": 0,
-                },
-                validator=_valid_chat_probe_response,
-            ) and await self._probe_processing_endpoint(
-                base_url=self._embedding_base_url,
-                api_key=self._embedding_api_key,
-                path="embeddings",
-                payload={"model": self._embedding_model, "input": "memory health check"},
-                validator=_valid_embedding_probe_response,
-            )
-            if healthy and self._rerank_configured():
-                healthy = await self._probe_processing_endpoint(
-                    base_url=self._rerank_base_url,
-                    api_key=self._rerank_api_key,
-                    path=self._rerank_model or "",
-                    payload={"queries": ["OK"], "documents": ["OK"]},
-                    validator=_valid_rerank_probe_response,
-                )
-            if healthy and self._multimodal_configured():
-                healthy = await self._probe_processing_endpoint(
-                    base_url=self._multimodal_base_url,
-                    api_key=self._multimodal_api_key,
+            probes = [
+                self._probe_processing_endpoint(
+                    base_url=self._llm_base_url,
+                    api_key=self._llm_api_key,
                     path="chat/completions",
-                    payload=_multimodal_preflight_payload(self._multimodal_model),
+                    payload={
+                        "model": self._llm_model,
+                        "messages": [{"role": "user", "content": "Reply with OK."}],
+                        "max_tokens": 1,
+                        "temperature": 0,
+                    },
                     validator=_valid_chat_probe_response,
+                ),
+                self._probe_processing_endpoint(
+                    base_url=self._embedding_base_url,
+                    api_key=self._embedding_api_key,
+                    path="embeddings",
+                    payload={"model": self._embedding_model, "input": "memory health check"},
+                    validator=_valid_embedding_probe_response,
+                ),
+            ]
+            if self._rerank_configured():
+                probes.append(
+                    self._probe_processing_endpoint(
+                        base_url=self._rerank_base_url,
+                        api_key=self._rerank_api_key,
+                        path=self._rerank_model or "",
+                        payload={"queries": ["OK"], "documents": ["OK"]},
+                        validator=_valid_rerank_probe_response,
+                    )
                 )
-            return healthy
+            if self._multimodal_configured():
+                probes.append(
+                    self._probe_processing_endpoint(
+                        base_url=self._multimodal_base_url,
+                        api_key=self._multimodal_api_key,
+                        path="chat/completions",
+                        payload=_multimodal_preflight_payload(self._multimodal_model),
+                        validator=_valid_chat_probe_response,
+                    )
+                )
+            results = await asyncio.gather(*probes, return_exceptions=True)
+            return all(result is True for result in results)
 
     async def preflight(self) -> MemoryPreflightResult:
         """Run one bounded request for each configured processing endpoint."""

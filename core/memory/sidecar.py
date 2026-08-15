@@ -596,7 +596,15 @@ def _valid_session(value: object) -> bool:
 def _processing_healthy_from_child_environment() -> bool:
     """Run fixed authenticated probes only inside the scrubbed owned child."""
 
-    from core.memory.everos import EverOSPort
+    from core.memory.everos import EverOSPort, MULTIMODAL_EXPLICIT_ENV
+
+    multimodal_kwargs: dict[str, str | None] = {}
+    if os.environ.get(MULTIMODAL_EXPLICIT_ENV) == "1":
+        multimodal_kwargs = {
+            "multimodal_base_url": os.environ.get("EVEROS_MULTIMODAL__BASE_URL"),
+            "multimodal_model": os.environ.get("EVEROS_MULTIMODAL__MODEL"),
+            "multimodal_api_key": os.environ.get("EVEROS_MULTIMODAL__API_KEY"),
+        }
 
     provider = EverOSPort(
         Path("/nonexistent-memory-sidecar.sock"),
@@ -609,9 +617,7 @@ def _processing_healthy_from_child_environment() -> bool:
         rerank_base_url=os.environ.get("EVEROS_RERANK__BASE_URL"),
         rerank_model=os.environ.get("EVEROS_RERANK__MODEL"),
         rerank_api_key=os.environ.get("EVEROS_RERANK__API_KEY"),
-        multimodal_base_url=os.environ.get("EVEROS_MULTIMODAL__BASE_URL"),
-        multimodal_model=os.environ.get("EVEROS_MULTIMODAL__MODEL"),
-        multimodal_api_key=os.environ.get("EVEROS_MULTIMODAL__API_KEY"),
+        **multimodal_kwargs,
     )
     return asyncio.run(provider.processing_healthy())
 

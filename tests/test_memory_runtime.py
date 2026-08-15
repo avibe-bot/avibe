@@ -3681,6 +3681,62 @@ async def test_status_preserves_everos_disabled_recorder_state(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_attachment_capture_status_rejects_stale_runtime_health(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = MemoryConfig(
+        enabled=True,
+        processing=replace(
+            _processing_config(),
+            multimodal=MemoryEndpointConfig(
+                "https://vision.example.test/v1",
+                "vision-model",
+                "vision-key",
+            ),
+        ),
+    )
+    runtime = memory_runtime_factory(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(config))["ok"] is True
+    snapshot = ProviderHealthSnapshot(
+        status="ok",
+        version="1.2.3",
+        capabilities={
+            "llm": True,
+            "embed": True,
+            "rerank": True,
+            "multimodal_llm": True,
+            "parser": True,
+        },
+        disabled_features=(),
+        cascade=None,
+        recorder={"state": "active", "reason": None},
+    )
+    calls = 0
+
+    async def health_snapshot() -> ProviderHealthSnapshot:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return snapshot
+        raise RuntimeError("sidecar unavailable")
+
+    monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
+    assert (await runtime.status_payload())["attachment_capture"] == {"status": "ready"}
+
+    stale = await runtime.status_payload()
+    assert stale["source"]["status"] == "stale"
+    assert stale["attachment_capture"] == {"status": "unavailable"}
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_recorder_reap_hands_call_log_to_host_until_restart(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

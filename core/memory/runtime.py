@@ -1317,7 +1317,11 @@ class MemoryRuntime:
         runtime = await self._processing_record.read_status()
         payload = _runtime_health_payload(runtime)
         payload["attachment_capture"] = {
-            "status": _attachment_capture_status(self._config, payload.get("health")),
+            "status": _attachment_capture_status(
+                self._config,
+                runtime.source.status,
+                payload.get("health"),
+            ),
         }
         return payload
 
@@ -3671,6 +3675,7 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
 
 def _attachment_capture_status(
     config: MemoryConfig,
+    source_status: object,
     health: object,
 ) -> Literal["ready", "not_configured", "unavailable"]:
     """Project explicit IM attachment-capture readiness from config and health."""
@@ -3678,6 +3683,8 @@ def _attachment_capture_status(
     if config.processing.multimodal is None:
         return "not_configured"
     if not config.enabled:
+        return "unavailable"
+    if source_status != "available":
         return "unavailable"
     if not isinstance(health, dict):
         return "unavailable"

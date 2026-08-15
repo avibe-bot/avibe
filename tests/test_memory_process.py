@@ -29,6 +29,7 @@ from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.attachments import AttachmentPinStore, attachment_pin_root
 from core.memory.everos import (
     EverOSPort,
+    MULTIMODAL_EXPLICIT_ENV,
     ProviderCapture,
 )
 import core.memory.process as memory_process
@@ -319,6 +320,7 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     assert environment["EVEROS_MULTIMODAL__BASE_URL"] == environment["EVEROS_LLM__BASE_URL"]
     assert environment["EVEROS_MULTIMODAL__MODEL"] == environment["EVEROS_LLM__MODEL"]
     assert environment["EVEROS_MULTIMODAL__API_KEY"] == "llm-secret"
+    assert MULTIMODAL_EXPLICIT_ENV not in environment
     assert environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(
         attachment_pin_root(tmp_path)
     )
@@ -361,6 +363,7 @@ def test_configured_multimodal_stays_env_only_and_independent_from_llm(tmp_path:
     assert environment["EVEROS_MULTIMODAL__MODEL"] == "vision-model"
     assert environment["EVEROS_MULTIMODAL__API_KEY"] == "vision-secret"
     assert environment["EVEROS_MULTIMODAL__MODEL"] != environment["EVEROS_LLM__MODEL"]
+    assert environment[MULTIMODAL_EXPLICIT_ENV] == "1"
     assert parsed["multimodal"]["file_uri_max_bytes"] == 25 * 1024 * 1024
     assert "vision-secret" not in generated
 

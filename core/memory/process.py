@@ -39,7 +39,7 @@ from core.memory.confined_filesystem import (
     remove_anchored_entry,
     required_no_follow_flag,
 )
-from core.memory.everos import EverOSPort
+from core.memory.everos import EverOSPort, MULTIMODAL_EXPLICIT_ENV
 from core.memory.secret_scrubber import scrub_text
 from core.memory.types import MemoryErrorCode
 
@@ -2452,6 +2452,15 @@ def _memory_child_environment(
         "EVEROS_RERANK__API_KEY": settings.rerank_api_key,
     }
     env.update({key: value for key, value in optional.items() if value is not None})
+    if all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (
+            settings.multimodal_base_url,
+            settings.multimodal_model,
+            settings.multimodal_api_key,
+        )
+    ):
+        env[MULTIMODAL_EXPLICIT_ENV] = "1"
     if settings.call_log_db_path is not None:
         env["AVIBE_MEMORY_CALL_LOG_DB"] = str(settings.call_log_db_path)
     if role is not None:
