@@ -10,7 +10,7 @@ Ingress attachment eligibility is the conjunction of:
 
 Platform rollout changes only the first term. The #1470 ingress fix changes only
 the latter two terms by removing live provider health from eligibility. Workbench
-keeps its one-cycle live-read compatibility path.
+keeps its one-cycle implicit provider compatibility outside this IM call site.
 
 The call-site invariants remain:
 
@@ -34,9 +34,18 @@ a position rule: one placement blocks Agent dispatch and the other blocks `/new`
 A cached health value is also rejected as an eligibility input because freshness
 cannot be proved without coupling admission correctness to refresh timing.
 
-**Blast radius.** `core/controller.py` and focused controller tests only. No
-persistent shape changes. This PR does not touch platform allowlists, Workbench
-readiness, Processing Record, or any `core/memory/` implementation.
+**Blast radius.** `core/controller.py`, the authoritative generation normalizer in
+`core/memory/admission.py`, and focused controller tests only. No persistent shape
+changes. This PR does not touch platform allowlists, Workbench readiness, or
+Processing Record.
+
+Workbench does not enter the bounded span changed here. The outer
+`admits_attachment_turn()` check requires membership in the IM platform allowlist,
+while Workbench attachments are converted directly by `CaptureAdmission.decide()`.
+It therefore never awaits `attachment_capture_status()` while holding this IM
+exact-session ticket, and its `/new` lifecycle budget is not exposed to the probe
+removed by PR-D. The one-cycle implicit provider compatibility remains unchanged
+in the Workbench/provider path.
 
 **Tests.** A permanently blocked health stub is never called and an eligible
 attachment reaches the request; `/new` completes inside its lifecycle budget while
@@ -88,7 +97,10 @@ capture when materialization later succeeds.
 **Blast radius.** `core/handlers/inbound_attachments.py`,
 `core/handlers/message_handler.py`, and focused tests. These files overlap PR5, so
 this work starts only after PR5 merges and rebases; it never runs in parallel with
-PR5. No persistent shape changes.
+PR5. As part of that already-owned edit, PR-A replaces the existing inline
+non-negative-generation predicate in `message_handler.py` with
+`normalize_attachment_config_generation()`; PR-D deliberately does not widen into
+that file. No persistent shape changes.
 
 **Tests.** Root initialization, lease initialization, and gather-level failures
 each preserve exactly one caption capture while the Agent path retains its existing

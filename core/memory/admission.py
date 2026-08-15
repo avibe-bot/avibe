@@ -192,7 +192,7 @@ class CaptureAdmission:
                 if not self.admits_attachment_turn(facts):
                     return CaptureSkipped(reason="memory_invalid_input")
                 status = facts.attachment_capture_status
-                config_generation = _attachment_config_generation(
+                config_generation = normalize_attachment_config_generation(
                     facts.attachment_config_generation
                 )
                 if status == "ready" and config_generation is not None:
@@ -248,7 +248,9 @@ def _asserted_true(value: object) -> bool:
     return value is True
 
 
-def _attachment_config_generation(value: object) -> int | None:
+def normalize_attachment_config_generation(value: object) -> int | None:
+    """Return one valid explicit multimodal configuration generation."""
+
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value

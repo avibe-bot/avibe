@@ -1955,12 +1955,9 @@ class Controller:
             observed_generation = read_generation() if callable(read_generation) else None
         except Exception:
             observed_generation = None
-        if (
-            not isinstance(observed_generation, bool)
-            and isinstance(observed_generation, int)
-            and observed_generation >= 0
-        ):
-            generation = observed_generation
+        generation = memory_admission.normalize_attachment_config_generation(
+            observed_generation
+        )
         try:
             token = reserve(
                 principal_id=principal_id,
@@ -2511,12 +2508,12 @@ class Controller:
             attachment_selection = None
             if status not in {"ready", "not_configured", "unavailable"}:
                 status = "not_configured"
-                generation = facts.attachment_config_generation
                 if (
                     platform != WORKBENCH_PLATFORM
-                    and not isinstance(generation, bool)
-                    and isinstance(generation, int)
-                    and generation >= 0
+                    and memory_admission.normalize_attachment_config_generation(
+                        facts.attachment_config_generation
+                    )
+                    is not None
                 ):
                     status = "ready"
                 elif platform == WORKBENCH_PLATFORM:

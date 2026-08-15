@@ -306,11 +306,14 @@ def test_slack_memory_lease_retention_is_local_and_ignores_runtime_health(
     assert reservation.config_generation == 1
 
 
-def test_slack_memory_reservation_survives_without_multimodal_opt_in() -> None:
+@pytest.mark.parametrize("generation", [None, True, -1, "1"])
+def test_slack_memory_reservation_normalizes_invalid_multimodal_generation(
+    generation: object,
+) -> None:
     """Scenario: MEMORY-IM-ATTACH-003."""
 
     controller = _controller()
-    controller.memory_runtime.attachment_generation = None
+    controller.memory_runtime.attachment_generation = generation
     context = _context("slack", ordinary=False)
     context.files = [
         FileAttachment(
