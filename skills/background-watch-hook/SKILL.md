@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.17.1
+version: 0.17.2
 ---
 
 # Background Watch Hook
@@ -254,7 +254,8 @@ vibe watch add \
     --repo avibe-bot/avibe --pr 151 \
     --branch "$BRANCH" \
     --workflow lint \
-    --actionable-only --settle 20 --state-file "$STATE_FILE" --interval 60
+    --actionable-only --settle 20 --state-file "$STATE_FILE" --interval 60 \
+    --timeout 0
 
 # After the seeded Watch is confirmed live, push or post the review trigger.
 # Keep this same state file and Watch for every later head and review round.
@@ -287,9 +288,11 @@ vibe watch add \
 Before the first watched push or review trigger in the delivery loop, seed an
 owner-specific state file from the current complete PR snapshot. Arm the forever
 Watch with that exact file and confirm it is live before taking the watched action.
-Use `--timeout 0` so an ordinary quiet period cannot retire the Watch; GitHub request
-timeouts remain bounded inside the waiter itself. A nonzero per-cycle timeout is for
-a Watch whose lack of an event by that deadline is itself reportable.
+Set `--timeout 0` on both sides of the `--` command separator: the first disables
+the Watch supervisor's per-cycle deadline, while the second disables the bundled
+waiter's own default six-hour deadline. GitHub request timeouts remain bounded inside
+the waiter. A nonzero timeout at either layer is for a Watch whose lack of an event
+by that deadline is itself reportable.
 After the Watch starts, never reseed or replace its state between rounds: a later
 event may already exist, and turning it into the new baseline silently drops it.
 The forever Watch promotes each delivered batch and compares the next cycle against
@@ -358,7 +361,8 @@ vibe watch add \
     --actionable-only \
     --settle 20 \
     --state-file "$STATE_FILE" \
-    --interval 60
+    --interval 60 \
+    --timeout 0
 ```
 
 Always pass `--state-file` to a `--forever` watch. Each cycle is a fresh waiter

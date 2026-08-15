@@ -173,7 +173,20 @@ def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_sta
     assert "Omit `--sha`" in body
     assert "Use `--forever` and one" in body
     assert "never reseed or replace its state between rounds" in body
-    assert body.count("--timeout 0") >= 2
+    preferred_section = body.split("### Preferred PR + CI watch", 1)[1]
+    preferred_forever_command = preferred_section.split('vibe watch add \\\n', 1)[
+        1
+    ].split("```", 1)[0]
+    supervisor, waiter = preferred_forever_command.split("  -- \\\n", 1)
+    assert "--timeout 0" in supervisor
+    assert "--timeout 0" in waiter
+    generic_forever_command = body.split('  --name "Monitor PR 151 reviews"', 1)[1].split(
+        "```", 1
+    )[0]
+    supervisor, waiter = generic_forever_command.split("  -- \\\n", 1)
+    assert "--timeout 0" in supervisor
+    assert "--timeout 0" in waiter
+    assert "both sides of the `--` command separator" in body
     assert "six quiet hours" in body
     assert '--workflow lint' in body
 
