@@ -376,7 +376,7 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
             stop_order.append("memory-runtime")
 
     class _MessageHandler:
-        async def drain_memory_capture_tasks(self) -> None:
+        async def cancel_memory_capture_tasks(self) -> None:
             stopped["capture"] = True
             stop_order.append("capture")
 

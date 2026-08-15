@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional, Dict, Any, TypeVar
 from config import paths
@@ -64,6 +64,24 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MemorySessionLifecycleResult = TypeVar("_MemorySessionLifecycleResult")
+
+
+@dataclass
+class _MemoryAttachmentCaptureReservation:
+    """Single-owner bridge from SessionTurn registration to Memory execution."""
+
+    module: object
+    token: object
+    config_generation: int | None
+    active: bool = True
+
+    def release(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        cancel = getattr(self.module, "cancel_capture_reservation", None)
+        if callable(cancel):
+            cancel(self.token)
 
 
 class _SettingsUserBindings:
@@ -1888,12 +1906,12 @@ class Controller:
             self._memory_turn_facts(context, include_workdir=False)
         )
 
-    def memory_attachment_capture_admitted(
+    def reserve_memory_attachment_capture(
         self,
         context: MessageContext,
         session_id: str,
-    ) -> int | None:
-        """Return the local config generation authorizing a Memory lease."""
+    ) -> object | None:
+        """Register exact-session capture order using local facts only."""
 
         admission = self._memory_admission()
         facts = self._memory_turn_facts(
@@ -1905,20 +1923,45 @@ class Controller:
         if not admission.admits_attachment_turn(facts):
             return None
         runtime = getattr(self, "memory_runtime", None)
+        module = getattr(runtime, "module", None)
+        reserve = getattr(module, "reserve_capture_admission", None)
+        principal_id = admission.principal_for(facts)
+        project_id = admission.project_for(facts)
+        if (
+            not callable(reserve)
+            or not isinstance(principal_id, str)
+            or not isinstance(project_id, str)
+        ):
+            return None
         read_generation = getattr(
             runtime,
             "attachment_capture_config_generation",
             None,
         )
-        if not callable(read_generation):
-            return None
+        generation = None
         try:
-            generation = read_generation()
+            observed_generation = read_generation() if callable(read_generation) else None
+        except Exception:
+            observed_generation = None
+        if (
+            not isinstance(observed_generation, bool)
+            and isinstance(observed_generation, int)
+            and observed_generation >= 0
+        ):
+            generation = observed_generation
+        try:
+            token = reserve(
+                principal_id=principal_id,
+                project_id=project_id,
+                session_id=session_id,
+            )
         except Exception:
             return None
-        if isinstance(generation, bool) or not isinstance(generation, int):
-            return None
-        return generation if generation >= 0 else None
+        return _MemoryAttachmentCaptureReservation(
+            module=module,
+            token=token,
+            config_generation=generation,
+        )
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
         return self._memory_admission().principal_for(
@@ -2315,6 +2358,7 @@ class Controller:
         session_id: str,
         *,
         attachment_lease: object = None,
+        attachment_reservation: object = None,
         attachment_config_generation: int | None = None,
         attachment_failure_reasons: object = None,
         admission_ready: asyncio.Event | None = None,
@@ -2331,6 +2375,7 @@ class Controller:
             text,
             session_id,
             attachment_lease=attachment_lease,
+            attachment_reservation=attachment_reservation,
             attachment_config_generation=attachment_config_generation,
             attachment_failure_reasons=attachment_failure_reasons,
             admission_ready=admission_ready,
@@ -2344,11 +2389,22 @@ class Controller:
         session_id: str,
         *,
         attachment_lease: object = None,
+        attachment_reservation: object = None,
         attachment_config_generation: int | None = None,
         attachment_failure_reasons: object = None,
         admission_ready: asyncio.Event | None = None,
         observed_runtime: object,
     ) -> None:
+        reservation = (
+            attachment_reservation
+            if isinstance(
+                attachment_reservation,
+                _MemoryAttachmentCaptureReservation,
+            )
+            else None
+        )
+        if reservation is not None:
+            attachment_config_generation = reservation.config_generation
         admission = self._memory_admission()
         facts = self._memory_turn_facts(
             context,
@@ -2360,6 +2416,8 @@ class Controller:
         )
         try:
             if admission.admits_attachment_turn(facts):
+                if reservation is None:
+                    return
                 principal_id = admission.principal_for(facts)
                 project_id = admission.project_for(facts)
                 module = getattr(observed_runtime, "module", None)
@@ -2368,11 +2426,15 @@ class Controller:
                     isinstance(principal_id, str)
                     and isinstance(project_id, str)
                     and callable(acquire_admission)
+                    and (reservation is None or reservation.module is module)
                 ):
                     async with acquire_admission(
                         principal_id=principal_id,
                         project_id=project_id,
                         session_id=session_id,
+                        reservation=(
+                            reservation.token if reservation is not None else None
+                        ),
                     ) as held_admission:
                         if admission_ready is not None:
                             admission_ready.set()
@@ -2393,6 +2455,8 @@ class Controller:
                 observed_runtime=observed_runtime,
             )
         finally:
+            if reservation is not None:
+                reservation.release()
             if admission_ready is not None:
                 admission_ready.set()
 
@@ -3073,13 +3137,20 @@ class Controller:
             "Memory factory reset",
             timeout=None,
         )
-        async def _drain_memory_capture_tasks() -> None:
+        async def _cancel_memory_capture_tasks() -> None:
             handler = getattr(self, "message_handler", None)
-            drain = getattr(handler, "drain_memory_capture_tasks", None)
-            if callable(drain):
-                await drain()
+            cancel = getattr(handler, "cancel_memory_capture_tasks", None)
+            if callable(cancel):
+                await cancel()
 
-        _stop_loop_coroutine(_drain_memory_capture_tasks(), "Memory capture tasks")
+        # Tracked captures own retained attachment leases. Cancel and join them
+        # without the generic five-second cutoff while the event loop can still
+        # run their done callbacks.
+        _stop_loop_coroutine(
+            _cancel_memory_capture_tasks(),
+            "Memory capture tasks",
+            timeout=None,
+        )
         memory_runtime = getattr(self, "memory_runtime", None)
         if memory_runtime is not None:
             _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")

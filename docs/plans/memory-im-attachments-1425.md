@@ -296,12 +296,44 @@ all capture work to one late stage.
   Runtime generation; absence or mismatch fails closed for attachments, including
   an opt-out or endpoint replacement that completed while readiness was being read.
   Eligible text remains independently best effort.
-- The per-session `SessionTurn` lifecycle admission is held only until the
-  background task has acquired Memory's exact-session capture fence. It is then
-  released before durable Agent admission. Attachment validation, bundle pin/copy,
-  queue commit, and provider work happen outside the `SessionTurn` lock while the
-  Memory fence remains held, so `/new` cannot pass the old turn but Agent startup
-  never waits for the attachment pin.
+- **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
+  admission, the handler performs only an O(1), non-blocking, local registration of
+  an exact-session Memory capture ticket. Registration records FIFO order but never
+  waits for an earlier capture and never reads a provider or subprocess. Once the
+  ticket and task ownership are established, the handler releases `SessionTurn`
+  immediately and continues durable Agent admission.
+- **Concurrent captures.** Tickets for the same canonical session execute in
+  registration order. A background task waits for its predecessor only after
+  `SessionTurn` has been released, then performs readiness, attachment selection,
+  bundle pin/copy, and queue commit under the existing exact-session execution
+  fence. Tickets for different canonical sessions have independent tails and remain
+  concurrent. Order is represented by ticket data, never by holding the dispatch
+  lock while slow work runs.
+- **Lifecycle barrier.** `/new` first acquires `SessionTurn`, then registers a
+  lifecycle barrier behind the current exact-session ticket tail and waits for that
+  snapshot with the existing bounded lifecycle deadline. Holding `SessionTurn`
+  prevents later turns from registering while the barrier drains, so every ticket
+  before the reset is included and the wait converges; captures admitted after the
+  reset queue behind the barrier. The reset and final flush therefore cannot pass an
+  older registered capture, while Agent dispatch never waits for capture execution.
+- **Single ownership, in process.** Before task tracking, the handler owns the
+  reservation and any retained materializer lease. Successful scheduling transfers
+  both to the background task; every exception, cancellation, or scheduling failure
+  completes the reservation and releases the retained lease together. Once tracked,
+  the task completes its ticket in `finally` and its done callback releases the
+  lease. Controller shutdown cancels and joins every tracked capture without the
+  generic five-second cleanup cutoff while the event loop is still alive, ensuring
+  those callbacks run. This process-local cleanup is best effort: no exit path may
+  have two owners, but an abrupt process termination can bypass all callbacks.
+- **Authoritative durable cleanup.** Startup recovery is the final correctness
+  guarantee for every termination path, including crashes and `SIGKILL`.
+  `MemoryCoordinator.recover_after_boot()` takes the database attachment-reference
+  snapshot inside the admission fence and `_reconcile_attachments()` invokes the
+  idempotent `AttachmentStore.reconcile(referenced, releasing)` operation. It removes
+  all staging remnants and every bundle not referenced by the database. Therefore an
+  attachment lease or bundle abandoned before queue adoption is bounded to the
+  process lifetime plus the next Memory startup recovery, rather than permanently
+  retained.
 
 ## Scenario contract
 

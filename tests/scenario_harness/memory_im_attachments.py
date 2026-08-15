@@ -250,10 +250,11 @@ class MemoryIMAttachmentScenarioHarness:
         ).materialize(context, self.downloader)
         memory_lease = None
         try:
-            config_generation = self.controller.memory_attachment_capture_admitted(
+            reservation = self.controller.reserve_memory_attachment_capture(
                 context,
                 "stable-session",
             )
+            config_generation = getattr(reservation, "config_generation", None)
             if config_generation is not None:
                 memory_lease = batch.lease.retain()
             await self.controller.capture_user_memory(
@@ -261,6 +262,7 @@ class MemoryIMAttachmentScenarioHarness:
                 text,
                 "stable-session",
                 attachment_lease=memory_lease,
+                attachment_reservation=reservation,
                 attachment_config_generation=config_generation,
                 attachment_failure_reasons=batch.errors,
             )

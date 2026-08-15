@@ -11,6 +11,7 @@ import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -131,6 +132,15 @@ class _CaptureModule:
     def __init__(self) -> None:
         self.accepted = []
         self.seen: set[str] = set()
+        self.reservations: list[object] = []
+
+    def reserve_capture_admission(self, **_scope):
+        reservation = object()
+        self.reservations.append(reservation)
+        return reservation
+
+    def cancel_capture_reservation(self, _reservation):
+        return None
 
     @asynccontextmanager
     async def capture_admission(self, **_scope):
@@ -232,6 +242,31 @@ def test_message_handler_drains_memory_capture_tasks() -> None:
     asyncio.run(run())
 
 
+def test_message_handler_cancels_and_joins_memory_capture_tasks() -> None:
+    handler = MessageHandler.__new__(MessageHandler)
+    handler._memory_capture_tasks = set()
+    released = Mock()
+
+    async def run() -> None:
+        started = asyncio.Event()
+
+        async def capture() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(capture())
+        handler._track_memory_capture_task(task, attachment_lease=released)
+        await started.wait()
+
+        await handler.cancel_memory_capture_tasks()
+
+        assert task.cancelled()
+        assert handler._memory_capture_tasks == set()
+        released.release.assert_called_once_with()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("platform", ["slack", "discord", "telegram", "feishu", "wechat"])
 def test_capture_admits_every_enabled_bound_dm_user(platform: str) -> None:
     controller = _controller(user=SimpleNamespace(enabled=True, is_admin=False))
@@ -258,10 +293,16 @@ def test_slack_memory_lease_retention_is_local_and_ignores_runtime_health(
     ]
     context.is_ordinary_attachment = True
 
-    assert controller.memory_attachment_capture_admitted(context, "stable-session") == 1
+    reservation = controller.reserve_memory_attachment_capture(
+        context,
+        "stable-session",
+    )
+
+    assert reservation is not None
+    assert reservation.config_generation == 1
 
 
-def test_slack_memory_lease_retention_requires_explicit_multimodal_config() -> None:
+def test_slack_memory_reservation_survives_without_multimodal_opt_in() -> None:
     """Scenario: MEMORY-IM-ATTACH-003."""
 
     controller = _controller()
@@ -276,7 +317,13 @@ def test_slack_memory_lease_retention_requires_explicit_multimodal_config() -> N
     ]
     context.is_ordinary_attachment = True
 
-    assert controller.memory_attachment_capture_admitted(context, "stable-session") is None
+    reservation = controller.reserve_memory_attachment_capture(
+        context,
+        "stable-session",
+    )
+
+    assert reservation is not None
+    assert reservation.config_generation is None
 
 
 def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
@@ -286,7 +333,6 @@ def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
         controller = _controller()
         health_started = asyncio.Event()
         release_health = asyncio.Event()
-        admission_ready = asyncio.Event()
 
         async def attachment_capture_status() -> str:
             health_started.set()
@@ -303,6 +349,11 @@ def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
             )
         ]
         context.is_ordinary_attachment = True
+        reservation = controller.reserve_memory_attachment_capture(
+            context,
+            "stable-session",
+        )
+        assert reservation is not None
 
         capture = asyncio.create_task(
             controller.capture_user_memory(
@@ -310,11 +361,9 @@ def test_attachment_capture_hands_off_before_runtime_health_read() -> None:
                 "remember this",
                 "stable-session",
                 attachment_lease=object(),
-                attachment_config_generation=1,
-                admission_ready=admission_ready,
+                attachment_reservation=reservation,
             )
         )
-        await asyncio.wait_for(admission_ready.wait(), timeout=1.0)
         await asyncio.wait_for(health_started.wait(), timeout=1.0)
         assert not capture.done()
 
@@ -356,13 +405,18 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
             )
         ]
         context.is_ordinary_attachment = True
+        reservation = controller.reserve_memory_attachment_capture(
+            context,
+            "stable-session",
+        )
+        assert reservation is not None
 
         await controller.capture_user_memory(
             context,
             "keep the caption",
             "stable-session",
             attachment_lease=object(),
-            attachment_config_generation=1,
+            attachment_reservation=reservation,
         )
 
         assert len(controller.memory_module.accepted) == 1

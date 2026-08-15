@@ -102,6 +102,41 @@ class _HeldCaptureAdmission:
         self.active = True
 
 
+class _CaptureReservation:
+    """One O(1) FIFO registration for exact-session capture work."""
+
+    def __init__(
+        self,
+        module: "MemoryModule",
+        key: tuple[str, str, str],
+        predecessor: asyncio.Future[None] | None,
+    ) -> None:
+        self.module = module
+        self.key = key
+        self.predecessor = predecessor
+        self.completion = asyncio.get_running_loop().create_future()
+        self.active = True
+
+    async def wait_for_turn(self) -> None:
+        if self.predecessor is not None:
+            await asyncio.shield(self.predecessor)
+
+    def complete(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        if self.predecessor is None or self.predecessor.done():
+            self._resolve_completion()
+            return
+        self.predecessor.add_done_callback(
+            lambda _predecessor: self._resolve_completion()
+        )
+
+    def _resolve_completion(self) -> None:
+        if not self.completion.done():
+            self.completion.set_result(None)
+
+
 logger = logging.getLogger(__name__)
 _SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
 
@@ -158,6 +193,9 @@ class MemoryModule:
         self._capture_admission_locks: weakref.WeakValueDictionary[
             tuple[str, str, str], asyncio.Lock
         ] = weakref.WeakValueDictionary()
+        self._capture_reservation_tails: dict[
+            tuple[str, str, str], _CaptureReservation
+        ] = {}
         self._invalid_capture_admission_lock = asyncio.Lock()
         self._clear_active = False
         self._retired = False
@@ -301,6 +339,11 @@ class MemoryModule:
         timeout = _positive_timeout(deadline_seconds)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        barrier = self.reserve_capture_admission(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=raw_session_id,
+        )
         admission_lock = self._capture_admission_lock(
             principal_id=principal_id,
             project_id=project_id,
@@ -308,7 +351,11 @@ class MemoryModule:
         )
         acquired = False
         try:
-            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
+            await self._wait_for_capture_reservation(barrier, deadline)
+            await asyncio.wait_for(
+                admission_lock.acquire(),
+                timeout=max(deadline - loop.time(), 0.001),
+            )
             acquired = True
             return await self._final_flush_under_admission(
                 principal_id=principal_id,
@@ -321,6 +368,7 @@ class MemoryModule:
         finally:
             if acquired:
                 admission_lock.release()
+            self.cancel_capture_reservation(barrier)
 
     async def run_session_lifecycle(
         self,
@@ -338,19 +386,29 @@ class MemoryModule:
         timeout = _positive_timeout(deadline_seconds)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        barrier = self.reserve_capture_admission(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=raw_session_id,
+        )
         admission_lock = self._capture_admission_lock(
             principal_id=principal_id,
             project_id=project_id,
             session_id=raw_session_id,
         )
+        acquired = False
         try:
-            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
-        except asyncio.TimeoutError as error:
-            raise MemorySessionLifecycleBusyError(
-                "memory capture admission did not quiesce before the deadline"
-            ) from error
-
-        try:
+            try:
+                await self._wait_for_capture_reservation(barrier, deadline)
+                await asyncio.wait_for(
+                    admission_lock.acquire(),
+                    timeout=max(deadline - loop.time(), 0.001),
+                )
+                acquired = True
+            except asyncio.TimeoutError as error:
+                raise MemorySessionLifecycleBusyError(
+                    "memory capture admission did not quiesce before the deadline"
+                ) from error
             await self._final_flush_under_admission(
                 principal_id=principal_id,
                 project_id=project_id,
@@ -359,7 +417,9 @@ class MemoryModule:
             )
             return await operation()
         finally:
-            admission_lock.release()
+            if acquired:
+                admission_lock.release()
+            self.cancel_capture_reservation(barrier)
 
     async def run_session_scopes_lifecycle(
         self,
@@ -390,6 +450,14 @@ class MemoryModule:
         timeout = _positive_timeout(deadline_seconds)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        barriers = [
+            self.reserve_capture_admission(
+                principal_id=principal_id,
+                project_id=project_id,
+                session_id=raw_session_id,
+            )
+            for principal_id, project_id in canonical_scopes
+        ]
         locks = [
             self._capture_admission_lock(
                 principal_id=principal_id,
@@ -400,32 +468,27 @@ class MemoryModule:
         ]
         acquired: list[asyncio.Lock] = []
         try:
-            for admission_lock in locks:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError
-                await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
-                acquired.append(admission_lock)
-        except asyncio.TimeoutError as error:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-            raise MemorySessionLifecycleBusyError(
-                "memory capture admission did not quiesce before the deadline"
-            ) from error
-        except asyncio.CancelledError:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-            raise
-
-        try:
+            try:
+                for barrier in barriers:
+                    await self._wait_for_capture_reservation(barrier, deadline)
+                for admission_lock in locks:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
+                    acquired.append(admission_lock)
+            except asyncio.TimeoutError as error:
+                raise MemorySessionLifecycleBusyError(
+                    "memory capture admission did not quiesce before the deadline"
+                ) from error
             flush_succeeded = True
             for principal_id, project_id in canonical_scopes:
                 flush_succeeded = (
                     await self._final_flush_under_admission(
-                    principal_id=principal_id,
-                    project_id=project_id,
-                    raw_session_id=raw_session_id,
-                    deadline=deadline,
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        raw_session_id=raw_session_id,
+                        deadline=deadline,
                     )
                     and flush_succeeded
                 )
@@ -436,6 +499,8 @@ class MemoryModule:
         finally:
             for admission_lock in reversed(acquired):
                 admission_lock.release()
+            for barrier in reversed(barriers):
+                self.cancel_capture_reservation(barrier)
 
     async def _final_flush_under_admission(
         self,
@@ -517,6 +582,7 @@ class MemoryModule:
         principal_id: str,
         project_id: str,
         session_id: str,
+        reservation: object = None,
     ) -> AsyncIterator[_HeldCaptureAdmission]:
         """Acquire the exact-session fence before deferred capture work starts."""
 
@@ -526,13 +592,92 @@ class MemoryModule:
             project_id=project_id,
             session_id=session_id,
         )
-        await lock.acquire()
-        admission = _HeldCaptureAdmission(self, lock, key)
+        ticket = reservation if isinstance(reservation, _CaptureReservation) else None
+        if reservation is not None and not self._owns_capture_reservation(ticket, key):
+            self.cancel_capture_reservation(reservation)
+            raise ValueError("invalid Memory capture reservation")
+        acquired = False
         try:
+            if ticket is not None:
+                await ticket.wait_for_turn()
+            await lock.acquire()
+            acquired = True
+            admission = _HeldCaptureAdmission(self, lock, key)
             yield admission
         finally:
-            admission.active = False
-            lock.release()
+            if acquired:
+                admission.active = False
+                lock.release()
+            if ticket is not None:
+                self.cancel_capture_reservation(ticket)
+
+    def reserve_capture_admission(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        session_id: str,
+    ) -> object:
+        """Register exact-session capture order without waiting for earlier work."""
+
+        key = self._capture_admission_key(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        if key is None:
+            raise ValueError("invalid Memory capture reservation scope")
+        tail = self._capture_reservation_tails.get(key)
+        predecessor = tail.completion if tail is not None else None
+        reservation = _CaptureReservation(self, key, predecessor)
+        self._capture_reservation_tails[key] = reservation
+        reservation.completion.add_done_callback(
+            lambda _completion: self._retire_capture_reservation(key, reservation)
+        )
+        return reservation
+
+    def cancel_capture_reservation(self, reservation: object) -> None:
+        """Complete an owned reservation on cancellation or scheduling failure."""
+
+        if isinstance(reservation, _CaptureReservation) and reservation.module is self:
+            reservation.complete()
+
+    async def _wait_for_capture_reservation(
+        self,
+        reservation: object,
+        deadline: float,
+    ) -> None:
+        if not isinstance(reservation, _CaptureReservation):
+            raise ValueError("invalid Memory capture reservation")
+        if reservation.predecessor is None:
+            return
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.wait_for(
+            asyncio.shield(reservation.predecessor),
+            timeout=remaining,
+        )
+
+    def _retire_capture_reservation(
+        self,
+        key: tuple[str, str, str],
+        reservation: _CaptureReservation,
+    ) -> None:
+        if self._capture_reservation_tails.get(key) is reservation:
+            self._capture_reservation_tails.pop(key, None)
+
+    def _owns_capture_reservation(
+        self,
+        reservation: _CaptureReservation | None,
+        key: tuple[str, str, str],
+    ) -> bool:
+        return bool(
+            reservation is not None
+            and reservation.active
+            and reservation.module is self
+            and reservation.key == key
+        )
 
     async def _capture_with_admission(
         self,
@@ -1366,17 +1511,32 @@ class MemoryModule:
     ) -> asyncio.Lock:
         """Return the exact-session fence covering pin through queue commit."""
 
-        if not all(
-            isinstance(value, str)
-            for value in (principal_id, project_id, session_id)
-        ):
+        key = self._capture_admission_key(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        if key is None:
             return self._invalid_capture_admission_lock
-        key = (principal_id, project_id, session_id)
         lock = self._capture_admission_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
             self._capture_admission_locks[key] = lock
         return lock
+
+    @staticmethod
+    def _capture_admission_key(
+        *,
+        principal_id: object,
+        project_id: object,
+        session_id: object,
+    ) -> tuple[str, str, str] | None:
+        if not all(
+            isinstance(value, str)
+            for value in (principal_id, project_id, session_id)
+        ):
+            return None
+        return principal_id, project_id, session_id
 
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         return await run_blocking(method, *args, **kwargs)
