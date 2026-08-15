@@ -1587,7 +1587,7 @@ class TelegramBot(BaseIMClient):
                 proxy_url=self._proxy_url,
             )
             return FileDownloadResult(True)
-        except ValueError:
+        except telegram_api.TelegramFileTooLargeError:
             target.unlink(missing_ok=True)
             return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
         except Exception:

@@ -63,7 +63,7 @@ async def test_telegram_api_streams_to_disk_and_removes_midstream_overflow(
         lambda **_kwargs: _Session(response),
     )
 
-    with pytest.raises(ValueError, match="max_bytes"):
+    with pytest.raises(telegram_api.TelegramFileTooLargeError, match="max_bytes"):
         await telegram_api.download_file_to_path(
             "token",
             "documents/file.bin",
@@ -87,7 +87,7 @@ async def test_telegram_api_rejects_response_header_before_writing(
         lambda **_kwargs: _Session(response),
     )
 
-    with pytest.raises(ValueError, match="max_bytes"):
+    with pytest.raises(telegram_api.TelegramFileTooLargeError, match="max_bytes"):
         await telegram_api.download_file_to_path(
             "token",
             "documents/file.bin",
@@ -144,3 +144,67 @@ async def test_telegram_adapter_streams_resolved_file_with_bound(monkeypatch, tm
         timeout_seconds=17,
         proxy_url=bot._proxy_url,
     )
+
+
+@pytest.mark.asyncio
+async def test_telegram_adapter_does_not_classify_unrelated_value_error_as_overflow(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    monkeypatch.setattr(
+        telegram_api,
+        "get_file",
+        AsyncMock(return_value={"result": {"file_path": "docs/file.pdf"}}),
+    )
+    monkeypatch.setattr(
+        telegram_api,
+        "download_file_to_path",
+        AsyncMock(side_effect=ValueError("malformed proxy or file URL")),
+    )
+    target = tmp_path / "file.pdf"
+
+    result = await bot.download_file_to_path(
+        {"url": "file-id"},
+        str(target),
+        max_bytes=None,
+    )
+
+    assert result.success is False
+    assert result.error == "Telegram file download failed"
+    assert result.failure_reason is None
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_telegram_adapter_preserves_streaming_overflow_reason(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    monkeypatch.setattr(
+        telegram_api,
+        "get_file",
+        AsyncMock(return_value={"result": {"file_path": "docs/file.pdf"}}),
+    )
+    monkeypatch.setattr(
+        telegram_api,
+        "download_file_to_path",
+        AsyncMock(
+            side_effect=telegram_api.TelegramFileTooLargeError(
+                "Downloaded file exceeds max_bytes"
+            )
+        ),
+    )
+    target = tmp_path / "file.pdf"
+
+    result = await bot.download_file_to_path(
+        {"url": "file-id"},
+        str(target),
+        max_bytes=5,
+    )
+
+    assert result.success is False
+    assert result.error == "File exceeds max_bytes"
+    assert result.failure_reason == "file_too_large"
+    assert not target.exists()

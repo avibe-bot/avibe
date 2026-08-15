@@ -10,6 +10,10 @@ import aiohttp
 from aiohttp_socks import ProxyConnector
 
 
+class TelegramFileTooLargeError(ValueError):
+    """The streamed Telegram file exceeded its configured byte bound."""
+
+
 def _api_url(bot_token: str, method: str) -> str:
     return f"https://api.telegram.org/bot{bot_token}/{method}"
 
@@ -94,13 +98,13 @@ async def download_file_to_path(
                 resp.raise_for_status()
                 content_length = _positive_content_length(resp.headers.get("Content-Length"))
                 if max_bytes is not None and content_length is not None and content_length > max_bytes:
-                    raise ValueError("Downloaded file exceeds max_bytes")
+                    raise TelegramFileTooLargeError("Downloaded file exceeds max_bytes")
                 total = 0
                 with target.open("xb") as file_obj:
                     async for chunk in resp.content.iter_chunked(64 * 1024):
                         total += len(chunk)
                         if max_bytes is not None and total > max_bytes:
-                            raise ValueError("Downloaded file exceeds max_bytes")
+                            raise TelegramFileTooLargeError("Downloaded file exceeds max_bytes")
                         file_obj.write(chunk)
         return total
     except BaseException:

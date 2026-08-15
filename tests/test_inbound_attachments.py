@@ -226,3 +226,48 @@ async def test_materializer_preserves_typed_size_reason_and_localizes_display(
     assert batch.display_errors == ("附件“large.pdf”超过附件大小限制。",)
     assert "native size detail" not in repr(batch)
     batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_materializer_removes_corrected_final_file_when_post_processing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "avibe-home"
+    client = _StubClient(
+        {
+            "failed.bin": b"\x89PNG\r\n\x1a\ncontent",
+            "valid.txt": b"valid",
+        }
+    )
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[
+            FileAttachment("failed.bin", "application/octet-stream", url="failed"),
+            FileAttachment("valid.txt", "text/plain", url="valid"),
+        ],
+    )
+    original_chmod = Path.chmod
+
+    def fail_corrected_chmod(path: Path, mode: int) -> None:
+        if path.suffix == ".png":
+            raise OSError("post-download chmod failed")
+        original_chmod(path, mode)
+
+    monkeypatch.setattr(Path, "chmod", fail_corrected_chmod)
+
+    batch = await InboundAttachmentMaterializer(effective_home=home).materialize(
+        context,
+        client,
+        max_concurrency=2,
+    )
+
+    assert [attachment.name for attachment in batch.attachments] == ["valid.txt"]
+    assert batch.errors == ("download_failed",)
+    lease_root = home / "attachments" / "im"
+    assert not list(lease_root.rglob("*failed*"))
+    batch.lease.adopt()
+    batch.lease.release()
+    assert not list(lease_root.rglob("*failed*"))

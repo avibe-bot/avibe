@@ -228,6 +228,8 @@ class InboundAttachmentMaterializer:
         final_path = lease_dir / f"{index:02d}-{safe_name}"
         partial_path = lease_dir / f"{index:02d}-{safe_name}.part"
         file_info = _download_info(context, attachment)
+        published_paths: set[Path] = set()
+        materialized = False
         try:
             stream_download = getattr(im_client, "download_file_to_path", None)
             if callable(stream_download):
@@ -262,11 +264,13 @@ class InboundAttachmentMaterializer:
                 return _materialization_failure("file_too_large", attachment.name, language)
             partial_path.chmod(0o600)
             os.replace(partial_path, final_path)
+            published_paths.add(final_path)
             name, mimetype, final_path = _normalize_detected_media(
                 attachment.name,
                 attachment.mimetype,
                 final_path,
             )
+            published_paths.add(final_path)
             final_path.chmod(0o600)
             snapshot = FileAttachment(
                 name=name,
@@ -274,19 +278,24 @@ class InboundAttachmentMaterializer:
                 local_path=str(final_path),
                 size=size,
             )
-            return snapshot, _LeasedAttachmentRecord(
+            outcome = snapshot, _LeasedAttachmentRecord(
                 name=name,
                 mimetype=mimetype,
                 declared_size=attachment.size,
                 size=size,
                 path=final_path,
             )
+            materialized = True
+            return outcome
         except asyncio.CancelledError:
             raise
         except Exception:
             return _materialization_failure("download_failed", attachment.name, language)
         finally:
             partial_path.unlink(missing_ok=True)
+            if not materialized:
+                for published_path in published_paths:
+                    published_path.unlink(missing_ok=True)
 
 
 def leased_attachment_records(
