@@ -133,6 +133,41 @@ def test_watch_row_serializer_covers_every_managed_watch_field(store) -> None:
     assert {field.name for field in fields(ManagedWatch)} <= set(row)
 
 
+def test_watch_numeric_defaults_preserve_zero_and_restore_nulls(store) -> None:
+    """Every numeric Watch setting preserves zero and restores its declared default."""
+    from dataclasses import MISSING, fields
+    from numbers import Real
+
+    from core.watches import ManagedWatch
+
+    numeric_defaults = {
+        field.name: field.default
+        for field in fields(ManagedWatch)
+        if field.default is not MISSING
+        and isinstance(field.default, Real)
+        and not isinstance(field.default, bool)
+    }
+    zero_values = dict.fromkeys(numeric_defaults, 0)
+
+    _watch(store, "zero-values", **zero_values)
+    zero_row = store.get_watch("zero-values")
+    assert {name: zero_row[name] for name in numeric_defaults} == zero_values
+
+    _watch(store, "absent-values")
+    absent_row = store.get_watch("absent-values")
+    assert {name: absent_row[name] for name in numeric_defaults} == numeric_defaults
+
+    _watch(store, "null-values")
+    with store.engine.begin() as connection:
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == "null-values")
+            .values({name: None for name in numeric_defaults})
+        )
+    null_row = store.get_watch("null-values")
+    assert {name: null_row[name] for name in numeric_defaults} == numeric_defaults
+
+
 def test_watch_states_separate_the_switch_from_the_history(store) -> None:
     """The four states, one fixture per rule (plan §2)."""
     _watch(store, "armed")
