@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import pytest
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -12323,6 +12324,200 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     )
 
 
+def test_watch_cycle_outcome_pair_is_published_atomically(
+    tmp_path: Path,
+) -> None:
+    """A held reader cannot straddle publication of the next cycle outcome."""
+
+    from core.watches import ManagedWatchStore
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="atomic outcome",
+        session_key="",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    assert store.mark_cycle_result(watch.id, exit_code=0, error=None)
+    previous_outcome = (0, None)
+    next_outcome = (75, "watch command exited with status 75")
+
+    reader_has_old_exit_code = threading.Event()
+    writer_finished = threading.Event()
+    observed_outcomes: list[tuple[int | None, str | None]] = []
+    reader_errors: list[BaseException] = []
+    writer_errors: list[BaseException] = []
+
+    class _BlockingNamespace(dict):
+        def __getitem__(self, key):
+            value = super().__getitem__(key)
+            if key == "last_exit_code":
+                reader_has_old_exit_code.set()
+                if not writer_finished.wait(timeout=5):
+                    raise AssertionError("writer did not publish while the reader was paused")
+            return value
+
+    # ``watch`` is the mutation result retained by its caller and therefore the cached
+    # object whose namespace publication updates. Pause its outcome reader after the
+    # first old value has been fetched, then let the writer publish the complete next
+    # namespace before the reader fetches the second value.
+    watch.__dict__ = _BlockingNamespace(watch.__dict__)
+
+    def _read_result() -> None:
+        try:
+            observed_outcomes.append(watch.last_cycle_outcome)
+        except BaseException as exc:
+            reader_errors.append(exc)
+
+    def _write_result() -> None:
+        try:
+            assert store.mark_cycle_result(
+                watch.id,
+                exit_code=next_outcome[0],
+                error=next_outcome[1],
+            )
+        except BaseException as exc:
+            writer_errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    reader = threading.Thread(target=_read_result)
+    reader.start()
+    assert reader_has_old_exit_code.wait(timeout=5)
+    writer = threading.Thread(target=_write_result)
+    writer.start()
+    writer.join(timeout=5)
+    reader.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert not writer_errors
+    assert not reader_errors
+    assert observed_outcomes == [previous_outcome]
+
+    visible_after = store.get_watch(watch.id)
+    assert visible_after is not None
+    assert visible_after is watch
+    assert visible_after.last_cycle_outcome == next_outcome
+    persisted_after = ManagedWatchStore(tmp_path / "watches.json").get_watch(watch.id)
+    assert persisted_after is not None
+    assert persisted_after.last_cycle_outcome == next_outcome
+
+
+def test_watch_write_and_mirror_publication_exclude_same_store_reload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A newer durable edit cannot be replaced by an older pending publication."""
+
+    from core.watches import ManagedWatchStore
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+
+    def _sqlite_watch_store() -> ManagedWatchStore:
+        store = ManagedWatchStore(tmp_path / "unused-watches.json")
+        store._sqlite = SQLiteBackgroundTaskStore(db_path)
+        store.load()
+        return store
+
+    store = _sqlite_watch_store()
+    other = _sqlite_watch_store()
+    watch = store.add_watch(
+        name="atomic publication",
+        session_key="",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    other.load()
+
+    candidate_committed = threading.Event()
+    allow_publication = threading.Event()
+    newer_edit_committed = threading.Event()
+    reload_started = threading.Event()
+    reload_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    reloader_errors: list[BaseException] = []
+    sqlite = store.sqlite_backend
+    assert sqlite is not None
+    original_upsert = sqlite.upsert_watch
+
+    def _pause_after_commit(*args, **kwargs):
+        landed = original_upsert(*args, **kwargs)
+        candidate_committed.set()
+        if not allow_publication.wait(timeout=5):
+            raise AssertionError("test did not release the pending mirror publication")
+        return landed
+
+    monkeypatch.setattr(sqlite, "upsert_watch", _pause_after_commit)
+
+    def _write_cycle_result() -> None:
+        try:
+            assert store.mark_cycle_result(
+                watch.id,
+                exit_code=75,
+                error="watch command exited with status 75",
+            )
+        except BaseException as exc:
+            writer_errors.append(exc)
+
+    def _write_newer_edit_and_reload() -> None:
+        try:
+            assert candidate_committed.wait(timeout=5)
+            other.set_enabled(watch.id, False)
+            newer_edit_committed.set()
+            reload_started.set()
+            store.load()
+        except BaseException as exc:
+            reloader_errors.append(exc)
+        finally:
+            reload_finished.set()
+
+    writer = threading.Thread(target=_write_cycle_result)
+    reloader = threading.Thread(target=_write_newer_edit_and_reload)
+    writer.start()
+    reloader.start()
+    assert candidate_committed.wait(timeout=5)
+    assert newer_edit_committed.wait(timeout=5)
+    assert reload_started.wait(timeout=5)
+    assert not reload_finished.wait(timeout=0.1), (
+        "same-store reload must wait for durable write plus mirror publication"
+    )
+    allow_publication.set()
+    writer.join(timeout=5)
+    reloader.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reloader.is_alive()
+    assert not writer_errors
+    assert not reloader_errors
+    visible = store.get_watch(watch.id)
+    other_sqlite = other.sqlite_backend
+    assert other_sqlite is not None
+    persisted = other_sqlite.get_watch(watch.id)
+    assert visible is not None
+    assert visible.enabled is False
+    assert persisted is not None
+    assert persisted["enabled"] is False
+
+
 def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     tmp_path: Path,
     monkeypatch,
@@ -12448,7 +12643,7 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
 
     def _last_completed_cycle_is_retry() -> bool:
         row = watch_store.get_watch(watch.id)
-        return row is not None and (row.last_exit_code, row.last_error) == (75, sentinel)
+        return row is not None and row.last_cycle_outcome == (75, sentinel)
 
     service = ManagedWatchService(
         controller=SimpleNamespace(),
