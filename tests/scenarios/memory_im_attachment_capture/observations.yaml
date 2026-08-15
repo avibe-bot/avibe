@@ -1,0 +1,24 @@
+version: 1
+capability: memory_im_attachment_capture
+observations:
+  - id: MEMORY-IM-ATTACH-OBS-001
+    scenarios:
+      - MEMORY-IM-ATTACH-001
+      - MEMORY-IM-ATTACH-004
+    observation: Slack, Discord, and Feishu/Lark already expose bounded streaming path downloads; Telegram buffers before its limit and WeChat checks only after download and decrypt, so those two adapters require bounded writers.
+    evidence:
+      avibe_commit: c21bf9268417c9d857ea275fe9f7e95023809311
+  - id: MEMORY-IM-ATTACH-OBS-002
+    scenarios:
+      - MEMORY-IM-ATTACH-001
+      - MEMORY-IM-ATTACH-003
+    observation: EverOS parses non-text ContentItems before ordinary extraction, supports independent multimodal endpoint variables, and returns capability unavailable when that client or parser is absent.
+    evidence:
+      everos_commit: 560fb80b59fe5f033a911e38bebc87a3232a5234
+  - id: MEMORY-IM-ATTACH-OBS-003
+    scenarios:
+      - MEMORY-IM-ATTACH-001
+      - MEMORY-IM-ATTACH-002
+    observation: The existing Avibe sidecar already admits confined pinned file URIs for the exact memory add route, while current IM admission rejects file turns before Memory acquisition.
+    evidence:
+      avibe_commit: c21bf9268417c9d857ea275fe9f7e95023809311
