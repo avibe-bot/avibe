@@ -1,15 +1,11 @@
-// Model Hub API client. Presents ONE typed surface to the UI; internally it
-// either replays server-recorded fixtures for hermetic tests or calls the frozen
-// `/api/models/*` REST endpoints (live mode). Components never
-// branch on the mode — flip `MODELS_API_MODE` in featureFlags.ts to switch.
+// Model Hub API client. Presents one typed live surface over the frozen
+// `/api/models/*` REST endpoints. Hermetic tests load the recorded replay client
+// through `modelsApi.mockEntry.ts`, which keeps its corpus outside live bundles.
 //
 // Methods unwrap the frozen envelope ({ok:true, …} | {ok:false, error}) and
 // throw an Error carrying the machine code on failure, so callers work with
 // plain domain objects.
 import { apiFetch, isApiFetchDeadlineAbort, withApiDeadline } from '@/lib/apiFetch';
-import { MODELS_API_MODE } from './featureFlags';
-import mockCorpusJson from './modelHubMockCorpus.json';
-import { buildMockEvents, buildMockRuntime } from './mockData';
 import type {
   AddedTo,
   AdoptedBy,
@@ -142,8 +138,6 @@ export type ModelsApi = {
   cancelOAuth(flowId: string): Promise<void>;
 };
 
-const isLive = () => MODELS_API_MODE === 'live';
-
 // ── Live client ─────────────────────────────────────────────────────────
 export class ApiCallError extends Error {
   code: string;
@@ -217,7 +211,7 @@ export class ApiCallError extends Error {
 /** Normalize to the FULL contract shape: a gap without `agents` is a gap whose
  *  confirm copy has nothing to name, and `[]` renders as 「无」 rather than
  *  crashing the dialog that was opened to explain the refusal. */
-const supplyGaps = (raw: unknown): SupplyGap[] =>
+export const supplyGaps = (raw: unknown): SupplyGap[] =>
   Array.isArray(raw)
     ? raw
         .filter((g): g is Record<string, unknown> => Boolean(g) && typeof g === 'object')
@@ -228,7 +222,7 @@ const supplyGaps = (raw: unknown): SupplyGap[] =>
         }))
     : [];
 
-const routeHopRefs = (raw: unknown): RouteHopRef[] =>
+export const routeHopRefs = (raw: unknown): RouteHopRef[] =>
   Array.isArray(raw)
     ? raw.filter((hop): hop is RouteHopRef => Boolean(hop) && typeof hop === 'object')
     : [];
@@ -418,576 +412,207 @@ export const oauthResult = (r: OAuthResultResponse): OAuthResult => {
   };
 };
 
+export type ModelHubOperation = keyof ModelsApi;
+type ModelHubOperationResult<Operation extends ModelHubOperation> =
+  Awaited<ReturnType<ModelsApi[Operation]>>;
+type ModelHubOperationRegistry = {
+  [Operation in ModelHubOperation]: {
+    responseTransform: (response: unknown) => ModelHubOperationResult<Operation>;
+  };
+};
+
+const responseAs = <Response>(response: unknown): Response => response as Response;
+
+/**
+ * The one client-response boundary for live calls and recorded service bodies.
+ * Existing bare-body fallbacks remain live compatibility behavior, not mock policy.
+ */
+export const modelHubOperationRegistry = {
+  listSources: {
+    responseTransform: (response) => responseAs<{ sources: Source[] }>(response).sources,
+  },
+  observeApiKeySource: {
+    responseTransform: (response) =>
+      responseAs<{ observation: SourceObservation }>(response).observation,
+  },
+  createApiKeySource: {
+    responseTransform: (response) => created(responseAs<SourceCreatedResponse>(response)),
+  },
+  patchSource: {
+    responseTransform: (response) => sourcePatched(responseAs<SourcePatchedResponse>(response)),
+  },
+  refreshSource: {
+    responseTransform: (response) => responseAs<SourceRefresh>(response),
+  },
+  deleteSource: {
+    responseTransform: (response) => sourceDeleted(responseAs<SourceDeletedResponse>(response)),
+  },
+  replaceCredential: {
+    responseTransform: (response) =>
+      credentialReplacement(responseAs<CredentialReplacementResponse>(response)),
+  },
+  reauthSource: {
+    responseTransform: (response) => {
+      const value = responseAs<{ flow?: OAuthFlow } & OAuthFlow>(response);
+      return (value.flow ?? value) as OAuthFlow;
+    },
+  },
+  listAgents: {
+    responseTransform: (response) => responseAs<{ agents: AgentSupply[] }>(response).agents,
+  },
+  getAgentSources: {
+    responseTransform: (response) => responseAs<{ agent: AgentSupply }>(response).agent,
+  },
+  putAgentSources: {
+    responseTransform: (response) => responseAs<{ agent: AgentSupply }>(response).agent,
+  },
+  getAgentChain: {
+    responseTransform: (response) => responseAs<{ chain: AgentChain }>(response).chain,
+  },
+  putAgentChain: {
+    responseTransform: (response) => responseAs<AgentChainMutation>(response),
+  },
+  probeAgent: {
+    responseTransform: (response) => responseAs<{ probe: ProbeResult }>(response).probe,
+  },
+  setAgentMode: {
+    responseTransform: (response) => {
+      const value = responseAs<{ agent?: AgentSupply } & AgentSupply>(response);
+      return (value.agent ?? value) as AgentSupply;
+    },
+  },
+  putMenu: {
+    responseTransform: (response) => {
+      const value = responseAs<{ agent?: AgentSupply } & AgentSupply>(response);
+      return (value.agent ?? value) as AgentSupply;
+    },
+  },
+  addCustomModel: {
+    responseTransform: (response) => {
+      const value = responseAs<{ source?: Source } & Source>(response);
+      return (value.source ?? value) as Source;
+    },
+  },
+  updateModelReasoningEfforts: {
+    responseTransform: (response) => {
+      const value = responseAs<{ source?: Source } & Source>(response);
+      return (value.source ?? value) as Source;
+    },
+  },
+  deleteCustomModel: {
+    responseTransform: (response) => {
+      const value = responseAs<{ source?: Source } & Source>(response);
+      return (value.source ?? value) as Source;
+    },
+  },
+  scanMigration: {
+    responseTransform: (response) => {
+      const value = responseAs<{ scan?: MigrationScan } & MigrationScan>(response);
+      return (value.scan ?? value) as MigrationScan;
+    },
+  },
+  applyMigration: {
+    responseTransform: (response) => responseAs<MigrationApplyResult>(response),
+  },
+  listEvents: {
+    responseTransform: (response) =>
+      responseAs<{ events: ResolutionEvent[] }>(response).events,
+  },
+  getRuntimeStatus: {
+    responseTransform: (response) => {
+      const value = responseAs<{ runtime?: RuntimeDependency } & RuntimeDependency>(response);
+      return (value.runtime ?? value) as RuntimeDependency;
+    },
+  },
+  installRuntime: {
+    responseTransform: (response) => {
+      const value = responseAs<{ runtime?: RuntimeDependency } & RuntimeDependency>(response);
+      return (value.runtime ?? value) as RuntimeDependency;
+    },
+  },
+  startRuntime: {
+    responseTransform: (response) => {
+      const value = responseAs<{ runtime?: RuntimeDependency } & RuntimeDependency>(response);
+      return (value.runtime ?? value) as RuntimeDependency;
+    },
+  },
+  startOAuth: {
+    responseTransform: (response) => {
+      const value = responseAs<{ flow?: OAuthFlow } & OAuthFlow>(response);
+      return (value.flow ?? value) as OAuthFlow;
+    },
+  },
+  getOAuthStatus: {
+    responseTransform: (response) => oauthResult(responseAs<OAuthResultResponse>(response)),
+  },
+  submitOAuth: {
+    responseTransform: (response) => oauthResult(responseAs<OAuthResultResponse>(response)),
+  },
+  cancelOAuth: {
+    responseTransform: (_response) => undefined,
+  },
+} satisfies ModelHubOperationRegistry;
+
 const liveApi: ModelsApi = {
-  listSources: () => call<{ sources: Source[] }>('/api/models/sources').then((r) => r.sources),
+  listSources: () => call<{ sources: Source[] }>('/api/models/sources')
+    .then(modelHubOperationRegistry.listSources.responseTransform),
   observeApiKeySource: (draft, signal) =>
     call<{ observation: SourceObservation }>('/api/models/sources/observe', {
       ...jsonInit('POST', draft),
       signal,
-    }).then((r) => r.observation),
+    }).then(modelHubOperationRegistry.observeApiKeySource.responseTransform),
   // Both keep `adopted_by`. The old unwrap-to-`source` dropped it on the floor,
   // and no later read can put it back: `/agents` shows today's orders, not which
   // of them this commit changed.
-  createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
-  patchSource: (id, patch) => call<SourcePatchedResponse>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then(sourcePatched),
-  refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
+  createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(modelHubOperationRegistry.createApiKeySource.responseTransform),
+  patchSource: (id, patch) => call<SourcePatchedResponse>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then(modelHubOperationRegistry.patchSource.responseTransform),
+  refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})).then(modelHubOperationRegistry.refreshSource.responseTransform),
   deleteSource: (id, confirmation) => call<SourceDeletedResponse>(
     `/api/models/sources/${encodeURIComponent(id)}${confirmation ? '?force=true' : ''}`,
     jsonInit('DELETE', confirmation ? {
       would_remove_hops: confirmation.would_remove_hops,
       would_interrupt: confirmation.would_interrupt,
     } : undefined),
-  ).then(sourceDeleted),
+  ).then(modelHubOperationRegistry.deleteSource.responseTransform),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
   // and carry no `contract_version` — the same closed-body rule as putAgentSources.
-  replaceCredential: (id, body) => call<CredentialReplacementResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(credentialReplacement),
+  replaceCredential: (id, body) => call<CredentialReplacementResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(modelHubOperationRegistry.replaceCredential.responseTransform),
   // The OAuth acknowledgement is unconditional because beginning reauth may
   // irreversibly replace grant material. It does not stand in for destructive
   // supply consent: guarded inventory mutations separately echo the server plan.
-  reauthSource: (id) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })).then((r) => (r.flow ?? r) as OAuthFlow),
-  listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
-  getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
+  reauthSource: (id) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })).then(modelHubOperationRegistry.reauthSource.responseTransform),
+  listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then(modelHubOperationRegistry.listAgents.responseTransform),
+  getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then(modelHubOperationRegistry.getAgentSources.responseTransform),
   // The body is TOTAL and closed: the route rejects unknown keys, so
   // `contract_version` is deliberately absent (unlike every other write here).
-  putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),
-  getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
-  putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),
-  probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
-  setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
-  putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then((r) => (r.agent ?? r) as AgentSupply),
-  addCustomModel: (sourceId, draft) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models`, jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
-  updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })).then((r) => (r.source ?? r) as Source),
-  deleteCustomModel: (sourceId, modelId, confirmation) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', confirmation ?? {})).then((r) => (r.source ?? r) as Source),
-  scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then((r) => (r.scan ?? r) as MigrationScan),
-  applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
+  putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then(modelHubOperationRegistry.putAgentSources.responseTransform),
+  getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then(modelHubOperationRegistry.getAgentChain.responseTransform),
+  putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)).then(modelHubOperationRegistry.putAgentChain.responseTransform),
+  probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then(modelHubOperationRegistry.probeAgent.responseTransform),
+  setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then(modelHubOperationRegistry.setAgentMode.responseTransform),
+  putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then(modelHubOperationRegistry.putMenu.responseTransform),
+  addCustomModel: (sourceId, draft) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models`, jsonInit('POST', draft)).then(modelHubOperationRegistry.addCustomModel.responseTransform),
+  updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })).then(modelHubOperationRegistry.updateModelReasoningEfforts.responseTransform),
+  deleteCustomModel: (sourceId, modelId, confirmation) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', confirmation ?? {})).then(modelHubOperationRegistry.deleteCustomModel.responseTransform),
+  scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then(modelHubOperationRegistry.scanMigration.responseTransform),
+  applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })).then(modelHubOperationRegistry.applyMigration.responseTransform),
   listEvents: (limit = 20, before) =>
     call<{ events: ResolutionEvent[] }>(
       `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
-    ).then((r) => r.events),
-  getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
-  installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
-  startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
+    ).then(modelHubOperationRegistry.listEvents.responseTransform),
+  getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then(modelHubOperationRegistry.getRuntimeStatus.responseTransform),
+  installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then(modelHubOperationRegistry.installRuntime.responseTransform),
+  startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then(modelHubOperationRegistry.startRuntime.responseTransform),
   startOAuth: (vendor, channel, clientNonce) =>
     call<{ flow?: OAuthFlow } & OAuthFlow>(
       '/api/models/oauth/start',
       jsonInit('POST', { vendor, channel, ...(clientNonce ? { client_nonce: clientNonce } : {}) }),
-    ).then((r) => (r.flow ?? r) as OAuthFlow),
-  getOAuthStatus: (flowId) => call<OAuthResultResponse>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then(oauthResult),
-  submitOAuth: (flowId, value) => call<OAuthResultResponse>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then(oauthResult),
-  cancelOAuth: (flowId) => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })).then(() => undefined),
-};
-
-// ── Recorded mock client ─────────────────────────────────────────────────
-type JsonObject = Record<string, unknown>;
-type RecordedBody =
-  | { present: false }
-  | { present: true; value: unknown };
-type RecordedRequest = {
-  operation: string;
-  path: JsonObject;
-  query: Record<string, { present: boolean; value?: unknown }>;
-  body: RecordedBody;
-};
-type RecordedReads = {
-  sources: Source[];
-  agents: AgentSupply[];
-  agent_sources: Record<AgentBackend, AgentSupply>;
-  agent_chains: Partial<Record<AgentBackend, Record<string, AgentChain>>>;
-};
-type RecordedOutcome =
-  | { kind: 'success'; value: unknown }
-  | {
-      kind: 'error';
-      error: string;
-      detail: string;
-      status: number;
-      data: JsonObject;
-    };
-type RecordedTransition = {
-  key: {
-    id: string;
-    pre: {
-      model_hub_config_sha256: string;
-      fixture_world_sha256: string;
-    };
-    request: RecordedRequest;
-  };
-  outcome: RecordedOutcome;
-  post: {
-    model_hub_config_sha256: string;
-    fixture_world_sha256: string;
-    config: unknown;
-    fixture_world: unknown;
-    reads: RecordedReads;
-  };
-};
-export type MockCorpus = {
-  generator: string;
-  recording_operations: Array<{
-    operation: string;
-    request: RecordedRequest;
-  }>;
-  seed: {
-    model_hub_config_sha256: string;
-    fixture_world_sha256: string;
-    config: unknown;
-    fixture_world: unknown;
-    reads: RecordedReads;
-  };
-  transitions: RecordedTransition[];
-};
-
-const mockCorpus = mockCorpusJson as unknown as MockCorpus;
-const clone = <T>(value: T): T => structuredClone(value);
-
-const canonicalJson = (value: unknown): string => {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.entries(value as JsonObject)
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
-};
-
-const base64Url = (value: string): string => {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return globalThis.btoa(binary)
-    .replaceAll('+', '-')
-    .replaceAll('/', '_')
-    .replace(/=+$/, '');
-};
-
-const normalizedRequest = (
-  operation: string,
-  path: JsonObject = {},
-  body: RecordedBody = { present: false },
-  query: RecordedRequest['query'] = {},
-): RecordedRequest => ({ operation, path, query, body });
-
-export class UncontractedMockTransitionError extends Error {
-  readonly code = 'uncontracted_mock_transition';
-  readonly missingKey: string;
-  readonly operation: string;
-  readonly generatorCommand: string | null;
-
-  constructor(
-    missingKey: string,
-    operation: string,
-    generatorCommand: string | null,
-  ) {
-    super(
-      generatorCommand
-        ? [
-            'uncontracted_mock_transition',
-            `Missing key: ${missingKey}`,
-            `Operation: ${operation}`,
-            `Record it: ${generatorCommand}`,
-          ].join('\n')
-        : [
-            'uncontracted_mock_transition',
-            `Missing key: ${missingKey}`,
-            `Operation: ${operation}`,
-            'No authoritative server dispatch exists for this operation; add or restore that server operation before recording mock evidence.',
-          ].join('\n'),
-    );
-    this.name = 'UncontractedMockTransitionError';
-    this.missingKey = missingKey;
-    this.operation = operation;
-    this.generatorCommand = generatorCommand;
-  }
-}
-
-/**
- * A replay store, not a second Model Hub service.
- *
- * Every policy-bearing mutation must match a transition produced by the Python
- * service. Reads are the server projections recorded at that exact post-state.
- */
-export class MockStore {
-  private reads: RecordedReads;
-  private configHash: string;
-  private fixtureWorldHash: string;
-  private readonly corpus: MockCorpus;
-  private readonly transitions: Map<string, RecordedTransition>;
-  private readonly events = buildMockEvents();
-  private readonly runtime = buildMockRuntime();
-
-  constructor(corpus: MockCorpus = mockCorpus) {
-    this.corpus = corpus;
-    this.reads = clone(corpus.seed.reads);
-    this.configHash = corpus.seed.model_hub_config_sha256;
-    this.fixtureWorldHash = corpus.seed.fixture_world_sha256;
-    this.transitions = new Map(
-      corpus.transitions.map((transition) => [transition.key.id, transition]),
-    );
-  }
-
-  get sources(): Source[] {
-    return clone(this.reads.sources);
-  }
-
-  get agents(): AgentSupply[] {
-    return clone(this.reads.agents);
-  }
-
-  private transitionKey(request: RecordedRequest) {
-    const key = {
-      version: 1,
-      pre: {
-        model_hub_config_sha256: this.configHash,
-        fixture_world_sha256: this.fixtureWorldHash,
-      },
-      request,
-    };
-    return base64Url(canonicalJson(key));
-  }
-
-  private replay<T>(request: RecordedRequest): Promise<T> {
-    const missingKey = this.transitionKey(request);
-    const transition = this.transitions.get(missingKey);
-    if (!transition) {
-      const generatorCommand = this.corpus.recording_operations.some(
-        ({ operation }) => operation === request.operation,
-      )
-        ? `${this.corpus.generator} --record-miss ${missingKey}`
-        : null;
-      throw new UncontractedMockTransitionError(
-        missingKey,
-        request.operation,
-        generatorCommand,
-      );
-    }
-
-    this.reads = clone(transition.post.reads);
-    this.configHash = transition.post.model_hub_config_sha256;
-    this.fixtureWorldHash = transition.post.fixture_world_sha256;
-
-    if (transition.outcome.kind === 'error') {
-      const data = transition.outcome.data;
-      throw new ApiCallError(
-        transition.outcome.error,
-        transition.outcome.detail,
-        true,
-        supplyGaps(data.would_interrupt),
-        supplyGaps(data.interrupted_pairs),
-        routeHopRefs(data.would_remove_hops),
-        transition.outcome.status,
-        typeof data.observation === 'object' && data.observation !== null
-          ? data.observation as SourceObservation
-          : undefined,
-      );
-    }
-    return Promise.resolve(clone(transition.outcome.value) as T);
-  }
-
-  listSources(): Promise<Source[]> {
-    return Promise.resolve(this.sources);
-  }
-
-  listAgents(): Promise<AgentSupply[]> {
-    return Promise.resolve(this.agents);
-  }
-
-  getAgentSources(backend: AgentBackend): Promise<AgentSupply> {
-    const projection = this.reads.agent_sources[backend];
-    if (projection) return Promise.resolve(clone(projection));
-    return this.replay(normalizedRequest(
-      'getAgentSources',
-      { backend },
-    ));
-  }
-
-  getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain> {
-    const projection = this.reads.agent_chains[backend]?.[model];
-    if (projection) return Promise.resolve(clone(projection));
-    return this.replay(normalizedRequest(
-      'getAgentChain',
-      { backend },
-      { present: false },
-      { model: { present: true, value: model } },
-    ));
-  }
-
-  listEvents(limit = 20, before?: string): Promise<ResolutionEvent[]> {
-    const start = before
-      ? Math.max(0, this.events.findIndex((event) => event.id === before) + 1)
-      : 0;
-    return Promise.resolve(clone(this.events.slice(start, start + limit)));
-  }
-
-  getRuntimeStatus(): Promise<RuntimeDependency> {
-    return Promise.resolve(clone(this.runtime));
-  }
-
-  observeApiKeySource(
-    draft: ApiKeySourceObservation,
-    _signal?: AbortSignal,
-  ): Promise<SourceObservation> {
-    return this.replay(normalizedRequest(
-      'observeApiKeySource',
-      {},
-      { present: true, value: draft },
-    ));
-  }
-
-  createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated> {
-    return this.replay(normalizedRequest(
-      'createApiKeySource',
-      {},
-      { present: true, value: draft },
-    ));
-  }
-
-  patchSource(id: string, body: SourcePatch): Promise<SourcePatched> {
-    return this.replay(normalizedRequest(
-      'patchSource',
-      { id },
-      { present: true, value: body },
-    ));
-  }
-
-  refreshSource(
-    id: string,
-    confirmation?: GuardConfirmation,
-  ): Promise<SourceRefresh> {
-    return this.replay(normalizedRequest(
-      'refreshSource',
-      { id },
-      { present: true, value: confirmation ?? {} },
-    ));
-  }
-
-  deleteSource(
-    id: string,
-    confirmation?: GuardConfirmation,
-  ): Promise<SourceDeleted> {
-    return this.replay(normalizedRequest(
-      'deleteSource',
-      { id },
-      confirmation
-        ? {
-            present: true,
-            value: {
-              would_remove_hops: confirmation.would_remove_hops,
-              would_interrupt: confirmation.would_interrupt,
-            },
-          }
-        : { present: false },
-      confirmation
-        ? { force: { present: true, value: true } }
-        : {},
-    ));
-  }
-
-  replaceCredential(
-    id: string,
-    body: CredentialReplace,
-  ): Promise<CredentialReplacement> {
-    return this.replay(normalizedRequest(
-      'replaceCredential',
-      { id },
-      { present: true, value: body },
-    ));
-  }
-
-  reauthSource(id: string): Promise<OAuthFlow> {
-    return this.replay(normalizedRequest(
-      'reauthSource',
-      { id },
-      { present: true, value: { acknowledge_irreversible: true } },
-    ));
-  }
-
-  putAgentSources(
-    backend: AgentBackend,
-    body: AgentSourcesPut,
-  ): Promise<AgentSupply> {
-    return this.replay(normalizedRequest(
-      'putAgentSources',
-      { backend },
-      { present: true, value: body },
-    ));
-  }
-
-  putAgentChain(
-    backend: AgentBackend,
-    model: string,
-    body: AgentChainPut,
-  ): Promise<AgentChainMutation> {
-    return this.replay(normalizedRequest(
-      'putAgentChain',
-      { backend },
-      { present: true, value: body },
-      { model: { present: true, value: model } },
-    ));
-  }
-
-  probeAgent(
-    backend: AgentBackend,
-    model?: string,
-  ): Promise<ProbeResult> {
-    return this.replay(normalizedRequest(
-      'probeAgent',
-      { backend },
-      { present: true, value: model ? { model } : {} },
-    ));
-  }
-
-  setAgentMode(
-    backend: AgentBackend,
-    mode: AgentMode,
-  ): Promise<AgentSupply> {
-    return this.replay(normalizedRequest(
-      'setAgentMode',
-      { backend },
-      { present: true, value: { mode } },
-    ));
-  }
-
-  putMenu(menu: AgentMenu): Promise<AgentSupply> {
-    return this.replay(normalizedRequest(
-      'putMenu',
-      { backend: 'opencode' },
-      { present: true, value: { menu } },
-    ));
-  }
-
-  addCustomModel(
-    sourceId: string,
-    draft: CustomModelCreate,
-  ): Promise<Source> {
-    return this.replay(normalizedRequest(
-      'addCustomModel',
-      { sourceId },
-      { present: true, value: draft },
-    ));
-  }
-
-  updateModelReasoningEfforts(
-    sourceId: string,
-    modelId: string,
-    reasoningEfforts: string[],
-  ): Promise<Source> {
-    return this.replay(normalizedRequest(
-      'updateModelReasoningEfforts',
-      { sourceId, modelId },
-      { present: true, value: { reasoning_efforts: reasoningEfforts } },
-    ));
-  }
-
-  deleteCustomModel(
-    sourceId: string,
-    modelId: string,
-    confirmation?: GuardConfirmation,
-  ): Promise<Source> {
-    return this.replay(normalizedRequest(
-      'deleteCustomModel',
-      { sourceId, modelId },
-      { present: true, value: confirmation ?? {} },
-    ));
-  }
-
-  scanMigration(): Promise<MigrationScan> {
-    return this.replay(normalizedRequest('scanMigration'));
-  }
-
-  applyMigration(itemIds: string[]): Promise<MigrationApplyResult> {
-    return this.replay(normalizedRequest(
-      'applyMigration',
-      {},
-      { present: true, value: { item_ids: itemIds } },
-    ));
-  }
-
-  installRuntime(): Promise<RuntimeDependency> {
-    return this.replay(normalizedRequest('installRuntime'));
-  }
-
-  startRuntime(): Promise<RuntimeDependency> {
-    return this.replay(normalizedRequest('startRuntime'));
-  }
-
-  startOAuth(
-    vendor: string,
-    channel: SupplyChannel,
-    clientNonce?: string,
-  ): Promise<OAuthFlow> {
-    return this.replay(normalizedRequest(
-      'startOAuth',
-      {},
-      {
-        present: true,
-        value: {
-          vendor,
-          channel,
-          ...(clientNonce ? { client_nonce: clientNonce } : {}),
-        },
-      },
-    ));
-  }
-
-  getOAuthStatus(flowId: string): Promise<OAuthResult> {
-    return this.replay(normalizedRequest(
-      'getOAuthStatus',
-      { flowId },
-    ));
-  }
-
-  submitOAuth(flowId: string, value: string): Promise<OAuthResult> {
-    return this.replay(normalizedRequest(
-      'submitOAuth',
-      {},
-      { present: true, value: { flow_id: flowId, value } },
-    ));
-  }
-
-  cancelOAuth(flowId: string): Promise<void> {
-    return this.replay(normalizedRequest(
-      'cancelOAuth',
-      {},
-      { present: true, value: { flow_id: flowId } },
-    ));
-  }
-}
-
-const mockStore = new MockStore();
-
-const mockApi: ModelsApi = {
-  listSources: () => mockStore.listSources(),
-  observeApiKeySource: (draft, signal) => mockStore.observeApiKeySource(draft, signal),
-  createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
-  patchSource: (id, patch) => mockStore.patchSource(id, patch),
-  refreshSource: (id, confirmation) => mockStore.refreshSource(id, confirmation),
-  deleteSource: (id, confirmation) => mockStore.deleteSource(id, confirmation),
-  replaceCredential: (id, body) => mockStore.replaceCredential(id, body),
-  reauthSource: (id) => mockStore.reauthSource(id),
-  listAgents: () => mockStore.listAgents(),
-  getAgentSources: (backend) => mockStore.getAgentSources(backend),
-  putAgentSources: (backend, body) => mockStore.putAgentSources(backend, body),
-  getAgentChain: (backend, model) => mockStore.getAgentChain(backend, model),
-  putAgentChain: (backend, model, body) => mockStore.putAgentChain(backend, model, body),
-  probeAgent: (backend, model) => mockStore.probeAgent(backend, model),
-  setAgentMode: (backend, mode) => mockStore.setAgentMode(backend, mode),
-  putMenu: (menu) => mockStore.putMenu(menu),
-  addCustomModel: (sourceId, draft) => mockStore.addCustomModel(sourceId, draft),
-  updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => mockStore.updateModelReasoningEfforts(sourceId, modelId, reasoningEfforts),
-  deleteCustomModel: (sourceId, modelId, confirmation) => mockStore.deleteCustomModel(sourceId, modelId, confirmation),
-  scanMigration: () => mockStore.scanMigration(),
-  applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
-  listEvents: (limit, before) => mockStore.listEvents(limit, before),
-  getRuntimeStatus: () => mockStore.getRuntimeStatus(),
-  installRuntime: () => mockStore.installRuntime(),
-  startRuntime: () => mockStore.startRuntime(),
-  startOAuth: (vendor, channel, clientNonce) => mockStore.startOAuth(vendor, channel, clientNonce),
-  getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),
-  submitOAuth: (flowId, value) => mockStore.submitOAuth(flowId, value),
-  cancelOAuth: (flowId) => mockStore.cancelOAuth(flowId),
+    ).then(modelHubOperationRegistry.startOAuth.responseTransform),
+  getOAuthStatus: (flowId) => call<OAuthResultResponse>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then(modelHubOperationRegistry.getOAuthStatus.responseTransform),
+  submitOAuth: (flowId, value) => call<OAuthResultResponse>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then(modelHubOperationRegistry.submitOAuth.responseTransform),
+  cancelOAuth: (flowId) => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })).then(modelHubOperationRegistry.cancelOAuth.responseTransform),
 };
 
 /** The single client instance. Stable across renders (safe in effect deps). */
-export const modelsApi: ModelsApi = isLive() ? liveApi : mockApi;
+export const modelsApi: ModelsApi = liveApi;

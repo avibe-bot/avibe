@@ -47,7 +47,11 @@ describe('collection read authority', () => {
   });
 
   it('keeps collection endpoints private to the generation authority', () => {
-    const allowed = new Set(['collectionReadAuthority.ts', 'modelsApi.ts']);
+    const allowed = new Set([
+      'collectionReadAuthority.ts',
+      'modelsApi.mock.ts',
+      'modelsApi.ts',
+    ]);
     const violations = productFiles(__dirname).flatMap((path) => {
       if (allowed.has(path.split('/').at(-1) ?? '')) return [];
       return /\.list(?:Agents|Sources)\s*\(/.test(readFileSync(path, 'utf8')) ? [path] : [];

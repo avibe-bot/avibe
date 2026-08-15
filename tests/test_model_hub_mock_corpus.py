@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -54,13 +54,46 @@ def test_mh_mock_replay_001_corpus_is_server_generated_and_keyed_by_full_state()
     assert result.returncode == 0, result.stderr
 
     corpus = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+    assert corpus["artifact"] == "model-hub-mock-corpus-v1"
     assert len(corpus["sequences"]) == 5
     assert len(corpus["transitions"]) == 11
     generator = _generator_module()
     assert {
-        item["operation"] for item in corpus["recording_operations"]
-    } == set(generator.OPERATION_DISPATCH)
+        item["operation"] for item in corpus["operation_registry"]
+    } == set(generator.OPERATION_REGISTRY)
+    for item in corpus["operation_registry"]:
+        assert item["recording"]["request"]["operation"] == item["operation"]
+        assert item["request_identity"]["strategy"] == "all_except_declared"
+        assert set(item["request_identity"]) == {
+            "strategy",
+            "sensitive_fields",
+            "sensitive_placeholder",
+            "volatile_fields",
+            "volatile_placeholder",
+            "eligibility",
+        }
+        assert item["request_identity"]["sensitive_placeholder"] == (
+            generator.SENSITIVE_PLACEHOLDER
+        )
+        assert item["request_identity"]["volatile_placeholder"] == (
+            generator.VOLATILE_PLACEHOLDER
+        )
+        if item["dispatch"] == "unrecordable":
+            assert item["recording"]["command"] is None
+            assert item["reachability"]["kind"] == "unrecordable"
+            assert "#1462" in item["reachability"]["reason"]
+            continue
+        assert item["dispatch"] == "authoritative_server"
+        assert item["recording"]["command"] == generator.GENERATOR_COMMAND
+        if item["reachability"]["kind"] == "seed":
+            assert item["reachability"]["prerequisites"] == []
+        else:
+            assert item["reachability"]["kind"] == "sequence"
+            assert item["reachability"]["prerequisites"]
     for transition in corpus["transitions"]:
+        assert re.fullmatch(r"[0-9a-f]{64}", transition["key"]["id"])
+        with pytest.raises((ValueError, UnicodeDecodeError, json.JSONDecodeError)):
+            generator._decode_token(transition["key"]["id"])
         assert transition["key"]["pre"] == {
             "model_hub_config_sha256": _digest(transition["pre"]["config"]),
             "fixture_world_sha256": _digest(
@@ -115,7 +148,7 @@ def test_mh_mock_replay_001_record_miss_extends_a_known_sequence(
     corpus, traces = asyncio.run(generator._generate(seed, sequence_spec))
     previous = traces["reorder-then-delete-regression"][-1]
     key_body = {
-        "version": 1,
+        "version": 2,
         "pre": {
             "model_hub_config_sha256": previous["post"]["model_hub_config_sha256"],
             "fixture_world_sha256": previous["post"]["fixture_world_sha256"],
@@ -127,12 +160,19 @@ def test_mh_mock_replay_001_record_miss_extends_a_known_sequence(
             "body": {"present": True, "value": {"mode": "direct"}},
         },
     }
-    token = generator._token(key_body)
+    transition_id = generator._sha256(key_body)
+    request_token = generator._token(key_body)
     sequences_path = tmp_path / "model_hub_mock_sequences.json"
     sequences_path.write_text(generator._render(sequence_spec), encoding="utf-8")
     monkeypatch.setattr(generator, "SEQUENCES_PATH", sequences_path)
 
-    generator._record_miss(token, sequence_spec, corpus, traces)
+    generator._record_miss(
+        transition_id,
+        request_token,
+        sequence_spec,
+        corpus,
+        traces,
+    )
     extended = json.loads(sequences_path.read_text(encoding="utf-8"))
     regenerated, _ = asyncio.run(generator._generate(seed, extended))
 
@@ -141,25 +181,75 @@ def test_mh_mock_replay_001_record_miss_extends_a_known_sequence(
     assert regenerated["transitions"][-1]["key"]["request"] == key_body["request"]
 
 
-def test_mh_mock_replay_001_advertised_operations_have_server_dispatches():
-    """Every advertised record command enters an authoritative service method."""
+def test_mh_mock_replay_001_operation_registry_is_total_and_reachable():
+    """Every registry entry declares and proves all generator-owned facets."""
 
     generator = _generator_module()
     seed = json.loads(generator.SEED_PATH.read_text(encoding="utf-8"))
-
-    async def dispatch_all() -> None:
-        for spec in generator.OPERATION_DISPATCH.values():
-            runtime = generator.FixtureRuntime(
-                seed["config"],
-                seed["fixture_world"],
+    assert generator.OPERATION_REGISTRY
+    for operation, spec in generator.OPERATION_REGISTRY.items():
+        assert spec.recording_probe["operation"] == operation
+        assert spec.request_identity.eligibility.kind in {
+            "always",
+            "observation_fixture",
+            "unrecordable",
+        }
+        assert not (
+            set(spec.request_identity.sensitive_fields)
+            & set(spec.request_identity.volatile_fields)
+        )
+        if spec.reachability.kind == "unrecordable":
+            assert spec.handler is None
+            assert spec.reachability.reason
+        else:
+            assert callable(spec.handler)
+            assert spec.reachability.kind in {"seed", "sequence"}
+            assert (spec.reachability.kind == "seed") != bool(
+                spec.reachability.prerequisites
             )
-            try:
-                with generator.sealed_execution(runtime):
-                    await generator._execute(
-                        runtime,
-                        copy.deepcopy(spec.recording_probe),
-                    )
-            except generator.ModelHubError:
-                pass
 
-    asyncio.run(dispatch_all())
+    asyncio.run(generator._validate_operation_registry(seed))
+
+
+def test_mh_mock_replay_001_request_identity_redacts_sensitive_and_volatile_fields():
+    """Registry declarations structurally exclude unsafe request values from ids."""
+
+    generator = _generator_module()
+
+    def replace(request: dict, path: tuple[str, ...], value: str) -> None:
+        parent = request
+        for member in path[:-1]:
+            parent = parent[member]
+        parent[path[-1]] = value
+
+    for operation, spec in generator.OPERATION_REGISTRY.items():
+        for index, path in enumerate(spec.request_identity.sensitive_fields):
+            sensitive = f"sensitive-{operation}-{index}"
+            request = json.loads(json.dumps(spec.recording_probe))
+            replace(request, path, sensitive)
+            canonical = generator._canonical_request(request)
+            key_input = {
+                "version": 2,
+                "pre": {
+                    "model_hub_config_sha256": "a" * 64,
+                    "fixture_world_sha256": "b" * 64,
+                },
+                "request": canonical,
+            }
+            transition_id = generator._sha256(key_input)
+            command = (
+                f"{generator.GENERATOR_COMMAND} --record-miss {transition_id} "
+                f"--request-token {generator._token(key_input)}"
+            )
+            assert sensitive not in generator._canonical(canonical)
+            assert sensitive not in transition_id
+            assert sensitive not in command
+
+        for index, path in enumerate(spec.request_identity.volatile_fields):
+            first = json.loads(json.dumps(spec.recording_probe))
+            second = json.loads(json.dumps(spec.recording_probe))
+            replace(first, path, f"volatile-a-{index}")
+            replace(second, path, f"volatile-b-{index}")
+            assert generator._canonical_request(first) == generator._canonical_request(
+                second
+            )

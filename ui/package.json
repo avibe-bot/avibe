@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite",
     "validate:imports": "node scripts/validate-out-of-tree-imports.mjs",
-    "build": "npm run validate:imports && tsc -b && vite build",
+    "build": "npm run validate:imports && tsc -b && vite build && node scripts/validate-model-hub-live-boundary.mjs",
     "lint": "node scripts/lint-baseline.mjs",
     "lint:report": "eslint .",
     "lint:baseline": "node scripts/lint-baseline.mjs --update",

@@ -198,6 +198,7 @@
       "provisioned": [],
       "oauth_started": [],
       "oauth_cursor": 0,
+      "oauth_flows": {},
       "discovery_script": {
         "anthropic|anthropic|https://retarget-src_anthkey01.example/v1": ["anthropic-model-1"]
       },

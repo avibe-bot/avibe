@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import {
   copyFileSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -11,12 +12,12 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import mockCorpusJson from './modelHubMockCorpus.json';
+import { ApiCallError, modelHubOperationRegistry } from './modelsApi';
 import {
-  ApiCallError,
   MockStore,
   UncontractedMockTransitionError,
-} from './modelsApi';
-import type { MockCorpus } from './modelsApi';
+  type MockCorpus,
+} from './modelsApi.mock';
 import type { RouteHopRef } from './types';
 
 const referencesTo = (store: MockStore, sourceId: string): RouteHopRef[] =>
@@ -47,7 +48,7 @@ describe('Model Hub mock deletion contract', () => {
       const expected = referencesTo(store, sourceId);
       let refusal: ApiCallError | null = null;
       try {
-        store.deleteSource(sourceId);
+        await store.deleteSource(sourceId);
       } catch (error) {
         if (error instanceof ApiCallError) refusal = error;
         else throw error;
@@ -172,7 +173,7 @@ describe('Model Hub mock replay boundary', () => {
       .toEqual(['src_anthkey01', 'src_relay9c1x']);
   });
 
-  it('runs every advertised recovery command and replays the recorded transition', async () => {
+  it('runs every registered recovery path and applies the shared response transform', async () => {
     const corpus = mockCorpusJson as unknown as MockCorpus;
     const nonMutationMembers = new Set([
       'constructor',
@@ -188,74 +189,233 @@ describe('Model Hub mock replay boundary', () => {
     const reachableMutations = Object.getOwnPropertyNames(MockStore.prototype)
       .filter((name) => !nonMutationMembers.has(name))
       .sort();
-    const advertised = corpus.recording_operations
+    const apiMethods = Object.getOwnPropertyNames(MockStore.prototype)
+      .filter((name) => ![
+        'constructor',
+        'sources',
+        'agents',
+        'transitionKey',
+        'replay',
+      ].includes(name))
+      .sort();
+    expect(Object.keys(modelHubOperationRegistry).sort()).toEqual(apiMethods);
+    const registered = corpus.operation_registry
       .map(({ operation }) => operation)
       .sort();
-    expect(reachableMutations).toEqual([...advertised, 'installRuntime'].sort());
+    expect(reachableMutations).toEqual(registered);
+    for (const entry of corpus.operation_registry) {
+      expect(entry.recording.request.operation, entry.operation).toBe(entry.operation);
+      expect(entry.request_identity.strategy, entry.operation).toBe('all_except_declared');
+      expect(Array.isArray(entry.request_identity.sensitive_fields), entry.operation).toBe(true);
+      expect(Array.isArray(entry.request_identity.volatile_fields), entry.operation).toBe(true);
+      expect(entry.request_identity.eligibility.kind, entry.operation).toBeTruthy();
+      expect(
+        typeof modelHubOperationRegistry[entry.operation].responseTransform,
+        entry.operation,
+      ).toBe('function');
+      if (entry.dispatch === 'unrecordable') {
+        expect(entry.recording.command, entry.operation).toBeNull();
+        expect(entry.reachability.kind, entry.operation).toBe('unrecordable');
+        expect(entry.reachability.reason, entry.operation).toContain('#1462');
+        expect(entry.request_identity.eligibility.kind, entry.operation).toBe('unrecordable');
+        continue;
+      }
+      expect(entry.recording.command, entry.operation).toBe(
+        'python3 scripts/generate_model_hub_mock_corpus.py',
+      );
+      expect(
+        entry.reachability.kind === 'seed'
+          ? entry.reachability.prerequisites
+          : entry.reachability.prerequisites.length,
+        entry.operation,
+      ).toEqual(entry.reachability.kind === 'seed' ? [] : expect.any(Number));
+      if (entry.reachability.kind === 'sequence') {
+        expect(entry.reachability.prerequisites.length, entry.operation).toBeGreaterThan(0);
+      }
+    }
 
     const repoRoot = resolve(import.meta.dirname, '../../../../..');
     const tempRoot = mkdtempSync(join(tmpdir(), 'model-hub-record-miss-'));
-    const seedPath = join(tempRoot, 'seed.json');
-    const sequencesPath = join(tempRoot, 'sequences.json');
-    const outputPath = join(tempRoot, 'corpus.json');
-    copyFileSync(join(repoRoot, 'scripts/model_hub_mock_seed.json'), seedPath);
-    copyFileSync(
-      join(repoRoot, 'scripts/model_hub_mock_sequences.json'),
-      sequencesPath,
-    );
+    type RegistryEntry = MockCorpus['operation_registry'][number];
+    type Request = RegistryEntry['recording']['request'];
+    const replayRequest = async (store: MockStore, request: Request) => {
+      const replay = (
+        store as unknown as {
+          replay<T>(candidate: Request): Promise<T>;
+        }
+      ).replay.bind(store);
+      try {
+        return { kind: 'success' as const, value: await replay<unknown>(request) };
+      } catch (error) {
+        return { kind: 'error' as const, error };
+      }
+    };
 
     try {
-      for (const { operation, request } of corpus.recording_operations) {
-        const store = new MockStore();
-        const replay = (
-          store as unknown as {
-            replay<T>(candidate: typeof request): Promise<T>;
-          }
-        ).replay.bind(store);
-        let failure: unknown;
-        try {
-          await replay(request);
-        } catch (error) {
-          failure = error;
+      for (const entry of corpus.operation_registry) {
+        if (entry.dispatch === 'unrecordable') {
+          const store = new MockStore(corpus);
+          const missing = await replayRequest(store, entry.recording.request);
+          expect(missing.kind, entry.operation).toBe('error');
+          const error = missing.kind === 'error' ? missing.error : null;
+          expect(error, entry.operation).toBeInstanceOf(UncontractedMockTransitionError);
+          expect((error as UncontractedMockTransitionError).generatorCommand).toBeNull();
+          expect((error as UncontractedMockTransitionError).recordingReason).toContain('#1462');
+          continue;
         }
-        expect(failure, operation).toBeInstanceOf(UncontractedMockTransitionError);
-        const error = failure as UncontractedMockTransitionError;
-        expect(error.operation, operation).toBe(operation);
-        expect(error.generatorCommand, operation).toBe(
-          `python3 scripts/generate_model_hub_mock_corpus.py --record-miss ${error.missingKey}`,
+        const operationRoot = join(tempRoot, entry.operation);
+        mkdirSync(operationRoot);
+        const seedPath = join(operationRoot, 'seed.json');
+        const sequencesPath = join(operationRoot, 'sequences.json');
+        const outputPath = join(operationRoot, 'corpus.json');
+        copyFileSync(join(repoRoot, 'scripts/model_hub_mock_seed.json'), seedPath);
+        copyFileSync(
+          join(repoRoot, 'scripts/model_hub_mock_sequences.json'),
+          sequencesPath,
         );
 
-        execSync(error.generatorCommand ?? '', {
-          cwd: repoRoot,
-          env: {
-            ...process.env,
-            MODEL_HUB_MOCK_SEED_PATH: seedPath,
-            MODEL_HUB_MOCK_SEQUENCES_PATH: sequencesPath,
-            MODEL_HUB_MOCK_OUTPUT_PATH: outputPath,
-          },
-          stdio: 'pipe',
-        });
-        const recorded = JSON.parse(
-          readFileSync(outputPath, 'utf8'),
-        ) as MockCorpus;
-        const recordedStore = new MockStore(recorded);
-        const recordedReplay = (
-          recordedStore as unknown as {
-            replay<T>(candidate: typeof request): Promise<T>;
+        let activeCorpus = corpus;
+        const prefix: Request[] = [];
+        const recoveryPath = [
+          ...entry.reachability.prerequisites,
+          entry.recording.request,
+        ];
+        for (const [index, request] of recoveryPath.entries()) {
+          const store = new MockStore(activeCorpus);
+          for (const previous of prefix) {
+            const previousResult = await replayRequest(store, previous);
+            expect(previousResult.kind, `${entry.operation}:prerequisite`).toBe('success');
           }
-        ).replay.bind(recordedStore);
-        let replayFailure: unknown;
-        try {
-          await recordedReplay(request);
-        } catch (error) {
-          replayFailure = error;
+
+          const missing = await replayRequest(store, request);
+          expect(missing.kind, `${entry.operation}:${request.operation}`).toBe('error');
+          const error = missing.kind === 'error' ? missing.error : null;
+          expect(error, `${entry.operation}:${request.operation}`).toBeInstanceOf(
+            UncontractedMockTransitionError,
+          );
+          const uncontracted = error as UncontractedMockTransitionError;
+          expect(uncontracted.operation, entry.operation).toBe(request.operation);
+          expect(uncontracted.generatorCommand, entry.operation).toMatch(
+            new RegExp(`^${entry.recording.command} --record-miss ${uncontracted.missingKey} --request-token [A-Za-z0-9_-]+$`),
+          );
+
+          execSync(uncontracted.generatorCommand ?? '', {
+            cwd: repoRoot,
+            env: {
+              ...process.env,
+              MODEL_HUB_MOCK_SEED_PATH: seedPath,
+              MODEL_HUB_MOCK_SEQUENCES_PATH: sequencesPath,
+              MODEL_HUB_MOCK_OUTPUT_PATH: outputPath,
+            },
+            stdio: 'pipe',
+          });
+          activeCorpus = JSON.parse(readFileSync(outputPath, 'utf8')) as MockCorpus;
+          const recordedStore = new MockStore(activeCorpus);
+          for (const previous of prefix) {
+            const previousResult = await replayRequest(recordedStore, previous);
+            expect(previousResult.kind, `${entry.operation}:recorded prerequisite`).toBe('success');
+          }
+          const recorded = await replayRequest(recordedStore, request);
+          if (index < recoveryPath.length - 1) {
+            expect(recorded.kind, `${entry.operation}:${request.operation}`).toBe('success');
+            prefix.push(request);
+            continue;
+          }
+
+          const transition = activeCorpus.transitions.find(
+            (candidate) => candidate.key.id === uncontracted.missingKey,
+          );
+          expect(transition, entry.operation).toBeDefined();
+          if (transition?.outcome.kind === 'success') {
+            expect(recorded.kind, entry.operation).toBe('success');
+            const expected = modelHubOperationRegistry[entry.operation]
+              .responseTransform(structuredClone(transition.outcome.value));
+            expect(
+              recorded.kind === 'success' ? recorded.value : undefined,
+              entry.operation,
+            ).toEqual(expected);
+          } else {
+            expect(recorded.kind, entry.operation).toBe('error');
+            const recordedError = recorded.kind === 'error' ? recorded.error : null;
+            expect(recordedError, entry.operation).toBeInstanceOf(ApiCallError);
+            expect((recordedError as ApiCallError).code, entry.operation).toBe(
+              transition?.outcome.kind === 'error' ? transition.outcome.error : undefined,
+            );
+          }
         }
-        expect(replayFailure, operation).not.toBeInstanceOf(
-          UncontractedMockTransitionError,
-        );
       }
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 180_000);
+
+  it('derives secret redaction, volatile aliases, and request eligibility from the registry', async () => {
+    const corpus = mockCorpusJson as unknown as MockCorpus;
+    type RegistryEntry = MockCorpus['operation_registry'][number];
+    type Request = RegistryEntry['recording']['request'];
+    type KeyResult = { id: string };
+    const replay = (store: MockStore, request: Request) => (
+      store as unknown as { replay<T>(candidate: Request): Promise<T> }
+    ).replay<unknown>(request);
+    const transitionKey = (store: MockStore, request: Request) => (
+      store as unknown as { transitionKey(candidate: Request): Promise<KeyResult> }
+    ).transitionKey(request);
+    const setField = (request: Request, path: string[], value: string) => {
+      let parent = request as unknown as Record<string, unknown>;
+      for (const member of path.slice(0, -1)) {
+        parent = parent[member] as Record<string, unknown>;
+      }
+      parent[path.at(-1)!] = value;
+    };
+
+    for (const transition of corpus.transitions) {
+      expect(transition.key.id).toMatch(/^[0-9a-f]{64}$/);
+    }
+
+    for (const entry of corpus.operation_registry) {
+      for (const [index, path] of entry.request_identity.sensitive_fields.entries()) {
+        const sensitive = `sensitive-${entry.operation}-${index}`;
+        const request = structuredClone(entry.recording.request);
+        setField(request, path, sensitive);
+        let failure: UncontractedMockTransitionError | null = null;
+        try {
+          await replay(new MockStore(corpus), request);
+        } catch (error) {
+          if (error instanceof UncontractedMockTransitionError) failure = error;
+          else throw error;
+        }
+        expect(failure, entry.operation).not.toBeNull();
+        expect(failure?.missingKey, entry.operation).not.toContain(sensitive);
+        expect(failure?.canonicalRequest, entry.operation).not.toContain(sensitive);
+        expect(failure?.generatorCommand ?? '', entry.operation).not.toContain(sensitive);
+      }
+
+      for (const [index, path] of entry.request_identity.volatile_fields.entries()) {
+        const first = structuredClone(entry.recording.request);
+        const second = structuredClone(entry.recording.request);
+        setField(first, path, `volatile-a-${index}`);
+        setField(second, path, `volatile-b-${index}`);
+        expect(
+          (await transitionKey(new MockStore(corpus), first)).id,
+          entry.operation,
+        ).toBe((await transitionKey(new MockStore(corpus), second)).id);
+      }
+
+      if (entry.request_identity.eligibility.kind === 'observation_fixture') {
+        const request = structuredClone(entry.recording.request);
+        setField(request, ['body', 'value', 'base_url'], 'https://unregistered.example/v1');
+        let failure: UncontractedMockTransitionError | null = null;
+        try {
+          await replay(new MockStore(corpus), request);
+        } catch (error) {
+          if (error instanceof UncontractedMockTransitionError) failure = error;
+          else throw error;
+        }
+        expect(failure?.generatorCommand, entry.operation).toBeNull();
+        expect(failure?.recordingReason, entry.operation).toContain(
+          'registered observation fixture',
+        );
+      }
+    }
+  });
 });

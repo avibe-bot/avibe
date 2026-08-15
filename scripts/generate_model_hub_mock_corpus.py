@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterator, Mapping
+from typing import Any, Awaitable, Callable, Iterator, Literal, Mapping
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -256,6 +256,18 @@ class MemoryOAuthFlows:
     ) -> None:
         self.pending_nonces.discard((client_nonce, vendor, channel))
 
+    def forget(self, flow_id: str) -> None:
+        self.bindings.pop(flow_id, None)
+
+    def retain_cancelled(self, flow_id: str) -> None:
+        binding = self.bindings.get(flow_id)
+        if binding is None:
+            raise KeyError(flow_id)
+        self.bindings[flow_id] = dataclasses.replace(
+            binding,
+            terminal_state="cancelled",
+        )
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "bindings": {
@@ -295,6 +307,10 @@ class RecordedAdapter:
         self.provisioned = copy.deepcopy(payload["provisioned"])
         self.oauth_started = copy.deepcopy(payload["oauth_started"])
         self.oauth_cursor = int(payload["oauth_cursor"])
+        self.oauth_flows = {
+            flow_id: OAuthFlowState(**flow)
+            for flow_id, flow in payload["oauth_flows"].items()
+        }
 
     async def provision_transient_credential(
         self,
@@ -414,7 +430,7 @@ class RecordedAdapter:
         self.oauth_started.append(
             {"flow_id": flow_id, "source_id": source_id, "vendor": vendor}
         )
-        return OAuthFlowState(
+        flow = OAuthFlowState(
             flow_id=flow_id,
             source_id=source_id,
             vendor=vendor,
@@ -426,6 +442,24 @@ class RecordedAdapter:
             error_key=None,
             expires_at_iso="2026-08-15T08:15:00+00:00",
             credential_ref=None,
+        )
+        self.oauth_flows[flow_id] = flow
+        return flow
+
+    async def oauth_status(self, flow_id: str) -> OAuthFlowState:
+        return self.oauth_flows[flow_id]
+
+    async def submit_oauth(self, flow_id: str, _value: str) -> OAuthFlowState:
+        current = self.oauth_flows[flow_id]
+        flow = dataclasses.replace(current, state="verifying")
+        self.oauth_flows[flow_id] = flow
+        return flow
+
+    async def cancel_oauth(self, flow_id: str) -> None:
+        current = self.oauth_flows[flow_id]
+        self.oauth_flows[flow_id] = dataclasses.replace(
+            current,
+            state="cancelled",
         )
 
     def snapshot(self) -> dict[str, Any]:
@@ -440,6 +474,10 @@ class RecordedAdapter:
             "provisioned": copy.deepcopy(self.provisioned),
             "oauth_started": copy.deepcopy(self.oauth_started),
             "oauth_cursor": self.oauth_cursor,
+            "oauth_flows": {
+                flow_id: _json_value(flow)
+                for flow_id, flow in self.oauth_flows.items()
+            },
         }
 
     def __getattr__(self, member: str) -> Any:
@@ -678,12 +716,62 @@ OperationHandler = Callable[[FixtureRuntime, dict[str, Any]], Awaitable[Any]]
 
 
 @dataclass(frozen=True)
+class ReachabilitySpec:
+    kind: Literal["seed", "sequence", "unrecordable"]
+    prerequisites: tuple[dict[str, Any], ...] = ()
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "seed" and self.prerequisites:
+            raise ValueError("seed-reachable operations cannot have prerequisites")
+        if self.kind == "sequence" and not self.prerequisites:
+            raise ValueError("sequence-reachable operations require prerequisites")
+        if self.kind == "unrecordable" and (self.prerequisites or not self.reason):
+            raise ValueError("unrecordable operations require a reason and no prerequisites")
+        if self.kind != "unrecordable" and self.reason is not None:
+            raise ValueError("only unrecordable operations can carry a reason")
+
+
+FieldPath = tuple[str, ...]
+SENSITIVE_PLACEHOLDER = "<sensitive>"
+VOLATILE_PLACEHOLDER = "<volatile>"
+
+
+@dataclass(frozen=True)
+class EligibilitySpec:
+    kind: Literal["always", "observation_fixture", "unrecordable"] = "always"
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "unrecordable" and not self.reason:
+            raise ValueError("unrecordable request identity requires a reason")
+        if self.kind != "unrecordable" and self.reason is not None:
+            raise ValueError("only unrecordable request identity can carry a reason")
+
+
+@dataclass(frozen=True)
+class RequestIdentitySpec:
+    sensitive_fields: tuple[FieldPath, ...] = ()
+    volatile_fields: tuple[FieldPath, ...] = ()
+    eligibility: EligibilitySpec = EligibilitySpec()
+
+    def __post_init__(self) -> None:
+        overlap = set(self.sensitive_fields) & set(self.volatile_fields)
+        if overlap:
+            raise ValueError(f"request identity fields overlap: {sorted(overlap)}")
+
+
+@dataclass(frozen=True)
 class OperationSpec:
-    handler: OperationHandler
+    handler: OperationHandler | None
     recording_probe: dict[str, Any]
+    reachability: ReachabilitySpec
+    request_identity: RequestIdentitySpec
 
 
-OPERATION_DISPATCH: dict[str, OperationSpec] = {}
+OPERATION_REGISTRY: dict[str, OperationSpec] = {}
+SEED_REACHABLE = ReachabilitySpec("seed")
+DEFAULT_REQUEST_IDENTITY = RequestIdentitySpec()
 
 
 def _request(
@@ -709,14 +797,45 @@ def _request(
 def _operation(
     name: str,
     recording_probe: dict[str, Any],
+    *,
+    reachability: ReachabilitySpec,
+    request_identity: RequestIdentitySpec = DEFAULT_REQUEST_IDENTITY,
 ) -> Callable[[OperationHandler], OperationHandler]:
     def register(handler: OperationHandler) -> OperationHandler:
-        if name in OPERATION_DISPATCH:
+        if name in OPERATION_REGISTRY:
             raise RuntimeError(f"duplicate corpus operation: {name}")
-        OPERATION_DISPATCH[name] = OperationSpec(handler, recording_probe)
+        if recording_probe.get("operation") != name:
+            raise RuntimeError(f"recording probe operation mismatch: {name}")
+        OPERATION_REGISTRY[name] = OperationSpec(
+            handler,
+            recording_probe,
+            reachability,
+            request_identity,
+        )
         return handler
 
     return register
+
+
+def _seed_operation(
+    name: str,
+    recording_probe: dict[str, Any],
+    *,
+    request_identity: RequestIdentitySpec = DEFAULT_REQUEST_IDENTITY,
+) -> Callable[[OperationHandler], OperationHandler]:
+    return _operation(
+        name,
+        recording_probe,
+        reachability=SEED_REACHABLE,
+        request_identity=request_identity,
+    )
+
+
+def _after(*prerequisites: dict[str, Any]) -> ReachabilitySpec:
+    return ReachabilitySpec(
+        "sequence",
+        tuple(copy.deepcopy(request) for request in prerequisites),
+    )
 
 
 def _body_value(request: dict[str, Any]) -> Any:
@@ -724,7 +843,79 @@ def _body_value(request: dict[str, Any]) -> Any:
     return copy.deepcopy(body.get("value")) if body.get("present") else None
 
 
-@_operation(
+def _replace_field(
+    value: dict[str, Any],
+    path: FieldPath,
+    replacement: str,
+) -> None:
+    parent: Any = value
+    for member in path[:-1]:
+        if not isinstance(parent, dict) or member not in parent:
+            return
+        parent = parent[member]
+    if isinstance(parent, dict) and path[-1] in parent:
+        parent[path[-1]] = replacement
+
+
+def _canonical_request(request: dict[str, Any]) -> dict[str, Any]:
+    operation = request.get("operation")
+    spec = OPERATION_REGISTRY.get(operation)
+    if spec is None:
+        raise UnregisteredFixtureAccess(
+            f"no request identity is registered for corpus operation: {operation}"
+        )
+    canonical = copy.deepcopy(request)
+    for path in spec.request_identity.sensitive_fields:
+        _replace_field(canonical, path, SENSITIVE_PLACEHOLDER)
+    for path in spec.request_identity.volatile_fields:
+        _replace_field(canonical, path, VOLATILE_PLACEHOLDER)
+    return canonical
+
+
+def _recording_eligibility(
+    request: dict[str, Any],
+    fixture_world: dict[str, Any],
+) -> tuple[bool, str | None]:
+    spec = OPERATION_REGISTRY[request["operation"]].request_identity.eligibility
+    if spec.kind == "unrecordable":
+        return False, spec.reason
+    if spec.kind == "always":
+        return True, None
+    body = _body_value(request)
+    if not isinstance(body, dict):
+        return True, None
+    vendor = body.get("vendor")
+    if not isinstance(vendor, str):
+        return True, None
+    base_url = body.get("base_url")
+    key = f"{vendor}|{base_url or ''}"
+    fixtures = fixture_world["adapter"]["observation_script"]
+    if key in fixtures:
+        return True, None
+    return (
+        False,
+        "request needs a registered observation fixture for "
+        f"{key}; add it to scripts/model_hub_mock_seed.json before recording",
+    )
+
+
+INSTALL_RUNTIME_REASON = (
+    "unrecordable pending #1462: the server has no /api/models/runtime/install "
+    "operation, so the mock cannot record or invent an installation result"
+)
+
+
+OPERATION_REGISTRY["installRuntime"] = OperationSpec(
+    handler=None,
+    recording_probe=_request("installRuntime"),
+    reachability=ReachabilitySpec("unrecordable", reason=INSTALL_RUNTIME_REASON),
+    request_identity=RequestIdentitySpec(
+        eligibility=EligibilitySpec("unrecordable", INSTALL_RUNTIME_REASON)
+    ),
+)
+
+
+@_seed_operation(
     "observeApiKeySource",
     _request(
         "observeApiKeySource",
@@ -740,13 +931,16 @@ def _body_value(request: dict[str, Any]) -> Any:
         },
         body_present=True,
     ),
+    request_identity=RequestIdentitySpec(
+        sensitive_fields=(("body", "value", "key"),),
+        eligibility=EligibilitySpec("observation_fixture"),
+    ),
 )
 async def _observe_source(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
-    result = await runtime.service.observe_source(_body_value(request))
-    return result["observation"]
+    return await runtime.service.observe_source(_body_value(request))
 
 
-@_operation(
+@_seed_operation(
     "createApiKeySource",
     _request(
         "createApiKeySource",
@@ -766,12 +960,17 @@ async def _observe_source(runtime: FixtureRuntime, request: dict[str, Any]) -> A
         },
         body_present=True,
     ),
+    request_identity=RequestIdentitySpec(
+        sensitive_fields=(("body", "value", "key"),),
+        volatile_fields=(("body", "value", "client_nonce"),),
+        eligibility=EligibilitySpec("observation_fixture"),
+    ),
 )
 async def _create_source(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     return await runtime.service.create_source(_body_value(request))
 
 
-@_operation(
+@_seed_operation(
     "deleteSource",
     _request("deleteSource", path={"id": "src_missing0001"}),
 )
@@ -786,7 +985,7 @@ async def _delete_source(runtime: FixtureRuntime, request: dict[str, Any]) -> An
     )
 
 
-@_operation(
+@_seed_operation(
     "patchSource",
     _request(
         "patchSource",
@@ -802,7 +1001,7 @@ async def _patch_source(runtime: FixtureRuntime, request: dict[str, Any]) -> Any
     )
 
 
-@_operation(
+@_seed_operation(
     "refreshSource",
     _request(
         "refreshSource",
@@ -821,13 +1020,16 @@ async def _refresh_source(runtime: FixtureRuntime, request: dict[str, Any]) -> A
     )
 
 
-@_operation(
+@_seed_operation(
     "replaceCredential",
     _request(
         "replaceCredential",
         path={"id": "src_missing0001"},
         body={"key": "test-only"},
         body_present=True,
+    ),
+    request_identity=RequestIdentitySpec(
+        sensitive_fields=(("body", "value", "key"),),
     ),
 )
 async def _replace_credential(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
@@ -837,7 +1039,7 @@ async def _replace_credential(runtime: FixtureRuntime, request: dict[str, Any]) 
     )
 
 
-@_operation(
+@_seed_operation(
     "reauthSource",
     _request(
         "reauthSource",
@@ -847,14 +1049,13 @@ async def _replace_credential(runtime: FixtureRuntime, request: dict[str, Any]) 
     ),
 )
 async def _reauth_source(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
-    result = await runtime.service.reauth_source(
+    return await runtime.service.reauth_source(
         request["path"]["id"],
         _body_value(request),
     )
-    return result["flow"]
 
 
-@_operation(
+@_seed_operation(
     "putAgentSources",
     _request(
         "putAgentSources",
@@ -870,7 +1071,7 @@ async def _put_agent_sources(runtime: FixtureRuntime, request: dict[str, Any]) -
     )
 
 
-@_operation(
+@_seed_operation(
     "getAgentSources",
     _request("getAgentSources", path={"backend": "missing"}),
 )
@@ -878,7 +1079,7 @@ async def _get_agent_sources(runtime: FixtureRuntime, request: dict[str, Any]) -
     return runtime.service.get_agent_sources(request["path"]["backend"])
 
 
-@_operation(
+@_seed_operation(
     "getAgentChain",
     _request(
         "getAgentChain",
@@ -891,7 +1092,7 @@ async def _get_agent_chain(runtime: FixtureRuntime, request: dict[str, Any]) -> 
     return runtime.service.agent_chain(request["path"]["backend"], model)
 
 
-@_operation(
+@_seed_operation(
     "putAgentChain",
     _request(
         "putAgentChain",
@@ -910,7 +1111,7 @@ async def _put_agent_chain(runtime: FixtureRuntime, request: dict[str, Any]) -> 
     )
 
 
-@_operation(
+@_seed_operation(
     "probeAgent",
     _request(
         "probeAgent",
@@ -926,7 +1127,7 @@ async def _probe_agent(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     )
 
 
-@_operation(
+@_seed_operation(
     "setAgentMode",
     _request(
         "setAgentMode",
@@ -942,7 +1143,7 @@ async def _set_agent_mode(runtime: FixtureRuntime, request: dict[str, Any]) -> A
     )
 
 
-@_operation(
+@_seed_operation(
     "putMenu",
     _request(
         "putMenu",
@@ -956,7 +1157,7 @@ async def _put_menu(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     )
 
 
-@_operation(
+@_seed_operation(
     "addCustomModel",
     _request(
         "addCustomModel",
@@ -972,7 +1173,7 @@ async def _add_custom_model(runtime: FixtureRuntime, request: dict[str, Any]) ->
     )
 
 
-@_operation(
+@_seed_operation(
     "updateModelReasoningEfforts",
     _request(
         "updateModelReasoningEfforts",
@@ -989,7 +1190,7 @@ async def _update_reasoning(runtime: FixtureRuntime, request: dict[str, Any]) ->
     )
 
 
-@_operation(
+@_seed_operation(
     "deleteCustomModel",
     _request(
         "deleteCustomModel",
@@ -1000,22 +1201,21 @@ async def _update_reasoning(runtime: FixtureRuntime, request: dict[str, Any]) ->
 )
 async def _delete_custom_model(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     value = _body_value(request) or {}
-    result = await runtime.service.delete_custom_model(
+    return await runtime.service.delete_custom_model(
         request["path"]["sourceId"],
         request["path"]["modelId"],
         force=value.get("force") is True,
         confirmed_remove_hops=value.get("would_remove_hops"),
         confirmed_interruptions=value.get("would_interrupt"),
     )
-    return result["source"]
 
 
-@_operation("scanMigration", _request("scanMigration"))
+@_seed_operation("scanMigration", _request("scanMigration"))
 async def _scan_migration(runtime: FixtureRuntime, _request: dict[str, Any]) -> Any:
     return runtime.service.migration_scan()
 
 
-@_operation(
+@_seed_operation(
     "applyMigration",
     _request(
         "applyMigration",
@@ -1029,31 +1229,37 @@ async def _apply_migration(runtime: FixtureRuntime, request: dict[str, Any]) -> 
     )
 
 
-@_operation("startRuntime", _request("startRuntime"))
+@_seed_operation("startRuntime", _request("startRuntime"))
 async def _start_runtime(runtime: FixtureRuntime, _request: dict[str, Any]) -> Any:
     return await runtime.service.runtime_start()
 
 
-@_operation(
+OAUTH_START_PROBE = _request(
     "startOAuth",
-    _request(
-        "startOAuth",
-        body={
-            "vendor": "anthropic",
-            "channel": "hub",
-            "client_nonce": "ofn_0000000000000001",
-        },
-        body_present=True,
+    body={
+        "vendor": "anthropic",
+        "channel": "hub",
+        "client_nonce": "ofn_0000000000000001",
+    },
+    body_present=True,
+)
+
+
+@_seed_operation(
+    "startOAuth",
+    OAUTH_START_PROBE,
+    request_identity=RequestIdentitySpec(
+        volatile_fields=(("body", "value", "client_nonce"),),
     ),
 )
 async def _start_oauth(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
-    result = await runtime.service.oauth_start(_body_value(request))
-    return result["flow"]
+    return await runtime.service.oauth_start(_body_value(request))
 
 
 @_operation(
     "getOAuthStatus",
-    _request("getOAuthStatus", path={"flowId": "flow_missing"}),
+    _request("getOAuthStatus", path={"flowId": "flow_recorded001"}),
+    reachability=_after(OAUTH_START_PROBE),
 )
 async def _get_oauth_status(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     return await runtime.service.oauth_status(request["path"]["flowId"])
@@ -1063,8 +1269,12 @@ async def _get_oauth_status(runtime: FixtureRuntime, request: dict[str, Any]) ->
     "submitOAuth",
     _request(
         "submitOAuth",
-        body={"flow_id": "flow_missing", "value": "test-only"},
+        body={"flow_id": "flow_recorded001", "value": "test-only"},
         body_present=True,
+    ),
+    reachability=_after(OAUTH_START_PROBE),
+    request_identity=RequestIdentitySpec(
+        sensitive_fields=(("body", "value", "value"),),
     ),
 )
 async def _submit_oauth(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
@@ -1075,9 +1285,10 @@ async def _submit_oauth(runtime: FixtureRuntime, request: dict[str, Any]) -> Any
     "cancelOAuth",
     _request(
         "cancelOAuth",
-        body={"flow_id": "flow_missing"},
+        body={"flow_id": "flow_recorded001"},
         body_present=True,
     ),
+    reachability=_after(OAUTH_START_PROBE),
 )
 async def _cancel_oauth(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     await runtime.service.oauth_cancel(
@@ -1088,12 +1299,52 @@ async def _cancel_oauth(runtime: FixtureRuntime, request: dict[str, Any]) -> Any
 
 async def _execute(runtime: FixtureRuntime, request: dict[str, Any]) -> Any:
     operation = request["operation"]
-    spec = OPERATION_DISPATCH.get(operation)
-    if spec is None:
+    spec = OPERATION_REGISTRY.get(operation)
+    if spec is None or spec.handler is None:
+        reason = (
+            spec.request_identity.eligibility.reason
+            if spec is not None
+            else None
+        )
         raise UnregisteredFixtureAccess(
-            f"no authoritative server dispatch is registered for corpus operation: {operation}"
+            reason
+            or f"no authoritative server dispatch is registered for corpus operation: {operation}"
         )
     return await spec.handler(runtime, request)
+
+
+async def _validate_operation_registry(seed: dict[str, Any]) -> None:
+    """Prove every advertised probe is reachable through its declared path."""
+
+    for operation, spec in OPERATION_REGISTRY.items():
+        if spec.reachability.kind == "unrecordable":
+            if spec.handler is not None or not spec.reachability.reason:
+                raise RuntimeError(f"{operation} has an invalid unrecordable declaration")
+            continue
+        runtime = FixtureRuntime(seed["config"], seed["fixture_world"])
+        for prerequisite in spec.reachability.prerequisites:
+            canonical_prerequisite = _canonical_request(prerequisite)
+            prerequisite_operation = canonical_prerequisite.get("operation")
+            if prerequisite_operation not in OPERATION_REGISTRY:
+                raise RuntimeError(
+                    f"{operation} has an unregistered prerequisite: "
+                    f"{prerequisite_operation}"
+                )
+            try:
+                with sealed_execution(runtime):
+                    await _execute(runtime, canonical_prerequisite)
+            except ModelHubError as error:
+                raise RuntimeError(
+                    f"{operation} prerequisite failed: "
+                    f"{prerequisite_operation} ({error.code})"
+                ) from error
+        try:
+            with sealed_execution(runtime):
+                await _execute(runtime, _canonical_request(spec.recording_probe))
+        except ModelHubError:
+            # A server-named refusal is a recordable outcome. Escapes from the
+            # sealed fixture world remain loud and fail generation.
+            pass
 
 
 async def _record_transition(
@@ -1103,20 +1354,21 @@ async def _record_transition(
     sequence_id: str,
     step: int,
 ) -> dict[str, Any]:
+    canonical_request = _canonical_request(request)
     pre_config = runtime.config_snapshot()
     pre_world = runtime.world_snapshot()
     key_body = {
-        "version": 1,
+        "version": 2,
         "pre": {
             "model_hub_config_sha256": _sha256(pre_config),
             "fixture_world_sha256": _sha256(pre_world),
         },
-        "request": request,
+        "request": canonical_request,
     }
-    key = {**key_body, "id": _token(key_body)}
+    key = {**key_body, "id": _sha256(key_body)}
     try:
         with sealed_execution(runtime):
-            result = await _execute(runtime, request)
+            result = await _execute(runtime, canonical_request)
     except ModelHubError as error:
         outcome = {
             "kind": "error",
@@ -1162,6 +1414,7 @@ async def _generate(
     seed: dict[str, Any],
     sequence_spec: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    await _validate_operation_registry(seed)
     seed_runtime = FixtureRuntime(seed["config"], seed["fixture_world"])
     with sealed_execution(seed_runtime):
         seed_reads = seed_runtime.read_projections()
@@ -1201,14 +1454,51 @@ async def _generate(
         traces[sequence["id"]] = records
         sequences.append({"id": sequence["id"], "transition_ids": transition_ids})
     corpus = {
+        "artifact": "model-hub-mock-corpus-v1",
         "version": 1,
-        "generator": GENERATOR_COMMAND,
-        "recording_operations": [
+        "operation_registry": [
             {
                 "operation": operation,
-                "request": copy.deepcopy(spec.recording_probe),
+                "dispatch": (
+                    "authoritative_server"
+                    if spec.handler is not None
+                    else "unrecordable"
+                ),
+                "recording": {
+                    "command": (
+                        GENERATOR_COMMAND if spec.handler is not None else None
+                    ),
+                    "request": _canonical_request(spec.recording_probe),
+                },
+                "reachability": {
+                    "kind": spec.reachability.kind,
+                    "prerequisites": copy.deepcopy(
+                        [
+                            _canonical_request(request)
+                            for request in spec.reachability.prerequisites
+                        ]
+                    ),
+                    "reason": spec.reachability.reason,
+                },
+                "request_identity": {
+                    "strategy": "all_except_declared",
+                    "sensitive_fields": [
+                        list(path)
+                        for path in spec.request_identity.sensitive_fields
+                    ],
+                    "sensitive_placeholder": SENSITIVE_PLACEHOLDER,
+                    "volatile_fields": [
+                        list(path)
+                        for path in spec.request_identity.volatile_fields
+                    ],
+                    "volatile_placeholder": VOLATILE_PLACEHOLDER,
+                    "eligibility": {
+                        "kind": spec.request_identity.eligibility.kind,
+                        "reason": spec.request_identity.eligibility.reason,
+                    },
+                },
             }
-            for operation, spec in sorted(OPERATION_DISPATCH.items())
+            for operation, spec in sorted(OPERATION_REGISTRY.items())
         ],
         "seed": {
             "model_hub_config_sha256": _sha256(seed_config),
@@ -1237,21 +1527,29 @@ def _render_corpus(value: Any) -> str:
 
 
 def _record_miss(
-    token: str,
+    transition_id: str,
+    request_token: str,
     sequence_spec: dict[str, Any],
     corpus: dict[str, Any],
     traces: dict[str, list[dict[str, Any]]],
 ) -> None:
-    missing = _decode_token(token)
-    if set(missing) != {"version", "pre", "request"} or missing["version"] != 1:
-        raise ValueError("record-miss token is not a v1 transition key")
+    missing = _decode_token(request_token)
+    if set(missing) != {"version", "pre", "request"} or missing["version"] != 2:
+        raise ValueError("request token is not a v2 transition key input")
+    if _sha256(missing) != transition_id:
+        raise ValueError("request token does not match the missing transition id")
+    action = _canonical_request(missing["request"])
+    if action != missing["request"]:
+        raise ValueError("request token is not canonically redacted")
     target_pre = missing["pre"]
     prefix: list[dict[str, Any]] | None = None
+    target_world: dict[str, Any] | None = None
     if target_pre == {
         "model_hub_config_sha256": corpus["seed"]["model_hub_config_sha256"],
         "fixture_world_sha256": corpus["seed"]["fixture_world_sha256"],
     }:
         prefix = []
+        target_world = corpus["seed"]["fixture_world"]
     if prefix is None:
         by_id = {
             sequence["id"]: sequence
@@ -1265,13 +1563,17 @@ def _record_miss(
                     "fixture_world_sha256": _sha256(post["fixture_world"]),
                 }:
                     prefix = copy.deepcopy(by_id[sequence_id]["actions"][: index + 1])
+                    target_world = post["fixture_world"]
                     break
             if prefix is not None:
                 break
     if prefix is None:
         raise ValueError("missing pre-state is not reachable from a recorded sequence")
-    action = copy.deepcopy(missing["request"])
-    sequence_id = f"recorded-{hashlib.sha256(token.encode()).hexdigest()[:12]}"
+    assert target_world is not None
+    eligible, reason = _recording_eligibility(action, target_world)
+    if not eligible:
+        raise ValueError(reason or "request is not eligible for recording")
+    sequence_id = f"recorded-{transition_id[:12]}"
     if any(item["id"] == sequence_id for item in sequence_spec["sequences"]):
         return
     sequence_spec["sequences"].append(
@@ -1284,6 +1586,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--record-miss")
+    parser.add_argument("--request-token")
     args = parser.parse_args()
     seed = json.loads(SEED_PATH.read_text(encoding="utf-8"))
     sequence_spec = json.loads(SEQUENCES_PATH.read_text(encoding="utf-8"))
@@ -1291,9 +1594,19 @@ def main() -> int:
     if args.record_miss:
         if args.check:
             parser.error("--check and --record-miss are mutually exclusive")
-        _record_miss(args.record_miss, sequence_spec, corpus, traces)
+        if not args.request_token:
+            parser.error("--record-miss requires --request-token")
+        _record_miss(
+            args.record_miss,
+            args.request_token,
+            sequence_spec,
+            corpus,
+            traces,
+        )
         sequence_spec = json.loads(SEQUENCES_PATH.read_text(encoding="utf-8"))
         corpus, _ = asyncio.run(_generate(seed, sequence_spec))
+    elif args.request_token:
+        parser.error("--request-token requires --record-miss")
     rendered = _render_corpus(corpus)
     if args.check:
         if not OUTPUT_PATH.exists() or OUTPUT_PATH.read_text(encoding="utf-8") != rendered:
