@@ -63,6 +63,11 @@ It calls the platform's `BaseIMClient.download_file_to_path` implementation,
 uses sanitized names, removes partial files, and publishes only an opaque,
 reference-counted local lease. Consumers never receive a native URL, token,
 encryption material, or mutable `MessageContext` as their durable contract.
+Lease files live below the fixed private
+`<effective-home>/attachments/im/<opaque-lease-id>/` root. A rejected or
+unclaimed batch is removed after its final reference; ordinary Agent delivery
+adopts its existing local-file lifetime, while a retained Memory reference can
+finish pinning first. Empty and failed batches are never preserved by adoption.
 
 The message handler materializes before scheduling Memory capture. Agent delivery
 and Memory retain independent lease references, so Agent cleanup, retry, or

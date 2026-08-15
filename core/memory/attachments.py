@@ -13,6 +13,7 @@ import threading
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from config import paths
@@ -27,6 +28,9 @@ from core.memory.types import (
     MemoryContentKind,
     MemoryErrorCode,
 )
+
+if TYPE_CHECKING:
+    from core.handlers.inbound_attachments import InboundAttachmentLease
 
 
 MAX_PINNED_ATTACHMENTS = 8
@@ -238,7 +242,12 @@ class AttachmentPinStore:
         with self._lock:
             self._prepare_private_layout()
 
-    def pin(self, sources: Sequence[CaptureAttachment]) -> PinnedBundle:
+    def pin(
+        self,
+        sources: Sequence[CaptureAttachment],
+        *,
+        source_lease: InboundAttachmentLease | None = None,
+    ) -> PinnedBundle:
         """Copy one bounded source set and publish it only after durable rename."""
 
         try:
@@ -246,6 +255,7 @@ class AttachmentPinStore:
         except TypeError as error:
             raise AttachmentPinError("memory_invalid_input", "attachments are invalid") from error
         self._validate_sources(source_items)
+        source_root, allowed_paths = self._pin_source(source_lease)
         with self._lock:
             self._verify_private_layout()
             staging_fd = _open_private_directory(self._staging, "attachment staging root")
@@ -267,7 +277,11 @@ class AttachmentPinStore:
                 total_bytes = 0
                 try:
                     for index, source in enumerate(source_items):
-                        source_fd, source_info = self._open_source(source)
+                        source_fd, source_info = self._open_source(
+                            source,
+                            source_root=source_root,
+                            allowed_paths=allowed_paths,
+                        )
                         try:
                             filename = _bundle_filename(index, source.ext)
                             size_bytes, digest = _copy_source_file(
@@ -535,10 +549,58 @@ class AttachmentPinStore:
             "attachment staging bundle could not be reserved",
         )
 
-    def _open_source(self, source: CaptureAttachment) -> tuple[int, os.stat_result]:
-        source_path = _path_from_file_uri(source.uri)
+    def _pin_source(
+        self,
+        source_lease: InboundAttachmentLease | None,
+    ) -> tuple[Path, frozenset[Path] | None]:
+        if source_lease is None:
+            return self._source_root, None
+        from core.handlers.inbound_attachments import (
+            InboundAttachmentLease,
+            leased_attachment_records,
+        )
+
+        if type(source_lease) is not InboundAttachmentLease:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment source lease is invalid",
+            )
         try:
-            relative = source_path.relative_to(self._source_root)
+            root, records = leased_attachment_records(source_lease)
+        except (TypeError, ValueError) as error:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment source lease is invalid",
+            ) from error
+        expected_root = self._effective_home / "attachments" / "im"
+        if _absolute_lexical(root) != expected_root:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment source lease belongs to another Avibe home",
+            )
+        _require_path_below(root, self._effective_home, "leased attachment source root")
+        if _paths_overlap(self._root, root):
+            raise AttachmentPinError(
+                "memory_store_unavailable",
+                "attachment source and storage roots must be disjoint",
+            )
+        return root, frozenset(record.path for record in records)
+
+    def _open_source(
+        self,
+        source: CaptureAttachment,
+        *,
+        source_root: Path,
+        allowed_paths: frozenset[Path] | None,
+    ) -> tuple[int, os.stat_result]:
+        source_path = _path_from_file_uri(source.uri)
+        if allowed_paths is not None and source_path not in allowed_paths:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment is not part of the source lease",
+            )
+        try:
+            relative = source_path.relative_to(source_root)
         except ValueError as error:
             raise AttachmentPinError(
                 "memory_invalid_input",
@@ -549,7 +611,7 @@ class AttachmentPinStore:
         if source_path.suffix.lstrip(".").lower() != source.ext:
             raise AttachmentPinError("memory_invalid_input", "attachment extension is inconsistent")
 
-        current_fd = _open_source_directory_path(self._source_root)
+        current_fd = _open_source_directory_path(source_root)
         try:
             for component in relative.parts[:-1]:
                 next_fd = _open_source_directory_at(current_fd, component)

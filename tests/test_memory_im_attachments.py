@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import core.memory.im_attachments as im_attachment_module
+from core.handlers.inbound_attachments import InboundAttachmentMaterializer
+from core.memory.attachments import AttachmentPinStore
+from core.memory.im_attachments import select_memory_attachments
+from core.memory.types import CaptureAttachment
+from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
+
+
+class _Client:
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        self.payloads = payloads
+
+    async def download_file_to_path(self, file_info, target_path, max_bytes=None, timeout_seconds=30):
+        Path(target_path).write_bytes(self.payloads[file_info["name"]])
+        return FileDownloadResult(True)
+
+
+async def _materialize(
+    home: Path,
+    entries: list[tuple[str, str, bytes, int | None]],
+):
+    files = [
+        FileAttachment(name=name, mimetype=mime, url=name, size=declared)
+        for name, mime, _payload, declared in entries
+    ]
+    payloads = {name: payload for name, _mime, payload, _declared in entries}
+    return await InboundAttachmentMaterializer(effective_home=home).materialize(
+        MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            platform="slack",
+            files=files,
+        ),
+        _Client(payloads),
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_im_attach_004_invalid_items_preserve_valid_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MEMORY-IM-ATTACH-004: per-item limits/type failures degrade independently."""
+
+    home = tmp_path / "avibe-home"
+    batch = await _materialize(
+        home,
+        [
+            ("valid.pdf", "application/pdf", b"%PDF-1.7\nvalid", 14),
+            ("video.mp4", "video/mp4", b"\x00\x00\x00\x18ftypmp42", 12),
+            ("oversized.txt", "text/plain", b"12345", 20),
+        ],
+    )
+    monkeypatch.setattr(im_attachment_module, "MAX_PINNED_ATTACHMENT_BYTES", 16)
+
+    selected = select_memory_attachments(batch.lease)
+
+    assert [item.name for item in selected.attachments] == ["valid.pdf"]
+    assert selected.skipped == ("unsupported_type", "file_too_large")
+    store = AttachmentPinStore(effective_home=home)
+    bundle = store.pin(selected.attachments, source_lease=batch.lease)
+    assert bundle.attachments[0].name == "valid.pdf"
+    store.release(bundle.bundle_id)
+    batch.lease.release()
+    assert list((home / "attachments" / "im").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_memory_selection_checks_magic_and_bundle_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "avibe-home"
+    batch = await _materialize(
+        home,
+        [
+            ("fake.png", "image/png", b"not a png", 9),
+            ("first.txt", "text/plain", b"123", 3),
+            ("second.txt", "text/plain", b"456", 3),
+        ],
+    )
+    monkeypatch.setattr(im_attachment_module, "MAX_PINNED_BUNDLE_BYTES", 4)
+
+    selected = select_memory_attachments(batch.lease)
+
+    assert [item.name for item in selected.attachments] == ["first.txt"]
+    assert selected.skipped == ("unsupported_type", "bundle_too_large")
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_memory_selection_enforces_eight_file_limit(tmp_path: Path) -> None:
+    home = tmp_path / "avibe-home"
+    batch = await _materialize(
+        home,
+        [(f"item-{index}.txt", "text/plain", b"x", 1) for index in range(9)],
+    )
+
+    selected = select_memory_attachments(batch.lease)
+
+    assert len(selected.attachments) == 8
+    assert selected.skipped == ("count_limit",)
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_pin_rejects_released_or_mismatched_im_lease(tmp_path: Path) -> None:
+    first_home = tmp_path / "first-home"
+    second_home = tmp_path / "second-home"
+    batch = await _materialize(
+        first_home,
+        [("notes.txt", "text/plain", b"notes", 5)],
+    )
+    selected = select_memory_attachments(batch.lease)
+
+    with pytest.raises(Exception) as mismatched:
+        AttachmentPinStore(effective_home=second_home).pin(
+            selected.attachments,
+            source_lease=batch.lease,
+        )
+    assert getattr(mismatched.value, "error", None) == "memory_invalid_input"
+
+    original = selected.attachments[0]
+    extra = Path(original.uri.removeprefix("file://")).parent / "extra.txt"
+    extra.write_text("extra", encoding="utf-8")
+    extra.chmod(0o600)
+    forged = CaptureAttachment(
+        kind="doc",
+        name="extra.txt",
+        uri=extra.as_uri(),
+        ext="txt",
+    )
+    with pytest.raises(Exception) as unleased:
+        AttachmentPinStore(effective_home=first_home).pin(
+            (forged,),
+            source_lease=batch.lease,
+        )
+    assert getattr(unleased.value, "error", None) == "memory_invalid_input"
+
+    batch.lease.release()
+    with pytest.raises(Exception) as released:
+        AttachmentPinStore(effective_home=first_home).pin(
+            selected.attachments,
+            source_lease=batch.lease,
+        )
+    assert getattr(released.value, "error", None) == "memory_invalid_input"

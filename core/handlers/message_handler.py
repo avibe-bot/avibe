@@ -1740,146 +1740,25 @@ class MessageHandler(BaseHandler):
     async def _process_file_attachments(
         self, context: MessageContext, working_path: str
     ) -> Tuple[Optional[List[FileAttachment]], List[str]]:
-        """Download and process file attachments from the message.
+        """Materialize native files once and preserve ordinary Agent ownership."""
 
-        All files (including images) are saved to ~/.vibe_remote/attachments/{channel_id}/
-        to avoid polluting the working directory (which is often a git repo).
-        The agent can then use Read tools to access them.
-
-        Args:
-            context: Message context with file attachments
-            working_path: Working directory path (not used for storage, kept for API compat)
-
-        Returns:
-            Tuple of processed attachments and download error messages
-        """
-        import os
-        import time
         from config.paths import get_attachments_dir
-        from modules.im.base import FileAttachment, FileDownloadResult
+        from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 
         if not context.files:
             return None, []
-
-        # Create channel-specific attachments directory
-        # Path: ~/.vibe_remote/attachments/{channel_id}/
-        attachments_dir = get_attachments_dir() / context.channel_id
-        attachments_dir.mkdir(parents=True, exist_ok=True)
-
-        processed = []
-        errors: List[str] = []
-        for attachment in context.files:
-            if not isinstance(attachment, FileAttachment):
-                continue
-
-            # Already on local disk (e.g. an avibe workbench upload, saved by the
-            # UI server before dispatch) — there is nothing to download, so pass
-            # it straight through to the agent turn. IM attachments arrive with a
-            # ``url`` and no ``local_path`` and fall through to the download path.
-            if attachment.local_path and os.path.isfile(attachment.local_path):
-                if attachment.size is None:
-                    try:
-                        attachment.size = os.path.getsize(attachment.local_path)
-                    except OSError:
-                        pass
-                processed.append(attachment)
-                continue
-
-            try:
-                im_client = self._get_im_client(context)
-                # Download the file content. Some platforms receive a thin
-                # attachment event first and resolve the actual URL from
-                # platform metadata such as a Slack file id.
-                can_download = hasattr(im_client, "download_file_to_path") or hasattr(im_client, "download_file")
-                if can_download:
-                    # Platform-agnostic download info dict
-                    file_info = {
-                        "url": attachment.url,
-                        "name": attachment.name,
-                        "size": attachment.size,
-                        "platform": context.platform,
-                    }
-                    if attachment.url:
-                        file_info["url_private_download"] = attachment.url  # Slack compat
-                    attachment_data = getattr(attachment, "__dict__", {})
-                    for key, value in attachment_data.items():
-                        if key in {"name", "mimetype", "url", "content", "local_path", "size"}:
-                            continue
-                        file_info[key] = value
-                    timestamp = time.time_ns()
-                    safe_name = self._sanitize_filename(attachment.name)
-                    filename = f"{timestamp}_{safe_name}"
-                    local_path = attachments_dir / filename
-                    temp_path = attachments_dir / f"{filename}.part"
-                    content = None
-                    detected_sample = None
-                    content_size = None
-
-                    if hasattr(im_client, "download_file_to_path"):
-                        self._cleanup_partial_attachment(temp_path)
-                        result = await im_client.download_file_to_path(file_info, str(temp_path))
-                        if not isinstance(result, FileDownloadResult):
-                            result = FileDownloadResult(bool(result), None if result else "Download failed")
-
-                        if result.success:
-                            os.replace(temp_path, local_path)
-                            content_size = local_path.stat().st_size
-                            with open(local_path, "rb") as file_obj:
-                                detected_sample = file_obj.read(AUDIO_SIGNATURE_SAMPLE_BYTES)
-                        else:
-                            self._cleanup_partial_attachment(temp_path)
-                            error_text = result.error or "Download failed"
-                            logger.warning("Failed to download file %s: %s", attachment.name, error_text)
-                            errors.append(f"Attachment '{attachment.name}' could not be downloaded: {error_text}")
-                    else:
-                        content = await im_client.download_file(file_info)
-                        if content:
-                            with open(local_path, "wb") as f:
-                                f.write(content)
-                            content_size = len(content)
-                            detected_sample = content[:AUDIO_SIGNATURE_SAMPLE_BYTES]
-                        else:
-                            logger.warning("Failed to download file %s: download returned no content", attachment.name)
-                            errors.append(
-                                f"Attachment '{attachment.name}' could not be downloaded: Download returned no content"
-                            )
-
-                    if content is not None or content_size is not None:
-                        # Detect actual MIME type from magic bytes for media
-                        # (some platforms don't provide accurate MIME, e.g. Feishu and Slack)
-                        detected = self._detect_image_mime(detected_sample or b"")
-                        if not detected:
-                            detected = detect_audio_mime_from_sample(detected_sample or b"")
-                        if detected:
-                            attachment.mimetype = detected[0]
-                            # Fix filename extension to match actual type
-                            ext = detected[1]
-                            base = os.path.splitext(attachment.name)[0]
-                            attachment.name = f"{base}{ext}"
-
-                        attachment.local_path = str(local_path)
-                        attachment.size = content_size
-
-                        # Determine file type for logging
-                        is_image = (attachment.mimetype or "").startswith("image/")
-                        file_type = "image" if is_image else "file"
-
-                        logger.info(f"Saved {file_type} '{attachment.name}' ({content_size} bytes) to '{local_path}'")
-
-                        processed.append(attachment)
-                    else:
-                        logger.warning(f"Failed to download file: {attachment.name}")
-                else:
-                    logger.warning(f"Cannot download file: {attachment.name} (no URL or download method)")
-                    errors.append(f"Attachment '{attachment.name}' could not be downloaded: No URL or download method")
-
-            except Exception as e:
-                self._cleanup_partial_attachment(locals().get("temp_path"))
-                logger.error(f"Error processing file attachment {attachment.name}: {e}")
-                errors.append(f"Attachment '{attachment.name}' could not be downloaded: {e}")
-                continue
-
-        return (processed if processed else None), errors
+        batch = await InboundAttachmentMaterializer(
+            attachments_root=get_attachments_dir(),
+        ).materialize(
+            context,
+            self._get_im_client(context),
+        )
+        # Ordinary Agent attachments remain durable as before. PR4 retains an
+        # independent Memory reference before this ownership transfer.
+        batch.lease.adopt()
+        batch.lease.release()
+        processed = list(batch.attachments)
+        return (processed if processed else None), list(batch.display_errors)
 
     @staticmethod
     def _cleanup_partial_attachment(path) -> None:

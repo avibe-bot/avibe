@@ -72,6 +72,50 @@ async def download_file(bot_token: str, file_path: str, *, timeout_seconds: int 
             return await resp.read()
 
 
+async def download_file_to_path(
+    bot_token: str,
+    file_path: str,
+    target_path: Path | str,
+    *,
+    max_bytes: int | None = None,
+    timeout_seconds: int = 60,
+    proxy_url: Optional[str] = None,
+) -> int:
+    """Stream one Bot API file to disk with header and byte-count bounds."""
+
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    connector = ProxyConnector.from_url(proxy_url) if proxy_url else None
+    target = Path(target_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            async with session.get(_file_url(bot_token, file_path)) as resp:
+                resp.raise_for_status()
+                content_length = _positive_content_length(resp.headers.get("Content-Length"))
+                if max_bytes is not None and content_length is not None and content_length > max_bytes:
+                    raise ValueError("Downloaded file exceeds max_bytes")
+                total = 0
+                with target.open("xb") as file_obj:
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if max_bytes is not None and total > max_bytes:
+                            raise ValueError("Downloaded file exceeds max_bytes")
+                        file_obj.write(chunk)
+        return total
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+
+
+def _positive_content_length(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 async def get_file(bot_token: str, file_id: str, proxy_url: Optional[str] = None) -> dict[str, Any]:
     return await call_api(bot_token, "getFile", {"file_id": file_id}, proxy_url=proxy_url)
 

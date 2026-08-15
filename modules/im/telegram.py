@@ -19,12 +19,29 @@ from vibe.proxy import resolve_proxy
 from modules.agents.native_sessions import AgentNativeSessionService, NativeResumeSession
 from modules.agents.opencode.utils import format_claude_model_label
 
-from .base import BaseIMClient, FileAttachment, MessageContext, InlineButton, InlineKeyboard
+from .base import (
+    BaseIMClient,
+    FileAttachment,
+    FileDownloadResult,
+    MessageContext,
+    InlineButton,
+    InlineKeyboard,
+)
 from .formatters import TelegramFormatter
 from .message_facts import is_ordinary_telegram_text
 from . import telegram_api
 
 logger = logging.getLogger(__name__)
+
+
+def _telegram_size_exceeds(value: object, max_bytes: int | None) -> bool:
+    if max_bytes is None:
+        return False
+    try:
+        size = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return size >= 0 and size > max_bytes
 
 
 @dataclass
@@ -1530,6 +1547,52 @@ class TelegramBot(BaseIMClient):
         if max_bytes is not None and len(content) > max_bytes:
             raise ValueError("Downloaded file exceeds max_bytes")
         return content
+
+    async def download_file_to_path(
+        self,
+        file_info: Dict[str, Any],
+        target_path: str,
+        max_bytes: Optional[int] = None,
+        timeout_seconds: int = 30,
+    ) -> FileDownloadResult:
+        """Resolve and stream a Telegram file without buffering it in memory."""
+
+        file_id = (
+            file_info.get("telegram_file_id")
+            or file_info.get("url")
+            or file_info.get("file_id")
+        )
+        if not file_id:
+            return FileDownloadResult(False, "Telegram file_id is required")
+        if _telegram_size_exceeds(file_info.get("size"), max_bytes):
+            return FileDownloadResult(False, "File exceeds max_bytes")
+        target = Path(target_path)
+        try:
+            file_result = await telegram_api.get_file(
+                self.config.bot_token,
+                str(file_id),
+                proxy_url=self._proxy_url,
+            )
+            resolved = file_result.get("result")
+            if not isinstance(resolved, dict) or not resolved.get("file_path"):
+                return FileDownloadResult(False, "Telegram file metadata is invalid")
+            if _telegram_size_exceeds(resolved.get("file_size"), max_bytes):
+                return FileDownloadResult(False, "File exceeds max_bytes")
+            await telegram_api.download_file_to_path(
+                self.config.bot_token,
+                str(resolved["file_path"]),
+                target,
+                max_bytes=max_bytes,
+                timeout_seconds=timeout_seconds,
+                proxy_url=self._proxy_url,
+            )
+            return FileDownloadResult(True)
+        except ValueError:
+            target.unlink(missing_ok=True)
+            return FileDownloadResult(False, "File exceeds max_bytes")
+        except Exception:
+            target.unlink(missing_ok=True)
+            return FileDownloadResult(False, "Telegram file download failed")
 
     async def open_change_cwd_modal(self, trigger_id: Any, current_cwd: str, channel_id: str = None):
         context = trigger_id if isinstance(trigger_id, MessageContext) else None

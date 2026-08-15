@@ -83,6 +83,42 @@ _SHORT_RETRY_SECONDS = 2
 _LONG_RETRY_SECONDS = 30
 _MAX_CONSECUTIVE_FAILURES = 3
 _DEDUP_SET_MAX = 1000
+
+
+def _wechat_declared_size_exceeds(file_info: Dict[str, Any], max_bytes: int | None) -> bool:
+    if max_bytes is None:
+        return False
+    cdn_info = file_info.get("cdn_info")
+    cdn_info = cdn_info if isinstance(cdn_info, dict) else {}
+    wechat_item = file_info.get("wechat_item")
+    wechat_item = wechat_item if isinstance(wechat_item, dict) else {}
+    plaintext_values = (
+        file_info.get("size"),
+        cdn_info.get("file_size"),
+        wechat_item.get("len"),
+    )
+    ciphertext_values = (
+        cdn_info.get("file_size_ciphertext"),
+        wechat_item.get("file_size_ciphertext"),
+    )
+    for value in plaintext_values:
+        size = _nonnegative_size(value)
+        if size is not None and size > max_bytes:
+            return True
+    ciphertext_limit = _wechat_cdn_mod.aes_ecb_padded_size(max_bytes)
+    for value in ciphertext_values:
+        size = _nonnegative_size(value)
+        if size is not None and size > ciphertext_limit:
+            return True
+    return False
+
+
+def _nonnegative_size(value: object) -> int | None:
+    try:
+        size = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
 _DEDUP_CLEAN_INTERVAL_SECONDS = 300
 _SESSION_EXPIRED_ERRCODE = -14
 _CONTEXT_TOKEN_CACHE_VERSION = 1
@@ -274,6 +310,8 @@ class _WeChatCDN:
         cdn_base_url: str,
         file_info: Dict[str, Any],
         target_path: str,
+        max_bytes: Optional[int] = None,
+        timeout_seconds: int = 30,
         proxy: Optional[str] = None,
     ) -> bool:
         """Download and decrypt a CDN file to a local path."""
@@ -300,21 +338,26 @@ class _WeChatCDN:
 
         try:
             if aes_key_b64:
-                content = await _wechat_cdn_mod.download_and_decrypt(
+                await _wechat_cdn_mod.download_and_decrypt_to_path(
                     cdn_base_url,
                     encrypted_query_param,
                     aes_key_b64,
+                    dest,
+                    max_bytes=max_bytes,
+                    timeout_seconds=timeout_seconds,
                 )
             else:
-                content = await _wechat_cdn_mod.download_plain(
+                await _wechat_cdn_mod.download_plain_to_path(
                     cdn_base_url,
                     encrypted_query_param,
+                    dest,
+                    max_bytes=max_bytes,
+                    timeout_seconds=timeout_seconds,
                 )
-
-            dest.write_bytes(content)
             return True
         except Exception as exc:
-            logger.error("CDN download error: %s", exc)
+            dest.unlink(missing_ok=True)
+            logger.warning("WeChat CDN download failed: %s", type(exc).__name__)
             return False
 
 
@@ -906,26 +949,20 @@ class WeChatBot(BaseIMClient):
         timeout_seconds: int = 30,
     ) -> FileDownloadResult:
         """Download a CDN file to a local path."""
+        if _wechat_declared_size_exceeds(file_info, max_bytes):
+            return FileDownloadResult(False, "File exceeds max_bytes")
         success = await wechat_cdn.download_and_decrypt(
             self.config.base_url,
             self.config.bot_token,
             getattr(self.config, "cdn_base_url", self.config.base_url),
             file_info,
             target_path,
+            max_bytes=max_bytes,
+            timeout_seconds=timeout_seconds,
             proxy=self._proxy_url,
         )
         if not success:
             return FileDownloadResult(False, "CDN download/decrypt failed")
-
-        # Enforce max_bytes after download if specified
-        if max_bytes is not None:
-            dest = Path(target_path)
-            if dest.exists() and dest.stat().st_size > max_bytes:
-                dest.unlink(missing_ok=True)
-                return FileDownloadResult(
-                    False,
-                    f"File exceeds max_bytes ({max_bytes})",
-                )
 
         return FileDownloadResult(True)
 
