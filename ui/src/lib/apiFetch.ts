@@ -8,6 +8,10 @@ const REMOTE_AUTH_RECOVERY_ERRORS = new Set([
   'remote_access_authorization_refresh_required',
 ]);
 
+export type ApiFetchOptions = {
+  deadlineMs?: number;
+};
+
 let csrfTokenPromise: Promise<string> | null = null;
 
 function readCookie(name: string): string | null {
@@ -131,9 +135,49 @@ function canReplayRequest(input: RequestInfo | URL, body: BodyInit | null | unde
   return !(typeof ReadableStream !== 'undefined' && body instanceof ReadableStream);
 }
 
-export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+const signalWithDeadline = (
+  callerSignal: AbortSignal | null | undefined,
+  deadlineMs: number | undefined,
+): AbortSignal | undefined => {
+  if (deadlineMs === undefined) return callerSignal ?? undefined;
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    throw new TypeError('apiFetch deadlineMs must be a positive finite number');
+  }
+  if (callerSignal?.aborted) return callerSignal;
+
+  const deadlineController = new AbortController();
+  const deadlineTimer = globalThis.setTimeout(() => {
+    deadlineController.abort(new DOMException(
+      `Request exceeded its ${deadlineMs}ms deadline`,
+      'TimeoutError',
+    ));
+  }, deadlineMs);
+  if (!callerSignal) return deadlineController.signal;
+
+  const composedController = new AbortController();
+  const abortFromCaller = () => abortFrom(callerSignal);
+  const abortFromDeadline = () => abortFrom(deadlineController.signal);
+  const abortFrom = (source: AbortSignal) => {
+    callerSignal.removeEventListener('abort', abortFromCaller);
+    deadlineController.signal.removeEventListener('abort', abortFromDeadline);
+    if (source === callerSignal) globalThis.clearTimeout(deadlineTimer);
+    composedController.abort(
+      source.reason ?? new DOMException('request aborted', 'AbortError'),
+    );
+  };
+  callerSignal.addEventListener('abort', abortFromCaller, { once: true });
+  deadlineController.signal.addEventListener('abort', abortFromDeadline, { once: true });
+  return composedController.signal;
+};
+
+export async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  options: ApiFetchOptions = {},
+): Promise<Response> {
   const method = (init.method || 'GET').toUpperCase();
-  const nextInit: RequestInit = { ...init };
+  const signal = signalWithDeadline(init.signal, options.deadlineMs);
+  const nextInit: RequestInit = { ...init, signal };
   const headers = new Headers(init.headers || {});
 
   // Be explicit about wanting JSON so endpoints that double as SPA
@@ -145,7 +189,7 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
 
   let csrfToken = '';
   if (MUTATING_METHODS.has(method)) {
-    csrfToken = await ensureCsrfToken(init.signal ?? undefined);
+    csrfToken = await ensureCsrfToken(signal);
     headers.set(CSRF_HEADER_NAME, csrfToken);
   }
 
@@ -159,7 +203,7 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     && canReplayRequest(input, init.body)
     && await isInvalidCsrfResponse(response.clone())
   ) {
-    const recoveredToken = await refreshRejectedCsrfToken(init.signal ?? undefined);
+    const recoveredToken = await refreshRejectedCsrfToken(signal);
     // Cookies are shared across tabs while the acquisition promise is not.
     // Read once more at the replay boundary in case another tab won the race.
     csrfToken = readCookie(CSRF_COOKIE_NAME) || recoveredToken;

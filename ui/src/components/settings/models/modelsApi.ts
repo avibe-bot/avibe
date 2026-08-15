@@ -272,8 +272,26 @@ export const apiFailure = (
       }
     : null;
 
+const MODEL_HUB_REQUEST_DEADLINE_MS = 30_000;
+const MODEL_HUB_EXTERNAL_REQUEST_DEADLINE_MS = 120_000;
+
+const requestDeadlineMs = (path: string): number =>
+  /\/(?:refresh|probe)$/.test(path) || path.startsWith('/api/models/oauth/status/')
+    ? MODEL_HUB_EXTERNAL_REQUEST_DEADLINE_MS
+    : MODEL_HUB_REQUEST_DEADLINE_MS;
+
+const isDeadlineAbort = (error: unknown): boolean =>
+  Boolean(error && typeof error === 'object' && 'name' in error && error.name === 'TimeoutError');
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await apiFetch(path, init);
+  let res: Response;
+  try {
+    res = await apiFetch(path, init, { deadlineMs: requestDeadlineMs(path) });
+  } catch (error) {
+    if (!isDeadlineAbort(error)) throw error;
+    // The deadline says the answer did not arrive, not whether the route wrote.
+    throw new ApiCallError('bad_response', `Request deadline exceeded for ${path}`, false);
+  }
   let payload: unknown = null;
   try {
     payload = await res.json();

@@ -230,6 +230,90 @@ describe('apiFetch remote auth recovery', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('aborts a deadline-bound request without a caller signal', async () => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          expect(input).toBe('/api/models/sources');
+          issuedSignal = init?.signal ?? undefined;
+          issuedSignal?.addEventListener('abort', () => reject(issuedSignal?.reason), { once: true });
+        })),
+    );
+
+    const request = apiFetch('/api/models/sources', {}, { deadlineMs: 1_000 });
+    const rejected = expect(request).rejects.toMatchObject({ name: 'TimeoutError' });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(issuedSignal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+  });
+
+  it('lets a caller abort before the deadline', async () => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          issuedSignal = init?.signal ?? undefined;
+          issuedSignal?.addEventListener('abort', () => reject(issuedSignal?.reason), { once: true });
+        })),
+    );
+    const controller = new AbortController();
+    const callerReason = new DOMException('caller stopped waiting', 'AbortError');
+
+    const request = apiFetch('/api/models/sources', { signal: controller.signal }, { deadlineMs: 1_000 });
+    const rejected = expect(request).rejects.toBe(callerReason);
+    controller.abort(callerReason);
+
+    await rejected;
+    expect(issuedSignal).not.toBe(controller.signal);
+    expect(issuedSignal?.reason).toBe(callerReason);
+  });
+
+  it('fires the deadline while a shared CSRF fetch is in flight', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(Response.json({ csrf_token: 'fresh-token' }))
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const stalled = apiFetch('/api/models/sources', { method: 'POST' }, { deadlineMs: 1_000 });
+    const rejected = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejected;
+    await expect(apiFetch('/api/models/sources', { method: 'POST' })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps a caller signal connected after fetch returns', async () => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        issuedSignal = init?.signal ?? undefined;
+        return Response.json({ ok: true });
+      }),
+    );
+    const controller = new AbortController();
+    const callerReason = new DOMException('dialog closed', 'AbortError');
+
+    await apiFetch('/api/models/sources', { signal: controller.signal }, { deadlineMs: 1_000 });
+    controller.abort(callerReason);
+
+    expect(issuedSignal).not.toBe(controller.signal);
+    expect(issuedSignal).toMatchObject({ aborted: true, reason: callerReason });
+  });
+
   it('evicts a stalled shared CSRF fetch after a deadline-bound caller aborts', async () => {
     const fetchMock = vi.fn()
       .mockImplementationOnce(() => new Promise<Response>(() => undefined))
