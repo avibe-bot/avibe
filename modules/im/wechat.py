@@ -100,6 +100,8 @@ def _wechat_declared_size_exceeds(file_info: Dict[str, Any], max_bytes: int | No
     ciphertext_values = (
         cdn_info.get("file_size_ciphertext"),
         wechat_item.get("file_size_ciphertext"),
+        wechat_item.get("mid_size"),
+        wechat_item.get("video_size"),
     )
     for value in plaintext_values:
         size = _nonnegative_size(value)

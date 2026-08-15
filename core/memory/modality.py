@@ -19,6 +19,7 @@ runtime child process, which runs with a minimal environment.
 
 from __future__ import annotations
 
+import codecs
 from pathlib import Path
 
 from core.memory.types import MemoryContentKind
@@ -128,7 +129,7 @@ def classify_pinned_attachment(
     if b"\x00" in sample:
         return None
     try:
-        sample.decode("utf-8")
+        codecs.getincrementaldecoder("utf-8")().decode(sample, final=False)
     except UnicodeDecodeError:
         return None
     if normalized_mime != "application/octet-stream" and not (

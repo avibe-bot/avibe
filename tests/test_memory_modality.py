@@ -39,6 +39,23 @@ def test_classifier_requires_an_audio_brand_for_m4a(tmp_path: Path) -> None:
     )
 
 
+def test_classifier_accepts_utf8_sample_with_incomplete_trailing_codepoint(
+    tmp_path: Path,
+) -> None:
+    path = _write_private(tmp_path / "notes.txt", b"a" * 4095 + "你".encode())
+
+    assert classify_pinned_attachment("notes.txt", "text/plain", path) == (
+        "doc",
+        "txt",
+    )
+
+
+def test_classifier_still_rejects_invalid_utf8_inside_sample(tmp_path: Path) -> None:
+    path = _write_private(tmp_path / "notes.txt", b"valid\xffinvalid")
+
+    assert classify_pinned_attachment("notes.txt", "text/plain", path) is None
+
+
 def test_pinned_modality_contract_allows_exact_upstream_set_minus_exclusions() -> None:
     upstream = SUPPORTED_ATTACHMENT_EXTENSIONS | PINNED_UPSTREAM_EXCLUDED_EXTENSIONS
 

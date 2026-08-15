@@ -162,6 +162,37 @@ async def test_wechat_adapter_rejects_declared_plaintext_before_acquisition(
     assert called is False
 
 
+@pytest.mark.parametrize("declared_field", ["mid_size", "video_size"])
+@pytest.mark.asyncio
+async def test_wechat_adapter_rejects_native_declared_ciphertext_before_acquisition(
+    declared_field: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = WeChatBot(WeChatConfig(bot_token="test-token"))
+    called = False
+
+    async def acquire(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(wechat_cdn_client, "download_and_decrypt", acquire)
+
+    result = await bot.download_file_to_path(
+        {
+            "url": "opaque-query",
+            "wechat_item": {declared_field: "33"},
+        },
+        str(tmp_path / "wechat.bin"),
+        max_bytes=16,
+    )
+
+    assert result.success is False
+    assert result.failure_reason == "file_too_large"
+    assert called is False
+
+
 @pytest.mark.asyncio
 async def test_wechat_adapter_preserves_streamed_plaintext_overflow_reason(
     tmp_path: Path,

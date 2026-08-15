@@ -420,8 +420,19 @@ def _make_private_directory(descriptor: int, label: str) -> None:
 def _sanitize_filename(name: object) -> str:
     raw = Path(str(name or "attachment")).name or "attachment"
     safe = _SAFE_FILENAME.sub("_", raw).replace("..", "_")
-    encoded = safe.encode("utf-8", errors="ignore")[:_MAX_FILENAME_BYTES]
-    return encoded.decode("utf-8", errors="ignore") or "attachment"
+    suffix = Path(safe).suffix
+    suffix_bytes = suffix.encode("utf-8", errors="ignore")
+    if not suffix or len(suffix_bytes) >= _MAX_FILENAME_BYTES:
+        return _truncate_utf8(safe, _MAX_FILENAME_BYTES) or "attachment"
+    stem = safe[: -len(suffix)]
+    stem_budget = _MAX_FILENAME_BYTES - len(suffix_bytes)
+    stem = _truncate_utf8(stem, stem_budget)
+    return f"{stem or _truncate_utf8('attachment', stem_budget)}{suffix}"
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8", errors="ignore")[:max_bytes]
+    return encoded.decode("utf-8", errors="ignore")
 
 
 def _normalize_detected_media(name: str, mimetype: str, path: Path) -> tuple[str, str, Path]:

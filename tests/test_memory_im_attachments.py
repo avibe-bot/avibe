@@ -127,6 +127,25 @@ async def test_memory_selection_counts_only_supported_survivors(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_long_materialized_filename_preserves_supported_extension(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "avibe-home"
+    long_name = f"{'report' * 40}.pdf"
+    batch = await _materialize(
+        home,
+        [(long_name, "application/pdf", b"%PDF-1.7\n", 9)],
+    )
+
+    selected = select_memory_attachments(batch.lease)
+
+    assert len(selected.attachments) == 1
+    assert selected.attachments[0].name.endswith(".pdf")
+    assert len(selected.attachments[0].name.encode("utf-8")) <= 200
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
 async def test_pin_rejects_released_or_mismatched_im_lease(tmp_path: Path) -> None:
     first_home = tmp_path / "first-home"
     second_home = tmp_path / "second-home"
