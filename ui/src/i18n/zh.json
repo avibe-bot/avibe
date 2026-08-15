@@ -2044,7 +2044,8 @@
         "testTitle": "Avibe",
         "testBody": "通知已经准备好了。",
         "testSent": "测试通知已发送",
-        "testFailed": "测试通知发送失败"
+        "testFailed": "测试通知发送失败",
+        "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
       }
     },
     "modules": {

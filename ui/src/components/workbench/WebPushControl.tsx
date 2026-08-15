@@ -101,7 +101,23 @@ export const WebPushControl: React.FC = () => {
         endpoint: subscription.endpoint,
       });
       if (result.ok) {
-        showToast(t('workbench.inbox.notifications.testSent'), 'success');
+        const blocked = result.normal_delivery;
+        if (blocked && blocked.authorized === false) {
+          // The channel works, but the normal-path authorization gate would
+          // currently skip this owner — explain which gate decided.
+          showToast(
+            `${t('workbench.inbox.notifications.testSent')} — ${t(
+              'workbench.inbox.notifications.normalBlocked',
+              {
+                disposition: blocked.disposition ?? 'unknown',
+                policy: blocked.policy ?? 'unknown',
+              },
+            )}`,
+            'warning',
+          );
+        } else {
+          showToast(t('workbench.inbox.notifications.testSent'), 'success');
+        }
       } else {
         showToast(
           t('workbench.inbox.notifications.testFailed', { count: result.failed ?? 0 }),

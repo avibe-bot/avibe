@@ -1251,6 +1251,184 @@ def test_read_suppressed_attempt_is_attributed_to_its_owners(monkeypatch, tmp_pa
     engine.dispose()
 
 
+def test_unsigned_organization_snapshot_without_config_is_rejected(monkeypatch, tmp_path):
+    """Organization delivery needs a signed revision even with no paired config."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    # No `_paired_revision_config`: this AVIBE_HOME has no paired config at all.
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-15T00:00:00Z"
+    unsigned_record = _remote_authorization_record(
+        "remote:user-a",
+        instance_access_source="organization_group",
+        organization=True,
+    )
+    assert "vibe_instance_authorization_revision" not in unsigned_record
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_unsigned_no_config",
+            session_id="ses_push_unsigned_no_config",
+            title="Unsigned No Config",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_unsigned_no_config",
+            user_keys=["remote:user-a"],
+            records=[unsigned_record],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_unsigned_no_config")
+        _upsert_subscriptions(conn, "remote:user-a")
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Unsigned No Config",
+            "body": "Done",
+            "session_id": "ses_push_unsigned_no_config",
+            "message_id": message["id"],
+        }
+    )
+
+    assert sends == []
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_AUTHORIZATION_REFRESH_REQUIRED
+    assert recent[0]["owners"]["remote:user-a"]["policy"] == "organization"
+    engine.dispose()
+
+
+def test_config_read_failure_fails_closed_for_remote_owners(monkeypatch, tmp_path):
+    """An unreadable paired config must not authorize any remote snapshot."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-15T00:00:00Z"
+
+    def _broken_load_config():
+        raise RuntimeError("config read failed")
+
+    monkeypatch.setattr("core.services.settings.load_config", _broken_load_config)
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_config_failure",
+            session_id="ses_push_config_failure",
+            title="Config Failure",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_config_failure",
+            user_keys=["remote:user-a"],
+            records=[_remote_authorization_record("remote:user-a")],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_config_failure")
+        _upsert_subscriptions(conn, "remote:user-a")
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Config Failure",
+            "body": "Done",
+            "session_id": "ses_push_config_failure",
+            "message_id": message["id"],
+        }
+    )
+
+    assert sends == []
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE
+    owner = recent[0]["owners"]["remote:user-a"]
+    assert owner["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE
+    engine.dispose()
+
+
+def test_message_read_during_authorization_retry_is_not_sent(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="organization")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-15T00:00:00Z"
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_read_during_retry",
+            session_id="ses_push_read_during_retry",
+            title="Read During Retry",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_read_during_retry",
+            user_keys=["remote:user-a"],
+            records=[_remote_authorization_record("remote:user-a", authorization_revision=41)],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_read_during_retry")
+        _upsert_subscriptions(conn, "remote:user-a")
+
+    def _open_message_during_retry(config):
+        # The user opens the message while the bounded watermark retry blocks.
+        with engine.begin() as conn:
+            messages_service.mark_session_read(
+                conn,
+                "ses_push_read_during_retry",
+                until_message_id=message["id"],
+            )
+
+    monkeypatch.setattr(
+        remote_access,
+        "current_authorization_revision",
+        lambda config, *, now=None: None,
+    )
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_retry_authorization_revision_sync",
+        _open_message_during_retry,
+    )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Read During Retry",
+            "body": "Done",
+            "session_id": "ses_push_read_during_retry",
+            "message_id": message["id"],
+        }
+    )
+
+    assert sends == []
+    scoped = web_push_notifications.recent_delivery_dispositions(user_key="remote:user-a")
+    assert scoped[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SUPPRESSED_READ
+    engine.dispose()
+
+
 def test_scoped_dispositions_redact_other_owners(monkeypatch, tmp_path):
     from core.chat_discovery import set_state_meta
 

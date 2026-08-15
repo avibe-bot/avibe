@@ -43,6 +43,8 @@ WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION = "no_subscription"
 WEB_PUSH_DISPOSITION_PROVIDER_FAILURE = "provider_failure"
 WEB_PUSH_DISPOSITION_SUPPRESSED_READ = "suppressed_read"
 
+WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE = "config_unavailable"
+
 _ORGANIZATION_REVISION_DISPOSITIONS = {
     "unsigned": (
         WEB_PUSH_DISPOSITION_AUTHORIZATION_REFRESH_REQUIRED,
@@ -76,16 +78,23 @@ class OwnerAuthorizationDecision:
     reason: str
 
 
-def _load_notification_config() -> Any:
+def _load_notification_config() -> tuple[Any, bool]:
+    """Return ``(config, load_failed)`` for the paired notification config.
+
+    ``FileNotFoundError`` means the installation is genuinely unpaired and is
+    not a failure; any other error means an existing configuration could not
+    be read, which callers must treat as fail-closed for remote records.
+    """
+
     try:
         from core.services import settings as settings_service
 
-        return settings_service.load_config()
+        return settings_service.load_config(), False
     except FileNotFoundError:
-        return None
+        return None, False
     except Exception:
         logger.debug("web push: could not load authorization config", exc_info=True)
-        return None
+        return None, True
 
 
 def _notification_policy_for_record(config: Any, record: Mapping[str, Any]) -> str:
@@ -144,7 +153,7 @@ def _retry_authorization_revision_sync(config: Any) -> None:
     deadline = time.monotonic() + WEB_PUSH_AUTHORIZATION_SYNC_WAIT_SECONDS
     while time.monotonic() < deadline:
         if config is None:
-            config = _load_notification_config()
+            config, _config_load_failed = _load_notification_config()
         if config is not None:
             try:
                 if remote_access.current_authorization_revision(config) is not None:
@@ -160,6 +169,7 @@ def _evaluate_record_authorization(
     user_key: str,
     record: Mapping[str, Any],
     *,
+    config_load_failed: bool = False,
     allow_sync_retry: bool = True,
 ) -> OwnerAuthorizationDecision:
     """Authorize one persisted prompt snapshot under its notification policy.
@@ -180,6 +190,19 @@ def _evaluate_record_authorization(
     from vibe import remote_access
 
     policy = _notification_policy_for_record(config, record)
+    if config_load_failed:
+        # The paired configuration exists but could not be read: the record's
+        # instance binding cannot be validated for any remote owner, so fail
+        # closed for this delivery instead of guessing. The next delivery
+        # retries the read.
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason="paired configuration could not be read; instance binding cannot be validated",
+        )
     context = context_from_session_payload(record)
     if not (
         context.subject
@@ -223,8 +246,20 @@ def _evaluate_record_authorization(
             disposition=None,
             reason="personal access resolved from the persisted signed snapshot",
         )
+    if not _record_carries_signed_revision(record):
+        # Organization delivery-time verification is only possible against a
+        # signed revision; unsigned claims can never be confirmed current,
+        # whether or not revision sync is configured right now.
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=context,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_AUTHORIZATION_REFRESH_REQUIRED,
+            reason="organization claims lack a signed authorization revision",
+        )
     revision_state = remote_access.session_authorization_revision_state(config, record)
-    if revision_state == "not_configured" and _record_carries_signed_revision(record):
+    if revision_state == "not_configured":
         # A revision-signed Organization snapshot proves the instance was
         # revision-synced when the snapshot was minted. Being unable to check
         # the watermark now — missing, unreadable, or unpaired local config —
@@ -234,20 +269,16 @@ def _evaluate_record_authorization(
     if revision_state == "unavailable" and allow_sync_retry:
         _retry_authorization_revision_sync(config)
         revision_state = remote_access.session_authorization_revision_state(config, record)
-        if revision_state == "not_configured" and _record_carries_signed_revision(record):
+        if revision_state == "not_configured":
             revision_state = "unavailable"
-    if revision_state in {"current", "not_configured"}:
+    if revision_state == "current":
         return OwnerAuthorizationDecision(
             user_key=user_key,
             policy=policy,
             context=context,
             authorized=True,
             disposition=None,
-            reason=(
-                "organization access current at delivery time"
-                if revision_state == "current"
-                else "organization revision sync not configured"
-            ),
+            reason="organization access current at delivery time",
         )
     disposition, reason = _ORGANIZATION_REVISION_DISPOSITIONS.get(
         revision_state,
@@ -297,21 +328,26 @@ def _resolve_owner_authorization_decisions(
         records.append((user_key, raw_context))
     if not records:
         return {}
-    config = _load_notification_config()
-    if allow_sync_retry and any(
-        _notification_policy_for_record(config, record) == "organization"
-        for _user_key, record in records
+    config, config_load_failed = _load_notification_config()
+    if (
+        allow_sync_retry
+        and not config_load_failed
+        and any(
+            _notification_policy_for_record(config, record) == "organization"
+            for _user_key, record in records
+        )
     ):
         from vibe import remote_access
 
         if config is None or remote_access.current_authorization_revision(config) is None:
             _retry_authorization_revision_sync(config)
-            config = _load_notification_config()
+            config, config_load_failed = _load_notification_config()
     return {
         user_key: _evaluate_record_authorization(
             config,
             user_key,
             record,
+            config_load_failed=config_load_failed,
             allow_sync_retry=False,
         )
         for user_key, record in records
@@ -403,11 +439,12 @@ def evaluate_delivery_authorization_for_context(
             "disposition": WEB_PUSH_DISPOSITION_AUTHORIZATION_REFRESH_REQUIRED,
             "reason": "no usable authorization snapshot for this owner",
         }
-    config = _load_notification_config()
+    config, config_load_failed = _load_notification_config()
     decision = _evaluate_record_authorization(
         config,
         user_key,
         record,
+        config_load_failed=config_load_failed,
         allow_sync_retry=False,
     )
     evaluation: dict[str, Any] = {
@@ -417,7 +454,7 @@ def evaluate_delivery_authorization_for_context(
         "disposition": decision.disposition,
         "reason": decision.reason,
     }
-    if decision.policy == "organization":
+    if decision.policy == "organization" and config is not None:
         from vibe import remote_access
 
         evaluation["revision_state"] = remote_access.session_authorization_revision_state(
@@ -785,7 +822,8 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                 conn,
                 payload.get("message_id"),
             )
-            if not _message_still_unread(conn, payload.get("message_id")):
+
+            def _finish_suppressed_read() -> None:
                 # Attribute the suppression to the resolved owners so the
                 # scoped status surface can still explain this outcome.
                 logger.debug("web push: skip notification for message already read or missing")
@@ -796,8 +834,16 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                         "reason": "message was read or missing before the delivery delay elapsed",
                     }
                 _finish_delivery_attempt(attempt, WEB_PUSH_DISPOSITION_SUPPRESSED_READ)
+
+            if not _message_still_unread(conn, payload.get("message_id")):
+                _finish_suppressed_read()
                 return
             decisions = _resolve_owner_authorization_decisions(owner_metadata)
+            if not _message_still_unread(conn, payload.get("message_id")):
+                # The authorization resolution may block for a bounded sync
+                # retry; a message opened meanwhile must not still notify.
+                _finish_suppressed_read()
+                return
             user_keys = _metadata_user_keys(owner_metadata)
             for user_key in user_keys:
                 decision = decisions.get(user_key)

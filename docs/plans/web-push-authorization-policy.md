@@ -81,6 +81,14 @@ skip was only logged at debug level.
     labeled `no_subscription` in merged deliveries; read-suppressed attempts
     resolve and attribute their owners so the scoped surface can explain the
     suppression.
+  - Review round 4 hardening (Codex findings): Organization records require a
+    signed revision even when revision sync is not currently configured; a
+    config read failure (distinct from a genuinely unpaired install) fails
+    closed for all remote records with a `config_unavailable` disposition;
+    the unread state is rechecked after the potentially blocking
+    authorization resolution; the Web UI Web Push control consumes the
+    `normal_delivery` evaluation and surfaces a localized warning when the
+    test channel works but normal delivery is currently gated.
 - `vibe/ui_server.py`:
   - `_web_push_user_key()` no longer applies the 12-hour refresh cutoff;
     `parse_session_cookie` still enforces signature, expiry, and confirmed
