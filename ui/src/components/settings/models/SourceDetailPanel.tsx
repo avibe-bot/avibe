@@ -513,7 +513,7 @@ export const SourceDetailPanel: React.FC<{
         const displayNameCommitted = patch.display_name === undefined
           || current.display_name === patch.display_name;
         const baseUrlCommitted = patch.base_url === undefined
-          || current.base_url !== before.base_url;
+          || current.base_url === patch.base_url;
         return displayNameCommitted && baseUrlCommitted
           ? { kind: 'source', source: current } satisfies SourceReconciliation
           : undefined;

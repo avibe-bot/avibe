@@ -557,6 +557,44 @@ describe('SourceDetailPanel', () => {
     },
   );
 
+  it.each([
+    { outcome: 'requested', rereadBaseUrl: 'https://requested.example/v2', committed: true },
+    { outcome: 'third-party', rereadBaseUrl: 'https://other.example/v3', committed: false },
+    { outcome: 'unchanged', rereadBaseUrl: source.base_url, committed: false },
+  ])(
+    'confirms an endpoint write only when the reread value is $outcome',
+    async ({ rereadBaseUrl, committed }) => {
+      const requestedBaseUrl = 'https://requested.example/v2';
+      const patch = vi.spyOn(modelsApi, 'patchSource')
+        .mockRejectedValueOnce(new TypeError('response lost'));
+      const inventory = vi.spyOn(modelsApi, 'listSources')
+        .mockResolvedValueOnce([{ ...source, base_url: rereadBaseUrl }]);
+      renderEchoPanel();
+
+      await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+      await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+      const endpoint = screen.getByLabelText(/^Base URL$/i);
+      await userEvent.clear(endpoint);
+      await userEvent.type(endpoint, requestedBaseUrl);
+      await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+      await waitFor(() => expect(inventory).toHaveBeenCalledOnce());
+      expect(patch).toHaveBeenCalledWith(source.id, { base_url: requestedBaseUrl });
+      if (committed) {
+        expect(await screen.findByText(/requested\.example/)).toBeTruthy();
+        expect(document.querySelector('[data-manage-failure="edit"]')).toBeNull();
+      } else {
+        const failure = await waitFor(() => {
+          const node = document.querySelector<HTMLElement>('[data-manage-failure="edit"]');
+          expect(node).toBeTruthy();
+          return node!;
+        });
+        expect(failure.dataset.manageRetryRead).toBe('false');
+        expect(failure.textContent).toMatch(/was not saved|没有保存上/i);
+      }
+    },
+  );
+
   it('rereads instead of issuing another PATCH while an unknown edit remains unresolved', async () => {
     const patch = vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(new TypeError('response lost'));
     const inventory = vi.spyOn(modelsApi, 'listSources')
