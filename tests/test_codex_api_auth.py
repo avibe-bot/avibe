@@ -705,3 +705,81 @@ def test_empty_token_bag_is_not_live_oauth_evidence(
 
     state = api.get_codex_auth()
     assert state["base_url"] is None
+
+
+def test_unusable_token_bag_is_not_live_oauth_evidence(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A bag with only blank strings / unrelated metadata is signed out
+    (migration-scanner predicate) — the marker must not be consumed."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"id_token": "", "meta": "x"}, "auth_mode": "chatgpt"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\nmodel = "gpt-5.4"\n', encoding="utf-8"
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=lambda: None
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+
+    state = api.get_codex_auth()
+    assert state["base_url"] is None
+
+
+def test_official_key_oauth_save_prepersists_marker_clear(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Durability symmetry: the official-key transition's marker CLEAR
+    is pre-persisted (as ``None``) before the destructive cleanup, so a
+    later V2Config failure cannot resurrect the abandoned relay."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-official"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\nmodel = "gpt-5.4"\n', encoding="utf-8"
+    )
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="api_key",
+        api_key=None,
+        base_url=None,
+        oauth_relay_marker={"provider_id": "OpenAI", "base_url": "https://stale.example/v1"},
+    )
+
+    def failing_save():
+        raise OSError("config.json unwritable")
+
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=failing_save
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+    persisted: list[dict | None] = []
+    import vibe.codex_config as codex_config_module
+
+    monkeypatch.setattr(
+        codex_config_module,
+        "persist_codex_relay_marker",
+        lambda marker: persisted.append(marker) or True,
+    )
+
+    result = api.save_codex_auth({"auth_mode": "oauth"})
+    assert result.get("ok") is True
+    # The clear was durably recorded even though the owning save failed.
+    assert persisted == [None]

@@ -509,6 +509,22 @@ def read_codex_relay_marker(marker: object) -> Optional[Dict[str, str]]:
     return {"base_url": base_url.strip(), "provider_id": provider_id.strip()}
 
 
+def _tokens_bag_is_usable(tokens: object) -> bool:
+    """True when the OAuth token bag carries at least one usable token.
+
+    Mirrors the migration scanner's predicate (any non-blank
+    ``access_token`` / ``refresh_token`` / ``id_token``), so a bag with
+    only blank strings or unrelated metadata reads as signed out —
+    matching how ``apply_codex_auth`` treats it.
+    """
+    if not isinstance(tokens, dict) or not tokens:
+        return False
+    return any(
+        isinstance(tokens.get(field), str) and tokens[field].strip()
+        for field in ("access_token", "refresh_token", "id_token")
+    )
+
+
 def persist_codex_relay_marker(marker: Optional[Dict[str, str]]) -> bool:
     """Durably record (or clear) the OAuth-transition relay marker in V2Config.
 
@@ -631,12 +647,14 @@ def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:
     auth_data = _load_auth(auth_path)
     toml_data = _load_toml(config_path)
     api_key = auth_data.get("OPENAI_API_KEY")
-    # An empty ``tokens`` bag is "signed out", not live OAuth evidence:
-    # ``apply_codex_auth`` and the migration scanner already treat an
-    # empty dict as unsigned-in, and the marker gates rely on this
-    # field to mean "OAuth credentials are actually present".
+    # An unusable token bag is "signed out", not live OAuth evidence:
+    # the predicate mirrors the migration scanner (at least one of
+    # access_token / refresh_token / id_token non-blank), and
+    # ``apply_codex_auth`` treats a bag without usable tokens as
+    # unsigned-in. The marker gates rely on this field to mean "OAuth
+    # credentials are actually present".
     tokens_bag = auth_data.get("tokens")
-    has_chatgpt_tokens = isinstance(tokens_bag, dict) and bool(tokens_bag)
+    has_chatgpt_tokens = _tokens_bag_is_usable(tokens_bag)
     chatgpt_account = _extract_chatgpt_account(auth_data) if has_chatgpt_tokens else None
 
     providers = toml_data.get("model_providers")

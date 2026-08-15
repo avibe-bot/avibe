@@ -10100,14 +10100,17 @@ def save_codex_auth(payload: dict) -> dict:
         logger.debug("Codex relay marker read failed", exc_info=True)
         marker = None
 
-    # Durability (#1450): a fresh capture is persisted BEFORE
-    # ``apply_codex_auth(oauth)`` destroys the on-disk relay evidence,
-    # so a later V2Config failure cannot lose the capture. A failed
-    # pre-persist only costs switch-back recovery, never the save.
-    if auth_mode == "oauth" and captured_oauth_relay is not None:
+    # Durability (#1450): a fresh capture — or the official-key
+    # transition's clear — is persisted BEFORE ``apply_codex_auth(oauth)``
+    # destroys the on-disk relay evidence, so a later V2Config failure
+    # cannot lose the transition state. A failed pre-persist only costs
+    # switch-back recovery, never the save.
+    if auth_mode == "oauth" and (captured_oauth_relay is not None or observed_api_key_auth):
         try:
             from vibe.codex_config import persist_codex_relay_marker
 
+            # ``None`` here is deliberate for the official-key case: the
+            # pre-persist records the transition's marker-clear.
             if not persist_codex_relay_marker(captured_oauth_relay):
                 logger.warning(
                     "Codex relay marker pre-persist failed; switch-back recovery may be lost"
@@ -10180,13 +10183,19 @@ def save_codex_auth(payload: dict) -> dict:
         # save applies the same retention semantics as the controller
         # path (#1449): fresh capture overwrites, the official-key
         # transition clears, a repeated pure-OAuth save retains.
+        # A failed save here only loses the V2Config mirror — the
+        # durable marker state was already recorded by the pre-persist
+        # above, and the on-disk codex files are authoritative.
         if auth_mode == "api_key":
             config.agents.codex.oauth_relay_marker = None
         elif captured_oauth_relay is not None:
             config.agents.codex.oauth_relay_marker = captured_oauth_relay
         elif observed_api_key_auth:
             config.agents.codex.oauth_relay_marker = None
-        config.save()
+        try:
+            config.save()
+        except Exception:
+            logger.warning("V2Config mirror write failed during codex auth save", exc_info=True)
 
     restart_result = restart_backend(
         "codex",
