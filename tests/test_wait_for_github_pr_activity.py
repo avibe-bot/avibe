@@ -797,18 +797,23 @@ def test_main_detects_pr_status_change_during_polling() -> None:
     assert "pr_status #153 open -> merged" in stdout.getvalue()
 
 
-def test_combined_ci_mode_requires_exact_sha_and_workflow() -> None:
+def test_combined_ci_mode_supports_pinned_or_dynamic_current_head() -> None:
     module = _load_module()
 
-    valid = module._build_parser().parse_args(
+    pinned = module._build_parser().parse_args(
         ["--repo", "avibe-bot/avibe", "--pr", "153", "--sha", "abc123", "--workflow", "CI"]
     )
-    assert module._validate_ci_args(valid) is None
+    assert module._validate_ci_args(pinned) is None
 
-    missing_sha = module._build_parser().parse_args(
+    dynamic = module._build_parser().parse_args(
         ["--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI"]
     )
-    assert "--sha" in (module._validate_ci_args(missing_sha) or "")
+    assert module._validate_ci_args(dynamic) is None
+
+    missing_workflow = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--branch", "feature"]
+    )
+    assert "--workflow" in (module._validate_ci_args(missing_workflow) or "")
 
     new_pr_mode = module._build_parser().parse_args(
         ["--repo", "avibe-bot/avibe", "--new-prs", "--sha", "abc123", "--workflow", "CI"]
@@ -1127,6 +1132,65 @@ def test_combined_pr_waiter_reports_ci_completion(tmp_path) -> None:
     assert fetch_calls == 2
     assert "GitHub Actions success for avibe-bot/avibe@abc123 on feature" in stdout.getvalue()
     assert "CI: status=completed conclusion=success" in stdout.getvalue()
+
+
+def test_dynamic_combined_waiter_follows_the_current_pr_head(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    fetch_calls = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert kwargs["ci_sha"] is None
+        assert kwargs["ci_workflows"] == ["CI"]
+        head_sha = "old-head" if fetch_calls == 1 else "new-head"
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": head_sha}
+        state["actions"] = [
+            {
+                "id": fetch_calls,
+                "name": "CI",
+                "head_sha": head_sha,
+                "head_branch": "feature",
+                "status": "in_progress" if fetch_calls == 1 else "completed",
+                "conclusion": None if fetch_calls == 1 else "success",
+                "html_url": f"https://github.com/example/actions/runs/{fetch_calls}",
+            }
+        ]
+        return state, 2
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+                "--interval",
+                "1",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    output = stdout.getvalue()
+    assert rc == 0
+    assert fetch_calls == 2
+    assert "pr_head #153 old-head -> new-head" in output
+    assert "GitHub Actions success for avibe-bot/avibe@new-head" in output
 
 
 def test_combined_settle_does_not_report_a_stale_ci_success_after_a_rerun_starts() -> None:
@@ -2021,6 +2085,62 @@ def test_fetch_state_includes_combined_actions_and_request_count() -> None:
     assert state["actions"][0]["id"] == 7
     assert request_count == 2 + 5 + 2
     assert fetch_pr.call_count == 2
+
+
+def test_fetch_state_uses_the_observed_pr_head_for_dynamic_ci() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(
+            module,
+            "github_get",
+            side_effect=[
+                {"number": 153, "state": "open", "head": {"sha": "current-head"}},
+                {"number": 153, "state": "open", "head": {"sha": "current-head"}},
+            ],
+        ),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(module, "fetch_workflow_runs", return_value=([], 1)) as fetch_actions,
+    ):
+        module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_branch="feature",
+            ci_workflows=["CI"],
+        )
+
+    fetch_actions.assert_called_once_with(
+        "avibe-bot/avibe",
+        "token",
+        branch="feature",
+        head_sha="current-head",
+        max_pages=3,
+        cache=fetch_actions.call_args.kwargs["cache"],
+    )
+
+
+def test_fetch_state_rejects_dynamic_ci_when_pr_head_is_missing() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(module, "fetch_workflow_runs") as fetch_actions,
+        pytest.raises(
+            RuntimeError,
+            match="GitHub PR response has no head SHA for current-head CI monitoring",
+        ),
+    ):
+        module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_branch="feature",
+            ci_workflows=["CI"],
+        )
+
+    fetch_actions.assert_not_called()
 
 
 def test_fetch_state_discards_actions_when_pr_moves_during_fetch() -> None:
@@ -3964,7 +4084,7 @@ def _managed_state(module, path, watch_id: str | None, **fields) -> None:
     )
 
 
-def _run_managed(module, state_file, fetch, *, delivery: str = ""):
+def _run_managed(module, state_file, fetch, *, delivery: str = "", extra_args=()):
     """One managed cycle over ``state_file``, told when this watch last delivered."""
 
     env = {module.WATCH_ID_ENV: "wat_9", module.LAST_DELIVERY_ENV: delivery}
@@ -3976,7 +4096,16 @@ def _run_managed(module, state_file, fetch, *, delivery: str = ""):
         patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
-            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--state-file",
+                str(state_file),
+                *extra_args,
+            ],
         ),
         redirect_stdout(stdout),
         patch("sys.stderr", io.StringIO()),
@@ -4056,6 +4185,92 @@ def test_a_managed_run_promotes_the_staged_cursors_once_the_report_was_delivered
     payload = json.loads(state_file.read_text(encoding="utf-8"))
     assert payload["review_comment_cursor"] == 501
     assert module.STAGED_KEY not in payload
+
+
+def test_dynamic_combined_cycles_report_activity_that_lands_during_the_follow_up(tmp_path) -> None:
+    """A forever re-arm keeps one baseline across CI and the later review.
+
+    The first cycle exits after CI succeeds. The review lands while its Agent
+    follow-up is running, before the next cycle starts. Reusing the same durable
+    state must compare that review with the pre-review snapshot instead of
+    baselining it away.
+    """
+
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    baseline = _pr_state()
+    baseline["pull_request"]["head"] = {"sha": "head-1"}
+    in_progress = {
+        "id": 7,
+        "name": "CI",
+        "head_sha": "head-1",
+        "head_branch": "feature",
+        "status": "in_progress",
+        "conclusion": None,
+    }
+    _managed_state(
+        module,
+        state_file,
+        "wat_9",
+        **_complete_pr_baseline_fields(module, baseline),
+        actions=module.normalize_selected_runs({"CI": [in_progress]}),
+    )
+
+    succeeded = {
+        **in_progress,
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/example/actions/runs/7",
+    }
+
+    def _fetch_ci(repo, pr_number, token, **kwargs):
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": "head-1"}
+        state["actions"] = [succeeded]
+        return state, 2
+
+    rc, first_output, first_payload = _run_managed(
+        module,
+        state_file,
+        _fetch_ci,
+        delivery="delivery-1",
+        extra_args=("--workflow", "CI"),
+    )
+    assert rc == 0
+    assert "GitHub Actions success" in first_output
+    assert module.STAGED_KEY in first_payload
+
+    def _fetch_review(repo, pr_number, token, **kwargs):
+        state = _pr_state(
+            issue_comments=[
+                {
+                    "id": 601,
+                    "body": (
+                        "Codex Review: Didn't find any major issues.\n\n"
+                        "**Reviewed commit:** `head-1`"
+                    ),
+                    "user": {"login": "chatgpt-codex-connector[bot]"},
+                    "html_url": "https://github.com/example/repo/pull/153#issuecomment-601",
+                }
+            ]
+        )
+        state["pull_request"]["head"] = {"sha": "head-1"}
+        state["actions"] = [succeeded]
+        return state, 2
+
+    rc, second_output, second_payload = _run_managed(
+        module,
+        state_file,
+        _fetch_review,
+        delivery="delivery-2",
+        extra_args=("--workflow", "CI"),
+    )
+
+    assert rc == 0
+    assert "issue_comment #601" in second_output
+    assert "Didn't find any major issues" in second_output
+    assert second_payload["issue_comment_cursor"] == 0
+    assert second_payload[module.STAGED_KEY]["cursors"]["issue_comment_cursor"] == 601
 
 
 def test_a_managed_run_reports_the_event_again_when_it_was_never_delivered(tmp_path) -> None:

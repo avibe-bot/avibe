@@ -186,14 +186,18 @@ turn ends because you armed a watch and are waiting, say exactly that.
   the fact — look for a current-head verdict instead.
 - Liveness invariant: at every pause there is either a pending bot review of
   the current head, or one you just triggered. Never wait on nothing.
-- Use `background-watch-hook` to create one one-shot combined PR watch for each
-  review phase; never use `--forever` for a delivery loop. Prefer the bundled
-  `wait_pr.py` with the current `--sha` and each required `--workflow`, plus the
-  optional `--branch`, so one waiter observes PR activity and exact-head Actions
-  transitions with one state file and one follow-up Agent Run. Re-arm after every
-  round and update `--sha` when the PR head changes. Use `wait_pr.py` without CI
-  arguments for a PR-only loop, and reserve `wait_action.py` for Actions targets
-  that are not attached to a PR.
+- Use `background-watch-hook` to create one durable `--forever` combined PR watch
+  for the whole delivery loop. Prefer the bundled `wait_pr.py` with each required
+  `--workflow` and optional `--branch`, but omit `--sha`: every cycle resolves the
+  PR's current head and observes Actions at that exact SHA. A push is a head-change
+  event, not a reason to replace the Watch. Add `--sha` only for an intentionally
+  fixed-head one-shot wait. Use `wait_pr.py` without CI arguments for PR-only
+  monitoring, and reserve `wait_action.py` for Actions targets that are not attached
+  to a PR.
+- Set the durable PR Watch's per-cycle `--timeout 0`. The Harness default is
+  21600 seconds, so leaving it implicit turns six hours without PR activity into a
+  terminal timeout. The waiter's individual GitHub requests remain bounded; an idle
+  PR is expected state, not a failed cycle.
 - The one-watch invariant is scoped by owner and concern: one live lane/fix
   watch per PR, plus one independent orchestrator gate watch when work is
   delegated. Review activity and the PR's exact-head CI are one lane concern
@@ -206,21 +210,24 @@ turn ends because you armed a watch and are waiting, say exactly that.
   filtering, settling, retries, and delivery acknowledgement. Those mechanics
   belong to the reusable skill; this policy only constrains when and why the
   watch is armed.
-- Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
-  settled: your own thread resolutions count as "review activity" to a watch
-  armed earlier in the round, so it self-consumes on YOUR close-out actions and
-  the real next review lands with nobody watching. End every round by using the
-  `background-watch-hook` management commands to verify exactly one live watch
-  for this owner, concern, repository, and PR. Do not rely on a remembered watch
-  ID or one bookkeeping field as proof that its waiter is live.
-- Before a push or review trigger, use `background-watch-hook` to seed a complete
-  owner-specific state file. Arm the post-action watch with that same file so
-  activity that lands during the handoff is delivered. Use catch-up only when
-  deliberately processing historical activity; a first-poll baseline after the
-  action is not a valid review-loop handoff.
-- A watch you remove while handling its event is not a liveness break: the
-  running turn owns progress until the replacement is armed. Re-arm after the
-  push and close-out actions, then verify the invariant again.
+- Before the first push or review trigger, use `background-watch-hook` to seed one
+  complete owner-specific state file, then arm the forever Watch with that same
+  file. This is the only routine baseline creation in the loop. Never reseed,
+  rotate, or replace it between rounds: review or CI activity can land while the
+  current follow-up runs, and making the already-arrived event a fresh baseline
+  silently drops it. The durable delivery acknowledgement advances the state only
+  after a report was queued, so the next automatic cycle catches the whole handoff
+  window.
+- Keep the Watch alive while pushing, replying, and resolving threads. Those own
+  actions may produce one extra batched callback, but they cannot consume the Watch
+  or leave the real next review unobserved. End every round by using the
+  `background-watch-hook` management commands to verify exactly one live Watch for
+  this owner, concern, repository, and PR. Do not rely on a remembered Watch ID or
+  one bookkeeping field as proof that its waiter is live.
+- Use catch-up only when deliberately processing historical activity before the
+  durable loop starts. A first-poll baseline after a watched action is not a valid
+  handoff, and a replacement Watch is recovery from a real failure, not normal
+  per-round operation.
 - For whoever gates the PR: a lane run that ended `succeeded` proves nothing
   about the loop. A watch-triggered run can finish clean having pushed nothing
   and armed nothing, leaving the PR with new findings and no watcher on either
@@ -237,13 +244,12 @@ turn ends because you armed a watch and are waiting, say exactly that.
   workflow name at the exact SHA and branch. A workflow name is not a unique
   run identity; do not declare CI complete while a second matching run is
   pending or failed.
-- A `+1` reaction carries no commit sha by itself. Immediately before pushing a
-  new head, establish the current activity baseline through
-  `background-watch-hook`, and do not push another head while the new review is
-  pending. Accept the reaction only when that watch reports it as new for the
-  current review phase, the prior-head review was already terminal, and the PR
-  head is unchanged. If those facts cannot be established, require the
-  bot-authored exact-head pass comment instead.
+- A `+1` reaction carries no commit sha by itself. Do not push another head while
+  the current review is pending. Accept the reaction only when the durable Watch
+  reports it as new after the current head epoch began, the prior-head review was
+  already terminal, and the PR head is unchanged. Never reseed to manufacture that
+  boundary. If those facts cannot be established, require the bot-authored
+  exact-head pass comment instead.
 - Keep reaction meanings distinct: 👀 only says a trigger was picked up; the
   Codex bot's PR-body `+1` says the review completed without comments. Reactions
   from other authors or on other comments are not verdicts.
@@ -378,10 +384,11 @@ for dependent lanes, and your final-report draft.
 
 ## 7. Orchestrator counterpart (for dispatchers, not lanes)
 
-- Do not rely on lane terminal reports alone: arm your OWN one-shot gate watch
-  per PR through `background-watch-hook`, with the follow-up in your session and
-  merge-gate instructions in the message. Lanes go silent at exactly the moment
-  that matters (§5.5 failure mode); your gate watch is the insurance.
+- Do not rely on lane terminal reports alone: arm your OWN durable `--forever`
+  gate Watch per PR through `background-watch-hook`, with independent state, the
+  follow-up in your session, and merge-gate instructions in the message. Lanes go
+  silent at exactly the moment that matters (§5.5 failure mode); your gate Watch is
+  the insurance.
 - One waiter per concern still holds: the lane's watch drives its fix loop;
   your watch drives the merge gate. Two watches on one PR, two concerns — fine.
 - Every time a findings review lands, independently paginate the threads and

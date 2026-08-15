@@ -603,12 +603,17 @@ def _fetch_state(
     review_threads, review_thread_requests = _fetch_review_threads(repo, pr_number, token)
     actions: list[dict[str, Any]] = []
     action_requests = 0
-    if ci_sha and ci_workflows:
+    selected_ci_sha = ci_sha or (_current_pr_head_sha(pull_request) if ci_workflows else None)
+    if ci_workflows and not selected_ci_sha:
+        raise RuntimeError(
+            "GitHub PR response has no head SHA for current-head CI monitoring"
+        )
+    if selected_ci_sha and ci_workflows:
         actions, action_requests = fetch_workflow_runs(
             repo,
             token,
             branch=ci_branch,
-            head_sha=ci_sha,
+            head_sha=selected_ci_sha,
             max_pages=ci_max_pages,
             cache=cache,
         )
@@ -619,9 +624,13 @@ def _fetch_state(
         requests_after_actions = 1
     else:
         requests_after_actions = 0
-    if ci_sha and ci_workflows and _current_pr_head_sha(pull_request).casefold() != ci_sha.casefold():
+    if (
+        selected_ci_sha
+        and ci_workflows
+        and _current_pr_head_sha(pull_request).casefold() != selected_ci_sha.casefold()
+    ):
         # The PR moved while this snapshot was assembled. The caller will report the
-        # head transition and re-arm with a new SHA; never render old-SHA Actions.
+        # head transition; never render Actions fetched for the previous head.
         actions = []
     return (
         {
@@ -1551,10 +1560,8 @@ def _validate_ci_args(args: argparse.Namespace) -> str | None:
         return None
     if args.pr is None:
         return "CI monitoring requires --pr; --new-prs cannot be combined with --sha or --workflow"
-    if not args.sha:
-        return "CI monitoring requires --sha"
     if not args.workflow:
-        return "CI monitoring requires at least one --workflow when --sha is provided"
+        return "CI monitoring requires at least one --workflow"
     if args.max_pages < 1:
         return "--max-pages must be at least 1"
     if len(set(args.workflow)) != len(args.workflow):
@@ -1779,8 +1786,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sha",
         help=(
-            "Exact PR head SHA whose Actions runs should be monitored together with PR activity; "
-            "requires at least one --workflow"
+            "Optional exact PR head SHA whose Actions runs should be monitored together with PR "
+            "activity. Omit it to follow the PR's current head across watch cycles"
         ),
     )
     parser.add_argument(
@@ -1790,7 +1797,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workflow",
         action="append",
-        help="Actions workflow name to monitor at --sha; repeatable and enables combined CI mode",
+        help=(
+            "Actions workflow name to monitor at --sha, or at the PR's current head when --sha is "
+            "omitted; repeatable and enables combined CI mode"
+        ),
     )
     parser.add_argument(
         "--max-pages",
@@ -1972,7 +1982,7 @@ def main() -> int:
         return 1
     selected_actions: dict[str, list[dict[str, Any]]] = {}
     state, requests_per_poll_count = initial_request.value
-    if args.pr is not None and ci_enabled:
+    if args.pr is not None and ci_enabled and args.sha:
         observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
         if observed_head_sha.casefold() != args.sha.casefold():
             print(
@@ -1983,11 +1993,12 @@ def main() -> int:
             )
             return 2
     if ci_enabled:
+        selected_ci_sha = args.sha or _current_pr_head_sha(state.get("pull_request"))
         selected_actions = select_matching_runs(
             state.get("actions", []),
             workflows=args.workflow or [],
             branch=args.branch,
-            head_sha=args.sha,
+            head_sha=selected_ci_sha,
         )
 
     # The remote target is now proven valid. Only now may this run create or adopt
@@ -2139,6 +2150,9 @@ def main() -> int:
 
     if args.pr is not None:
 
+        def _active_ci_head_sha() -> str:
+            return args.sha or _current_pr_head_sha(state.get("pull_request"))
+
         def _initial_cursor(flag_value: int | None, saved_key: str, items_key: str) -> int:
             if flag_value is not None:
                 return flag_value
@@ -2216,7 +2230,7 @@ def main() -> int:
                 actions_output, _failed = render_actions_result(
                     repo=args.repo,
                     branch=args.branch,
-                    head_sha=args.sha,
+                    head_sha=_active_ci_head_sha(),
                     selected=selected_actions,
                     success_conclusions=success_conclusions,
                 )
@@ -2233,7 +2247,7 @@ def main() -> int:
                     state.get("actions", []),
                     workflows=args.workflow or [],
                     branch=args.branch,
-                    head_sha=args.sha,
+                    head_sha=_active_ci_head_sha(),
                 )
 
         def _actions_waiting_for_terminal_result() -> bool:
@@ -2245,7 +2259,7 @@ def main() -> int:
             actions_output, _failed = render_actions_result(
                 repo=args.repo,
                 branch=args.branch,
-                head_sha=args.sha,
+                head_sha=_active_ci_head_sha(),
                 selected=selected_actions,
                 success_conclusions=success_conclusions,
             )
