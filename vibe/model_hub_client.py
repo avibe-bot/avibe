@@ -151,6 +151,9 @@ class ModelHubRemoteService:
             {"backend": backend, "sources": sources},
         )
 
+    async def reorder_agent_chains(self, backend: str) -> dict:
+        return await _rpc("reorder_agent_chains", {"backend": backend})
+
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         return await _rpc("set_agent_mode", {"backend": backend, "mode": mode})
 

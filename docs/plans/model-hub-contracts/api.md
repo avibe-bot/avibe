@@ -1,6 +1,6 @@
 # Model Hub — REST API contract
 
-Status: **FINAL v5 (2026-08-11 contract completion)**. All endpoints live under `/api/models/`.
+Status: **Normative v5** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
 Success envelope: `{ok: true, contract_version: 5, ...}`.
 Failure envelope:
@@ -10,6 +10,11 @@ Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
 that a confirmed retry echoes unchanged.
 Authentication and CSRF rules are the existing UI-server rules.
+
+`api-response.schema.json` is the machine-readable response registry for this route
+table. The contract guard requires the two endpoint sets to be identical, requires an
+exercised HTTP response for every registry entry, and validates that response against
+the route's named schema.
 
 The shared envelope and every versioned nested contract use terminal version 5. Model
 Hub has not shipped, so there is no internal contract migration or compatibility path.

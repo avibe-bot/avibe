@@ -1,0 +1,372 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/api-response.schema.json",
+  "title": "Model Hub API response registry",
+  "description": "Machine-readable response contracts and real-response exercises for every route in api.md. The conformance guard requires exact route-table parity; entries may not be omitted or left without an exercise.",
+  "type": "object",
+  "x-model-hub-routes": [
+    {"method": "GET", "path": "/api/models/sources", "response_schema": "SourceListResponse", "exercise": {"path": "/api/models/sources", "status": 200}},
+    {"method": "POST", "path": "/api/models/sources/observe", "response_schema": "ObservationResponse", "exercise": {"path": "/api/models/sources/observe", "status": 200, "json": {"vendor": "anthropic", "key": "sk-contract-test", "protocol_order": ["anthropic", "openai_responses", "openai_chat"]}}},
+    {"method": "POST", "path": "/api/models/sources", "response_schema": "SourceCreateResponse", "exercise": {"path": "/api/models/sources", "status": 201, "json": {"kind": "api_key", "vendor": "anthropic", "display_name": "Contract source", "key": "sk-contract-test", "protocol_order": ["anthropic", "openai_responses", "openai_chat"]}}},
+    {"method": "PATCH", "path": "/api/models/sources/<id>", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001", "status": 200, "json": {"display_name": "Renamed contract source"}}},
+    {"method": "PUT", "path": "/api/models/sources/<id>/credential", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/credential", "status": 200, "json": {"key": "sk-replacement-contract-test"}}},
+    {"method": "POST", "path": "/api/models/sources/<id>/reauth", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/sources/src_subscribe01/reauth", "status": 200, "json": {"acknowledge_irreversible": true}}},
+    {"method": "DELETE", "path": "/api/models/sources/<id>?force=<bool>", "response_schema": "SourceDeleteResponse", "exercise": {"path": "/api/models/sources/src_delete0001?force=false", "status": 200, "json": {}}},
+    {"method": "POST", "path": "/api/models/sources/<id>/refresh", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/refresh", "status": 200, "json": {}}},
+    {"method": "POST", "path": "/api/models/sources/<source_id>/models", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models", "status": 201, "json": {"model_id": "manual-contract-model", "reasoning_efforts": []}}},
+    {"method": "PATCH", "path": "/api/models/sources/<source_id>/models/<model_id>", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models/retire-model", "status": 200, "json": {"reasoning_efforts": ["high"]}}},
+    {"method": "DELETE", "path": "/api/models/sources/<source_id>/models/<model_id>", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/models/retire-model", "status": 200, "json": {}}},
+    {"method": "GET", "path": "/api/models/agents", "response_schema": "AgentListResponse", "exercise": {"path": "/api/models/agents", "status": 200}},
+    {"method": "GET", "path": "/api/models/agents/<backend>/sources", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/sources", "status": 200}},
+    {"method": "PUT", "path": "/api/models/agents/<backend>/sources", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/sources", "status": 200, "json": {"order": ["src_conform001"]}}},
+    {"method": "POST", "path": "/api/models/agents/<backend>/chains/reorder", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/chains/reorder", "status": 200}},
+    {"method": "PATCH", "path": "/api/models/agents/<backend>/mode", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/claude/mode", "status": 200, "json": {"mode": "hub"}}},
+    {"method": "PUT", "path": "/api/models/agents/opencode/menu", "response_schema": "AgentResponse", "exercise": {"path": "/api/models/agents/opencode/menu", "status": 200, "json": {"menu": {"view": "featured", "checked": []}}}},
+    {"method": "GET", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200}},
+    {"method": "PUT", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainMutationResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200, "json": {"hops": [{"source_id": "src_conform001", "model_id": "claude-opus-4-6"}]}}},
+    {"method": "POST", "path": "/api/models/agents/<backend>/probe", "response_schema": "ProbeResponse", "exercise": {"path": "/api/models/agents/claude/probe", "status": 200, "json": {"model": "claude-opus-4-6"}}},
+    {"method": "GET", "path": "/api/models/events?limit=<n>&before=<id>", "response_schema": "EventsResponse", "exercise": {"path": "/api/models/events?limit=20", "status": 200}},
+    {"method": "POST", "path": "/api/models/oauth/start", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/oauth/start", "status": 200, "json": {"vendor": "anthropic", "channel": "hub"}}},
+    {"method": "GET", "path": "/api/models/oauth/status/<flow_id>", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/status/oaf_00000001", "status": 200}},
+    {"method": "POST", "path": "/api/models/oauth/submit", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/submit", "status": 200, "json": {"flow_id": "oaf_00000001", "value": "contract-code"}}},
+    {"method": "POST", "path": "/api/models/oauth/cancel", "response_schema": "EmptyResponse", "exercise": {"path": "/api/models/oauth/cancel", "status": 200, "json": {"flow_id": "oaf_00000001"}}},
+    {"method": "POST", "path": "/api/models/migration/scan", "response_schema": "MigrationScanResponse", "exercise": {"path": "/api/models/migration/scan", "status": 200}},
+    {"method": "POST", "path": "/api/models/migration/apply", "response_schema": "MigrationApplyResponse", "exercise": {"path": "/api/models/migration/apply", "status": 200, "json": {"item_ids": []}}},
+    {"method": "GET", "path": "/api/models/turns/<turn_id>/provenance", "response_schema": "ProvenanceResponse", "exercise": {"path": "/api/models/turns/turn_contract01/provenance", "status": 200}},
+    {"method": "GET", "path": "/api/models/runtime/status", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/status", "status": 200}},
+    {"method": "POST", "path": "/api/models/runtime/install", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/install", "status": 200}},
+    {"method": "POST", "path": "/api/models/runtime/start", "response_schema": "RuntimeResponse", "exercise": {"path": "/api/models/runtime/start", "status": 200}}
+  ],
+  "definitions": {
+    "SourceApi": {
+      "allOf": [
+        {"$ref": "model-hub/source.schema.json"},
+        {
+          "required": ["adopted_by"],
+          "properties": {
+            "models": {
+              "items": {"required": ["retired"]}
+            }
+          }
+        }
+      ]
+    },
+    "AgentSupplyApi": {
+      "allOf": [
+        {"$ref": "model-hub/agent-supply.schema.json"},
+        {
+          "required": ["backend", "cli_present", "mode", "menu_kind", "selected_by_agent", "selected_model_id", "selected_model_explicit", "sources", "routes", "supply_status", "menu", "model_supply", "named_agents", "builtin_models", "standard_vendors"],
+          "properties": {
+            "sources": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["order", "eligibility"],
+                  "properties": {
+                    "eligibility": {
+                      "type": "array",
+                      "items": {
+                        "required": ["source_id", "eligible", "reason_key", "in_current_model_chain", "process_availability_reason"]
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "model_supply": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "array",
+                  "items": {"required": ["model_id", "chain_length", "has_runnable_hop"]}
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "AddedTo": {
+      "type": "object",
+      "required": ["backend", "menu_model", "source_id", "model_id", "position"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"enum": ["claude", "codex", "opencode"]},
+        "menu_model": {"type": "string", "minLength": 1},
+        "source_id": {"type": "string", "pattern": "^src_[a-z0-9]{8,}$"},
+        "model_id": {"type": "string", "minLength": 1},
+        "position": {"type": "integer", "minimum": 1}
+      }
+    },
+    "AdoptedBy": {
+      "type": "object",
+      "required": ["backend", "menu_model"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"enum": ["claude", "codex", "opencode"]},
+        "menu_model": {"type": "string", "minLength": 1}
+      }
+    },
+    "RouteHopRef": {
+      "type": "object",
+      "required": ["backend", "menu_model", "source_id", "model_id", "position"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"enum": ["claude", "codex", "opencode"]},
+        "menu_model": {"type": "string", "minLength": 1},
+        "source_id": {"type": "string", "pattern": "^src_[a-z0-9]{8,}$"},
+        "model_id": {"type": "string", "minLength": 1},
+        "position": {"type": "integer", "minimum": 1}
+      }
+    },
+    "SupplyGap": {
+      "type": "object",
+      "required": ["backend", "model_id", "agents"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"enum": ["claude", "codex", "opencode"]},
+        "model_id": {"type": "string", "minLength": 1},
+        "agents": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    },
+    "SuccessCore": {
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5}
+      }
+    },
+    "SourceListResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "sources"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}}
+      }
+    },
+    "ObservationResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "observation"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "observation": {"$ref": "model-hub/observation-result.schema.json"}
+      }
+    },
+    "SourceCreateResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "source", "added_to", "adopted_by"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "source": {"$ref": "#/definitions/SourceApi"},
+        "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}},
+        "adopted_by": {"type": "array", "items": {"$ref": "#/definitions/AdoptedBy"}, "uniqueItems": true}
+      }
+    },
+    "SourceResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "source": {"$ref": "#/definitions/SourceApi"}
+      }
+    },
+    "SourceMutationResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "source", "removed_hops", "interrupted"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "source": {"$ref": "#/definitions/SourceApi"},
+        "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
+        "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
+      }
+    },
+    "SourceDeleteResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "removed_hops", "interrupted"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
+        "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
+      }
+    },
+    "AgentListResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "agents"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "agents": {"type": "array", "items": {"$ref": "#/definitions/AgentSupplyApi"}}
+      }
+    },
+    "AgentResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "agent"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "agent": {"$ref": "#/definitions/AgentSupplyApi"}
+      }
+    },
+    "ChainResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "chain"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "chain": {"$ref": "model-hub/agent-chain.schema.json"}
+      }
+    },
+    "ChainMutationResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "chain", "removed_hops", "interrupted"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "chain": {"$ref": "model-hub/agent-chain.schema.json"},
+        "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
+        "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
+      }
+    },
+    "ProbeResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "probe"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "probe": {"$ref": "model-hub/probe-result.schema.json"}
+      }
+    },
+    "EventsResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "events"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "events": {"type": "array", "items": {"$ref": "model-hub/resolution-event.schema.json"}}
+      }
+    },
+    "OAuthFlowResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "flow"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "flow": {"$ref": "model-hub/oauth-flow.schema.json"}
+      }
+    },
+    "OAuthResultResponse": {
+      "oneOf": [
+        {"$ref": "#/definitions/OAuthFlowResponse"},
+        {
+          "type": "object",
+          "required": ["ok", "contract_version", "flow", "source", "added_to", "adopted_by"],
+          "additionalProperties": false,
+          "properties": {
+            "ok": {"const": true},
+            "contract_version": {"const": 5},
+            "flow": {"$ref": "model-hub/oauth-flow.schema.json"},
+            "source": {"$ref": "#/definitions/SourceApi"},
+            "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}},
+            "adopted_by": {"type": "array", "items": {"$ref": "#/definitions/AdoptedBy"}, "uniqueItems": true}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["ok", "contract_version", "flow", "source", "recovered", "interrupted_pairs"],
+          "additionalProperties": false,
+          "properties": {
+            "ok": {"const": true},
+            "contract_version": {"const": 5},
+            "flow": {"$ref": "model-hub/oauth-flow.schema.json"},
+            "source": {"$ref": "#/definitions/SourceApi"},
+            "recovered": {"type": "boolean"},
+            "interrupted_pairs": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
+          }
+        }
+      ]
+    },
+    "EmptyResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5}
+      }
+    },
+    "RuntimeApi": {
+      "allOf": [
+        {"$ref": "model-hub/runtime-dependency.schema.json"},
+        {
+          "required": ["contract_version", "host_platform", "manifest", "status"],
+          "properties": {
+            "status": {
+              "required": ["installed_version", "verified", "listening", "health", "last_check", "error_key"]
+            }
+          }
+        }
+      ]
+    },
+    "MigrationScanResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "scan"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "scan": {"$ref": "model-hub/migration-scan.schema.json"}
+      }
+    },
+    "MigrationApplyResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "applied", "sources", "added_to"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "applied": {"type": "integer", "minimum": 0},
+        "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}},
+        "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}}
+      }
+    },
+    "ProvenanceResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "provenance": {"$ref": "model-hub/turn-provenance.schema.json"}
+      }
+    },
+    "RuntimeResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "runtime"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "runtime": {"$ref": "#/definitions/RuntimeApi"}
+      }
+    }
+  }
+}

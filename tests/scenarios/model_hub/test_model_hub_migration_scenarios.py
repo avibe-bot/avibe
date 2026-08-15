@@ -566,8 +566,8 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
         base_url=base_url,
     )
     assert scan_response.status_code == 200
-    scan = scan_response.get_json()
-    _validate_scan({"items": scan["items"]})
+    scan = scan_response.get_json()["scan"]
+    _validate_scan(scan)
     assert len(scan["items"]) == 4
 
     apply_response = client.post(

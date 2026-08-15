@@ -4075,6 +4075,17 @@ async def model_hub_agent_sources_put(backend):
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/agents/<backend>/chains/reorder", methods=["POST"])
+async def model_hub_agent_chains_reorder_post(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        agent = await _model_hub_service().reorder_agent_chains(backend)
+        return _model_hub_success(agent=agent)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/agents/<backend>/mode", methods=["PATCH"])
 async def model_hub_agent_mode_patch(backend):
     from core.handlers.model_hub import ModelHubError
@@ -4288,7 +4299,7 @@ def model_hub_migration_scan():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        return _model_hub_success(**_model_hub_service().migration_scan())
+        return _model_hub_success(scan=_model_hub_service().migration_scan())
     except ModelHubError as exc:
         return _model_hub_error(exc)
 

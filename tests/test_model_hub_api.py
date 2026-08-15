@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import inspect
 import json
+import re
 import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from jsonschema import Draft7Validator, FormatChecker
+from referencing import Registry, Resource
 
 from config.v2_config import (
     ModelHubAgentSupplyConfig,
@@ -39,6 +42,7 @@ from core.handlers.model_hub.oauth import (
     NativeOAuthSourceStatus,
     OAuthFlowRegistry,
 )
+from core.handlers.model_hub.provenance import BoundedProvenanceStore
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     CONTRACT_VERSION,
@@ -67,6 +71,10 @@ def _enable_model_hub_for_existing_contract_tests(monkeypatch):
 
 def _schema(name: str) -> dict:
     return json.loads((CONTRACTS / name).read_text(encoding="utf-8"))
+
+
+API_RESPONSE_CONTRACT = _schema("api-response.schema.json")
+API_RESPONSE_ROUTES = API_RESPONSE_CONTRACT["x-model-hub-routes"]
 
 
 def _assert_valid(name: str, payload: dict) -> None:
@@ -308,6 +316,7 @@ def _service(tmp_path, adapter=None):
         store=store,
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json"),
+        provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
         native_oauth_adapter=adapter,
         oauth_flows=OAuthFlowRegistry(
             tmp_path / "oauth_flows.json",
@@ -375,6 +384,232 @@ async def _create_source(service: ModelHubService, payload: dict) -> dict:
 def _assert_envelope(payload: dict, *, ok: bool = True):
     assert payload["ok"] is ok
     assert payload["contract_version"] == CONTRACT_VERSION
+
+
+def _canonical_contract_route(path: str) -> str:
+    route_path = path.split("?", 1)[0]
+    return re.sub(r"(?:<[^>]+>|\{[^}]+\})", "<param>", route_path)
+
+
+def _api_response_registry() -> Registry:
+    registry = Registry()
+    for path in sorted(CONTRACTS.glob("*.schema.json")):
+        schema = json.loads(path.read_text(encoding="utf-8"))
+        registry = registry.with_resource(
+            schema["$id"],
+            Resource.from_contents(schema),
+        )
+    return registry
+
+
+def _response_validation_error(errors) -> object:
+    candidates = []
+
+    def collect(error) -> None:
+        candidates.append(error)
+        for nested in error.context:
+            collect(nested)
+
+    for error in errors:
+        collect(error)
+    return max(
+        candidates,
+        key=lambda error: (
+            len(error.absolute_path),
+            error.validator == "required",
+            error.validator == "additionalProperties",
+        ),
+    )
+
+
+def _response_error_path(error) -> str:
+    path = "$"
+    for part in error.absolute_path:
+        path += f"[{part}]" if isinstance(part, int) else f".{part}"
+    if error.validator == "required":
+        missing = re.match(r"'([^']+)' is a required property", error.message)
+        if missing is not None:
+            path += f".{missing.group(1)}"
+    elif error.validator == "additionalProperties":
+        unexpected = re.search(r"\('([^']+)' was unexpected\)", error.message)
+        if unexpected is not None:
+            path += f".{unexpected.group(1)}"
+    return path
+
+
+def _seed_response_conformance_service(tmp_path: Path) -> ModelHubService:
+    service, store, _adapter = _service(tmp_path)
+    service.migration_home = tmp_path / "native-home"
+    sources = [
+        ModelHubSourceConfig(
+            id="src_conform001",
+            kind="api_key",
+            vendor="anthropic",
+            display_name="Contract source",
+            protocol="anthropic",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id="claude-opus-4-6",
+                    provenance="discovered",
+                ),
+                ModelHubModelConfig(
+                    id="retire-model",
+                    provenance="discovered",
+                ),
+            ],
+            credential_ref="cred_conform001",
+        ),
+        ModelHubSourceConfig(
+            id="src_delete0001",
+            kind="api_key",
+            vendor="anthropic",
+            display_name="Delete candidate",
+            protocol="anthropic",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[],
+            credential_ref="cred_delete0001",
+        ),
+        ModelHubSourceConfig(
+            id="src_subscribe01",
+            kind="subscription",
+            vendor="anthropic",
+            display_name="Subscription source",
+            protocol="anthropic",
+            supply_channel="hub",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[],
+            credential_ref="cred_subscribe01",
+        ),
+    ]
+    store.config.sources = sources
+    claude = store.config.agents["claude"]
+    claude.sources.order = ["src_conform001"]
+    claude.routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig(
+                source_id="src_conform001",
+                model_id="claude-opus-4-6",
+            ),
+        )
+    )
+
+    event_payload = copy.deepcopy(_schema("resolution-event.schema.json")["examples"][0])
+    service.events.append(ResolutionEvent(**event_payload))
+    provenance = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][0])
+    provenance["turn_id"] = "turn_contract01"
+    service.provenance.put(provenance)
+    asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))
+    return service
+
+
+def test_api_response_registry_exactly_covers_contract_and_server_routes():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    documented = {
+        (method, path)
+        for method, path in re.findall(
+            r"^\| (GET|POST|PUT|PATCH|DELETE) `([^`]+)`",
+            api_contract,
+            re.MULTILINE,
+        )
+    }
+    registered = {
+        (entry["method"], entry["path"])
+        for entry in API_RESPONSE_ROUTES
+    }
+    assert registered == documented, (
+        "api-response.schema.json must enumerate exactly the api.md route table; "
+        f"missing={sorted(documented - registered)}, extra={sorted(registered - documented)}"
+    )
+    assert len(registered) == len(API_RESPONSE_ROUTES), (
+        "api-response.schema.json contains duplicate endpoint entries"
+    )
+
+    response_schemas = API_RESPONSE_CONTRACT["definitions"]
+    for entry in API_RESPONSE_ROUTES:
+        endpoint = f"{entry['method']} {entry['path']}"
+        assert "exercise" in entry, f"{endpoint}: response exercise is missing"
+        assert entry["response_schema"] in response_schemas, (
+            f"{endpoint}: response schema {entry['response_schema']!r} is missing"
+        )
+
+    actual = {
+        (method, _canonical_contract_route(route.path))
+        for route in app.routes
+        if route.path.startswith("/api/models/")
+        for method in route.methods or ()
+    }
+    expected = {
+        (method, _canonical_contract_route(path))
+        for method, path in documented
+    }
+    assert actual == expected, (
+        "Model Hub server routes must match api.md; "
+        f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "route_contract",
+    API_RESPONSE_ROUTES,
+    ids=lambda entry: f"{entry['method']} {entry['path']}",
+)
+def test_every_model_hub_endpoint_returns_its_contract_response(
+    monkeypatch,
+    tmp_path,
+    route_contract,
+):
+    endpoint = f"{route_contract['method']} {route_contract['path']}"
+    exercise = route_contract.get("exercise")
+    assert exercise is not None, f"{endpoint}: response exercise is missing"
+
+    isolated_home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.setenv("AVIBE_HOME", str(isolated_home / ".avibe"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
+    save_config(isolated_home)
+    service = _seed_response_conformance_service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    request_kwargs = {
+        "headers": csrf_headers(client, base_url),
+        "base_url": base_url,
+    }
+    if "json" in exercise:
+        request_kwargs["json"] = exercise["json"]
+
+    response = getattr(client, route_contract["method"].lower())(
+        exercise["path"],
+        **request_kwargs,
+    )
+    body = response.get_json()
+    assert response.status_code == exercise["status"], (
+        f"{endpoint}: expected HTTP {exercise['status']}, got {response.status_code}: {body}"
+    )
+
+    validator = Draft7Validator(
+        {
+            "$ref": (
+                "model-hub/api-response.schema.json#/definitions/"
+                f"{route_contract['response_schema']}"
+            )
+        },
+        registry=_api_response_registry(),
+        format_checker=FormatChecker(),
+    )
+    errors = list(validator.iter_errors(body))
+    if errors:
+        error = _response_validation_error(errors)
+        pytest.fail(
+            f"{endpoint}: response field {_response_error_path(error)}: "
+            f"{error.message}"
+        )
 
 
 def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
@@ -1215,6 +1450,53 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     }
 
 
+def test_agents_endpoint_projects_exact_chain_runnability(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    source = ModelHubSourceConfig(
+        id="src_runnable01",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Runnable source",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_runnable01",
+    )
+    store.config.sources.append(source)
+    store.config.agents["claude"].routes[model_id] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, model_id),)
+    )
+
+    supplied = {
+        row["model_id"]: row
+        for row in service.get_agent_sources("claude")["model_supply"]
+    }
+
+    assert supplied[model_id] == {
+        "model_id": model_id,
+        "chain_length": 1,
+        "has_runnable_hop": True,
+    }
+    empty_model = next(
+        model for model, row in supplied.items() if row["chain_length"] == 0
+    )
+    assert supplied[empty_model]["has_runnable_hop"] is False
+
+    source.state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.oauth_expired",
+    )
+    blocked = {
+        row["model_id"]: row
+        for row in service.get_agent_sources("claude")["model_supply"]
+    }
+    assert blocked[model_id]["chain_length"] == 1
+    assert blocked[model_id]["has_runnable_hop"] is False
+
+
 def test_agents_endpoint_cli_presence_probe_errors_fail_closed(tmp_path):
     service, _store, _adapter = _service(tmp_path)
 
@@ -1291,6 +1573,99 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     }
 
 
+def test_direct_to_hub_atomically_adopts_recognized_native_login(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    service.migration_home = tmp_path / "native-home"
+    service.migration_claude_oauth_probe = lambda: True
+    store.config.agents["claude"].mode = "direct"
+
+    adopted = asyncio.run(service.set_agent_mode("claude", "hub"))
+
+    assert adopted["mode"] == "hub"
+    assert len(store.config.sources) == 1
+    native = store.config.sources[0]
+    assert native.supply_channel == "native_cli"
+    assert native.vendor == "anthropic"
+    assert store.config.agents["claude"].sources.order[0] == native.id
+    assert any(
+        hop.source_id == native.id
+        for route in store.config.agents["claude"].routes.values()
+        for hop in route.hops
+    )
+
+    repeated = asyncio.run(service.set_agent_mode("claude", "hub"))
+
+    assert repeated["mode"] == "hub"
+    assert [source.id for source in store.config.sources] == [native.id]
+
+
+def test_direct_to_hub_without_recognized_login_changes_only_mode(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    service.migration_home = tmp_path / "native-home"
+    service.migration_claude_oauth_probe = lambda: False
+    store.config.agents["claude"].mode = "direct"
+
+    switched = asyncio.run(service.set_agent_mode("claude", "hub"))
+
+    assert switched["mode"] == "hub"
+    assert store.config.sources == []
+
+
+def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_path):
+    class FailingStore(MemoryStore):
+        def save(self, config):
+            raise OSError("persist failed")
+
+    store = FailingStore()
+    store.config.agents["claude"].mode = "direct"
+    adapter = FakeAdapter()
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        native_oauth_adapter=adapter,
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        migration_home=tmp_path / "native-home",
+        migration_claude_oauth_probe=lambda: True,
+    )
+
+    with pytest.raises(OSError, match="persist failed"):
+        asyncio.run(service.set_agent_mode("claude", "hub"))
+
+    assert store.config.agents["claude"].mode == "direct"
+    assert store.config.sources == []
+
+
+def test_reorder_agent_chains_applies_source_order_without_changing_pairs(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    original = _set_claude_route_fixture(
+        store,
+        ("src_first0001", "src_second001"),
+        model_id,
+    )
+    store.config.agents["claude"].sources.order = [
+        "src_second001",
+        "src_first0001",
+    ]
+
+    agent = asyncio.run(service.reorder_agent_chains("claude"))
+    reordered = store.config.agents["claude"].routes[model_id].hops
+
+    assert [(hop.source_id, hop.model_id) for hop in reordered] == [
+        ("src_second001", model_id),
+        ("src_first0001", model_id),
+    ]
+    assert sorted((hop.source_id, hop.model_id) for hop in reordered) == sorted(
+        (hop.source_id, hop.model_id) for hop in original
+    )
+    assert agent["routes"][model_id]["hops"] == [
+        {"source_id": "src_second001", "model_id": model_id},
+        {"source_id": "src_first0001", "model_id": model_id},
+    ]
+
+
 def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
     monkeypatch.setattr(ui_server, "_MODEL_HUB_SERVICE", None)
 
@@ -1349,34 +1724,8 @@ def test_ui_model_hub_rpc_preserves_structured_guard_data():
 @pytest.mark.parametrize(
     ("method", "path"),
     [
-        ("GET", "/api/models/sources"),
-        ("POST", "/api/models/sources/observe"),
-        ("POST", "/api/models/sources"),
-        ("PATCH", "/api/models/sources/src_test0001"),
-        ("PUT", "/api/models/sources/src_test0001/credential"),
-        ("POST", "/api/models/sources/src_test0001/reauth"),
-        ("DELETE", "/api/models/sources/src_test0001"),
-        ("POST", "/api/models/sources/src_test0001/refresh"),
-        ("GET", "/api/models/agents"),
-        ("GET", "/api/models/agents/claude/chain?model=claude-opus-4-6"),
-        ("PUT", "/api/models/agents/claude/chain?model=claude-opus-4-6"),
-        ("POST", "/api/models/agents/claude/probe"),
-        ("GET", "/api/models/agents/claude/sources"),
-        ("PUT", "/api/models/agents/claude/sources"),
-        ("PATCH", "/api/models/agents/claude/mode"),
-        ("PUT", "/api/models/agents/opencode/menu"),
-        ("POST", "/api/models/sources/src_test0001/models"),
-        ("PATCH", "/api/models/sources/src_test0001/models/custom-model"),
-        ("DELETE", "/api/models/sources/src_test0001/models/custom-model"),
-        ("GET", "/api/models/events?limit=invalid"),
-        ("POST", "/api/models/oauth/start"),
-        ("GET", "/api/models/oauth/status/oaf_test0001"),
-        ("POST", "/api/models/oauth/submit"),
-        ("POST", "/api/models/oauth/cancel"),
-        ("POST", "/api/models/migration/scan"),
-        ("POST", "/api/models/migration/apply"),
-        ("GET", "/api/models/runtime/status"),
-        ("POST", "/api/models/runtime/start"),
+        (entry["method"], entry["exercise"]["path"])
+        for entry in API_RESPONSE_ROUTES
     ],
 )
 def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtime_work(
@@ -1977,11 +2326,11 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         assert body["error"] == error
 
 
-def test_discovered_source_model_delete_is_rejected_as_upstream_managed(
+def test_discovered_source_model_delete_persists_retirement_tombstone(
     monkeypatch,
     tmp_path,
 ):
-    service, store, _ = _service(tmp_path)
+    service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_discovered01",
         kind="api_key",
@@ -2011,17 +2360,39 @@ def test_discovered_source_model_delete_is_rejected_as_upstream_managed(
     assert updated_model["origin"] == "discovered"
     assert updated_model["reasoning_efforts"] == ["high"]
 
-    refused = client.delete(
+    retired = client.delete(
         f"/api/models/sources/{source.id}/models/gpt-5",
         json={},
         headers=csrf_headers(client, base_url),
         base_url=base_url,
     )
 
-    assert refused.status_code == 409
-    assert refused.get_json()["error"] == "source_model_managed_upstream"
+    assert retired.status_code == 200
+    retired_model = retired.get_json()["source"]["models"][0]
+    assert retired_model["id"] == "gpt-5"
+    assert retired_model["retired"] is True
     assert [model.id for model in store.config.sources[0].models] == ["gpt-5"]
+    assert store.config.sources[0].models[0].retired is True
     assert store.config.sources[0].models[0].reasoning_efforts == ["high"]
+
+    async def rediscover(*_args):
+        return ("gpt-5", "gpt-5.1")
+
+    adapter.discover_models = rediscover
+    refreshed = client.post(
+        f"/api/models/sources/{source.id}/refresh",
+        json={},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert refreshed.status_code == 200
+    refreshed_models = {
+        model["id"]: model
+        for model in refreshed.get_json()["source"]["models"]
+    }
+    assert refreshed_models["gpt-5"]["retired"] is True
+    assert refreshed_models["gpt-5.1"]["retired"] is False
 
 
 def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(

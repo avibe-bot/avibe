@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Protocol, cast
 
 from sqlalchemy import func, select
@@ -75,6 +76,7 @@ from .identifiers import STANDARD_OPENCODE_VENDOR_IDS
 from .migration import (
     MigrationConflictError,
     apply_native_migration,
+    build_native_migration_source,
     scan_native_configs,
 )
 from .oauth import (
@@ -487,7 +489,7 @@ def _binding(source: ModelHubSourceConfig) -> SourceBinding:
         base_url=source.base_url,
         credential_ref=source.credential_ref,
         allowed_origins=source_origins,
-        model_ids=tuple(model.id for model in source.models),
+        model_ids=tuple(model.id for model in source.models if not model.retired),
     )
 
 
@@ -557,6 +559,7 @@ class ModelHubService:
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
         migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
+        migration_home: Optional[Path] = None,
         requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
         selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
         named_agents_override: Optional[
@@ -581,6 +584,7 @@ class ModelHubService:
             paths.get_state_dir() / "model_hub_pending_revocations.json"
         )
         self.migration_claude_oauth_probe = migration_claude_oauth_probe
+        self.migration_home = migration_home
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
@@ -715,7 +719,7 @@ class ModelHubService:
             _binding(source)
             for source in config.sources
             if source.supply_channel == "hub"
-            and bool(source.models)
+            and any(not model.retired for model in source.models)
             and source.id not in ineligible_source_ids
         ]
 
@@ -993,7 +997,7 @@ class ModelHubService:
 
     async def _discover(self, source: ModelHubSourceConfig) -> list[str]:
         if not source.credential_ref:
-            return [model.id for model in source.models]
+            return [model.id for model in source.models if not model.retired]
         return list(
             await self._engine_call(
                 self.adapter.discover_models(
@@ -1287,7 +1291,9 @@ class ModelHubService:
         config = self._clone_config(self.store.load())
         source = self._source(config, source_id)
         source.models = [
-            model for model in source.models if model.provenance == "manual"
+            model
+            for model in source.models
+            if model.provenance == "manual" or model.retired
         ]
         source.state = ModelHubSourceStateConfig(
             status="needs_action",
@@ -1337,9 +1343,15 @@ class ModelHubService:
         discovered_at = self.now().isoformat()
         manual_model_ids = {model.id for model in manual_models}
         existing_by_id = {model.id: model for model in source.models}
+        retired_models = [
+            model
+            for model in source.models
+            if model.provenance == "discovered" and model.retired
+        ]
+        retired_model_ids = {model.id for model in retired_models}
         discovered_models = []
         for model_id in discovered:
-            if model_id in manual_model_ids:
+            if model_id in manual_model_ids or model_id in retired_model_ids:
                 continue
             existing = existing_by_id.get(model_id)
             discovered_models.append(
@@ -1351,7 +1363,7 @@ class ModelHubService:
                     discovered_at=discovered_at,
                 )
             )
-        source.models = discovered_models + manual_models
+        source.models = discovered_models + retired_models + manual_models
         source.last_discovered_at = discovered_at
 
     async def _finalize_successful_discovery(
@@ -1451,8 +1463,12 @@ class ModelHubService:
                         )
         return result
 
-    def _adopted_by(self, source_id: str) -> list[dict]:
-        config = self.store.load()
+    def _adopted_by(
+        self,
+        source_id: str,
+        config: ModelHubConfig | None = None,
+    ) -> list[dict]:
+        config = config or self.store.load()
         return [
             {"backend": backend, "menu_model": menu_model}
             for backend in MODEL_HUB_BACKENDS
@@ -1460,7 +1476,25 @@ class ModelHubService:
             if any(hop.source_id == source_id for hop in route.hops)
         ]
 
+    def _source_payload(
+        self,
+        source: ModelHubSourceConfig,
+        config: ModelHubConfig | None = None,
+    ) -> dict:
+        payload = source.to_payload()
+        for model in payload["models"]:
+            model.setdefault("retired", False)
+        payload["adopted_by"] = self._adopted_by(source.id, config)
+        return payload
+
     def _source_creation_result(self, source: dict) -> dict:
+        source = dict(source)
+        for model in source["models"]:
+            model.setdefault("retired", False)
+        source = {
+            **source,
+            "adopted_by": self._adopted_by(source["id"]),
+        }
         return {
             "source": source,
             "added_to": self._added_to(source["id"]),
@@ -1758,7 +1792,7 @@ class ModelHubService:
         if source is None:
             raise ModelHubError("flow_not_found", status=404)
         return {
-            "source": source.to_payload(),
+            "source": self._source_payload(source),
             "recovered": binding.recovered is True,
             "interrupted_pairs": list(binding.interrupted_pairs),
         }
@@ -1773,7 +1807,9 @@ class ModelHubService:
             config = self.store.load()
             source = self._source(config, source_id)
             source.models = [
-                model for model in source.models if model.provenance == "manual"
+                model
+                for model in source.models
+                if model.provenance == "manual" or model.retired
             ]
             source.account_label = None
             source.state = ModelHubSourceStateConfig(
@@ -1838,7 +1874,11 @@ class ModelHubService:
                 ]
                 discovered = list(_native_model_ids(binding.vendor))
                 if not discovered:
-                    source.models = []
+                    source.models = [
+                        model
+                        for model in source.models
+                        if model.provenance == "manual" or model.retired
+                    ]
                     source.state = ModelHubSourceStateConfig(
                         status="error",
                         detail_key="models.source.error.unclassified",
@@ -1859,7 +1899,7 @@ class ModelHubService:
                     interrupted_pairs,
                 )
                 return {
-                    "source": source.to_payload(),
+                    "source": self._source_payload(source),
                     "recovered": binding.recovered is True,
                     "interrupted_pairs": interrupted_pairs,
                 }
@@ -1975,7 +2015,7 @@ class ModelHubService:
                     except OSError:
                         pass
             return {
-                "source": source.to_payload(),
+                "source": self._source_payload(source),
                 "recovered": binding.recovered is True,
                 "interrupted_pairs": interrupted_pairs,
             }
@@ -2027,7 +2067,7 @@ class ModelHubService:
         source.models = [
             model
             for model in source.models
-            if model.provenance == "manual"
+            if model.provenance == "manual" or model.retired
         ]
         source.state = ModelHubSourceStateConfig(
             status="needs_action",
@@ -2157,7 +2197,7 @@ class ModelHubService:
 
     def list_sources(self) -> list[dict]:
         config = self.store.load()
-        return [source.to_payload() for source in config.sources]
+        return [self._source_payload(source, config) for source in config.sources]
 
     async def create_source(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
@@ -2482,7 +2522,7 @@ class ModelHubService:
                     except OSError:
                         pass
             return {
-                "source": source.to_payload(),
+                "source": self._source_payload(source),
                 "removed_hops": removed_hops,
                 "interrupted": interrupted,
             }
@@ -2597,7 +2637,7 @@ class ModelHubService:
             else:
                 self._save_config(config)
             return {
-                "source": source.to_payload(),
+                "source": self._source_payload(source),
                 "removed_hops": removed_hops,
                 "interrupted": interrupted,
             }
@@ -2926,7 +2966,7 @@ class ModelHubService:
                 )
                 raise
             return {
-                "source": source.to_payload(),
+                "source": self._source_payload(source),
                 "removed_hops": removed_hops,
                 "interrupted": would_interrupt,
             }
@@ -3042,7 +3082,8 @@ class ModelHubService:
                 if source is None or not self._eligible_for_agent(source, backend):
                     raise ModelHubError("mapping_target_unavailable", status=409)
                 if (hop.source_id, hop.model_id) not in old_pairs and not any(
-                    model.id == hop.model_id for model in source.models
+                    model.id == hop.model_id and not model.retired
+                    for model in source.models
                 ):
                     raise ModelHubError("mapping_target_unavailable", status=409)
             new_pairs = {
@@ -3108,11 +3149,12 @@ class ModelHubService:
         standard_vendors = sorted(STANDARD_OPENCODE_VENDOR_IDS) if agent.backend == "opencode" else None
         requested_model = self._requested_model(agent)
         unavailable_source_ids = self._unavailable_native_sources(config, backend)
+        now = self.now()
         resolution = resolve_model_hub_turn(
             config,
             backend,
             requested_model,
-            now=self.now(),
+            now=now,
             unavailable_source_ids=unavailable_source_ids,
         )
         menu_model_ids = (
@@ -3122,6 +3164,16 @@ class ModelHubService:
             {
                 "model_id": model_id,
                 "chain_length": len(agent.routes.get(model_id, ModelHubRouteConfig()).hops),
+                "has_runnable_hop": any(
+                    inspection.runnable
+                    for inspection in resolve_model_hub_turn(
+                        config,
+                        backend,
+                        model_id,
+                        now=now,
+                        unavailable_source_ids=unavailable_source_ids,
+                    ).inspected_hops
+                ),
             }
             for model_id in menu_model_ids
         ]
@@ -3174,7 +3226,7 @@ class ModelHubService:
                     config,
                     backend,
                     requested,
-                    now=self.now(),
+                    now=now,
                     unavailable_source_ids=unavailable_source_ids,
                 )
                 named_agents.append(
@@ -3238,9 +3290,62 @@ class ModelHubService:
         if mode not in {"hub", "direct"}:
             raise ModelHubError("mode_switch_blocked")
         async with self._mutation_lock:
-            config = self.store.load()
+            previous = self.store.load()
+            config = self._clone_config(previous)
             agent = self._agent(config, backend)
+            if agent.mode == "direct" and mode == "hub":
+                native_items = await asyncio.to_thread(
+                    scan_native_configs,
+                    config,
+                    mask_credential=_mask_credential,
+                    home=self.migration_home,
+                    claude_oauth_probe=self.migration_claude_oauth_probe,
+                    validate_base_url=_validated_base_url,
+                )
+                native_item = next(
+                    (
+                        item
+                        for item in native_items
+                        if item.backend == backend
+                        and item.proposed_action == "keep_native"
+                    ),
+                    None,
+                )
+                if native_item is not None:
+                    source = build_native_migration_source(
+                        native_item,
+                        now=self.now(),
+                        validate_base_url=_validated_base_url,
+                    )
+                    config.sources.append(source)
+                    self._apply_source_placement(config, source)
             agent.mode = mode
+            await self._commit_synced(previous, config)
+            committed = self.store.load()
+            return self._agent_payload(committed, self._agent(committed, backend))
+
+    async def reorder_agent_chains(self, backend: str) -> dict:
+        async with self._mutation_lock:
+            config = self._clone_config(self.store.load())
+            agent = self._agent(config, backend)
+            source_positions = {
+                source_id: position
+                for position, source_id in enumerate(agent.sources.order)
+            }
+            for route in agent.routes.values():
+                indexed_hops = list(enumerate(route.hops))
+                indexed_hops.sort(
+                    key=lambda entry: (
+                        (
+                            0,
+                            source_positions[entry[1].source_id],
+                            entry[0],
+                        )
+                        if entry[1].source_id in source_positions
+                        else (1, entry[0], entry[0])
+                    )
+                )
+                route.hops = tuple(hop for _, hop in indexed_hops)
             self._save_config(config)
             return self._agent_payload(config, agent)
 
@@ -3324,7 +3429,7 @@ class ModelHubService:
                     reasoning_efforts,
                 )
             await self._commit_synced(previous, config)
-            return source.to_payload()
+            return self._source_payload(source)
 
     async def update_model_reasoning_efforts(
         self,
@@ -3348,7 +3453,7 @@ class ModelHubService:
                 payload["reasoning_efforts"],
             )
             await self._commit_synced(previous, config)
-            return source.to_payload()
+            return self._source_payload(source)
 
     async def delete_custom_model(
         self,
@@ -3368,8 +3473,6 @@ class ModelHubService:
             model = next((item for item in source.models if item.id == model_id), None)
             if model is None:
                 raise ModelHubError("mapping_target_unavailable", status=404)
-            if model.provenance == "discovered":
-                raise ModelHubError("source_model_managed_upstream", status=409)
             removed_hops = [
                 {
                     "backend": backend,
@@ -3383,11 +3486,14 @@ class ModelHubService:
                 for position, hop in enumerate(route.hops, start=1)
                 if hop.source_id == source.id and hop.model_id == model_id
             ]
-            source.models = [
-                item
-                for item in source.models
-                if item.id != model_id
-            ]
+            if model.provenance == "discovered":
+                model.retired = True
+            else:
+                source.models = [
+                    item
+                    for item in source.models
+                    if item.id != model_id
+                ]
             would_interrupt = self._introduced_interruptions(previous, config)
             self._require_guard_plan(
                 force=force,
@@ -3411,7 +3517,7 @@ class ModelHubService:
                         )
             await self._commit_synced(previous, config)
             return {
-                "source": source.to_payload(),
+                "source": self._source_payload(source),
                 "removed_hops": removed_hops,
                 "interrupted": would_interrupt,
             }
@@ -3915,7 +4021,7 @@ class ModelHubService:
                     candidate.models = [
                         model
                         for model in candidate.models
-                        if model.provenance == "manual"
+                        if model.provenance == "manual" or model.retired
                     ]
                     candidate.account_label = None
                     candidate.state = ModelHubSourceStateConfig(
@@ -4142,7 +4248,7 @@ class ModelHubService:
         if binding.intent == "reauth":
             result.update(
                 {
-                    "source": source.to_payload(),
+                    "source": self._source_payload(source),
                     "recovered": binding.recovered is True,
                     "interrupted_pairs": list(binding.interrupted_pairs),
                 }
@@ -4285,6 +4391,7 @@ class ModelHubService:
                 for item in scan_native_configs(
                     config,
                     mask_credential=_mask_credential,
+                    home=self.migration_home,
                     claude_oauth_probe=self.migration_claude_oauth_probe,
                     validate_base_url=_validated_base_url,
                 )
