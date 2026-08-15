@@ -1671,14 +1671,14 @@ class MemoryRuntime:
         ]
         | OperationFailed
     ):
-        page = max(1, page_hint - 1)
+        page = 1
         items_by_id: dict[str, MemoryListItem] = {}
         item_page_hints: dict[str, int] = {}
         timestamp_page_hints: dict[datetime, int] = {}
         warnings: list[MemoryListWarningCode] = []
         total_count: int | None = None
-        hint_checked = False
         previous_page: tuple[int, MemoryListPage] | None = None
+        open_timestamp: datetime | None = None
         boundary_instant = (
             _memory_list_instant(boundary[0])
             if boundary is not None
@@ -1701,72 +1701,132 @@ class MemoryRuntime:
                 {},
             )
 
+        async def read_page(page_number: int) -> MemoryListResult:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return OperationFailed(error="memory_provider_timeout")
+            try:
+                return await asyncio.wait_for(
+                    list_episodes(
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        page=page_number,
+                        page_size=_MEMORY_LIST_PROVIDER_PAGE_SIZE,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                return OperationFailed(error="memory_provider_timeout")
+
         def failure_result(error):
             if not items_by_id:
                 return OperationFailed(error=error)
             ordered = _order_project_memory_list_items(items_by_id.values())
+            safe = tuple(
+                item
+                for item in ordered
+                if open_timestamp is not None
+                and _memory_list_instant(item.timestamp) > open_timestamp
+            )
             warning: MemoryListWarningCode = (
                 "memory_list_truncated"
                 if error == "memory_provider_timeout"
                 else "memory_list_partial"
             )
             return (
-                tuple(ordered[:limit]),
+                safe[:limit],
                 total_count or 0,
                 tuple(dict.fromkeys((*warnings, warning))),
                 True,
                 False,
                 {
                     item.id: item_page_hints[item.id]
-                    for item in ordered[:limit]
+                    for item in safe[:limit]
                 },
             )
 
+        async def locate_boundary_page() -> tuple[int | None, int] | OperationFailed:
+            first = await read_page(page_hint)
+            if isinstance(first, OperationFailed):
+                return first
+            warnings.extend(first.warnings)
+            observed_total = first.total_count
+            if observed_total == 0:
+                return (1, 0)
+            last_page = (
+                observed_total + _MEMORY_LIST_PROVIDER_PAGE_SIZE - 1
+            ) // _MEMORY_LIST_PROVIDER_PAGE_SIZE
+            probes = {page_hint: first}
+
+            async def probe(page_number: int) -> MemoryListPage | OperationFailed | None:
+                cached = probes.get(page_number)
+                if cached is not None:
+                    return cached
+                result = await read_page(page_number)
+                if isinstance(result, OperationFailed):
+                    return result
+                warnings.extend(result.warnings)
+                if result.total_count != observed_total:
+                    return None
+                probes[page_number] = result
+                return result
+
+            pivot = min(page_hint, last_page)
+            pivot_result = await probe(pivot)
+            if isinstance(pivot_result, OperationFailed):
+                return pivot_result
+            if pivot_result is None:
+                return (None, observed_total)
+
+            def crosses_boundary(result: MemoryListPage) -> bool:
+                return bool(result.items) and min(
+                    _memory_list_instant(item.timestamp)
+                    for item in result.items
+                ) <= boundary_instant
+
+            if crosses_boundary(pivot_result):
+                low, high = 1, pivot
+            else:
+                low, high = pivot + 1, last_page + 1
+            while low < high:
+                middle = (low + high) // 2
+                if middle == last_page + 1:
+                    high = middle
+                    continue
+                middle_result = await probe(middle)
+                if isinstance(middle_result, OperationFailed):
+                    return middle_result
+                if middle_result is None:
+                    return (None, observed_total)
+                if crosses_boundary(middle_result):
+                    high = middle
+                else:
+                    low = middle + 1
+            return (low, observed_total)
+
+        if boundary_instant is not None:
+            location = await locate_boundary_page()
+            if isinstance(location, OperationFailed):
+                return failure_result(location.error)
+            boundary_page, observed_total = location
+            if boundary_page is None:
+                return retry_result("memory_list_partial", observed_total)
+            boundary_group_page_hint = max(
+                1,
+                min(
+                    boundary_page,
+                    (
+                        observed_total + _MEMORY_LIST_PROVIDER_PAGE_SIZE - 1
+                    )
+                    // _MEMORY_LIST_PROVIDER_PAGE_SIZE,
+                ),
+            )
+            page = max(1, boundary_page - 1)
+
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return failure_result("memory_provider_timeout")
-            try:
-                result = await asyncio.wait_for(
-                    list_episodes(
-                        principal_id=principal_id,
-                        project_id=project_id,
-                        page=page,
-                        page_size=_MEMORY_LIST_PROVIDER_PAGE_SIZE,
-                    ),
-                    timeout=remaining,
-                )
-            except asyncio.TimeoutError:
-                return failure_result("memory_provider_timeout")
+            result = await read_page(page)
             if isinstance(result, OperationFailed):
                 return failure_result(result.error)
-            if not hint_checked:
-                hint_checked = True
-                if (
-                    total_hint is not None
-                    and result.total_count < total_hint
-                    and boundary is not None
-                    and result.items
-                    and all(
-                        _memory_list_after_boundary(item, boundary)
-                        for item in result.items
-                    )
-                ):
-                    removed_pages = (
-                        total_hint
-                        - result.total_count
-                        + _MEMORY_LIST_PROVIDER_PAGE_SIZE
-                        - 1
-                    ) // _MEMORY_LIST_PROVIDER_PAGE_SIZE
-                    repositioned = max(1, page_hint - 1 - removed_pages)
-                    if repositioned < page:
-                        boundary_group_page_hint = max(
-                            1,
-                            page_hint - removed_pages,
-                        )
-                        page = repositioned
-                        warnings.extend(result.warnings)
-                        continue
             if (
                 total_count is None
                 and page > 1
@@ -1852,6 +1912,11 @@ class MemoryRuntime:
                 )
                 if oldest_in_page < cutoff:
                     break
+            if result.items:
+                open_timestamp = min(
+                    _memory_list_instant(item.timestamp)
+                    for item in result.items
+                )
             previous_page = (page, result)
             page += 1
         ordered = _order_project_memory_list_items(items_by_id.values())

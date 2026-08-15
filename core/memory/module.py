@@ -927,7 +927,18 @@ class MemoryModule:
             if self._clear_active or self._is_maintenance_open():
                 yield unavailable("memory_clear_failed")
                 return
-            yield self._list_episodes_under_lifecycle
+            try:
+                meta = await self._store_call(self._store.ensure_meta)
+            except Exception:
+                yield unavailable("memory_store_unavailable")
+                return
+            if meta.clear_in_progress:
+                yield unavailable("memory_clear_failed")
+                return
+            if monotonic() >= deadline:
+                yield unavailable("memory_provider_timeout")
+                return
+            yield self._list_episodes_after_store_check
         finally:
             self._lifecycle_lock.release()
 
@@ -980,6 +991,29 @@ class MemoryModule:
             return OperationFailed(error="memory_store_unavailable")
         if meta.clear_in_progress:
             return OperationFailed(error="memory_clear_failed")
+        return await self._list_episodes_after_store_check(
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
+
+    async def _list_episodes_after_store_check(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        page: int,
+        page_size: int,
+    ) -> MemoryListResult:
+        invalid = self._list_request_error(
+            principal_id=principal_id,
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+        )
+        if invalid is not None:
+            return invalid
         result = await self._provider_list_read(
             lambda: self._provider.list_episodes(
                 principal_id,
