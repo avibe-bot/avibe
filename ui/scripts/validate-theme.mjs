@@ -514,18 +514,25 @@ function splitTopLevel(value, isSeparator) {
 const shadowLayers = (value) => splitTopLevel(value, (char) => char === ',');
 const layerParts = (layer) => splitTopLevel(layer, (char) => char === '_' || /\s/.test(char));
 
-// Both halves of the test below are stated as properties, the colour half
-// deliberately so. Asking "does this layer contain `rgba(` or a hex?" would be
-// an enumeration of two spellings while CSS has many more -- `hsl()`,
-// `oklch()`, `lab()`, `color-mix()`, a bare `red` -- so it would wave through
-// the very literals it exists to catch. The positive question has no such gap:
-// in a shadow layer whatever is not a length IS the colour, so a glow's colour
-// must be a reference to a managed one, and every literal spelling fails
-// without being named. `currentColor` counts as managed -- it is not a value
-// but a pointer at the element's own text colour, which the theme already owns.
+// A glow layer has exactly one legal spelling: a reference to a --shadow-glow-*
+// token, as the whole layer. Not "a managed colour with any geometry" -- that
+// was this test's third hole in as many rounds, and the three share one shape.
+// Each time the predicate checked something narrower than the error message
+// claimed: first the colour, by listing two literal spellings out of the many
+// CSS accepts; then the input, by reading one of the four channels a shadow
+// value arrives through; then the geometry, by passing `0 0 93px var(--mint)`
+// because every part was individually well-formed while the shape it draws was
+// invented on the spot. Checking the parts one axis at a time is what keeps
+// leaving an axis uncovered, so they are not checked one axis at a time any
+// more. A glow names a token; a layer that spells out any of its own offsets,
+// blur, spread or colour is an offender however each piece is written. That
+// leaves no fourth axis to hide behind and makes the predicate say precisely
+// what the message below says.
+//
+// Lengths are still recognised, but only to tell a hand-written glow apart from
+// a token reference so it can be rejected -- never to bless one part of it.
 const ZERO_LENGTH = /^0(px|rem|em)?$/;
 const LENGTH = /^[+-]?(\d+(\.\d+)?|\.\d+)(px|rem|em|ch|vw|vh)?$/;
-const MANAGED_COLOUR = /^(var\(--[^)]*\)|currentColor)$/;
 
 // Every channel a shadow value reaches the page through. The first cut of this
 // scan read only `shadow-[...]`, which repeated one level up the mistake the
@@ -587,21 +594,21 @@ function assertGlowsReadThroughTokens(root) {
           for (const layer of shadowLayers(value)) {
             const parts = layerParts(layer);
             if (parts[0] === 'inset') parts.shift();
-            // CSS lets the colour lead instead of trail, so move a leading literal
-            // to the back and let the lengths line up. A leading `var()` is left
-            // alone: it only means this layer is not read as a glow, and a managed
-            // colour is not an offender either way.
-            if (parts.length > 1 && !LENGTH.test(parts[0]) && !MANAGED_COLOUR.test(parts[0])) {
+            // CSS lets the colour lead instead of trail, so move a leading
+            // non-length to the back and let the offsets line up. This used to
+            // exempt a leading `var()`, which quietly reopened the same hole from
+            // the other end: `var(--mint) 0 0 93px` kept its colour in the offset
+            // slot, failed to read as a glow, and drew whatever geometry it liked.
+            // A single-part layer -- the compliant `var(--shadow-glow-md-mint)` --
+            // is untouched here and has no offsets to test below, so a token
+            // reference never reaches the check either way.
+            if (parts.length > 1 && !LENGTH.test(parts[0])) {
               parts.push(parts.shift());
             }
             const [x, y, blur] = parts;
             const isGlow = ZERO_LENGTH.test(x ?? '') && ZERO_LENGTH.test(y ?? '')
               && blur !== undefined && !ZERO_LENGTH.test(blur);
-            if (!isGlow) continue;
-            const literal = parts.some((part) => !LENGTH.test(part) && !MANAGED_COLOUR.test(part));
-            if (literal) {
-              offenders.push(`${file}: ${layer}`);
-            }
+            if (isGlow) offenders.push(`${file}: ${layer.trim()}`);
           }
         }
       }
@@ -627,11 +634,13 @@ function assertGlowsReadThroughTokens(root) {
 
   if (offenders.length > 0) {
     throw new Error(
-      `${offenders.length} glow shadow(s) spell a colour inline instead of reading a --shadow-glow-* `
-      + `token. A literal cannot be re-anchored for light and cannot be checked against design.pen, `
-      + `so pick the token whose blur it is nearest -- dot, sm, md, lg or cta -- and use `
-      + `shadow-glow-<role>-<accent>, or var(--shadow-glow-<role>-<accent>) inside a composite `
-      + `shadow. Add the token to @theme if that accent does not have one yet.\n  `
+      `${offenders.length} glow shadow(s) draw their own shape instead of reading a --shadow-glow-* `
+      + `token. Spelled-out geometry drifts from design.pen exactly the way a spelled-out colour `
+      + `does: neither can be re-anchored for light, and blur, spread and alpha have no scale left `
+      + `to be checked against -- so a managed colour does not redeem hand-picked offsets. Pick the `
+      + `token whose blur this is nearest -- dot, sm, md, lg or cta -- and use `
+      + `shadow-glow-<role>-<accent>, or var(--shadow-glow-<role>-<accent>) as a whole layer inside `
+      + `a composite shadow. Add the token to @theme if that accent does not have one yet.\n  `
       + offenders.join('\n  '),
     );
   }
