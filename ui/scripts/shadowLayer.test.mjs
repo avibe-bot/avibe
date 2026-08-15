@@ -52,6 +52,21 @@ describe('what the classifier accepts', () => {
     accepts('0 2px 8px rgba(0, 0, 0, 0.4)');
   });
 
+  // Whether a layer is centred is decided by its OFFSETS and nothing else, so a
+  // part that cannot move them cannot make the answer uncertain. The
+  // deny-by-default rule below rejected a math function anywhere in the layer
+  // before the offsets were read at all, so a directional shadow whose literal
+  // `4px` already settled the question failed for computing a blur, a spread or
+  // a colour channel -- three spellings of one mistake, which is why they are
+  // stated as three rather than as the reported one.
+  it.each([
+    ['blur', '0 4px calc(8px) red'],
+    ['spread', '0 4px 8px calc(2px) red'],
+    ['colour channel', '0 4px 8px rgb(calc(255 / 2) 0 0)'],
+  ])('accepts a shadow whose offsets prove it directional while its %s computes', (_label, value) =>
+    accepts(value)
+  );
+
   it('accepts a ring, which has no blur to colour-manage', () => {
     accepts('0 0 0 2px rgba(0, 0, 0, 0.4)');
   });
@@ -128,9 +143,15 @@ describe('what the classifier rejects', () => {
 
   // Deny by default, one level down: an offset this scan cannot evaluate has no
   // innocent answer to give, and `calc(0px)` is not the literal `0` a zero-test
-  // looks for.
+  // looks for. The exemption above is for maths that provably cannot reach the
+  // offsets; maths IN one of them, or beside two zeroes, is the case the
+  // exemption must not widen to cover.
   it('rejects offsets it cannot evaluate', () => {
     rejects('calc(0px) calc(0px) 93px red');
+  });
+
+  it('rejects a centred layer whose blur is computed', () => {
+    rejects('0 0 calc(93px) red');
   });
 
   // A name could hold any radius, so it is unprovable rather than innocent --

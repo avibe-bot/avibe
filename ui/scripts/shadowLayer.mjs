@@ -213,23 +213,36 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
   // 93px` kept its colour in the offset slot and drew whatever geometry it liked.
   if (!isLength(parts[0])) parts.push(parts.shift());
 
-  // A multi-part layer passes only if it can be shown NOT to be a glow. That is
-  // the same inversion the single-part branch makes, and this branch was left
-  // out of it -- the check still asked "is this a glow" and accepted silence as
-  // a no. `calc(0px) calc(0px) 93px red` is what that costs: both offsets
-  // compute to zero, neither is the literal `0` a zero-test looks for, so the
-  // question answers no and a hand-drawn glow ships. Asked the other way round,
-  // an offset this scan cannot evaluate has no innocent answer to give.
+  const [x, y, third] = parts;
+
+  // Only the offsets decide whether a layer is centred, so they are the parts
+  // that have to be readable. A non-zero offset is directional light whatever
+  // the blur does, and that is provable from the offset alone.
+  //
+  // Asking this FIRST is the fix for a false positive the uncertainty rule
+  // below caused: it rejected a math function anywhere in the layer, so
+  // `0 4px calc(8px) red` was blocked -- a directional shadow whose literal 4px
+  // already settles the question, with the arithmetic confined to a blur that
+  // cannot unsettle it. Uncertainty about a part that cannot change the answer
+  // is not uncertainty about the answer, and blocking a correct shadow costs
+  // more than the miss it was guarding against.
+  const readableOffsets = isLength(x ?? '') && isLength(y ?? '');
+  if (readableOffsets && (!isZeroLength(x) || !isZeroLength(y))) return [];
+
+  // Past that point the layer is centred or unreadable, and a multi-part layer
+  // passes only if it can be shown NOT to be a glow. That is the same inversion
+  // the single-part branch makes, and this branch was left out of it -- the
+  // check still asked "is this a glow" and accepted silence as a no.
+  // `calc(0px) calc(0px) 93px red` is what that costs: both offsets compute to
+  // zero, neither is the literal `0` a zero-test looks for, so the question
+  // answers no and a hand-drawn glow ships. Asked the other way round, an
+  // offset this scan cannot evaluate has no innocent answer to give.
   if (parts.some((part) => MATH_FUNCTION.test(part))) {
     return [`${shown} -- a computed length cannot be evaluated here, so this cannot be shown not to be a glow`];
   }
-  const [x, y, third] = parts;
-  if (!isLength(x ?? '') || !isLength(y ?? '')) {
+  if (!readableOffsets) {
     return [`${shown} -- the offsets are not plain lengths, so this cannot be shown not to be a glow`];
   }
-  // A non-zero offset is directional light whatever the blur does, and that is
-  // provable from the offset alone.
-  if (!isZeroLength(x) || !isZeroLength(y)) return [];
   // Both offsets are zero, so the third part decides, and it has to prove itself
   // the same way the layer does. Absent means there is no blur part at all; a
   // colour means the same thing, since a layer whose third part is its colour
