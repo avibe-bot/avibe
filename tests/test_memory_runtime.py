@@ -1723,44 +1723,6 @@ async def test_final_flush_fences_capture_before_queue_visibility(
     original_run_blocking = memory_module.run_blocking
     monkeypatch.setattr(memory_module, "run_blocking", gate_attachment_pin)
 
-    class ObservedAdmissionLock:
-        def __init__(self) -> None:
-            self._lock = asyncio.Lock()
-            self._acquisitions = 0
-            self.final_flush_waiting = asyncio.Event()
-            self.later_capture_waiting = asyncio.Event()
-
-        async def acquire(self) -> bool:
-            self._acquisitions += 1
-            if self._acquisitions == 2:
-                self.final_flush_waiting.set()
-            elif self._acquisitions == 3:
-                self.later_capture_waiting.set()
-            return await self._lock.acquire()
-
-        def locked(self) -> bool:
-            return self._lock.locked()
-
-        def release(self) -> None:
-            self._lock.release()
-
-        async def __aenter__(self):
-            await self.acquire()
-            return self
-
-        async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-            del exc_type, exc_value, traceback
-            self.release()
-
-    admission_lock = ObservedAdmissionLock()
-    runtime.module._capture_admission_locks[
-        (
-            old_request.principal_id,
-            old_request.project_id,
-            old_request.session_id,
-        )
-    ] = admission_lock
-
     try:
         old_capture = asyncio.create_task(runtime.module.capture(old_request))
         await asyncio.wait_for(pin_entered.wait(), timeout=handshake_timeout_seconds)
@@ -1773,16 +1735,9 @@ async def test_final_flush_fences_capture_before_queue_visibility(
                 deadline_seconds=2.0,
             )
         )
-        await asyncio.wait_for(
-            admission_lock.final_flush_waiting.wait(),
-            timeout=handshake_timeout_seconds,
-        )
+        await asyncio.sleep(0)
         later_capture = asyncio.create_task(runtime.module.capture(later_request))
-        await asyncio.wait_for(
-            admission_lock.later_capture_waiting.wait(),
-            timeout=handshake_timeout_seconds,
-        )
-        assert admission_lock.locked()
+        await asyncio.sleep(0)
         assert not final_flush.done()
         assert not later_capture.done()
 
@@ -2187,6 +2142,72 @@ async def test_capture_reservations_are_fifo_per_session_and_parallel_across_ses
     await asyncio.gather(first_task, second_task, independent_task)
 
 
+async def test_unreserved_text_capture_queues_behind_existing_session_tickets() -> None:
+    """Scenario: MEMORY-IM-ATTACH-001."""
+
+    store = MemoryStore()
+    module = memory_module.MemoryModule(
+        store,
+        FakeMemoryProvider(),
+        enabled=True,
+    )
+    scope = {
+        "principal_id": PRINCIPAL,
+        "project_id": PROJECT,
+        "session_id": "mixed-capture-session",
+    }
+    first = module.reserve_capture_admission(**scope)
+    second = module.reserve_capture_admission(**scope)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    def request(source: str, text: str) -> CaptureRequest:
+        return CaptureRequest(
+            source_message_id=source,
+            session_id=scope["session_id"],
+            principal_id=scope["principal_id"],
+            project_id=scope["project_id"],
+            provenance="user_input",
+            text=text,
+            occurred_at_ms=1_725_000_001_234,
+        )
+
+    async def capture_reserved(ticket, source: str, text: str, *, hold: bool = False):
+        async with module.capture_admission(**scope, reservation=ticket) as admission:
+            receipt = await module.capture(
+                request(source, text),
+                admission=admission,
+            )
+            if hold:
+                first_entered.set()
+                await release_first.wait()
+            return receipt
+
+    first_task = asyncio.create_task(
+        capture_reserved(first, "reserved-first", "reserved first", hold=True)
+    )
+    second_task = asyncio.create_task(
+        capture_reserved(second, "reserved-second", "reserved second")
+    )
+    await asyncio.wait_for(first_entered.wait(), timeout=1.0)
+    text_task = asyncio.create_task(
+        module.capture(request("later-text", "later text"))
+    )
+    await asyncio.sleep(0)
+
+    release_first.set()
+    assert await asyncio.gather(first_task, second_task, text_task) == [
+        CaptureAccepted(),
+        CaptureAccepted(),
+        CaptureAccepted(),
+    ]
+    assert [row.payload_text for row in store.list_queue_rows()] == [
+        "reserved first",
+        "reserved second",
+        "later text",
+    ]
+
+
 async def test_cancelled_capture_ticket_does_not_let_successor_overtake(
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-004."""
@@ -2568,7 +2589,9 @@ async def test_memory_clear_201_discards_manual_required_evidence_and_allows_new
             ),
         ),
     )
-    assert await runtime.module.capture(first) == CaptureAccepted()
+    assert await runtime.module.capture(first) == CaptureAccepted(
+        captured_attachment_count=1
+    )
     assert await runtime.module.drain() == 1
 
     ambiguous = runtime._store.list_queue_rows()

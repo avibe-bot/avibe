@@ -564,6 +564,27 @@ class MemoryModule:
 
         admission_lock = self._capture_lock_for_request(request)
         if admission is None:
+            key = self._capture_admission_key(
+                principal_id=getattr(request, "principal_id", None),
+                project_id=getattr(request, "project_id", None),
+                session_id=getattr(request, "session_id", None),
+            )
+            if key is not None:
+                reservation = self.reserve_capture_admission(
+                    principal_id=key[0],
+                    project_id=key[1],
+                    session_id=key[2],
+                )
+                async with self.capture_admission(
+                    principal_id=key[0],
+                    project_id=key[1],
+                    session_id=key[2],
+                    reservation=reservation,
+                ):
+                    return await self._capture_with_admission(
+                        request,
+                        source_lease=source_lease,
+                    )
             async with admission_lock:
                 return await self._capture_with_admission(
                     request,

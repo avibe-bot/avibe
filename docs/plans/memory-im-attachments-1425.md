@@ -313,14 +313,18 @@ all capture work to one late stage.
   implicit compatibility path. Eligible text remains independently best effort, and
   that invariant must hold at every attachment-path failure or early return rather
   than only for failures with an existing closed classification.
-- **Attachment telemetry invariant.** Every capture attempt produces exactly one
-  result object. When that result returns to the controller, it emits exactly one
-  scrub-safe `memory_attachment_capture` record containing `platform`, `total`,
-  `captured`, and `dropped`. `captured` is supplied by
-  `CaptureAccepted.captured_attachment_count` and comes from the final bundle that
-  the attempt actually enqueued; every other result type counts as zero.
-  `dropped = total - captured` is computed at that one call site. No per-attachment
-  reason attribution or cross-call-site accounting state is retained.
+- **Attachment capture logging (best-effort observability, not a ledger).**
+  When a capture attempt reaches `MemoryModule.capture()` and returns a result,
+  the controller emits one `memory_attachment_capture` record with
+  `platform` / `total` / `captured` / `dropped`, where `captured` comes from
+  `CaptureAccepted.captured_attachment_count` (the bundle actually enqueued;
+  every other result type is zero) and `dropped = total - captured` is computed
+  at that one site. This record set is deliberately **not** a complete census of
+  turns: paths that terminate before a capture attempt is made — admission
+  skips, runtime replacement, retirement, factory reset — emit nothing, by
+  design. Do not add emission points to make it complete; completeness was tried
+  and is what produced the cross-call-site accounting defects this section
+  replaced. No per-attachment reason attribution is retained.
 - **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
   admission, the handler performs only an O(1), non-blocking, local registration of
   an exact-session Memory capture ticket. Registration records FIFO order but never
