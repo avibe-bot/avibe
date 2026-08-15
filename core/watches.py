@@ -809,8 +809,8 @@ class ManagedWatchStore:
             return False
         expect = self._read_state(watch)
         watch.last_started_at = _utc_now_iso()
-        if watch.retired_at is None:
-            watch.last_error = None
+        # The outcome pair describes the last completed cycle. Keep it stable while
+        # the next cycle is in flight; ``mark_cycle_result`` owns both fields.
         watch.updated_at = _utc_now_iso()
         # A runtime stamp: a lost write is reported by the return value, not by an
         # exception through the supervisor loop.

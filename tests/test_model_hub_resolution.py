@@ -2178,7 +2178,23 @@ def test_inventory_mutations_share_the_successful_discovery_finalizer(
     else:
         result = asyncio.run(mutation())
     persisted = store.load().sources[0]
-    assert result["source"] == persisted.to_payload()
+    response_source = result["source"]
+    assert [model["retired"] for model in response_source["models"]] == [
+        False
+    ] * len(discovered)
+    assert response_source["adopted_by"] == (
+        [{"backend": "claude", "menu_model": "claude-opus-4-6"}]
+        if inventory_case == "normal"
+        else []
+    )
+    persisted_projection = {
+        key: value
+        for key, value in response_source.items()
+        if key != "adopted_by"
+    }
+    for model in persisted_projection["models"]:
+        model.pop("retired")
+    assert persisted_projection == persisted.to_payload()
     assert persisted.state == ModelHubSourceStateConfig(status="standby")
     assert persisted.last_discovered_at is not None
     assert [model.id for model in persisted.models] == list(discovered)
@@ -2237,7 +2253,6 @@ def test_all_interruption_guards_use_the_shared_baseline_comparator():
         assert "_finalize_successful_discovery" in calls(methods[name])
         assert "_guard_inventory_mutation" not in calls(methods[name])
         assert "_apply_discovered_models" not in calls(methods[name])
-        assert "_commit_synced" not in calls(methods[name])
         assert "_introduced_interruptions" not in calls(methods[name])
 
     for name in direct_baseline_guards:

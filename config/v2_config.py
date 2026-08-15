@@ -2128,6 +2128,7 @@ class ModelHubModelConfig:
     reasoning_efforts: list[str] = field(default_factory=list)
     display_name: Optional[str] = None
     discovered_at: Optional[str] = None
+    retired: Optional[bool] = None
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubModelConfig":
@@ -2139,6 +2140,7 @@ class ModelHubModelConfig:
             "origin",
             "reasoning_efforts",
             "discovered_at",
+            "retired",
         }:
             raise ValueError("Config 'model_hub.sources.models' contains unknown fields")
         model_id = payload.get("id")
@@ -2148,6 +2150,7 @@ class ModelHubModelConfig:
         reasoning_efforts = payload["reasoning_efforts"]
         display_name = payload.get("display_name")
         discovered_at = payload.get("discovered_at")
+        retired = payload.get("retired")
         if not isinstance(model_id, str) or not model_id or _contains_model_hub_credential_material(model_id):
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
         if not isinstance(origin, str) or origin not in {"discovered", "manual"}:
@@ -2168,6 +2171,12 @@ class ModelHubModelConfig:
             raise ValueError("Config 'model_hub.sources.models.display_name' must be a string or null")
         if origin == "manual" and discovered_at is not None:
             raise ValueError("Config manual model entries cannot carry discovered_at")
+        if retired is not None and (
+            not isinstance(retired, bool) or (origin == "manual" and retired)
+        ):
+            raise ValueError(
+                "Config 'model_hub.sources.models.retired' must be false for manual models"
+            )
         return cls(
             id=model_id,
             provenance=origin,
@@ -2177,16 +2186,20 @@ class ModelHubModelConfig:
                 discovered_at,
                 "model_hub.sources.models.discovered_at",
             ),
+            retired=retired,
         )
 
     def to_payload(self) -> dict:
-        return {
+        payload = {
             "id": self.id,
             "display_name": self.display_name,
             "origin": self.provenance,
             "reasoning_efforts": list(self.reasoning_efforts),
             "discovered_at": self.discovered_at,
         }
+        if self.retired is not None:
+            payload["retired"] = self.retired
+        return payload
 
 
 @dataclass

@@ -495,9 +495,18 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
     serialized = json.loads(json.dumps(store.load().to_payload()))
     reloaded = ModelHubConfig.from_payload(serialized)
     persisted_sources = {item.id: item.to_payload() for item in reloaded.sources}
+    response_sources = {}
+    for item in result["sources"]:
+        persisted = json.loads(
+            json.dumps({key: value for key, value in item.items() if key != "adopted_by"})
+        )
+        for model in persisted["models"]:
+            if model.get("retired") is False:
+                model.pop("retired")
+        response_sources[persisted["id"]] = persisted
 
     assert result["applied"] == len(scan)
-    assert persisted_sources == {item["id"]: item for item in result["sources"]}
+    assert persisted_sources == response_sources
     assert store.saved_payloads
     assert reloaded.to_payload() == store.load().to_payload()
     assert set(_route_pairs(reloaded, "claude", menu_model)) == {

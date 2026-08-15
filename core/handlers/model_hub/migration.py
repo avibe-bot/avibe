@@ -56,6 +56,7 @@ class MigrationHost(Protocol):
     _mutation_lock: Any
     now: Callable[[], datetime]
     migration_claude_oauth_probe: Optional[Callable[[], bool]]
+    migration_home: Optional[Path]
 
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig: ...
@@ -640,6 +641,24 @@ def _validated_source(
     return ModelHubSourceConfig.from_payload(payload)
 
 
+def build_native_migration_source(
+    item: NativeMigrationItem,
+    *,
+    now: datetime,
+    validate_base_url: Callable[[object], Optional[str]],
+) -> ModelHubSourceConfig:
+    """Build the Source represented by one recognized native-login item."""
+
+    if item.proposed_action != "keep_native":
+        raise MigrationConflictError
+    return _validated_source(
+        item,
+        now=now,
+        protocol=item.protocol,
+        validate_base_url=validate_base_url,
+    )
+
+
 def _migration_rollback_id(source_id: str, credential_ref: str) -> str:
     return f"{source_id}:migration:{_stable_suffix(credential_ref)}"
 
@@ -668,6 +687,7 @@ async def apply_native_migration(
             scan_native_configs,
             previous,
             mask_credential=mask_credential,
+            home=host.migration_home,
             claude_oauth_probe=host.migration_claude_oauth_probe,
             validate_base_url=validate_base_url,
         )
@@ -769,10 +789,9 @@ async def apply_native_migration(
                         raise MigrationConflictError from None
                 else:
                     try:
-                        source = _validated_source(
+                        source = build_native_migration_source(
                             item,
                             now=host.now(),
-                            protocol=protocol,
                             validate_base_url=validate_base_url,
                         )
                     except (TypeError, ValueError):

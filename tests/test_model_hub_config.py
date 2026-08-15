@@ -224,6 +224,20 @@ def test_final_model_validator_requires_explicit_credential_free_efforts():
         ModelHubModelConfig.from_payload(example)
 
 
+def test_discovered_model_retirement_is_persisted_without_rewriting_legacy_rows():
+    example = copy.deepcopy(_schema("source.schema.json")["examples"][0]["models"][0])
+
+    legacy = ModelHubModelConfig.from_payload(example)
+    assert "retired" not in legacy.to_payload()
+
+    retired = ModelHubModelConfig.from_payload({**example, "retired": True})
+    assert retired.to_payload()["retired"] is True
+
+    manual = {**example, "origin": "manual", "discovered_at": None, "retired": True}
+    with pytest.raises(ValueError, match="retired"):
+        ModelHubModelConfig.from_payload(manual)
+
+
 def test_source_validator_enforces_final_cross_field_and_inventory_rules():
     native = copy.deepcopy(_schema("source.schema.json")["examples"][0])
     native["models"] = [native["models"][0], copy.deepcopy(native["models"][0])]
@@ -1296,7 +1310,10 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         assert serialized_source["last_discovered_at"] == source_example["last_discovered_at"], label
         assert source_state_fields == set(serialized_source["state"]), label
         assert source_usage_fields == set(serialized_source["usage"]), label
-        assert source_model_fields == set(serialized_source["models"][0]), label
+        assert source_model_fields - {"retired"} == set(
+            serialized_source["models"][0]
+        ), label
+        assert serialized_source["models"][0].get("retired", False) is False, label
         assert agent_fields == set(serialized_hub["agents"]["claude"]), label
         assert agent_sources_fields == set(serialized_hub["agents"]["claude"]["sources"]), label
         assert route_fields == set(ModelHubRouteConfig().to_payload()), label

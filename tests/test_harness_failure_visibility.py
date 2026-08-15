@@ -12444,9 +12444,11 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert second_claim is not None
     asyncio.run(executor._execute_claimed_request(second_claim))
 
-    def _ready() -> bool:
+    sentinel = "watch command exited with status 75"
+
+    def _last_completed_cycle_is_retry() -> bool:
         row = watch_store.get_watch(watch.id)
-        return row is not None and row.last_exit_code == 75
+        return row is not None and (row.last_exit_code, row.last_error) == (75, sentinel)
 
     service = ManagedWatchService(
         controller=SimpleNamespace(),
@@ -12454,7 +12456,14 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
         request_store=requests,
         runtime_store=runtime_store,
     )
-    asyncio.run(_drive_watch_service(service, watch.id, until=_ready, limit=800))
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=_last_completed_cycle_is_retry,
+            limit=800,
+        )
+    )
 
     hooks = [first_hook, second_hook]
     assert len(hooks) == 2, f"two events must queue two follow-up deliveries: {hooks}"
@@ -12467,7 +12476,6 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert saved.retired_at is None and saved.last_finished_at is None, (
         f"nor stamp a retirement on a watch that is still running: {saved}"
     )
-    sentinel = "watch command exited with status 75"
     assert saved.last_error == sentinel and saved.last_exit_code == 75, (
         f"the premise for the last assertion below — the last cycle was a retry: {saved}"
     )
