@@ -597,6 +597,11 @@ function collectCustomProperties(root) {
 const CSS_WIDE_KEYWORDS = new Set(['none', 'inherit', 'initial', 'unset', 'revert', 'revert-layer']);
 const GLOW_TOKEN = /^--shadow-glow-/;
 const VAR_REFERENCE = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([\s\S]*))?\)$/;
+// A length this scan can read is a literal. These two spell the ways one can
+// arrive without being readable: computed, or named. Neither is rejected for
+// being exotic -- they are rejected because a glow is what they might be.
+const MATH_FUNCTION = /\b(calc|min|max|clamp)\s*\(/;
+const INDIRECT = /\bvar\s*\(/;
 const MAX_INDIRECTION = 8;
 
 // The classification is DENY BY DEFAULT, and that is the whole point of it.
@@ -649,10 +654,33 @@ function glowOffencesInLayer(layer, cssVars, seen, depth) {
   // which quietly reopened the same hole from the other end: `var(--mint) 0 0
   // 93px` kept its colour in the offset slot and drew whatever geometry it liked.
   if (!LENGTH.test(parts[0])) parts.push(parts.shift());
-  const [x, y, blur] = parts;
-  const isGlow = ZERO_LENGTH.test(x ?? '') && ZERO_LENGTH.test(y ?? '')
-    && blur !== undefined && !ZERO_LENGTH.test(blur);
-  return isGlow ? [shown] : [];
+
+  // A multi-part layer passes only if it can be shown NOT to be a glow. That is
+  // the same inversion the single-part branch makes, and this branch was left
+  // out of it -- the check still asked "is this a glow" and accepted silence as
+  // a no. `calc(0px) calc(0px) 93px red` is what that costs: both offsets
+  // compute to zero, neither is the literal `0` a zero-test looks for, so the
+  // question answers no and a hand-drawn glow ships. Asked the other way round,
+  // an offset this scan cannot evaluate has no innocent answer to give.
+  if (parts.some((part) => MATH_FUNCTION.test(part))) {
+    return [`${shown} -- a computed length cannot be evaluated here, so this cannot be shown not to be a glow`];
+  }
+  const [x, y, third] = parts;
+  if (!LENGTH.test(x ?? '') || !LENGTH.test(y ?? '')) {
+    return [`${shown} -- the offsets are not plain lengths, so this cannot be shown not to be a glow`];
+  }
+  // A non-zero offset is directional light whatever the blur does, and that is
+  // provable from the offset alone.
+  if (!ZERO_LENGTH.test(x) || !ZERO_LENGTH.test(y)) return [];
+  // Both offsets are zero, so the third part decides. Absent, or a colour, means
+  // no blur at all -- the ring-spacer shape. A name is not an answer: it could
+  // hold any radius, so it is unprovable rather than innocent.
+  if (third === undefined) return [];
+  if (LENGTH.test(third)) return ZERO_LENGTH.test(third) ? [] : [shown];
+  if (INDIRECT.test(third)) {
+    return [`${shown} -- a name in the blur slot could be any radius, so this cannot be shown not to be a glow`];
+  }
+  return [];
 }
 
 // Token definitions (`--shadow-glow-cta-mint: …`) name none of the channel
@@ -664,6 +692,7 @@ function glowOffencesInLayer(layer, cssVars, seen, depth) {
 function assertGlowsReadThroughTokens(root) {
   const offenders = [];
   const unscanned = [];
+  const unreadable = [];
   const cssVars = collectCustomProperties(root);
 
   for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
@@ -675,7 +704,20 @@ function assertGlowsReadThroughTokens(root) {
       for (const match of source.matchAll(pattern)) {
         claimed.push([match.index, match.index + match[0].length]);
 
-        for (const value of valuesOf(match)) {
+        // Matching a mention silences the completeness check below, so a channel
+        // that matches and then yields nothing is the one way left to be scanned
+        // and unchecked at the same time. `style={{ boxShadow: glow }}` is that
+        // case: the expression holds no string literal, so there is no value to
+        // test, and moving a literal into a constant would slip the gate. A
+        // channel that claims a mention owes a value, and owing nothing fails.
+        const values = valuesOf(match).filter((value) => value && value.trim());
+        if (values.length === 0) {
+          unreadable.push(`${file}:${source.slice(0, match.index).split('\n').length}: ${
+            match[0].split('\n')[0].slice(0, 80)}`);
+          continue;
+        }
+
+        for (const value of values) {
           for (const offence of glowOffencesInValue(value, cssVars)) {
             offenders.push(`${file}: ${offence}`);
           }
@@ -689,6 +731,18 @@ function assertGlowsReadThroughTokens(root) {
           source.slice(mention.index, mention.index + 60).split('\n')[0]}`);
       }
     }
+  }
+
+  if (unreadable.length > 0) {
+    throw new Error(
+      `${unreadable.length} shadow value(s) are introduced through an expression this scan cannot read, `
+      + `so nothing checks whether they hold a glow. Inline the value, or name it with a `
+      + `--shadow-glow-* token this scan can follow. Do NOT satisfy this by making the channel stop `
+      + `matching: a mention that matches nothing at all is caught by the completeness check below, `
+      + `while one that matches and yields nothing is scanned and unchecked at once, which is the `
+      + `state this exists to make impossible.\n  `
+      + unreadable.join('\n  '),
+    );
   }
 
   if (unscanned.length > 0) {
