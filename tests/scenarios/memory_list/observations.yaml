@@ -15,3 +15,10 @@ observations:
     scenarios:
       - MEMORY-LIST-005
     observation: Aggregate reads retain healthy project items while surfacing a closed warning and nullable total when another project fails.
+  - id: MEMORY-LIST-OBS-004
+    scenarios:
+      - MEMORY-LIST-003
+      - MEMORY-LIST-004
+      - MEMORY-LIST-006
+      - MEMORY-LIST-007
+    observation: The existing Search tab selects browse or relevance search solely from the trimmed query, while UI-only aggregate cursors remain opaque and entry ids are exposed only through a copy affordance.

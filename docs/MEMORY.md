@@ -26,6 +26,12 @@ provider's opaque entry id as a future inspection handle. Listing does not add
 Search/Get payloads to provider diagnostics and does not invoke LLM, embedding,
 or reranking providers.
 
+In **Settings > Memory > Search**, leave the query empty to browse these
+episodes newest first. Choose one project or **All my projects**, use the page
+controls below the episode excerpts, then select a row to open its full detail.
+The **Entry ID** chip copies the provider's opaque identifier. Entering any
+non-empty query switches the same tab back to relevance-ordered search.
+
 ## Optional reranking endpoint
 
 The third processing endpoint in **Settings > Memory** is optional. Configure
