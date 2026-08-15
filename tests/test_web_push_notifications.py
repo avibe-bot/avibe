@@ -814,14 +814,297 @@ def test_unknown_instance_kind_selects_policy_from_record_claim_shape(monkeypatc
     engine.dispose()
 
 
+def _push_session_fixture(conn, *, scope_native_id: str, session_id: str, title: str, now: str):
+    from storage.settings_service import upsert_scope as _upsert_scope
+
+    scope_id = _upsert_scope(
+        conn,
+        platform="avibe",
+        scope_type="project",
+        native_id=scope_native_id,
+        now=now,
+    )
+    conn.execute(
+        agent_sessions.insert().values(
+            id=session_id,
+            scope_id=scope_id,
+            agent_backend="codex",
+            agent_variant="default",
+            session_anchor=session_id,
+            native_session_id="",
+            title=title,
+            status="active",
+            metadata_json="{}",
+            created_at=now,
+            updated_at=now,
+            last_active_at=now,
+        )
+    )
+    return scope_id
+
+
+def _append_user_prompt(conn, *, scope_id: str, session_id: str, user_keys, records, now=None):
+    metadata: dict = {}
+    if len(user_keys) == 1:
+        metadata["_web_push_user_key"] = user_keys[0]
+    else:
+        metadata["_web_push_user_keys"] = list(user_keys)
+    metadata["_web_push_authorization_contexts"] = records
+    return messages_service.append(
+        conn,
+        scope_id=scope_id,
+        session_id=session_id,
+        platform="avibe",
+        author="user",
+        source="user",
+        author_id=user_keys[0],
+        metadata=metadata,
+        message_type="user",
+        text="Please finish",
+    )
+
+
+def _append_result(conn, *, scope_id: str, session_id: str, text: str = "Done"):
+    return messages_service.append(
+        conn,
+        scope_id=scope_id,
+        session_id=session_id,
+        platform="avibe",
+        author="agent",
+        source="agent",
+        message_type="result",
+        text=text,
+    )
+
+
+def _upsert_subscriptions(conn, *user_keys: str):
+    for user_key in user_keys:
+        web_push_service.upsert_subscription(
+            conn,
+            user_key=user_key,
+            payload={
+                "endpoint": f"https://push.example.test/{user_key}",
+                "keys": {"p256dh": f"{user_key}-p256dh", "auth": f"{user_key}-auth"},
+            },
+        )
+
+
+def test_snapshot_from_previous_paired_instance_is_rejected(monkeypatch, tmp_path):
+    """Re-pairing must not let the previous instance's snapshots deliver here."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    # Paired as a Personal instance "inst-push"; the persisted snapshot was
+    # minted by a DIFFERENT instance ("inst-previous").
+    _paired_revision_config(41, instance_kind="personal")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-14T00:00:00Z"
+    stale_instance_record = web_push_notifications.web_push_authorization_context_record(
+        "remote:user-a",
+        AuthorizationContext(
+            instance_role="editor",
+            subject="user-a",
+            email="member@example.com",
+            instance_access_source="email",
+            instance_id="inst-previous",
+            claims_issued_at=int(web_push_notifications.time.time()),
+            is_remote=True,
+        ),
+    )
+    assert stale_instance_record["vibe_instance_id"] == "inst-previous"
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_repaired",
+            session_id="ses_push_repaired",
+            title="Re-paired Push",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_repaired",
+            user_keys=["remote:user-a"],
+            records=[stale_instance_record],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_repaired")
+        _upsert_subscriptions(conn, "remote:user-a")
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Re-paired Push",
+            "body": "Done",
+            "session_id": "ses_push_repaired",
+            "message_id": message["id"],
+        }
+    )
+
+    assert sends == []
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_REVOKED
+    assert recent[0]["owners"]["remote:user-a"]["reason"] == (
+        "persisted snapshot was issued for a different paired instance"
+    )
+    engine.dispose()
+
+
+def test_in_flight_authorization_sync_wait_recovers_watermark(monkeypatch, tmp_path):
+    """An in-flight poller sync is awaited instead of failing the delivery."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="organization")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-14T00:00:00Z"
+    authorization_record = _remote_authorization_record(
+        "remote:user-a",
+        authorization_revision=41,
+    )
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_inflight_sync",
+            session_id="ses_push_inflight_sync",
+            title="In-flight Sync",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_inflight_sync",
+            user_keys=["remote:user-a"],
+            records=[authorization_record],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_inflight_sync")
+        _upsert_subscriptions(conn, "remote:user-a")
+
+    watermark_reads = []
+
+    def _current_revision(config, *, now=None):
+        watermark_reads.append(now)
+        # First read (resolver pre-check) sees the stale watermark; the
+        # in-flight poller refresh lands right after.
+        return 41 if len(watermark_reads) > 1 else None
+
+    monkeypatch.setattr(remote_access, "current_authorization_revision", _current_revision)
+    sync_calls = []
+    monkeypatch.setattr(
+        remote_access,
+        "sync_authorization_revision_once",
+        lambda config=None, **kwargs: sync_calls.append(config)
+        or {"ok": False, "error": "authorization_revision_sync_in_progress"},
+    )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "In-flight Sync",
+            "body": "Done",
+            "session_id": "ses_push_inflight_sync",
+            "message_id": message["id"],
+        }
+    )
+
+    assert len(sync_calls) == 1
+    assert [send[0]["endpoint"] for send in sends] == ["https://push.example.test/remote:user-a"]
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    engine.dispose()
+
+
+def test_merged_delivery_reports_provider_failure_per_owner(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-14T00:00:00Z"
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_partial_failure",
+            session_id="ses_push_partial_failure",
+            title="Partial Failure",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_partial_failure",
+            user_keys=["remote:user-a", "remote:user-b"],
+            records=[
+                _remote_authorization_record("remote:user-a"),
+                _remote_authorization_record("remote:user-b"),
+            ],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_partial_failure")
+        _upsert_subscriptions(conn, "remote:user-a", "remote:user-b")
+
+    def _send(*, subscription, payload):
+        if subscription["endpoint"].endswith("remote:user-b"):
+            raise RuntimeError("push provider rejected endpoint")
+
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr("core.web_push.send_web_push", _send)
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Partial Failure",
+            "body": "Done",
+            "session_id": "ses_push_partial_failure",
+            "message_id": message["id"],
+        }
+    )
+
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    owners = recent[0]["owners"]
+    assert owners["remote:user-a"]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    assert owners["remote:user-b"]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_PROVIDER_FAILURE
+    engine.dispose()
+
+
+def test_scoped_dispositions_redact_other_owners(monkeypatch, tmp_path):
+    from core.chat_discovery import set_state_meta
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    entry = {
+        "at": "2026-08-14T00:00:00Z",
+        "message_id": "msg_multi",
+        "session_id": "ses_multi",
+        "owners": {
+            "remote:user-a": {"policy": "personal", "disposition": "sent", "reason": ""},
+            "remote:user-b": {"policy": "organization", "disposition": "revoked", "reason": "signed authorization revision is no longer current"},
+        },
+        "disposition": "sent",
+    }
+    set_state_meta(web_push_notifications._DELIVERY_DISPOSITIONS_STATE_KEY, [entry])
+
+    scoped = web_push_notifications.recent_delivery_dispositions(user_key="remote:user-a")
+
+    assert len(scoped) == 1
+    assert scoped[0]["owners"] == {
+        "remote:user-a": {"policy": "personal", "disposition": "sent", "reason": ""}
+    }
+    assert "remote:user-b" not in scoped[0]["owners"]
+
+
 def test_organization_signed_snapshot_without_config_records_unavailable(monkeypatch, tmp_path):
-    """A revision-signed Organization snapshot must not pass without config.
-
-    The snapshot proves the instance was revision-synced when it was minted;
-    a missing or unreadable paired config is unavailability, not proof that
-    no sync applies, and must not authorize protected delivery.
-    """
-
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     # No `_paired_revision_config`: this AVIBE_HOME has no paired config at all.
     ensure_sqlite_state()
@@ -2255,10 +2538,10 @@ def test_send_to_enabled_subscriptions_falls_back_to_local_owner(monkeypatch, tm
     recent = web_push_notifications.recent_delivery_dispositions()
     assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
     # A local owner is locally authorized — never labeled as needing a remote
-    # authorization refresh.
+    # authorization refresh — and reports its own provider outcome.
     assert recent[0]["owners"]["local"] == {
         "policy": "local",
-        "disposition": None,
+        "disposition": web_push_notifications.WEB_PUSH_DISPOSITION_SENT,
         "reason": "local fallback with remote access disabled",
     }
 

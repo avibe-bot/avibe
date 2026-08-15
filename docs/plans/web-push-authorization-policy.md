@@ -65,7 +65,16 @@ skip was only logged at debug level.
     authorized (the snapshot proves the instance was revision-synced when it
     was minted); the single bounded watermark retry is shared across all
     merged owners of one delivery; local owners are labeled with the `local`
-    policy instead of a bogus remote refresh disposition.
+    policy instead of a bogus remote refresh disposition; the disposition
+    ring is persisted to `state_meta` so UI-process diagnostics see
+    controller-process deliveries.
+  - Review round 2 hardening (Codex findings): a persisted snapshot minted by
+    a different (pre-re-pairing) instance is rejected as `revoked` before
+    either policy applies; the bounded watermark retry waits for an in-flight
+    poller sync instead of discarding `authorization_revision_sync_in_progress`;
+    the durable disposition write is serialized inside the writer lock;
+    provider outcomes are recorded per owner in merged deliveries; scoped
+    disposition reads redact other merged owners.
 - `vibe/ui_server.py`:
   - `_web_push_user_key()` no longer applies the 12-hour refresh cutoff;
     `parse_session_cookie` still enforces signature, expiry, and confirmed

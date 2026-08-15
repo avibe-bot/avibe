@@ -61,6 +61,7 @@ _ORGANIZATION_REVISION_DISPOSITIONS = {
 _RECENT_DELIVERY_DISPOSITIONS: collections.deque[dict[str, Any]] = collections.deque(maxlen=64)
 _RECENT_DELIVERY_LOCK = threading.Lock()
 _DELIVERY_DISPOSITIONS_STATE_KEY = "web_push.recent_delivery_dispositions"
+WEB_PUSH_AUTHORIZATION_SYNC_WAIT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -111,15 +112,47 @@ def _notification_policy_for_record(config: Any, record: Mapping[str, Any]) -> s
     return "personal"
 
 
+def _paired_instance_id(config: Any) -> str | None:
+    cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
+    if cloud is None or not cloud.enabled:
+        return None
+    instance_id = str(getattr(cloud, "instance_id", "") or "").strip()
+    return instance_id or None
+
+
 def _retry_authorization_revision_sync(config: Any) -> None:
-    """Refresh the device watermark once, bounded by the device request timeout."""
+    """Refresh the device watermark once, bounded by the device request timeout.
+
+    When the 15-second poller is already mid-sync the request returns
+    ``authorization_revision_sync_in_progress`` immediately; instead of
+    discarding that, boundedly wait for the in-flight refresh to land so a
+    watermark that is about to refresh does not fail this delivery.
+    """
 
     from vibe import remote_access
 
+    result: Any = None
     try:
-        remote_access.sync_authorization_revision_once(config)
+        result = remote_access.sync_authorization_revision_once(config)
     except Exception:
         logger.debug("web push: authorization revision sync retry failed", exc_info=True)
+        return
+    if not isinstance(result, dict) or (
+        result.get("error") != "authorization_revision_sync_in_progress"
+    ):
+        return
+    deadline = time.monotonic() + WEB_PUSH_AUTHORIZATION_SYNC_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if config is None:
+            config = _load_notification_config()
+        if config is not None:
+            try:
+                if remote_access.current_authorization_revision(config) is not None:
+                    return
+            except Exception:
+                logger.debug("web push: in-flight sync wait check failed", exc_info=True)
+                return
+        time.sleep(0.25)
 
 
 def _evaluate_record_authorization(
@@ -160,6 +193,26 @@ def _evaluate_record_authorization(
             authorized=False,
             disposition=WEB_PUSH_DISPOSITION_AUTHORIZATION_REFRESH_REQUIRED,
             reason="persisted snapshot does not carry a readable instance role for this owner",
+        )
+    paired_instance_id = _paired_instance_id(config)
+    record_instance_id = record.get("vibe_instance_id")
+    if (
+        paired_instance_id
+        and isinstance(record_instance_id, str)
+        and record_instance_id
+        and record_instance_id != paired_instance_id
+    ):
+        # Re-pairing this installation to another instance does not clear
+        # subscriptions or old prompt snapshots; a snapshot minted by the
+        # previous instance must never authorize delivery on this one, under
+        # either policy.
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_REVOKED,
+            reason="persisted snapshot was issued for a different paired instance",
         )
     if policy == "personal":
         return OwnerAuthorizationDecision(
@@ -310,11 +363,15 @@ def recent_delivery_dispositions(
     if stored is None:
         with _RECENT_DELIVERY_LOCK:
             stored = list(_RECENT_DELIVERY_DISPOSITIONS)
-    scoped = [
-        entry
-        for entry in stored
-        if user_key is None or user_key in entry.get("owners", {})
-    ]
+    scoped: list[dict[str, Any]] = []
+    for entry in stored:
+        owners = entry.get("owners", {})
+        if user_key is None:
+            scoped.append(entry)
+        elif user_key in owners:
+            # One owner's diagnostics must not disclose the other merged
+            # recipients or their authorization reasons.
+            scoped.append({**entry, "owners": {user_key: owners[user_key]}})
     return list(reversed(scoped[-limit:]))
 
 
@@ -382,12 +439,13 @@ def _new_delivery_attempt(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _finish_delivery_attempt(attempt: dict[str, Any], disposition: str) -> None:
     attempt["disposition"] = disposition
+    # The durable write stays INSIDE the lock: two concurrent delivery threads
+    # snapshotting the deque and persisting afterwards could let the older
+    # snapshot overwrite the newer entry.
     with _RECENT_DELIVERY_LOCK:
         _RECENT_DELIVERY_DISPOSITIONS.append(attempt)
         entries = list(_RECENT_DELIVERY_DISPOSITIONS)
-    # The lock serializes writers within the delivery process; the durable
-    # ring is what makes the entry visible to the UI-process status surface.
-    _store_delivery_dispositions(entries)
+        _store_delivery_dispositions(entries)
 
 
 def _is_notifiable_message(message_type: Any, metadata: Any = None) -> bool:
@@ -822,7 +880,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     if not isinstance(endpoint, str) or endpoint in seen_endpoints:
                         continue
                     seen_endpoints.add(endpoint)
-                    deliveries.append((subscription, badge_counts[user_key]))
+                    deliveries.append((subscription, badge_counts[user_key], user_key))
         if not deliveries:
             _finish_delivery_attempt(attempt, WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION)
             logger.info(
@@ -832,7 +890,9 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
             return
         sent_count = 0
         failed_count = 0
-        for subscription, badge_count in deliveries:
+        owner_sent_counts: dict[str, int] = {}
+        owner_failed_counts: dict[str, int] = {}
+        for subscription, badge_count, delivery_owner in deliveries:
             try:
                 send_web_push(
                     subscription=subscription,
@@ -841,6 +901,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                 with engine.begin() as conn:
                     web_push_service.mark_send_success(conn, endpoint=subscription["endpoint"])
                 sent_count += 1
+                owner_sent_counts[delivery_owner] = owner_sent_counts.get(delivery_owner, 0) + 1
             except Exception as exc:
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
                 disable = status_code in {404, 410}
@@ -852,6 +913,18 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                         disable=disable,
                     )
                 failed_count += 1
+                owner_failed_counts[delivery_owner] = owner_failed_counts.get(delivery_owner, 0) + 1
+        # Provider outcomes are per owner: in a merged delivery the owner whose
+        # endpoint failed must not be told the attempt was sent.
+        for delivery_owner in {owner for _s, _b, owner in deliveries}:
+            owner_entry = attempt["owners"].setdefault(
+                delivery_owner,
+                {"policy": "unknown", "disposition": None, "reason": ""},
+            )
+            if owner_sent_counts.get(delivery_owner):
+                owner_entry["disposition"] = WEB_PUSH_DISPOSITION_SENT
+            elif owner_failed_counts.get(delivery_owner):
+                owner_entry["disposition"] = WEB_PUSH_DISPOSITION_PROVIDER_FAILURE
         _finish_delivery_attempt(
             attempt,
             WEB_PUSH_DISPOSITION_SENT if sent_count else WEB_PUSH_DISPOSITION_PROVIDER_FAILURE,
