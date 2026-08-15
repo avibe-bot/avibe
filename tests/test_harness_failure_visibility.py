@@ -12413,6 +12413,111 @@ def test_watch_cycle_outcome_pair_is_published_atomically(
     assert persisted_after.last_cycle_outcome == next_outcome
 
 
+def test_watch_write_and_mirror_publication_exclude_same_store_reload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A newer durable edit cannot be replaced by an older pending publication."""
+
+    from core.watches import ManagedWatchStore
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+
+    def _sqlite_watch_store() -> ManagedWatchStore:
+        store = ManagedWatchStore(tmp_path / "unused-watches.json")
+        store._sqlite = SQLiteBackgroundTaskStore(db_path)
+        store.load()
+        return store
+
+    store = _sqlite_watch_store()
+    other = _sqlite_watch_store()
+    watch = store.add_watch(
+        name="atomic publication",
+        session_key="",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    other.load()
+
+    candidate_committed = threading.Event()
+    allow_publication = threading.Event()
+    newer_edit_committed = threading.Event()
+    reload_started = threading.Event()
+    reload_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    reloader_errors: list[BaseException] = []
+    sqlite = store.sqlite_backend
+    assert sqlite is not None
+    original_upsert = sqlite.upsert_watch
+
+    def _pause_after_commit(*args, **kwargs):
+        landed = original_upsert(*args, **kwargs)
+        candidate_committed.set()
+        if not allow_publication.wait(timeout=5):
+            raise AssertionError("test did not release the pending mirror publication")
+        return landed
+
+    monkeypatch.setattr(sqlite, "upsert_watch", _pause_after_commit)
+
+    def _write_cycle_result() -> None:
+        try:
+            assert store.mark_cycle_result(
+                watch.id,
+                exit_code=75,
+                error="watch command exited with status 75",
+            )
+        except BaseException as exc:
+            writer_errors.append(exc)
+
+    def _write_newer_edit_and_reload() -> None:
+        try:
+            assert candidate_committed.wait(timeout=5)
+            other.set_enabled(watch.id, False)
+            newer_edit_committed.set()
+            reload_started.set()
+            store.load()
+        except BaseException as exc:
+            reloader_errors.append(exc)
+        finally:
+            reload_finished.set()
+
+    writer = threading.Thread(target=_write_cycle_result)
+    reloader = threading.Thread(target=_write_newer_edit_and_reload)
+    writer.start()
+    reloader.start()
+    assert candidate_committed.wait(timeout=5)
+    assert newer_edit_committed.wait(timeout=5)
+    assert reload_started.wait(timeout=5)
+    assert not reload_finished.wait(timeout=0.1), (
+        "same-store reload must wait for durable write plus mirror publication"
+    )
+    allow_publication.set()
+    writer.join(timeout=5)
+    reloader.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reloader.is_alive()
+    assert not writer_errors
+    assert not reloader_errors
+    visible = store.get_watch(watch.id)
+    other_sqlite = other.sqlite_backend
+    assert other_sqlite is not None
+    persisted = other_sqlite.get_watch(watch.id)
+    assert visible is not None
+    assert visible.enabled is False
+    assert persisted is not None
+    assert persisted["enabled"] is False
+
+
 def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     tmp_path: Path,
     monkeypatch,

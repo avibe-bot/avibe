@@ -321,42 +321,49 @@ class ManagedWatchStore:
         self._sqlite = SQLiteBackgroundTaskStore() if path is None else None
         self._signature: Optional[tuple[int, int, int]] = None
         self._watches: dict[str, ManagedWatch] = {}
+        #: For this store, a durable write and the mirror publication reflecting it
+        #: are one atomic section for every observer of this mirror. No observer may
+        #: see an entry older than a row this store already committed. This must be
+        #: reentrant: ``_write_watch`` reloads through both its refused-write and
+        #: failed-write paths, so replacing the RLock with Lock would self-deadlock.
+        self._mirror_lock = threading.RLock()
         #: Set when a failed write left this mirror INCOMPLETE, cleared by the reload
         #: that repairs it. See ``maybe_reload`` and ``_reload_after_lost_write``.
         self._reload_required = False
         self.load()
 
     def load(self) -> None:
-        if self._sqlite is not None:
-            self._watches = {
-                item["id"]: ManagedWatch.from_dict(item)
-                for item in self._sqlite.list_watches()
-            }
-            self._reload_required = False
-            return
-        if not self.path.exists():
-            self._watches = {}
-            self._signature = None
-            self._reload_required = False
-            return
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.error("Failed to load managed watches: %s", exc)
-            self._watches = {}
-            self._signature = None
-            return
+        with self._mirror_lock:
+            if self._sqlite is not None:
+                self._watches = {
+                    item["id"]: ManagedWatch.from_dict(item)
+                    for item in self._sqlite.list_watches()
+                }
+                self._reload_required = False
+                return
+            if not self.path.exists():
+                self._watches = {}
+                self._signature = None
+                self._reload_required = False
+                return
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.error("Failed to load managed watches: %s", exc)
+                self._watches = {}
+                self._signature = None
+                return
 
-        raw_watches = payload.get("watches", []) if isinstance(payload, dict) else []
-        watches: dict[str, ManagedWatch] = {}
-        for item in raw_watches:
-            if not isinstance(item, dict):
-                continue
-            watch = ManagedWatch.from_dict(item)
-            watches[watch.id] = watch
-        self._watches = watches
-        self._signature = _path_signature(self.path)
-        self._reload_required = False
+            raw_watches = payload.get("watches", []) if isinstance(payload, dict) else []
+            watches: dict[str, ManagedWatch] = {}
+            for item in raw_watches:
+                if not isinstance(item, dict):
+                    continue
+                watch = ManagedWatch.from_dict(item)
+                watches[watch.id] = watch
+            self._watches = watches
+            self._signature = _path_signature(self.path)
+            self._reload_required = False
 
     def maybe_reload(self) -> bool:
         """Refresh the mirror when the database changed -- or when WE know it is stale.
@@ -376,59 +383,62 @@ class ManagedWatchStore:
         clears it, so a reload that fails again is retried on every later tick.
         """
 
-        if self._sqlite is not None:
-            changed = self._sqlite.maybe_reload()
-            if self._reload_required:
-                try:
+        with self._mirror_lock:
+            if self._sqlite is not None:
+                changed = self._sqlite.maybe_reload()
+                if self._reload_required:
+                    try:
+                        self.load()
+                    except Exception:
+                        # Still unreachable. Keep the flag and the incomplete mirror, and
+                        # report "nothing changed" -- the retry is the next tick's.
+                        logger.exception(
+                            "Could not reload managed watches after a lost write; the live "
+                            "store stays incomplete until a later attempt succeeds"
+                        )
+                        return False
+                    return True
+                if changed:
                     self.load()
-                except Exception:
-                    # Still unreachable. Keep the flag and the incomplete mirror, and
-                    # report "nothing changed" -- the retry is the next tick's.
-                    logger.exception(
-                        "Could not reload managed watches after a lost write; the live "
-                        "store stays incomplete until a later attempt succeeds"
-                    )
-                    return False
-                return True
-            if changed:
-                self.load()
-            return changed
-        signature = _path_signature(self.path)
-        if signature == self._signature and not self._reload_required:
-            return False
-        self.load()
-        return True
+                return changed
+            signature = _path_signature(self.path)
+            if signature == self._signature and not self._reload_required:
+                return False
+            self.load()
+            return True
 
     def _save(self, *, replacement: Optional[ManagedWatch] = None) -> None:
-        if self._sqlite is not None:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        watches = dict(self._watches)
-        if replacement is not None:
-            watches[replacement.id] = replacement
-        payload = {
-            "watches": [
-                watch.to_dict()
-                for watch in sorted(
-                    watches.values(),
-                    key=lambda item: (item.created_at, item.id),
-                )
-            ]
-        }
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.path.parent,
-            suffix=".tmp",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            json.dump(payload, handle, indent=2)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(self.path)
-        self._signature = _path_signature(self.path)
+        with self._mirror_lock:
+            if self._sqlite is not None:
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            watches = dict(self._watches)
+            if replacement is not None:
+                watches[replacement.id] = replacement
+            payload = {
+                "watches": [
+                    watch.to_dict()
+                    for watch in sorted(
+                        watches.values(),
+                        key=lambda item: (item.created_at, item.id),
+                    )
+                ]
+            }
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self.path.parent,
+                suffix=".tmp",
+                delete=False,
+                encoding="utf-8",
+            ) as handle:
+                json.dump(payload, handle, indent=2)
+                tmp_path = Path(handle.name)
+            tmp_path.replace(self.path)
+            self._signature = _path_signature(self.path)
 
     def list_watches(self) -> list[ManagedWatch]:
-        return sorted(self._watches.values(), key=lambda item: (item.created_at, item.id))
+        with self._mirror_lock:
+            return sorted(self._watches.values(), key=lambda item: (item.created_at, item.id))
 
     def list_watches_for_recovery(self) -> list[ManagedWatch]:
         """Return a strict, current snapshot suitable for process recovery."""
@@ -466,7 +476,8 @@ class ManagedWatchStore:
         return sorted(watches, key=lambda item: (item.created_at, item.id))
 
     def get_watch(self, watch_id: str) -> Optional[ManagedWatch]:
-        return self._watches.get(watch_id)
+        with self._mirror_lock:
+            return self._watches.get(watch_id)
 
     @staticmethod
     def _read_state(watch: ManagedWatch) -> DefinitionWriteExpectation:
@@ -534,36 +545,37 @@ class ManagedWatchStore:
                 # namespace once rather than reading across its publication point.
                 cached.__dict__ = watch.__dict__
 
-        try:
-            if self._sqlite is None:
-                if queued_run is not None:
-                    raise ValueError(
-                        "a file-backed watch store cannot commit a queued run with the watch row"
+        with self._mirror_lock:
+            try:
+                if self._sqlite is None:
+                    if queued_run is not None:
+                        raise ValueError(
+                            "a file-backed watch store cannot commit a queued run with the watch row"
+                        )
+                    self._save(replacement=watch)
+                    landed = True
+                elif queued_run is None:
+                    landed = self._sqlite.upsert_watch(
+                        watch.to_dict(),
+                        expect=expect,
+                        expected_enabled_agent_id=expected_enabled_agent_id,
+                        expected_reference_agent_id=expected_reference_agent_id,
                     )
-                self._save(replacement=watch)
+                else:
+                    landed = self._sqlite.upsert_watch_with_queued_run(
+                        watch.to_dict(), expect=expect, run_payload=queued_run
+                    )
+            except Exception:
+                self._reload_after_lost_write(watch.id)
+                raise
+            if landed:
                 _publish_snapshot()
-                _publish_watch_definitions_updated()
-                return True
-            if queued_run is None:
-                landed = self._sqlite.upsert_watch(
-                    watch.to_dict(),
-                    expect=expect,
-                    expected_enabled_agent_id=expected_enabled_agent_id,
-                    expected_reference_agent_id=expected_reference_agent_id,
-                )
             else:
-                landed = self._sqlite.upsert_watch_with_queued_run(
-                    watch.to_dict(), expect=expect, run_payload=queued_run
-                )
-        except Exception:
-            self._reload_after_lost_write(watch.id)
-            raise
-        if landed:
-            _publish_snapshot()
-            _publish_watch_definitions_updated()
-            return True
-        self.load()
-        return False
+                self.load()
+        if not landed:
+            return False
+        _publish_watch_definitions_updated()
+        return True
 
     def _reload_after_lost_write(self, watch_id: str) -> None:
         """Drop a mirror entry the database did not accept, reloading if it can.
@@ -579,17 +591,18 @@ class ManagedWatchStore:
         forever.
         """
 
-        try:
-            self.load()
-        except Exception:
-            logger.exception(
-                "Could not reload managed watches after a failed write; dropping the "
-                "stale mirror entry for %s",
-                watch_id,
-            )
-            self._watches.pop(watch_id, None)
-            self._signature = None
-            self._reload_required = True
+        with self._mirror_lock:
+            try:
+                self.load()
+            except Exception:
+                logger.exception(
+                    "Could not reload managed watches after a failed write; dropping the "
+                    "stale mirror entry for %s",
+                    watch_id,
+                )
+                self._watches.pop(watch_id, None)
+                self._signature = None
+                self._reload_required = True
 
     def upsert_watch(
         self,
@@ -607,29 +620,31 @@ class ManagedWatchStore:
         with no durable row to stop it and nothing to reload it away.
         """
 
-        watch.updated_at = _utc_now_iso()
-        self._watches[watch.id] = watch
-        try:
-            if self._sqlite is not None:
-                # No ``expect``: the create/adopt entry point (``add_watch``), whose
-                # payload is not derived from a stored row.
-                self._sqlite.upsert_watch(
-                    watch.to_dict(),
-                    expected_enabled_agent_id=expected_enabled_agent_id,
-                    expected_reference_agent_id=expected_reference_agent_id,
-                )
-                if expected_reference_agent_id is not None:
-                    self.load()
-                    _publish_watch_definitions_updated()
-                    return self._watches[watch.id]
-                _publish_watch_definitions_updated()
-                return watch
-            self._save()
-        except Exception:
-            self._reload_after_lost_write(watch.id)
-            raise
+        with self._mirror_lock:
+            watch.updated_at = _utc_now_iso()
+            self._watches[watch.id] = watch
+            try:
+                if self._sqlite is not None:
+                    # No ``expect``: the create/adopt entry point (``add_watch``), whose
+                    # payload is not derived from a stored row.
+                    self._sqlite.upsert_watch(
+                        watch.to_dict(),
+                        expected_enabled_agent_id=expected_enabled_agent_id,
+                        expected_reference_agent_id=expected_reference_agent_id,
+                    )
+                    if expected_reference_agent_id is not None:
+                        self.load()
+                        result = self._watches[watch.id]
+                    else:
+                        result = watch
+                else:
+                    self._save()
+                    result = watch
+            except Exception:
+                self._reload_after_lost_write(watch.id)
+                raise
         _publish_watch_definitions_updated()
-        return watch
+        return result
 
     def add_watch(
         self,
@@ -701,43 +716,44 @@ class ManagedWatchStore:
         user was told could not be deleted just stops until the process restarts.
         """
 
-        if watch_id not in self._watches:
-            return False
-        del self._watches[watch_id]
-        try:
-            if self._sqlite is not None:
-                self._sqlite.remove_task(watch_id)
-                _publish_watch_definitions_updated()
-                return True
-            self._save()
-        except Exception:
-            self._reload_after_lost_write(watch_id)
-            raise
+        with self._mirror_lock:
+            if watch_id not in self._watches:
+                return False
+            del self._watches[watch_id]
+            try:
+                if self._sqlite is not None:
+                    self._sqlite.remove_task(watch_id)
+                else:
+                    self._save()
+            except Exception:
+                self._reload_after_lost_write(watch_id)
+                raise
         _publish_watch_definitions_updated()
         return True
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
-        watch = self._watches[watch_id]
-        expect = self._read_state(watch)
-        if enabled and not watch.enabled:
-            # Same field split the storage layer applies to the Harness UI's
-            # toggle, so the two doorways cannot drift apart again.
-            self._clear_cycle_state(
-                watch,
-                definition_resume_clear_columns("watch", watch.mode),
-            )
-            watch.metadata = watch_metadata_after_resume(
-                watch.metadata,
-                resumed_at=_utc_now_iso(),
-            )
-        watch.enabled = enabled
-        watch.updated_at = _utc_now_iso()
-        if not self._write_watch(watch, expect):
-            # Same as the task side: this payload also restores ``last_error`` and the
-            # Session binding, so a pause/resume that lost to a teardown must fail
-            # loudly rather than quietly undo it.
-            raise DefinitionWriteConflict(watch_id, definition_type="watch")
-        return watch
+        with self._mirror_lock:
+            watch = self._watches[watch_id]
+            expect = self._read_state(watch)
+            if enabled and not watch.enabled:
+                # Same field split the storage layer applies to the Harness UI's
+                # toggle, so the two doorways cannot drift apart again.
+                self._clear_cycle_state(
+                    watch,
+                    definition_resume_clear_columns("watch", watch.mode),
+                )
+                watch.metadata = watch_metadata_after_resume(
+                    watch.metadata,
+                    resumed_at=_utc_now_iso(),
+                )
+            watch.enabled = enabled
+            watch.updated_at = _utc_now_iso()
+            if not self._write_watch(watch, expect):
+                # Same as the task side: this payload also restores ``last_error`` and the
+                # Session binding, so a pause/resume that lost to a teardown must fail
+                # loudly rather than quietly undo it.
+                raise DefinitionWriteConflict(watch_id, definition_type="watch")
+            return watch
 
     def update_watch(
         self,
@@ -773,61 +789,64 @@ class ManagedWatchStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
-        watch = self._watches[watch_id]
-        # Captured before the first mutation: the state ``vibe watch update`` read and
-        # resolved its payload from.
-        expect = self._read_state(watch)
-        waiter_lifecycle_changed = (
-            mode != watch.mode
-            or command != watch.command
-            or shell_command != watch.shell_command
-            or cwd != watch.cwd
-        )
-        if mode != watch.mode:
-            # A mode change starts a new lifecycle. Completion and failure
-            # metadata from the old mode remains available in run history, but
-            # must not determine the definition state under the new mode.
-            self._clear_cycle_state(watch, DEFINITION_CYCLE_COLUMNS)
-        watch.name = name
-        watch.session_key = session_key
-        watch.session_id = session_id
-        watch.agent_name = agent_name
-        if session_policy is None:
-            session_policy = watch.session_policy or ("existing" if session_id or session_key else None)
-        watch.session_policy = session_policy
-        watch.command = command
-        watch.shell_command = shell_command
-        watch.prefix = prefix
-        watch.message = message or prefix
-        watch.cwd = cwd
-        watch.mode = mode
-        watch.timeout_seconds = timeout_seconds
-        watch.lifetime_timeout_seconds = lifetime_timeout_seconds
-        watch.retry_exit_codes = retry_exit_codes
-        watch.retry_delay_seconds = retry_delay_seconds
-        watch.post_to = post_to
-        watch.deliver_key = deliver_key
-        watch.metadata = metadata_with_resource_user_context(
-            metadata if metadata is not None else watch.metadata,
-            user_context,
-        )
-        if waiter_lifecycle_changed:
-            watch.metadata = dict(watch.metadata)
-            watch.metadata.pop(RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
-        watch.updated_at = _utc_now_iso()
-        if not self._write_watch(
-            watch,
-            expect,
-            expected_enabled_agent_id=expected_enabled_agent_id,
-            expected_reference_agent_id=expected_reference_agent_id,
-        ):
-            # The edit did NOT land. ``cmd_watch_update`` turns this into a non-zero
-            # exit with an error payload instead of echoing an unwritten watch.
-            raise DefinitionWriteConflict(watch_id, definition_type="watch")
-        if expected_reference_agent_id is not None:
-            self.load()
-            return self._watches[watch_id]
-        return watch
+        with self._mirror_lock:
+            watch = self._watches[watch_id]
+            # Captured before the first mutation: the state ``vibe watch update`` read and
+            # resolved its payload from.
+            expect = self._read_state(watch)
+            waiter_lifecycle_changed = (
+                mode != watch.mode
+                or command != watch.command
+                or shell_command != watch.shell_command
+                or cwd != watch.cwd
+            )
+            if mode != watch.mode:
+                # A mode change starts a new lifecycle. Completion and failure
+                # metadata from the old mode remains available in run history, but
+                # must not determine the definition state under the new mode.
+                self._clear_cycle_state(watch, DEFINITION_CYCLE_COLUMNS)
+            watch.name = name
+            watch.session_key = session_key
+            watch.session_id = session_id
+            watch.agent_name = agent_name
+            if session_policy is None:
+                session_policy = watch.session_policy or (
+                    "existing" if session_id or session_key else None
+                )
+            watch.session_policy = session_policy
+            watch.command = command
+            watch.shell_command = shell_command
+            watch.prefix = prefix
+            watch.message = message or prefix
+            watch.cwd = cwd
+            watch.mode = mode
+            watch.timeout_seconds = timeout_seconds
+            watch.lifetime_timeout_seconds = lifetime_timeout_seconds
+            watch.retry_exit_codes = retry_exit_codes
+            watch.retry_delay_seconds = retry_delay_seconds
+            watch.post_to = post_to
+            watch.deliver_key = deliver_key
+            watch.metadata = metadata_with_resource_user_context(
+                metadata if metadata is not None else watch.metadata,
+                user_context,
+            )
+            if waiter_lifecycle_changed:
+                watch.metadata = dict(watch.metadata)
+                watch.metadata.pop(RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
+            watch.updated_at = _utc_now_iso()
+            if not self._write_watch(
+                watch,
+                expect,
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
+            ):
+                # The edit did NOT land. ``cmd_watch_update`` turns this into a non-zero
+                # exit with an error payload instead of echoing an unwritten watch.
+                raise DefinitionWriteConflict(watch_id, definition_type="watch")
+            if expected_reference_agent_id is not None:
+                self.load()
+                return self._watches[watch_id]
+            return watch
 
     @staticmethod
     def _clear_cycle_state(watch: ManagedWatch, columns: tuple[str, ...]) -> None:
@@ -837,18 +856,19 @@ class ManagedWatchStore:
             setattr(watch, column, None)
 
     def mark_cycle_start(self, watch_id: str) -> bool:
-        self.maybe_reload()
-        watch = self._watches.get(watch_id)
-        if watch is None:
-            return False
-        expect = self._read_state(watch)
-        watch.last_started_at = _utc_now_iso()
-        # The outcome pair describes the last completed cycle. Keep it stable while
-        # the next cycle is in flight; ``mark_cycle_result`` owns both fields.
-        watch.updated_at = _utc_now_iso()
-        # A runtime stamp: a lost write is reported by the return value, not by an
-        # exception through the supervisor loop.
-        return self._write_watch(watch, expect)
+        with self._mirror_lock:
+            self.maybe_reload()
+            watch = self._watches.get(watch_id)
+            if watch is None:
+                return False
+            expect = self._read_state(watch)
+            watch.last_started_at = _utc_now_iso()
+            # The outcome pair describes the last completed cycle. Keep it stable while
+            # the next cycle is in flight; ``mark_cycle_result`` owns both fields.
+            watch.updated_at = _utc_now_iso()
+            # A runtime stamp: a lost write is reported by the return value, not by an
+            # exception through the supervisor loop.
+            return self._write_watch(watch, expect)
 
     def mark_cycle_result(
         self,
@@ -873,45 +893,48 @@ class ManagedWatchStore:
 
         if disable and pause:
             raise ValueError("a watch cycle cannot retire and pause at the same time")
-        self.maybe_reload()
-        watch = self._watches.get(watch_id)
-        if watch is None:
-            return False
-        expect = self._read_state(watch)
-        candidate = replace(watch)
-        now = _utc_now_iso()
-        # Retirement is state, not a conclusion drawn from cycle history.
-        # Only the cycle that changes enabled -> disabled may write it. A cycle
-        # landing after a manual pause must preserve that pause; a later result
-        # must likewise not erase a genuine earlier retirement.
-        was_enabled = candidate.enabled
-        if was_enabled:
-            candidate.last_finished_at = now if disable or pause else None
-            candidate.retired_at = now if disable else None
-        # Once retirement commits, these fields describe that terminal outcome.
-        # A late cycle still owns its individual Run row, but it cannot replace
-        # the definition outcome written by the cycle that retired the Watch.
-        if was_enabled or candidate.retired_at is None:
-            candidate.last_exit_code = exit_code
-            candidate.last_error = error
-        if event_detected:
-            candidate.last_event_at = now
-        if metadata_updates or (event_detected and acknowledge_event):
-            # A NEW dict: ``expect`` above was derived from the stored one and has to
-            # keep describing the row as it was read.
-            candidate.metadata = {
-                **candidate.metadata,
-                **(metadata_updates or {}),
-            }
-            if event_detected and acknowledge_event:
-                candidate.metadata[DELIVERY_ACK_METADATA_KEY] = _delivered_reports(candidate) + 1
-        if disable or pause:
-            candidate.enabled = False
-        candidate.updated_at = _utc_now_iso()
-        # Guarded for the reason ``mark_task_result`` is: a cycle result landing after a
-        # ``/new`` reclaim would otherwise re-enable the watch and restore the binding
-        # the teardown cleared.
-        return self._write_watch(candidate, expect, queued_run=queued_run)
+        with self._mirror_lock:
+            self.maybe_reload()
+            watch = self._watches.get(watch_id)
+            if watch is None:
+                return False
+            expect = self._read_state(watch)
+            candidate = replace(watch)
+            now = _utc_now_iso()
+            # Retirement is state, not a conclusion drawn from cycle history.
+            # Only the cycle that changes enabled -> disabled may write it. A cycle
+            # landing after a manual pause must preserve that pause; a later result
+            # must likewise not erase a genuine earlier retirement.
+            was_enabled = candidate.enabled
+            if was_enabled:
+                candidate.last_finished_at = now if disable or pause else None
+                candidate.retired_at = now if disable else None
+            # Once retirement commits, these fields describe that terminal outcome.
+            # A late cycle still owns its individual Run row, but it cannot replace
+            # the definition outcome written by the cycle that retired the Watch.
+            if was_enabled or candidate.retired_at is None:
+                candidate.last_exit_code = exit_code
+                candidate.last_error = error
+            if event_detected:
+                candidate.last_event_at = now
+            if metadata_updates or (event_detected and acknowledge_event):
+                # A NEW dict: ``expect`` above was derived from the stored one and has to
+                # keep describing the row as it was read.
+                candidate.metadata = {
+                    **candidate.metadata,
+                    **(metadata_updates or {}),
+                }
+                if event_detected and acknowledge_event:
+                    candidate.metadata[DELIVERY_ACK_METADATA_KEY] = (
+                        _delivered_reports(candidate) + 1
+                    )
+            if disable or pause:
+                candidate.enabled = False
+            candidate.updated_at = _utc_now_iso()
+            # Guarded for the reason ``mark_task_result`` is: a cycle result landing after a
+            # ``/new`` reclaim would otherwise re-enable the watch and restore the binding
+            # the teardown cleared.
+            return self._write_watch(candidate, expect, queued_run=queued_run)
 
 
 class WatchRuntimeStateStore:
