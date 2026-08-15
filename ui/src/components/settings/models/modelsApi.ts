@@ -6,7 +6,7 @@
 // Methods unwrap the frozen envelope ({ok:true, …} | {ok:false, error}) and
 // throw an Error carrying the machine code on failure, so callers work with
 // plain domain objects.
-import { apiFetch } from '@/lib/apiFetch';
+import { apiFetch, isApiFetchDeadlineAbort, withApiDeadline } from '@/lib/apiFetch';
 import { MODELS_API_MODE } from './featureFlags';
 import {
   buildMockAgents,
@@ -272,36 +272,61 @@ export const apiFailure = (
       }
     : null;
 
+// The server owns the execution ceiling; this browser deadline is only a
+// backstop for a server that never answers, so it must outlast that controlled
+// failure. The margin covers CSRF acquisition, both transits (including a
+// tunnel), one fast CSRF-rejected attempt and replay, handler dispatch, and body
+// decoding. Keep the ceiling aligned with model_hub_client.py:_RPC_TIMEOUT_SECONDS.
+export const MODEL_HUB_RPC_CEILING_MS = 300_000;
+const TRANSPORT_MARGIN_MS = 30_000;
+export const MODEL_HUB_REQUEST_DEADLINE_MS =
+  MODEL_HUB_RPC_CEILING_MS + TRANSPORT_MARGIN_MS;
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await apiFetch(path, init);
-  let payload: unknown = null;
   try {
-    payload = await res.json();
-  } catch {
-    // Invented here, not read off the wire: the request may well have been
-    // carried out and its answer lost coming back.
-    throw new ApiCallError('bad_response', `Non-JSON response from ${path}`, false, [], [], [], res.status);
-  }
-  const envelope = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
-  if (!res.ok || envelope.ok === false) {
-    const error = typeof envelope.error === 'string' ? envelope.error : null;
-    throw new ApiCallError(
-      error ?? `http_${res.status}`,
-      typeof envelope.detail === 'string' ? envelope.detail : undefined,
-      // `payload.error` is the only thing that carries a route's own verdict, so
-      // its presence IS the answer. `http_502` is this client summarizing a
-      // response that never gave one.
-      error !== null,
-      supplyGaps(envelope.would_interrupt),
-      supplyGaps(envelope.interrupted_pairs),
-      routeHopRefs(envelope.would_remove_hops),
-      res.status,
-      typeof envelope.observation === 'object' && envelope.observation !== null
-        ? envelope.observation as SourceObservation
-        : undefined,
+    return await withApiDeadline(
+      MODEL_HUB_REQUEST_DEADLINE_MS,
+      init?.signal ?? undefined,
+      async (signal) => {
+        const res = await apiFetch(path, { ...init, signal });
+        let payload: unknown = null;
+        try {
+          payload = await res.json();
+        } catch (error) {
+          if (signal.aborted) {
+            throw signal.reason ?? error;
+          }
+          // Invented here, not read off the wire: the request may well have been
+          // carried out and its answer lost coming back.
+          throw new ApiCallError('bad_response', `Non-JSON response from ${path}`, false, [], [], [], res.status);
+        }
+        const envelope = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+        if (!res.ok || envelope.ok === false) {
+          const error = typeof envelope.error === 'string' ? envelope.error : null;
+          throw new ApiCallError(
+            error ?? `http_${res.status}`,
+            typeof envelope.detail === 'string' ? envelope.detail : undefined,
+            // `payload.error` is the only thing that carries a route's own verdict, so
+            // its presence IS the answer. `http_502` is this client summarizing a
+            // response that never gave one.
+            error !== null,
+            supplyGaps(envelope.would_interrupt),
+            supplyGaps(envelope.interrupted_pairs),
+            routeHopRefs(envelope.would_remove_hops),
+            res.status,
+            typeof envelope.observation === 'object' && envelope.observation !== null
+              ? envelope.observation as SourceObservation
+              : undefined,
+          );
+        }
+        return payload as T;
+      },
     );
+  } catch (error) {
+    if (!isApiFetchDeadlineAbort(error)) throw error;
+    // The deadline says the answer did not arrive, not whether the route wrote.
+    throw new ApiCallError('bad_response', `Request deadline exceeded for ${path}`, false);
   }
-  return payload as T;
 }
 
 const jsonInit = (method: string, body?: unknown): RequestInit => ({
