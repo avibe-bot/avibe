@@ -55,7 +55,7 @@ def _txn_worker_a(home: str, entered: threading.Event, release: threading.Event)
     update_config_fields(mutator)
 
 
-def _txn_worker_b(home: str, done: threading.Event, saw_queue) -> None:
+def _txn_worker_b(home: str, attempted: threading.Event, done: threading.Event, saw_queue) -> None:
     import os as _os
 
     _os.environ["AVIBE_HOME"] = home
@@ -65,6 +65,11 @@ def _txn_worker_b(home: str, done: threading.Event, saw_queue) -> None:
         saw_queue.put(cfg.language)
         cfg.runtime.log_level = "DEBUG"
 
+    # Signal AFTER imports/setup but BEFORE the transaction: the parent
+    # waits for this before concluding anything about lock blocking, so
+    # a slow spawn/import on a loaded CI host cannot fake the
+    # "B never attempted entry" outcome.
+    attempted.set()
     update_config_fields(mutator)
     done.set()
 
@@ -84,14 +89,21 @@ def test_transaction_blocks_second_process_until_first_releases(
     ctx = mp.get_context("spawn")
     entered = ctx.Event()
     release = ctx.Event()
+    b_attempted = ctx.Event()
     b_done = ctx.Event()
     saw_queue = ctx.Queue()
 
     a = ctx.Process(target=_txn_worker_a, args=(str(isolated_config_home.parent.parent), entered, release))
-    b = ctx.Process(target=_txn_worker_b, args=(str(isolated_config_home.parent.parent), b_done, saw_queue))
+    b = ctx.Process(
+        target=_txn_worker_b,
+        args=(str(isolated_config_home.parent.parent), b_attempted, b_done, saw_queue),
+    )
     a.start()
     assert entered.wait(timeout=15), "worker A never entered its transaction"
     b.start()
+    # B has reached the transaction call (imports done); from here the
+    # only thing between it and completion is the file lock.
+    assert b_attempted.wait(timeout=15), "worker B never reached the transaction"
     # B must be blocked on the file lock while A holds it. Generous
     # margin: an unblocked trivial transaction finishes well inside it.
     assert not b_done.wait(timeout=1.0), "B entered the transaction while A held the file lock"
