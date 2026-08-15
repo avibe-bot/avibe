@@ -51,6 +51,7 @@ const endpoint = (baseUrl: string) => ({
 const legacySettings: MemorySettings = {
   status: 'ok',
   enabled: true,
+  im_attachment_capture_available: true,
   processing: {
     llm: endpoint('https://old.example.test/v1'),
     embedding: endpoint('https://embedding.example.test/v1'),
@@ -67,6 +68,7 @@ const emptyEndpoint = {
 const firstSetupSettings: MemorySettings = {
   status: 'ok',
   enabled: false,
+  im_attachment_capture_available: true,
   processing: {
     llm: emptyEndpoint,
     embedding: emptyEndpoint,
@@ -79,7 +81,28 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
-  it('renders optional reranking and multimodal endpoints for released settings', () => {
+  it('hides multimodal configuration until IM attachment capture is available', () => {
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, im_attachment_capture_available: false }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.queryByText('memory.settings.multimodalTitle')).toBeNull();
+    expect(screen.queryByText('memory.settings.disclosureAttachment')).toBeNull();
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(3);
+    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(3);
+  });
+
+  it('renders optional multimodal configuration once IM capture is available', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
@@ -96,6 +119,7 @@ describe('MemorySettingsPanel', () => {
 
     expect(screen.getByText('memory.settings.rerankTitle')).not.toBeNull();
     expect(screen.getByText('memory.settings.multimodalTitle')).not.toBeNull();
+    expect(screen.getByText('memory.settings.disclosureAttachment')).not.toBeNull();
     expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(4);
     expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(4);
   });

@@ -221,13 +221,15 @@ export const MemorySettingsPanel: React.FC<{
       false,
       true,
     );
-    const multimodalPatch = buildEndpointPatch(
-      multimodalDraft,
-      settings.processing.multimodal ?? EMPTY_ENDPOINT,
-      true,
-      false,
-      true,
-    );
+    const multimodalPatch = settings.im_attachment_capture_available === true
+      ? buildEndpointPatch(
+        multimodalDraft,
+        settings.processing.multimodal ?? EMPTY_ENDPOINT,
+        true,
+        false,
+        true,
+      )
+      : null;
     if (llmPatch || embeddingPatch || rerankPatch || multimodalPatch) {
       patch.processing = {};
       if (llmPatch) patch.processing.llm = llmPatch;
@@ -435,18 +437,20 @@ export const MemorySettingsPanel: React.FC<{
         clearKeyLabel={t('memory.settings.rerankClearLabel')}
       />
 
-      <EndpointFields
-        title={t('memory.settings.multimodalTitle')}
-        help={t('memory.settings.multimodalHelp')}
-        helpLabel={t('memory.settings.multimodalHelpLabel')}
-        draft={multimodalDraft}
-        original={settings.processing.multimodal ?? EMPTY_ENDPOINT}
-        onChange={setMultimodalDraft}
-        disabled={busy}
-        identityHint={t('memory.settings.multimodalIdentityHint')}
-        canClearKey
-        clearKeyLabel={t('memory.settings.multimodalClearLabel')}
-      />
+      {settings.im_attachment_capture_available === true ? (
+        <EndpointFields
+          title={t('memory.settings.multimodalTitle')}
+          help={t('memory.settings.multimodalHelp')}
+          helpLabel={t('memory.settings.multimodalHelpLabel')}
+          draft={multimodalDraft}
+          original={settings.processing.multimodal ?? EMPTY_ENDPOINT}
+          onChange={setMultimodalDraft}
+          disabled={busy}
+          identityHint={t('memory.settings.multimodalIdentityHint')}
+          canClearKey
+          clearKeyLabel={t('memory.settings.multimodalClearLabel')}
+        />
+      ) : null}
 
       {error ? (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
@@ -489,6 +493,12 @@ export const MemorySettingsPanel: React.FC<{
               {line}
             </li>
           ))}
+          {settings.im_attachment_capture_available === true ? (
+            <li className="flex gap-2 text-[11.5px] leading-snug text-muted">
+              <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
+              {t('memory.settings.disclosureAttachment')}
+            </li>
+          ) : null}
         </ul>
       </div>
 

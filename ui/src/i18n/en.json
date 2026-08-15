@@ -4442,11 +4442,12 @@
       "disclosure": [
         "When on, your Workbench messages and authorized users' private messages are distilled into memories. Your Agent can also proactively save durable notes without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
         "The local Memory queue keeps raw messages and attachment copies while they wait to process. If a submission needs manual recovery, those copies can remain after processing stops.",
-        "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. When the IM attachment processing endpoint is configured, eligible attachments from bound direct messages are also sent to that provider. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
+        "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
         "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
         "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
+      "disclosureAttachment": "When the IM attachment processing endpoint is configured, eligible attachments from bound direct messages are also sent to that provider.",
       "clearKeyLabel": "Clear the saved key",
       "rebuildRequiredTitle": "Memory index rebuild required",
       "rebuildRequiredDescription": "Your embedding endpoint or model change is saved. The Memory engine can't restart until the rebuild finishes.",

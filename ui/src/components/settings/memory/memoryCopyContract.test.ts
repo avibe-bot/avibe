@@ -37,6 +37,19 @@ describe('Memory UI copy contracts', () => {
     }
   });
 
+  it.each(['en', 'zh'] as const)('keeps staged IM attachment disclosure separate in %s', (language) => {
+    const settings = BUNDLES[language].memory.settings;
+    const baseDisclosure = settings.disclosure.join('\n');
+
+    if (language === 'en') {
+      expect(baseDisclosure).not.toContain('eligible attachments from bound direct messages');
+      expect(settings.disclosureAttachment).toContain('eligible attachments from bound direct messages');
+    } else {
+      expect(baseDisclosure).not.toContain('已绑定私聊中的合规附件');
+      expect(settings.disclosureAttachment).toContain('已绑定私聊中的合规附件');
+    }
+  });
+
   it.each(['en', 'zh'] as const)('discloses proactive non-plain-content capture in %s', (language) => {
     const disclosure = BUNDLES[language].memory.settings.disclosure.join('\n');
 

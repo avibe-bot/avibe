@@ -145,10 +145,11 @@ independent multimodal URL and key; a configured parse may produce a bounded,
 redacted `multimodal_llm` record, while an unconfigured skip produces no provider
 add or call-log row.
 
-Settings exposes an optional Multimodal endpoint card with the same write-only-key
+The settings API carries the optional Multimodal endpoint with the same write-only-key
 and clear semantics as rerank. Either optional endpoint can be cleared while Memory
 remains enabled; required LLM and embedding keys retain the enabled-state clear gate.
-Status continues to project EverOS
+The visible card is gated until the Slack closed-loop slice lands. Status continues
+to project EverOS
 `multimodal_llm`, `parser`, and `disabled_features` and adds a concise attachment
 capture availability line. Configuration remains UI-only; no CLI config flags are
 added.
@@ -233,11 +234,15 @@ running Avibe services, real user paths, or production state.
 1. Contract and scenario catalog, including the stale Workbench-copy and IM
    non-goal corrections in `memory-plugin-system.md`.
 2. Optional multimodal config, child environment, preflight/redaction, UI, and
-   status. IM capture stays gated.
+   status. IM capture stays gated: `IM_ATTACHMENT_CAPTURE_AVAILABLE` remains false,
+   the settings response hides the card, and configured capture cannot report
+   `ready`; absent configuration retains the locked `not_configured` projection.
 3. Shared leased materializer, bounded Telegram/WeChat acquisition, and pin-source
    generalization. IM capture stays gated.
 4. Attachment classification/admission and the Slack closed loop with call-log
-   proof.
+   proof. This slice flips `IM_ATTACHMENT_CAPTURE_AVAILABLE` only after the capture
+   path and its closed-loop evidence land, revealing the endpoint card and enabling
+   health-derived readiness without adding a user-facing toggle.
 5. Discord, Telegram, Feishu/Lark, and WeChat enablement and contract tests, plus
    final user documentation and manual verification matrix.
 

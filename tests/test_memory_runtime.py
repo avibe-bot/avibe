@@ -3632,6 +3632,7 @@ async def test_status_preserves_everos_disabled_recorder_state(
     memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(memory_runtime, "IM_ATTACHMENT_CAPTURE_AVAILABLE", True)
     config = MemoryConfig(
         enabled=True,
         processing=replace(
@@ -3687,6 +3688,7 @@ async def test_attachment_capture_status_rejects_stale_runtime_health(
     memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(memory_runtime, "IM_ATTACHMENT_CAPTURE_AVAILABLE", True)
     config = MemoryConfig(
         enabled=True,
         processing=replace(
@@ -3735,6 +3737,29 @@ async def test_attachment_capture_status_rejects_stale_runtime_health(
     assert stale["source"]["status"] == "stale"
     assert stale["attachment_capture"] == {"status": "unavailable"}
     await memory_runtime_factory.close(runtime)
+
+
+def test_attachment_capture_status_stays_unavailable_until_im_capture_lands() -> None:
+    config = MemoryConfig(
+        enabled=True,
+        processing=replace(
+            _processing_config(),
+            multimodal=MemoryEndpointConfig(
+                "https://vision.example.test/v1",
+                "vision-model",
+                "vision-key",
+            ),
+        ),
+    )
+    health = {
+        "capabilities": {"multimodal_llm": True, "parser": True},
+        "disabled_features": [],
+    }
+
+    assert (
+        memory_runtime._attachment_capture_status(config, "available", health)
+        == "unavailable"
+    )
 
 
 async def test_recorder_reap_hands_call_log_to_host_until_restart(

@@ -115,6 +115,12 @@ def _memory_settings_projection(memory: object) -> dict:
     return payload
 
 
+def _memory_im_attachment_capture_available() -> bool:
+    from core.memory.attachments import IM_ATTACHMENT_CAPTURE_AVAILABLE
+
+    return IM_ATTACHMENT_CAPTURE_AVAILABLE
+
+
 def _memory_repair_available() -> bool:
     from core.memory.artifact import get_memory_artifact_manager
 
@@ -130,6 +136,9 @@ def _memory_settings_payload() -> dict:
     memory = V2Config.load().memory
     payload = _memory_settings_projection(memory)
     payload["status"] = "ok"
+    payload["im_attachment_capture_available"] = (
+        _memory_im_attachment_capture_available()
+    )
     # Read-only projection while a durable rebuild marker is pending.
     payload["rebuild_required"] = memory.recovery_intent == "rebuild"
     payload["factory_reset_required"] = memory.recovery_intent == "factory_reset"
@@ -710,6 +719,9 @@ async def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> d
 
     payload = _memory_settings_projection(memory)
     payload["status"] = "ok"
+    payload["im_attachment_capture_available"] = (
+        _memory_im_attachment_capture_available()
+    )
     payload["rebuild_required"] = getattr(memory, "recovery_intent", None) == "rebuild"
     payload["factory_reset_required"] = getattr(memory, "recovery_intent", None) == "factory_reset"
     payload["repair_available"] = (
