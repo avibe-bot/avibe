@@ -12,10 +12,16 @@ import i18n from '@/i18n';
 import { classifyModelHubFailure, createPendingWrites } from './asyncLifetime';
 import { MANAGE_DESTINATION, type ManageKind } from './manage';
 import { ApiCallError, modelsApi } from './modelsApi';
-import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import type {
+  SourceMutationLanding,
+  SourceMutationLandingReads,
+  SourceMutationSettlement,
+  TrackSourceMutation,
+} from './mutationSettlement';
 import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
 import { SourceDetailPanel } from './SourceDetailPanel';
+import { SourceMutationReport } from './SourceMutationReport';
 import {
   COOLDOWN_DETAIL_KEYS,
   ERROR_DETAIL_KEYS,
@@ -23,6 +29,7 @@ import {
   SOURCE_STATUSES,
 } from './types';
 import type { Source, SourceDetailKey, SourceKind, SupplyChannel } from './types';
+import { useSourceMutationReport } from './useSourceMutationReport';
 
 const source: Source = {
   id: 'src_detail',
@@ -112,15 +119,34 @@ const deferred = <T,>() => {
 
 let sourceSnapshot = 0;
 const beginSourceSnapshot = () => ++sourceSnapshot;
+const mutationLanding = (
+  verdict: SourceMutationLanding['verdict'] = 'landed',
+): SourceMutationLanding => verdict === 'landed'
+  ? { verdict, reads: {} as SourceMutationLandingReads, affectedChains: [] }
+  : { verdict, reads: null, affectedChains: [] };
 const settlement = (overrides: Partial<SourceMutationSettlement> = {}): SourceMutationSettlement => ({
-  source: vi.fn().mockResolvedValue('landed'),
-  gone: vi.fn().mockResolvedValue('landed'),
-  unread: vi.fn().mockResolvedValue('landed'),
+  source: vi.fn().mockResolvedValue(mutationLanding()),
+  gone: vi.fn().mockResolvedValue(mutationLanding()),
+  unread: vi.fn().mockResolvedValue(mutationLanding()),
   release: vi.fn(),
   readInventory: async () => ({ snapshot: beginSourceSnapshot(), sources: await modelsApi.listSources() }),
   ...overrides,
 });
 const immediateTrack: TrackSourceMutation = async (work) => work(source, settlement());
+type ReportOwnedPanelProps = Omit<React.ComponentProps<typeof SourceDetailPanel>, 'onMutationCommitted'>;
+const ReportOwnedPanel: React.FC<ReportOwnedPanelProps> = (props) => {
+  const owner = useSourceMutationReport();
+  return (
+    <>
+      <SourceDetailPanel {...props} onMutationCommitted={owner.present} />
+      <SourceMutationReport
+        report={owner.report}
+        onComplete={() => { void owner.complete(); }}
+        onDismiss={owner.dismiss}
+      />
+    </>
+  );
+};
 type MutationScheduler = <T>(work: () => Promise<T>) => Promise<T>;
 const serializedTrack = (): MutationScheduler => {
   const writes = createPendingWrites(() => {});
@@ -134,12 +160,16 @@ const serializedTrack = (): MutationScheduler => {
 const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <SourceDetailPanel source={{ ...source, adopted_by: adoptedBy }} trackMutation={immediateTrack} onReauth={noReauth} />
+      <ReportOwnedPanel source={{ ...source, adopted_by: adoptedBy }} trackMutation={immediateTrack} onReauth={noReauth} />
     </I18nextProvider>
   </ToastProvider>,
 );
 
-const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; scheduler?: MutationScheduler }> = ({ reconcile = vi.fn(), scheduler = async (work) => work() }) => {
+const EchoPanel: React.FC<{
+  reconcile?: () => Promise<SourceMutationLanding['verdict'] | void> | SourceMutationLanding['verdict'] | void;
+  scheduler?: MutationScheduler;
+}> = ({ reconcile = vi.fn(), scheduler = async (work) => work() }) => {
+  const owner = useSourceMutationReport();
   const [current, setCurrent] = React.useState<Source | null>(source);
   const currentRef = React.useRef<Source | null>(current);
   currentRef.current = current;
@@ -147,14 +177,23 @@ const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; scheduler?: 
     const latest = currentRef.current;
     if (!latest) throw new Error('Source is gone');
     return work(latest, settlement({
-      source: async (echoed) => { currentRef.current = echoed; setCurrent(echoed); await reconcile(); return 'landed'; },
-      gone: async () => { currentRef.current = null; setCurrent(null); await reconcile(); return 'landed'; },
-      unread: async () => { await reconcile(); return 'landed'; },
+      source: async (echoed) => { currentRef.current = echoed; setCurrent(echoed); return mutationLanding((await reconcile()) ?? 'landed'); },
+      gone: async () => { currentRef.current = null; setCurrent(null); return mutationLanding((await reconcile()) ?? 'landed'); },
+      unread: async () => mutationLanding((await reconcile()) ?? 'landed'),
     }));
   });
-  return current
-    ? <SourceDetailPanel source={current} trackMutation={trackMutation} onReauth={noReauth} />
-    : <p data-testid="source-gone">Source gone</p>;
+  return (
+    <>
+      {current
+        ? <SourceDetailPanel source={current} trackMutation={trackMutation} onReauth={noReauth} onMutationCommitted={owner.present} />
+        : <p data-testid="source-gone">Source gone</p>}
+      <SourceMutationReport
+        report={owner.report}
+        onComplete={() => { void owner.complete(); }}
+        onDismiss={owner.dismiss}
+      />
+    </>
+  );
 };
 
 const renderEchoPanel = (reconcile = vi.fn(), scheduler?: MutationScheduler) => render(
@@ -177,7 +216,7 @@ describe('SourceDetailPanel', () => {
     const headingRef = React.createRef<HTMLHeadingElement>();
     render(
       <I18nextProvider i18n={i18n}>
-        <SourceDetailPanel source={source} headingRef={headingRef} trackMutation={immediateTrack} onReauth={noReauth} />
+        <ReportOwnedPanel source={source} headingRef={headingRef} trackMutation={immediateTrack} onReauth={noReauth} />
       </I18nextProvider>,
     );
 
@@ -276,7 +315,7 @@ describe('SourceDetailPanel', () => {
   it('renders the proved protocol through its product-facing locale key', async () => {
     render(
       <I18nextProvider i18n={i18n}>
-        <SourceDetailPanel
+        <ReportOwnedPanel
           source={{ ...source, vendor: 'custom', protocol: 'openai_chat' }}
           trackMutation={immediateTrack}
           onReauth={noReauth}
@@ -635,13 +674,13 @@ describe('SourceDetailPanel', () => {
         });
       }
       const trackMutation: TrackSourceMutation = (work) => work(source, settlement({
-        source: reconcile,
-        gone: reconcile,
+        source: async () => mutationLanding(await reconcile()),
+        gone: async () => mutationLanding(await reconcile()),
       }));
       render(
         <ToastProvider>
           <I18nextProvider i18n={i18n}>
-            <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
+            <ReportOwnedPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
           </I18nextProvider>
         </ToastProvider>,
       );
@@ -684,7 +723,9 @@ describe('SourceDetailPanel', () => {
     let tracked: Promise<unknown> | undefined;
     let trackedSettled = false;
     const trackMutation: TrackSourceMutation = (work) => {
-      const operation = work(source, settlement({ source: reconcile }));
+      const operation = work(source, settlement({
+        source: async () => mutationLanding(await reconcile()),
+      }));
       tracked = operation;
       void operation.then(
         () => { trackedSettled = true; },
@@ -695,7 +736,7 @@ describe('SourceDetailPanel', () => {
     render(
       <ToastProvider>
         <I18nextProvider i18n={i18n}>
-          <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
+          <ReportOwnedPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
         </I18nextProvider>
       </ToastProvider>,
     );
@@ -723,49 +764,28 @@ describe('SourceDetailPanel', () => {
     expect(trackedSettled).toBe(true);
   });
 
-  it('releases tracked work when delete settlement unmounts the impact holder', async () => {
+  it('keeps a deletion report readable after settlement unmounts its Source panel', async () => {
     vi.spyOn(modelsApi, 'deleteSource').mockResolvedValueOnce({
       removed_hops: heldHops,
       interrupted: heldGaps,
     });
-    let tracked: Promise<unknown> | undefined;
-    let trackedSettled = false;
-    let view: ReturnType<typeof render> | null = null;
-    const gone = vi.fn(async () => {
-      view?.unmount();
-      return 'degraded' as const;
-    });
-    const trackMutation: TrackSourceMutation = (work) => {
-      const operation = work(source, settlement({ gone }));
-      tracked = operation;
-      void operation.then(
-        () => { trackedSettled = true; },
-        () => { trackedSettled = true; },
-      );
-      return operation;
-    };
-    view = render(
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} />
-        </I18nextProvider>
-      </ToastProvider>,
-    );
+    const landing = deferred<SourceMutationLanding['verdict']>();
+    renderEchoPanel(() => landing.promise);
 
     await submitManagementWrite('delete', false);
     const impact = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
     const done = within(impact).getAllByRole('button', { name: /^Done$|^完成$/i })
       .find((button) => button.classList.contains('model-hub-guard-action'));
     expect(done).toBeTruthy();
-    expect(trackedSettled).toBe(false);
     await userEvent.click(done!);
 
-    await waitFor(() => expect(gone).toHaveBeenCalledOnce());
-    expect(tracked).toBeDefined();
-    // Completeness comes from the total stage predicate, not from remembering
-    // each UI event that can stop holding the committed-impact stage.
-    await tracked;
-    expect(trackedSettled).toBe(true);
+    expect(await screen.findByTestId('source-gone')).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: /source was removed|来源已移除/i })).toBeTruthy();
+    expect(impact.textContent).toContain(heldHops[0].menu_model);
+    expect(impact.textContent).toContain(heldGaps[0].agents[0]);
+
+    landing.resolve('landed');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /source was removed|来源已移除/i })).toBeNull());
   });
 
   it.each((['edit', 'delete'] as const).flatMap((action) => [
@@ -796,7 +816,7 @@ describe('SourceDetailPanel', () => {
   );
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} trackMutation={immediateTrack} onReauth={noReauth} /></I18nextProvider>);
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
@@ -832,7 +852,7 @@ describe('SourceDetailPanel', () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([reconciled]);
     const applySource = vi.fn().mockResolvedValue(undefined);
     const trackMutation: TrackSourceMutation = (work) => work(source, settlement({ source: applySource }));
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
@@ -915,7 +935,6 @@ describe('SourceDetailPanel', () => {
     expect(jsx).toMatch(/editManageDraft/);
     expect(jsx).toMatch(/cancelManage/);
     expect(jsx).toMatch(/dismissUnresolvedManage/);
-    expect(jsx).toMatch(/completeManageImpact/);
   });
 
   it('keeps Source entities behind one generation authority without an adoption side cache', () => {
@@ -1057,12 +1076,12 @@ describe('SourceDetailPanel', () => {
     const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
     const onMutation = vi.fn().mockResolvedValue(undefined);
     const trackMutation: TrackSourceMutation = (work) => work(source, settlement({ source: onMutation }));
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
 
-    await waitFor(() => expect(onMutation).toHaveBeenCalledWith(expect.objectContaining({ models: [] })));
+    await waitFor(() => expect(onMutation).toHaveBeenCalledWith(expect.objectContaining({ models: [] }), undefined));
     expect(list).toHaveBeenCalledOnce();
     expect(remove).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
@@ -1103,12 +1122,16 @@ describe('SourceDetailPanel', () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
     const onGone = vi.fn().mockResolvedValue(undefined);
     const trackMutation: TrackSourceMutation = (work) => work(source, settlement({ gone: onGone }));
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={source} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
 
-    await waitFor(() => expect(onGone).toHaveBeenCalledWith(source.id, { kind: 'gone', sources: [], snapshot: 1 }));
+    await waitFor(() => expect(onGone).toHaveBeenCalledWith(
+      source.id,
+      { kind: 'gone', sources: [], snapshot: 1 },
+      undefined,
+    ));
     expect(remove).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
   });
@@ -1139,7 +1162,7 @@ describe('SourceDetailPanel', () => {
     for (const shape of shapes) {
       const view = render(
         <I18nextProvider i18n={i18n}>
-          <SourceDetailPanel source={shape} trackMutation={immediateTrack} onReauth={vi.fn()} />
+          <ReportOwnedPanel source={shape} trackMutation={immediateTrack} onReauth={vi.fn()} />
         </I18nextProvider>,
       );
       const action = repairAction(shape);
@@ -1160,7 +1183,7 @@ describe('SourceDetailPanel', () => {
   it('opens key replacement from the revoked hub credential repair tap', async () => {
     render(
       <I18nextProvider i18n={i18n}>
-        <SourceDetailPanel
+        <ReportOwnedPanel
           source={{
             ...source,
             state: {
@@ -1184,7 +1207,7 @@ describe('SourceDetailPanel', () => {
   it('confirms a native re-login with the cost it pays at start before handing the source up', async () => {
     const native = blockedSubscription('native_cli');
     const onReauth = vi.fn();
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={native} trackMutation={immediateTrack} onReauth={onReauth} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={native} trackMutation={immediateTrack} onReauth={onReauth} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /^Sign in$|^重新登录$/i }));
 
@@ -1199,7 +1222,7 @@ describe('SourceDetailPanel', () => {
   });
 
   it('warns a hub re-login about the cost it can pay, not the one it cannot', async () => {
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={blockedSubscription('hub')} trackMutation={immediateTrack} onReauth={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><ReportOwnedPanel source={blockedSubscription('hub')} trackMutation={immediateTrack} onReauth={vi.fn()} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /^Sign in$|^重新登录$/i }));
 

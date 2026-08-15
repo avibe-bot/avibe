@@ -7,8 +7,8 @@ import zh from '../../../i18n/zh.json';
 import {
   assessSourceEdit,
   canEditSourceEndpoint,
-  holdsCommittedImpact,
   manageActions,
+  MANAGE_COMMIT_ACTIONS,
   MANAGE_DESTINATION,
   MANAGE_LABEL_KEY,
   MANAGE_STAGE_CANCEL,
@@ -16,8 +16,8 @@ import {
   MANAGE_STAGE_EDIT_DRAFT,
   MANAGE_STAGE_FAILURE_SURFACE,
   MANAGE_STAGE_KINDS,
-  MANAGE_STAGE_LANDING,
   MANAGE_STAGE_RETRY,
+  MANAGE_STAGE_SETTLED,
   SOURCE_EDIT_REASON_KEY,
   transitionManageStage,
 } from './manage';
@@ -89,7 +89,7 @@ describe('source management capabilities', () => {
       MANAGE_STAGE_RETRY,
       MANAGE_STAGE_EDIT_DRAFT,
       MANAGE_STAGE_DISMISS_UNRESOLVED,
-      MANAGE_STAGE_LANDING,
+      MANAGE_STAGE_SETTLED,
     ]) {
       expect(new Set(Object.keys(record))).toEqual(new Set(MANAGE_STAGE_KINDS));
       for (const kind of MANAGE_STAGE_KINDS) expect(record[kind]).toEqual(expect.any(Function));
@@ -134,24 +134,25 @@ describe('source management capabilities', () => {
     }
   });
 
-  it('earns exit from every committed impact stage from landing evidence', () => {
-    const plan = { hops: [], gaps: [] };
-    const complete = async () => 'landed' as const;
-    const committed = {
-      committed_edit_impact: { kind: 'committed_edit_impact', plan, complete, landingFailed: false },
-      committed_delete_impact: { kind: 'committed_delete_impact', plan, complete, landingFailed: false },
-    } satisfies {
-      [Kind in Extract<ManageStage, { landingFailed: boolean }>['kind']]: Extract<ManageStage, { kind: Kind }>
-    };
+  it('announces settlement only after every committed mutation action', () => {
+    const submitting = {
+      edit: {
+        kind: 'submitting_edit',
+        draft: { displayName: source().display_name, baseUrl: source().base_url ?? '' },
+        patch: { display_name: 'Updated' },
+        plan: null,
+        forced: false,
+        surface: 'edit',
+      },
+      delete: { kind: 'submitting_delete', plan: null, forced: false },
+    } satisfies Record<(typeof MANAGE_COMMIT_ACTIONS)[number], ManageStage>;
 
-    for (const stage of Object.values(committed)) {
-      const degraded = transitionManageStage(stage, { type: 'land', verdict: 'degraded' });
-      expect(degraded.kind).toBe(stage.kind);
-      expect('plan' in degraded && degraded.plan).toBe(plan);
-      expect('landingFailed' in degraded && degraded.landingFailed).toBe(true);
-      expect(transitionManageStage(stage, { type: 'dismiss_unresolved' })).toBe(stage);
-      expect(transitionManageStage(degraded, { type: 'dismiss_unresolved' })).toEqual({ kind: 'idle' });
-      expect(transitionManageStage(degraded, { type: 'land', verdict: 'landed' })).toEqual({ kind: 'idle' });
+    expect(new Set(Object.keys(submitting))).toEqual(new Set(MANAGE_COMMIT_ACTIONS));
+    for (const action of MANAGE_COMMIT_ACTIONS) {
+      expect(transitionManageStage(submitting[action], { type: 'settled' })).toBe(submitting[action]);
+      const committed = transitionManageStage(submitting[action], { type: 'commit', action });
+      expect(committed.kind).toBe(`committed_${action}`);
+      expect(transitionManageStage(committed, { type: 'settled' })).toEqual({ kind: 'idle' });
     }
   });
 
@@ -160,7 +161,6 @@ describe('source management capabilities', () => {
     const draft = { displayName: before.display_name, baseUrl: before.base_url ?? '' };
     const patch = { display_name: before.display_name };
     const plan = { hops: [], gaps: [] };
-    const complete = async () => 'landed' as const;
     const stages = {
       idle: { kind: 'idle' },
       editing: { kind: 'editing', draft },
@@ -170,19 +170,19 @@ describe('source management capabilities', () => {
       confirming_delete: { kind: 'confirming_delete', plan },
       submitting_delete: { kind: 'submitting_delete', plan, forced: true },
       delete_failed: { kind: 'delete_failed', plan, forced: true, retryRead: true, before },
-      committed_edit_impact: { kind: 'committed_edit_impact', plan, complete, landingFailed: true },
-      committed_delete_impact: { kind: 'committed_delete_impact', plan, complete, landingFailed: true },
+      committed_edit: { kind: 'committed_edit' },
+      committed_delete: { kind: 'committed_delete' },
     } satisfies { [Kind in ManageStage['kind']]: Extract<ManageStage, { kind: Kind }> };
     const exitEvents = [
       { type: 'cancel' },
       { type: 'dismiss_unresolved' },
       { type: 'settled' },
-      { type: 'land', verdict: 'landed' },
+      { type: 'commit', action: 'edit' },
+      { type: 'commit', action: 'delete' },
     ] as const;
 
     expect(new Set(Object.keys(stages))).toEqual(new Set(MANAGE_STAGE_KINDS));
     for (const stage of Object.values(stages)) {
-      expect(holdsCommittedImpact(stage), `${stage.kind}:holds committed impact`).toBe('complete' in stage);
       if (stage.kind === 'idle') continue;
       expect(
         exitEvents.some((event) => transitionManageStage(stage, event).kind !== stage.kind),

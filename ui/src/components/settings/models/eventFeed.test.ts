@@ -201,6 +201,7 @@ describe('feedAfterTailRead — 加载更早, and the first page at mount', () =
 describe('the page reads the feed through this owner', () => {
   const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
   const firstPaint = readFileSync(join(__dirname, 'firstPaintRegions.ts'), 'utf8');
+  const mutationSettlement = readFileSync(join(__dirname, 'mutationSettlement.ts'), 'utf8');
 
   it('re-reads events in the shared post-write refresh', () => {
     // The whole point: the refresh every mutation site already calls is what has
@@ -213,7 +214,10 @@ describe('the page reads the feed through this owner', () => {
 
   it('lets the ancillary feed read fail without losing the rows', () => {
     // A slow or broken /events must not enter the operational first-paint barrier.
-    const landing = page.slice(page.indexOf('const readSurfaceLanding'), page.indexOf('\n\nconst surfaceLandingFailed'));
+    const landing = mutationSettlement.slice(
+      mutationSettlement.indexOf('export const readSurfaceLanding'),
+      mutationSettlement.indexOf('\n\nexport type SourceMutationLanding ='),
+    );
     expect(landing).not.toMatch(/listEvents|events/);
     expect(page).toMatch(/createLatestAsyncAuthority<RegionRead<ResolutionEvent\[\]>>/);
     expect(page).toMatch(/createLatestAsyncAuthority<AuthorizedSurfaceLanding>/);

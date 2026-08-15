@@ -8,7 +8,12 @@ import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
-import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
+import type {
+  SourceMutationLanding,
+  SourceMutationLandingReads,
+  SourceMutationSettlement,
+  TrackSourceMutation,
+} from './mutationSettlement';
 import {
   CONTRACT_VERSION,
   SOURCE_DISPLAY_NAME_MAX_LENGTH,
@@ -79,9 +84,21 @@ const renderDialog = (onClose = vi.fn(), onAdded = vi.fn()) => {
 const replacementSettlement = (
   overrides: Partial<SourceMutationSettlement> = {},
 ): SourceMutationSettlement => ({
-  source: vi.fn().mockResolvedValue('landed'),
-  gone: vi.fn().mockResolvedValue('landed'),
-  unread: vi.fn().mockResolvedValue('landed'),
+  source: vi.fn().mockResolvedValue({
+    verdict: 'landed',
+    reads: {} as SourceMutationLandingReads,
+    affectedChains: [],
+  } satisfies SourceMutationLanding),
+  gone: vi.fn().mockResolvedValue({
+    verdict: 'landed',
+    reads: {} as SourceMutationLandingReads,
+    affectedChains: [],
+  } satisfies SourceMutationLanding),
+  unread: vi.fn().mockResolvedValue({
+    verdict: 'landed',
+    reads: {} as SourceMutationLandingReads,
+    affectedChains: [],
+  } satisfies SourceMutationLanding),
   release: vi.fn(),
   readInventory: vi.fn().mockResolvedValue({ snapshot: 1, sources: [blockedSource] }),
   ...overrides,

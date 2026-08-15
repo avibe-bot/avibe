@@ -18,6 +18,7 @@ import { RecentSwitchesCard } from './RecentSwitchesCard';
 import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport } from './RouteChainDialog';
 import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
+import { SourceMutationReport } from './SourceMutationReport';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
@@ -31,13 +32,19 @@ import {
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
-import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority, type CollectionReadAuthority } from './collectionReadAuthority';
+import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
-import { readFirstPaintRegions, type SurfaceLanding } from './firstPaintRegions';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
-import type { SourceMutationLanding, SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
-import { modelChainKey, modelChainRequests, type ModelChainIndex } from './modelRows';
+import {
+  readSurfaceLanding,
+  sourceMutationLanding,
+  type SourceMutationLanding,
+  type SourceMutationLandingReads,
+  type SourceMutationSettlement,
+  type TrackSourceMutation,
+} from './mutationSettlement';
+import { modelChainKey, modelChainRequests, type ModelChainIndex, type ModelChainRequest } from './modelRows';
 import {
   beginRegionRead,
   failRegionRead,
@@ -45,13 +52,13 @@ import {
   degradedRegion,
   loadingRegion,
   readyRegion,
-  regionFailed,
   settleRegionRead,
   unreadRegion,
   type RegionRead,
 } from './regionRead';
 import { freshRuntimeProjection, pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
+import { useSourceMutationReport } from './useSourceMutationReport';
 import { backendVisual } from './vendorMeta';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
@@ -63,9 +70,9 @@ const SUBSCRIPTION_PICKER_OPTIONS = [
 ] as const;
 type SubscriptionPickerVendor = (typeof SUBSCRIPTION_PICKER_OPTIONS)[number]['vendor'];
 
-const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> => Object.fromEntries(
+const readChainRequests = async (requests: readonly ModelChainRequest[]): Promise<ModelChainIndex> => Object.fromEntries(
   await mapWithConcurrency(
-    modelChainRequests([agent]),
+    requests,
     CHAIN_READ_CONCURRENCY,
     async ({ backend, modelId }) => {
       const key = modelChainKey(backend, modelId);
@@ -77,6 +84,9 @@ const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> => 
     },
   ),
 );
+
+const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> =>
+  readChainRequests(modelChainRequests([agent]));
 
 const readExactAgentChain = async (
   agent: AgentSupply,
@@ -124,22 +134,14 @@ const beginAgentChainIndex = (
   return next;
 };
 
+type ChainAuthorityLanding =
+  | { scope: 'backend'; agent: AgentSupply; chains: ModelChainIndex }
+  | { scope: 'models'; chains: ModelChainIndex };
+
 type AuthorizedSurfaceLanding = {
-  landing: SurfaceLanding;
+  landing: SourceMutationLandingReads;
   sourceSnapshot: number;
 };
-
-const readSurfaceLanding = (
-  sourceReads: CollectionReadAuthority<Source[]>,
-  agentReads: CollectionReadAuthority<AgentSupply[]>,
-): Promise<SurfaceLanding> => readFirstPaintRegions({
-  sources: sourceReads.readValue,
-  supply: agentReads.readValue,
-  runtime: () => modelsApi.getRuntimeStatus(),
-});
-
-const surfaceLandingFailed = (landing: SurfaceLanding): boolean =>
-  Object.values(landing).some(regionFailed);
 
 export const RuntimePill: React.FC<{
   read: RegionRead<RuntimeDependency>;
@@ -339,6 +341,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [sourceIntentAuthority] = React.useState(createIntentAuthority);
   const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
   const [agentCollectionReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
+  const sourceMutationReport = useSourceMutationReport();
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const pageRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
@@ -403,7 +406,7 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }, [runtimeHealth, runtimeRead.kind, runtimeRecoveryPending, startingRuntime]);
 
-  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, { agent: AgentSupply; chains: ModelChainIndex; scope: 'backend' | 'model' }>((_backend, incoming) => {
+  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, ChainAuthorityLanding>((_backend, incoming) => {
     if (!aliveRef.current) return;
     setChainsRead((previous) => {
       const current = foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
@@ -430,6 +433,31 @@ export const SettingsModelsPage: React.FC = () => {
       chains: await readAgentChains(agent),
       scope: 'backend' as const,
     }));
+  }, [chainReadAuthority]);
+
+  const refreshAffectedChains = React.useCallback(async (
+    requests: readonly ModelChainRequest[],
+  ): Promise<ModelChainIndex> => {
+    const byBackend = new Map<AgentBackend, ModelChainRequest[]>();
+    for (const request of requests) {
+      const backendRequests = byBackend.get(request.backend) ?? [];
+      backendRequests.push(request);
+      byBackend.set(request.backend, backendRequests);
+    }
+    const landings = await Promise.all([...byBackend].map(async ([backend, backendRequests]) => {
+      let incoming: ModelChainIndex = {};
+      const result = await chainReadAuthority.run(backend, async () => {
+        incoming = await readChainRequests(backendRequests);
+        return { scope: 'models' as const, chains: incoming };
+      });
+      return result === 'landed'
+        ? incoming
+        : Object.fromEntries(backendRequests.map(({ backend: requestBackend, modelId }) => [
+            modelChainKey(requestBackend, modelId),
+            unreadRegion(),
+          ]));
+    }));
+    return Object.assign({}, ...landings);
   }, [chainReadAuthority]);
 
   const refreshAllAgentChains = React.useCallback((agentRows: AgentSupply[]) => {
@@ -519,25 +547,31 @@ export const SettingsModelsPage: React.FC = () => {
     if (landing.supply.kind !== 'ready') setChainsRead(failRegionRead);
   }));
 
-  const refresh = React.useCallback(async (): Promise<SourceMutationLanding> => {
+  const refresh = React.useCallback(async (
+    affectedChains: ModelChainRequest[] = [],
+  ): Promise<SourceMutationLanding> => {
     void refreshEventHead();
-    const outcome: { landing: SurfaceLanding | null } = { landing: null };
+    const outcome: { landing: SourceMutationLandingReads | null } = { landing: null };
     const result = await refreshAuthority.run(async () => {
       const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
-      outcome.landing = await readSurfaceLanding(sourceCollectionReads, agentCollectionReads);
+      outcome.landing = await readSurfaceLanding({
+        sources: sourceCollectionReads.readValue,
+        supply: agentCollectionReads.readValue,
+        runtime: () => modelsApi.getRuntimeStatus(),
+        chains: refreshAffectedChains,
+      }, affectedChains);
       return { landing: outcome.landing, sourceSnapshot };
     });
-    const failed = Boolean(aliveRef.current
-      && result === 'landed'
-      && outcome.landing
-      && surfaceLandingFailed(outcome.landing));
-    if (failed) {
+    const landing = sourceMutationLanding(
+      outcome.landing,
+      affectedChains,
+      aliveRef.current && result === 'landed',
+    );
+    if (aliveRef.current && result === 'landed' && landing.verdict === 'degraded') {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
-    return aliveRef.current && result === 'landed' && outcome.landing && !failed
-      ? 'landed'
-      : 'degraded';
-  }, [agentCollectionReads, refreshAuthority, refreshEventHead, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
+    return landing;
+  }, [agentCollectionReads, refreshAffectedChains, refreshAuthority, refreshEventHead, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
 
   const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
     let result!: T;
@@ -546,16 +580,22 @@ export const SettingsModelsPage: React.FC = () => {
       if (!current) throw new Error(`Source ${sourceId} is no longer available`);
       const generation = sourceEntityAuthority.begin(sourceId);
       let settled = false;
-      const finish = async (apply: () => void, reconcile = true): Promise<SourceMutationLanding> => {
+      const finish = async (
+        apply: () => void,
+        affectedChains: ModelChainRequest[] = [],
+      ): Promise<SourceMutationLanding> => {
         if (!settled) {
           settled = true;
           apply();
         }
-        return reconcile ? refresh() : 'landed';
+        return refresh(affectedChains);
       };
       const settlement: SourceMutationSettlement = {
-        source: async (echoed) => finish(() => { sourceEntityAuthority.settle(generation, echoed); }),
-        gone: async (goneId, inventory) => finish(() => {
+        source: async (echoed, scope) => finish(
+          () => { sourceEntityAuthority.settle(generation, echoed); },
+          scope?.affectedChains,
+        ),
+        gone: async (goneId, inventory, scope) => finish(() => {
           if (inventory) {
             sourceEntityAuthority.settleSnapshotEntries(
               inventory.snapshot,
@@ -563,9 +603,16 @@ export const SettingsModelsPage: React.FC = () => {
             );
           }
           if (goneId === sourceId) sourceEntityAuthority.settleRemoval(generation);
-        }),
-        unread: async () => finish(() => { sourceEntityAuthority.abandon(generation); }),
-        release: () => { void finish(() => { sourceEntityAuthority.abandon(generation); }, false); },
+        }, scope?.affectedChains),
+        unread: async (scope) => finish(
+          () => { sourceEntityAuthority.abandon(generation); },
+          scope?.affectedChains,
+        ),
+        release: () => {
+          if (settled) return;
+          settled = true;
+          sourceEntityAuthority.abandon(generation);
+        },
         readInventory: async () => {
           const snapshot = sourceEntityAuthority.beginSnapshot();
           return { snapshot, sources: await sourceCollectionReads.readValue() };
@@ -811,9 +858,8 @@ export const SettingsModelsPage: React.FC = () => {
       void (async () => {
         try {
           await chainReadAuthority.run(held.backend, async () => ({
-            agent: freshAgent,
             chains: await readExactAgentChain(freshAgent, held.modelId),
-            scope: 'model' as const,
+            scope: 'models' as const,
           }));
           if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
         } catch {
@@ -968,7 +1014,13 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} headingRef={sourceDetailHeadingRef} trackMutation={trackSourceMutation(selectedSource.id)} onReauth={setReauthSource} />
+            ? <SourceDetailPanel
+                source={selectedSource}
+                headingRef={sourceDetailHeadingRef}
+                trackMutation={trackSourceMutation(selectedSource.id)}
+                onReauth={setReauthSource}
+                onMutationCommitted={sourceMutationReport.present}
+              />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">
@@ -1071,6 +1123,11 @@ export const SettingsModelsPage: React.FC = () => {
                     <AdvancedRow />
                   </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
                 </div>}
+      <SourceMutationReport
+        report={sourceMutationReport.report}
+        onComplete={() => { void sourceMutationReport.complete(); }}
+        onDismiss={sourceMutationReport.dismiss}
+      />
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
       {subscriptionVendor && (
         <OAuthConnectDialog
