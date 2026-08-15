@@ -3358,7 +3358,7 @@ def test_claimed_attachment_downgrade_is_atomic_and_lease_fenced(
     assert stale is not None
 
     assert (
-        store._downgrade_claimed_attachment_to_text(
+        store.downgrade_claimed_attachment_to_text(
             stale,
             lease_owner="wrong-worker",
             now=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
@@ -3373,7 +3373,7 @@ def test_claimed_attachment_downgrade_is_atomic_and_lease_fenced(
     assert current is not None
     assert current.lease_token == stale.lease_token + 1
     assert (
-        store._downgrade_claimed_attachment_to_text(
+        store.downgrade_claimed_attachment_to_text(
             stale,
             lease_owner="second-worker",
             now=datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC),
@@ -3382,7 +3382,7 @@ def test_claimed_attachment_downgrade_is_atomic_and_lease_fenced(
     )
 
     assert (
-        store._downgrade_claimed_attachment_to_text(
+        store.downgrade_claimed_attachment_to_text(
             current,
             lease_owner="second-worker",
             now=datetime(2026, 1, 1, 0, 0, 4, tzinfo=UTC),
@@ -3417,7 +3417,7 @@ def test_claimed_attachment_downgrade_is_atomic_and_lease_fenced(
         frozenset({bundle.bundle_id}),
     )
     assert (
-        store._downgrade_claimed_attachment_to_text(
+        store.downgrade_claimed_attachment_to_text(
             current,
             lease_owner="second-worker",
             now=datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC),
@@ -3450,7 +3450,7 @@ def test_claimed_attachment_downgrade_rolls_back_caption_and_bundle_together(
         )
 
     with pytest.raises(sqlite3.IntegrityError, match="forced release failure"):
-        store._downgrade_claimed_attachment_to_text(
+        store.downgrade_claimed_attachment_to_text(
             claimed,
             lease_owner="worker",
             now=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
@@ -3560,6 +3560,217 @@ async def test_attachment_preflight_failure_retries_caption_as_text_only(
     assert provider.captures[0].text == "remember the attachment"
     assert provider.captures[0].attachments == ()
     assert releases == [bundle.bundle_id]
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["UNSUPPORTED_FORMAT", "CAPABILITY_UNAVAILABLE"],
+)
+async def test_attachment_provider_rejection_retries_caption_as_text_only(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-011."""
+
+    store = _store(tmp_path)
+    attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source=f"provider-{error_code.lower()}-text-downgrade",
+    )
+    provider = FakeMemoryProvider()
+    provider.add_results.extend(
+        (
+            AddRejected(
+                request_id="attachment-rejected",
+                error_code=error_code,
+                server_fault=error_code == "CAPABILITY_UNAVAILABLE",
+            ),
+            AddAck(request_id="text-accepted", status="accumulated"),
+        )
+    )
+    releases: list[str] = []
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+        release_attachment=releases.append,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    downgraded = store.get_queue_row(original.source_message_digest)
+    assert downgraded is not None
+    assert (
+        downgraded.state,
+        downgraded.attempts,
+        downgraded.payload_text,
+        downgraded.payload_attachments,
+        downgraded.attachment_bundle_id,
+    ) == ("pending", 0, "remember the attachment", None, None)
+    assert releases == [bundle.bundle_id]
+    assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+    assert not pinned_path.exists()
+    assert len(provider.captures) == 1
+    assert provider.captures[0].attachments
+
+    retry = store.claim_due(
+        lease_owner="retry-worker",
+        now="2026-01-01T00:00:01.000Z",
+    )
+    assert retry is not None
+    assert await coordinator.deliver(retry, lease_owner="retry-worker")
+    assert len(provider.captures) == 2
+    assert provider.captures[1].text == "remember the attachment"
+    assert provider.captures[1].attachments == ()
+    assert releases == [bundle.bundle_id]
+
+
+async def test_captionless_provider_rejection_falls_back_to_terminal_settlement(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle, _pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source="captionless-provider-rejection",
+        payload_text="",
+    )
+    provider = FakeMemoryProvider()
+    provider.add_results.append(
+        AddRejected(
+            request_id="unsupported-attachment",
+            error_code="UNSUPPORTED_FORMAT",
+            server_fault=False,
+        )
+    )
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    settled = store.get_queue_row(original.source_message_digest)
+    assert settled is not None
+    assert (settled.state, settled.attempts) == ("dead", 1)
+    assert provider.captures[0].attachments
+    assert not any(capture.attachments == () for capture in provider.captures)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_state", "expected_attempts"),
+    [
+        pytest.param(asyncio.TimeoutError(), "manual_required", 0, id="timeout"),
+        pytest.param(
+            MemoryProviderSystemFailure(),
+            "pending",
+            0,
+            id="transport",
+        ),
+        pytest.param(
+            RuntimeError("unknown provider failure"),
+            "manual_required",
+            0,
+            id="unknown",
+        ),
+        *(
+            pytest.param(
+                AddRejected(
+                    request_id=f"rejected-{error_code.lower()}",
+                    error_code=error_code,
+                    server_fault=False,
+                ),
+                "dead",
+                1,
+                id=f"4xx-{error_code.lower()}",
+            )
+            for error_code in (
+                "BAD_REQUEST",
+                "NOT_FOUND",
+                "CONFLICT",
+                "INVALID_INPUT",
+                "EXTRACTION_EMPTY",
+                "PROVIDER_NOT_CONFIGURED",
+                "FUTURE_REJECTION",
+            )
+        ),
+    ],
+)
+async def test_unproven_provider_failure_never_replays_caption_without_attachment(
+    tmp_path: Path,
+    outcome: BaseException | AddRejected,
+    expected_state: str,
+    expected_attempts: int,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source=f"provider-no-downgrade-{type(outcome).__name__}-{expected_state}",
+    )
+
+    class Provider(FakeMemoryProvider):
+        calls = 0
+
+        async def add(self, capture):
+            self.calls += 1
+            self.captures.append(capture)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    provider = Provider()
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    settled = store.get_queue_row(original.source_message_digest)
+    assert settled is not None
+    assert (settled.state, settled.attempts) == (expected_state, expected_attempts)
+    assert provider.calls == 1
+    assert len(provider.captures) == 1
+    assert provider.captures[0].attachments
+    assert not any(capture.attachments == () for capture in provider.captures)
+    if expected_state == "dead":
+        assert (settled.payload_text, settled.payload_attachments) == (None, None)
+        assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+        assert not pinned_path.exists()
+    else:
+        assert settled.payload_text == "remember the attachment"
+        assert settled.payload_attachments == original.payload_attachments
+        assert settled.attachment_bundle_id == bundle.bundle_id
+        assert store.attachment_bundle_sets() == (
+            frozenset({bundle.bundle_id}),
+            frozenset(),
+        )
+        assert pinned_path.exists()
 
 
 @pytest.mark.parametrize(

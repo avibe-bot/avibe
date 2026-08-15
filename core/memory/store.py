@@ -1602,7 +1602,7 @@ class MemoryStore:
             ).fetchone()
         return current is not None
 
-    def _downgrade_claimed_attachment_to_text(
+    def downgrade_claimed_attachment_to_text(
         self,
         row: QueueRow,
         *,
