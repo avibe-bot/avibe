@@ -436,6 +436,8 @@ for one-shot session creation. `vibe watch remove` hides the watch from manageme
 views while preserving existing run history in SQLite. Prefer `vibe watch`
 over ad-hoc `nohup` jobs when the
 user wants a managed background task with a guaranteed follow-up message.
+`--timeout` defaults to 21600 seconds; an explicit `--timeout 0` disables the
+per-cycle timeout, while any positive value is persisted unchanged.
 
 ### `vibe version`
 

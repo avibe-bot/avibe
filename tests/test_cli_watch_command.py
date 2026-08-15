@@ -101,6 +101,7 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
+    normalized_help = " ".join(captured.out.split())
     assert "Pass either --shell '<command>' or a command after '--'." in captured.out
     assert "--lifetime-timeout" in captured.out
     assert "vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.'" in captured.out
@@ -114,6 +115,7 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "a once Watch ends and a forever Watch re-arms" in captured.out
     assert "A once waiter that is still waiting must use a retry exit code" in captured.out
     assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
+    assert "Use 0 for no per-cycle timeout" in normalized_help
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
     assert "--post-to" not in captured.out
@@ -800,6 +802,59 @@ def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -
     assert payload["definition"]["mode"] == "forever"
     assert payload["definition"]["command"] == ["python3", "scripts/wait.py", "--build", "42"]
     assert payload["definition"]["retry_exit_codes"] == [1, 75]
+
+
+@pytest.mark.parametrize(
+    ("timeout_args", "expected_timeout"),
+    [
+        pytest.param([], 21600, id="omitted-default"),
+        pytest.param(["--timeout", "0"], 0, id="explicit-unlimited"),
+        pytest.param(["--timeout", "90.5"], 90.5, id="positive"),
+    ],
+)
+def test_watch_add_timeout_round_trips_through_persisted_read(
+    tmp_path: Path,
+    capsys,
+    timeout_args: list[str],
+    expected_timeout: float,
+) -> None:
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    args = _parse_watch_add(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            *timeout_args,
+            "--shell",
+            "exit 75",
+        ]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch(
+            "vibe.cli._wait_for_watch_startup",
+            side_effect=lambda *args, **kwargs: _startup_ok(
+                store, runtime_store, args[2]
+            ),
+        ),
+    ):
+        assert cli.cmd_watch_add(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    watch_id = payload["definition"]["id"]
+    reloaded_store = ManagedWatchStore()
+    try:
+        reloaded = reloaded_store.get_watch(watch_id)
+        assert reloaded is not None
+        assert reloaded.timeout_seconds == expected_timeout
+    finally:
+        if store.sqlite_backend is not None:
+            store.sqlite_backend.close()
+        if reloaded_store.sqlite_backend is not None:
+            reloaded_store.sqlite_backend.close()
 
 
 def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
