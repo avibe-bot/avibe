@@ -538,13 +538,25 @@ const LENGTH = /^[+-]?(\d+(\.\d+)?|\.\d+)(px|rem|em|ch|vw|vh)?$/;
 // scan read only `shadow-[...]`, which repeated one level up the mistake the
 // colour test above was written to stop: it enumerated its own input, so a
 // `[box-shadow:...]` written the next day would have walked straight past the
-// assertion meant to catch it. Unlike colour syntax this list can genuinely be
+// assertion meant to catch it. The fix then claimed this list "can genuinely be
 // closed -- a shadow is a Tailwind arbitrary value, a Tailwind arbitrary
-// property, a CSS declaration or an inline style object, and the stack offers
-// no fifth way to write one. But "can be closed" is a claim, so it is measured
-// rather than believed: SHADOW_MENTION below finds every place the word appears
-// and each one must fall inside a channel, which turns a spelling this file has
-// never seen into a loud failure instead of a silent gap.
+// property, a CSS declaration or an inline style object, and the stack offers no
+// fifth way to write one", and pointed at SHADOW_MENTION as the measurement that
+// kept the claim honest.
+//
+// `filter: drop-shadow(0 0 4px …)` was the fifth way, and it did not merely slip
+// the channels -- it slipped the measurement too, silently, because the mention
+// regex was written by listing the same spellings the channels already read. A
+// completeness check assembled from the list it is policing cannot discover that
+// the list is short; it can only confirm the entries it was handed. That is why
+// three hand-drawn wire glows sat in modelHubSurface.css through five rounds of
+// this guard reporting all-clear.
+//
+// So the claim is retired rather than re-made: this list is NOT closed by
+// argument, and no amount of thinking about the stack will close it. It is held
+// closed from the outside by SHADOW_MENTION, which now derives from the word
+// itself instead of from these entries, so the next spelling nobody here has
+// imagined arrives as a loud failure the day it lands.
 const SHADOW_CHANNELS = [
   // `shadow-[0_0_16px_-4px_var(--x)]`, including variants such as `hover:shadow-[…]`.
   { pattern: /shadow-\[([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
@@ -558,24 +570,121 @@ const SHADOW_CHANNELS = [
   // contains one, so the quotes cost nothing to stop at and stop the closing one
   // from being read as part of the colour.
   { pattern: /(?<!\[)box-shadow\s*:([^;}'"`]*)/g, valuesOf: (match) => [match[1]] },
+  // `filter: drop-shadow(0 0 4px …)`. Matched at the FUNCTION rather than at the
+  // property, because the property is not the thing there is only one of: a drop
+  // shadow can arrive through `filter`, `-webkit-filter`, `backdrop-filter`, a
+  // Tailwind arbitrary property or an inline style object, and reading it at
+  // `drop-shadow(` covers all of them at once instead of collecting five more
+  // entries here that would then need a sixth. The argument list is taken by
+  // balancing parentheses because a shadow colour is routinely a `color-mix(…)`
+  // and a `[^)]*` would stop inside it.
+  {
+    pattern: /drop-shadow\(/gi,
+    valuesOf: (match) => [balancedArgument(match.input, match.index + match[0].length - 1)],
+  },
   // `style={{ boxShadow: … }}` and `el.style.boxShadow = …`. What follows is an
   // expression rather than a value, so read the string literals out of it: a
-  // ternary's two branches are two shadows and both of them render.
+  // ternary's two branches are two shadows and both of them render. Any
+  // camelCase identifier carrying `shadow` is read, not `boxShadow` alone --
+  // `textShadow` and `dropShadow` are the same channel, and enumerating them one
+  // by one is how this list fell short the first time. The hyphen in the
+  // lookbehind keeps CSS's `box-shadow` with the declaration channel above.
   {
-    pattern: /boxShadow\s*[:=]([^;\n]*)/g,
+    pattern: /(?<![\w-])[A-Za-z]*[Ss]hadow[A-Za-z]*\s*[:=]([^;\n]*)/g,
     valuesOf: (match) => [...match[1].matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`/g)]
       .map(([, single, double, template]) => single ?? double ?? template),
+    // A CSS shadow is a string, so a bare non-string literal is provably not
+    // one: `scrollbar: { useShadows: false }` is a Monaco flag, not a shadow.
+    // This is deliberately narrower than "no string literal here" -- that is the
+    // `boxShadow: glow` case, where an identifier could hold anything and the
+    // value stays unreadable rather than becoming innocent.
+    provablyNotAShadow: (match) => NON_STRING_LITERAL.test(match[1]),
   },
 ];
 
+// The parenthesis-balanced span starting at `openIndex`, or null when it never
+// closes -- null is not a quiet skip, it lands in the unreadable bucket.
+function balancedArgument(source, openIndex) {
+  let depth = 0;
+  for (let index = openIndex; index < source.length; index += 1) {
+    if (source[index] === '(') depth += 1;
+    else if (source[index] === ')' && (depth -= 1) === 0) return source.slice(openIndex + 1, index);
+  }
+  return null;
+}
+
+// The whole expression is one non-string literal. Anchored on where the literal
+// ENDS rather than on the punctuation trailing it: written as "the rest of the
+// capture is closing syntax" it turned on how the surrounding JSX happened to be
+// spelled, and it has to close the value instead, so that `false || glow` -- a
+// literal followed by something that could hold anything -- stays unreadable.
+const NON_STRING_LITERAL = /^\s*(true|false|null|undefined|[+-]?\d+(\.\d+)?)\s*($|[,;}\])])/;
+
+// A CSS comment renders nothing, so a shadow spelled inside one is prose ABOUT a
+// glow, not a glow. Blanking comment bodies -- preserving length and line breaks
+// so every offset and line number below still points where it did -- lets a
+// stylesheet explain itself in the vocabulary it is explaining. index.css earns
+// this immediately: the note on the `wire` role has to name `drop-shadow(…)` to
+// say why the sized roles cannot be spelled into one.
+//
+// Widening the scan is what made this necessary and it is worth being clear that
+// it is not a hole. A commented-out declaration does not reach the page, so
+// nothing can be smuggled through here that could have drawn light. The quote
+// tracking is the part that matters: `/*` inside a string starts no comment, and
+// blanking from one would hide the real declarations after it.
+function blankCssComments(source) {
+  let out = '';
+  let quote = null;
+  let index = 0;
+  while (index < source.length) {
+    const char = source[index];
+    if (quote) {
+      if (char === '\\') { out += source.slice(index, index + 2); index += 2; continue; }
+      if (char === quote) quote = null;
+      out += char;
+      index += 1;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+      out += char;
+      index += 1;
+    } else if (char === '/' && source[index + 1] === '*') {
+      const closed = source.indexOf('*/', index + 2);
+      const stop = closed === -1 ? source.length : closed + 2;
+      out += source.slice(index, stop).replace(/[^\n]/g, ' ');
+      index = stop;
+    } else {
+      out += char;
+      index += 1;
+    }
+  }
+  return out;
+}
+
 // A glow is a *value*, and there are only so many ways to introduce one: a `:`
-// in a declaration or an object literal, an `=` in an assignment, and Tailwind's
-// `shadow-[`. Naming the property without carrying a value cannot hide a glow --
-// `transition-[background-color,box-shadow]`, `will-change: box-shadow`, a
-// sentence in a comment -- so those are not mentions. What the measurement then
-// pins is exactly what failed before: every place a shadow value is INTRODUCED
-// is also a place it is READ.
-const SHADOW_MENTION = /shadow-\[|box-shadow\s*:|boxShadow\s*[:=]/g;
+// in a declaration or an object literal, an `=` in an assignment, a `(` opening
+// a filter function, and Tailwind's `shadow-[`. Naming the property without
+// carrying a value cannot hide a glow -- `transition-[background-color,
+// box-shadow]`, `will-change: box-shadow`, a sentence in a comment -- so those
+// are not mentions. What the measurement pins is exactly what failed before:
+// every place a shadow value is INTRODUCED is also a place it is READ.
+//
+// The name is matched as ANY identifier containing the word, not as the three
+// spellings the channels happen to read. That difference is the entire value of
+// this line. Written the old way it listed `shadow-[`, `box-shadow:` and
+// `boxShadow`, which is to say it asked the channels what to look for and then
+// confirmed they were looking for it -- so `filter: drop-shadow(…)` was not
+// reported as an unscanned spelling, it was not reported at all, and the guard
+// that exists to make a missing channel loud stayed silent about the one channel
+// it was missing. Derived from the word instead, the check can fail in the
+// direction that matters: it does not need to know what a shadow may be called
+// tomorrow to notice that something called one went unread.
+//
+// Custom-property DECLARATIONS are excluded, and only they. `--x-shadow: 0 0 …`
+// is the token layer -- the one sanctioned home for a shadow literal -- and it
+// is not skipped so much as reached from the other end: call sites resolve their
+// names into it, so a glow parked in a token is caught when something uses it,
+// and a token nothing uses draws no light on any page.
+const SHADOW_MENTION = /(?<![\w-])(?!--)[A-Za-z-]*shadow[A-Za-z]*(?:\s*[:=]|\(|-\[)/gi;
 
 // Every custom property declared anywhere in the scanned stylesheets, name to
 // the set of values it is given. A name is collected once per distinct value
@@ -603,6 +712,27 @@ const VAR_REFERENCE = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([\s\S]*))?\)$/;
 const MATH_FUNCTION = /\b(calc|min|max|clamp)\s*\(/;
 const INDIRECT = /\bvar\s*\(/;
 const MAX_INDIRECTION = 8;
+
+// What a colour LOOKS like, which is a different question from what a blur does
+// not look like -- and the difference is the sixth round of this file. The blur
+// slot used to be tested by elimination: not a length, not a `var()`, therefore
+// harmless. `0 0 ${blur}px red` is neither of those two things and is also a
+// glow, so it walked out through the bottom of the test. That is the same
+// implicit accept the layer-level default was inverted to close; it had simply
+// survived one level further down, inside the branch that does the inverting.
+//
+// A bare identifier counts because a <length> always carries a digit, so a name
+// with none provably is not one. The function list is an enumeration and would
+// be a liability on the reject side; here it sits on the ACCEPT side, where a
+// colour syntax missing from it costs a spurious failure and a one-line fix
+// rather than a glow that ships. Order matters: `color-mix(…, var(--x) …)` is a
+// colour that happens to contain a name, so this is asked before INDIRECT.
+const COLOUR = new RegExp(
+  '^(#[0-9A-Fa-f]{3,8}'
+  + '|[A-Za-z][A-Za-z0-9-]*'
+  + '|(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\\([\\s\\S]*\\))$',
+  'i',
+);
 
 // The classification is DENY BY DEFAULT, and that is the whole point of it.
 // Three review rounds each found another spelling that fell past a check built
@@ -672,15 +802,21 @@ function glowOffencesInLayer(layer, cssVars, seen, depth) {
   // A non-zero offset is directional light whatever the blur does, and that is
   // provable from the offset alone.
   if (!ZERO_LENGTH.test(x) || !ZERO_LENGTH.test(y)) return [];
-  // Both offsets are zero, so the third part decides. Absent, or a colour, means
-  // no blur at all -- the ring-spacer shape. A name is not an answer: it could
-  // hold any radius, so it is unprovable rather than innocent.
+  // Both offsets are zero, so the third part decides, and it has to prove itself
+  // the same way the layer does. Absent means there is no blur part at all; a
+  // colour means the same thing, since a layer whose third part is its colour
+  // skipped the blur -- that is the ring-spacer shape. A name is not an answer:
+  // it could hold any radius, so it is unprovable rather than innocent. Anything
+  // else is unreadable and fails, which is the point -- this branch used to end
+  // in a bare `return []`, and every spelling that reached it was accepted for
+  // no better reason than that the two tests above had not recognised it.
   if (third === undefined) return [];
   if (LENGTH.test(third)) return ZERO_LENGTH.test(third) ? [] : [shown];
+  if (COLOUR.test(third)) return [];
   if (INDIRECT.test(third)) {
     return [`${shown} -- a name in the blur slot could be any radius, so this cannot be shown not to be a glow`];
   }
-  return [];
+  return [`${shown} -- the blur slot is neither a length nor a colour this scan can read, so this cannot be shown not to be a glow`];
 }
 
 // Token definitions (`--shadow-glow-cta-mint: …`) name none of the channel
@@ -697,10 +833,11 @@ function assertGlowsReadThroughTokens(root) {
 
   for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
     const file = path.join(root, relative);
-    const source = fs.readFileSync(file, 'utf8');
+    const raw = fs.readFileSync(file, 'utf8');
+    const source = file.endsWith('.css') ? blankCssComments(raw) : raw;
     const claimed = [];
 
-    for (const { pattern, valuesOf } of SHADOW_CHANNELS) {
+    for (const { pattern, valuesOf, provablyNotAShadow } of SHADOW_CHANNELS) {
       for (const match of source.matchAll(pattern)) {
         claimed.push([match.index, match.index + match[0].length]);
 
@@ -712,6 +849,7 @@ function assertGlowsReadThroughTokens(root) {
         // channel that claims a mention owes a value, and owing nothing fails.
         const values = valuesOf(match).filter((value) => value && value.trim());
         if (values.length === 0) {
+          if (provablyNotAShadow?.(match)) continue;
           unreadable.push(`${file}:${source.slice(0, match.index).split('\n').length}: ${
             match[0].split('\n')[0].slice(0, 80)}`);
           continue;
@@ -761,10 +899,12 @@ function assertGlowsReadThroughTokens(root) {
       + `Spelled-out geometry drifts from design.pen exactly the way a spelled-out colour does: `
       + `neither can be re-anchored for light, and blur, spread and alpha have no scale left to be `
       + `checked against -- so a managed colour does not redeem hand-picked offsets, and neither `
-      + `does a tidy name wrapped around them. Pick the token whose blur this is nearest -- dot, sm, `
-      + `md, lg or cta -- and use shadow-glow-<role>-<accent>, or var(--shadow-glow-<role>-<accent>) `
-      + `as a whole layer inside a composite shadow. Add the token to @theme if that accent does not `
-      + `have one yet. A layer reported as unreadable rather than as a glow is not asking to be `
+      + `does a tidy name wrapped around them. Pick the token whose blur this is nearest -- dot, `
+      + `wire, sm, md, lg or cta -- and use shadow-glow-<role>-<accent>, or `
+      + `var(--shadow-glow-<role>-<accent>) as a whole layer inside a composite shadow. Inside `
+      + `drop-shadow() only the spreadless roles fit, dot and wire, because that function takes no `
+      + `spread and silently drops a layer carrying one. Add the token to @theme if that accent does `
+      + `not have one yet. A layer reported as unreadable rather than as a glow is not asking to be `
       + `special-cased: give it a form this scan can classify, or it keeps its own geometry `
       + `unexamined.\n  `
       + offenders.join('\n  '),

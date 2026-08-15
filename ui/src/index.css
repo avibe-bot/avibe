@@ -134,6 +134,23 @@
   --shadow-glow-dot-gold: 0 0 8px rgba(255, 200, 87, 0.9);
   --shadow-glow-dot-danger: 0 0 8px rgba(255, 107, 107, 0.9);
 
+  /* `wire` is the drop-shadow role: the Model Hub connection wires glow through
+     `filter: drop-shadow(…)`, which takes no spread, so none of the sized roles
+     above can be spelled into one. Like `dot` it is named for its use rather
+     than its size, which is what the no-spread roles have in common.
+
+     These three are a verbatim capture of what already shipped in
+     modelHubSurface.css, down to the `color-mix`, so the wires render exactly as
+     before -- the point of moving them was that a glow written as a filter
+     escaped the guard entirely, not that the light was wrong. That does leave
+     `wire` as the one role whose colour follows the theme, through `--mint` and
+     friends, while every role above stays on the dark neon by design. Aligning
+     them would repaint the wires in Light, so it is a design.pen decision and
+     not this file's to take. */
+  --shadow-glow-wire-mint: 0 0 4px color-mix(in srgb, var(--mint) 40%, transparent);
+  --shadow-glow-wire-cyan: 0 0 4px color-mix(in srgb, var(--cyan) 40%, transparent);
+  --shadow-glow-wire-violet: 0 0 4px color-mix(in srgb, var(--violet) 40%, transparent);
+
   --shadow-glow-sm-mint: 0 0 16px -2px rgba(91, 255, 160, 0.44);
   --shadow-glow-sm-cyan: 0 0 16px -2px rgba(63, 224, 229, 0.44);
   --shadow-glow-sm-violet: 0 0 16px -2px rgba(124, 91, 255, 0.44);
