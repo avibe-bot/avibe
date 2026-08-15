@@ -222,12 +222,14 @@ runtime/memory/                  # downloaded immutable runtimes and active poin
 ```
 
 Schema v3 introduced the durable Personal Memory project catalog. Schema v4
-adds separate Agent trajectory, scan-cursor, and opaque project-binding tables;
-it does not overload `memory_capture_queue` or rewrite schema-v3 user rows.
+adds separate Agent trajectory, scan-cursor, and sequence-versioned opaque
+project-binding tables; it does not overload `memory_capture_queue` or rewrite
+schema-v3 user rows.
 
 The root sentinel binds a random `provider_root_id`, provider id, root format,
-and artifact fingerprint. Clear and runtime activation refuse missing,
-mismatched, symlinked, or unowned roots.
+and artifact fingerprint. Clear treats a fully absent, never-created role as a
+no-op; a present role path with a missing, mismatched, symlinked, or unowned
+sentinel fails closed, as does runtime activation.
 
 ### Queue and delivery semantics
 
@@ -318,13 +320,12 @@ idempotent. Under the shared lifecycle lock it:
 
 1. records `clear_in_progress` and advances the epoch;
 2. pauses both role workers/scanner and stops each owned sidecar;
-3. validates and removes children of the exact sentinel-owned chat root and any
-   existing sentinel-owned Agent root without following links (a never-created,
-   fully absent Agent root is a successful no-op; unexpected unowned paths fail
+3. validates and removes children of each existing exact sentinel-owned role
+   root without following links (a never-created, fully absent chat or Agent
+   root is independently a successful no-op; unexpected unowned paths fail
    closed);
-4. removes every user/agent queue row, recreates the chat root, and recreates the
-   Agent root only when it existed before Clear or Agent Memory remains enabled;
-   and
+4. removes every user/agent queue row and recreates each role root only when it
+   existed before Clear or that role remains enabled; and
 5. clears the recovery marker and restarts Memory only if it remains enabled.
 
 Startup resumes an interrupted clear before opening Memory. A restart failure

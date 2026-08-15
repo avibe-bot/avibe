@@ -39,13 +39,21 @@ before a destructive reset are not backfilled. The owner's workdir/project
 bindings remain in Memory settings across Clear and Reinitialize; the reset
 runtime derives fresh opaque internal keys from them.
 
-Disable closes new Agent provider claims, waits for any current bounded provider
-request to settle, stops the sidecar, snapshots the current terminal high water,
-and keeps only the local scanner in `disabling` state until every enabled-period
-Turn through that target is enqueued or durably skipped. No new provider write
-starts after worker quiescence. Crash recovery resumes that drain; drained rows
-remain pending without provider I/O until a later enable, which also skips the
-completed opt-out interval.
+Disable atomically snapshots the current terminal high water, closes the enable
+epoch, and closes new Agent provider claims. It then waits for any current
+bounded provider request to settle, stops the sidecar, and keeps only the local
+scanner in `disabling` state until every enabled-period Turn through the saved
+target is enqueued or durably skipped. No new provider write starts after worker
+quiescence. Crash recovery resumes that drain; drained rows remain pending
+without provider I/O until a later enable, which also skips the completed
+opt-out interval.
+
+Adding, changing, or removing a workdir binding has its own committed terminal
+high-water cutover. Backlogged Turns use the project binding that was effective
+when they settled; a new project never captures pre-cutover work, and removal
+keeps its closed binding epoch until the scanner durably drains through the
+cutover. That already-settled backlog remains eligible for delivery under the
+old project; later-settling Turns do not.
 
 The existing Personal Memory root remains pinned to chat mode. Agent Memory has
 its own provider root, socket, lifecycle/health slot, scanner, and queue. An
@@ -193,9 +201,9 @@ finish before starting another one.
 
 Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data or the
 call-log database is corrupt. Clear Memory Data records a durable intent marker, then
-removes the Personal and Agent Memory queues, the owned Personal root and any
-existing owned Agent root, role-owned call logs, and pinned attachments through
-their idempotent deletion primitives. A never-created Agent root is a safe no-op.
+removes the Personal and Agent Memory queues, each existing owned role root,
+role-owned call logs, and pinned attachments through their idempotent deletion
+primitives. A never-created, fully absent Personal or Agent root is a safe no-op.
 Clear is irreversible; it does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs or

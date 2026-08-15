@@ -40,7 +40,8 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    result. It does not parse formatted event streams into synthetic tool calls.
 7. Enabling the track does not create a project binding. The owner must bind a
    source workdir to either the exact `default` project or an existing/new-style
-   named Memory project. Missing bindings fail closed.
+   named Memory project. Missing bindings fail closed. Binding additions,
+   reassignments, and removals use commit-ordered high-water epochs.
 8. EverOS 1.2.3 limitations listed below are accepted. Avibe isolates and
    reports them but does not patch EverOS or file an upstream issue. Retrieval
    exposes skill freshness/maturity metadata, and status adds a conservative
@@ -86,6 +87,9 @@ trajectory content: user/Agent-authored identifiers and Avibe-injected time,
 source-Session, username, or user-id attribution lines present in those texts
 are retained locally and forwarded to the processing endpoints. They are never
 used as structural Memory owners, project selectors, or provider paths.
+The binding control also discloses that removal or reassignment stops eligibility
+for later-settling Turns, while already-settled backlog through its committed
+cutover remains eligible under the old project.
 
 Enabling requires the installed Memory runtime, complete processing endpoints,
 and at least one explicit project binding. Under the agent-capture lifecycle
@@ -279,9 +283,9 @@ Reconcile owns the roles independently:
   controller lifecycle; no routine verification restarts Avibe.
 
 Restart engine, Repair index, Clear Memory Data, rebuild, and factory reset must
-enumerate role-owned resources rather than assuming one global slot. A
-never-enabled Agent role whose root, sentinel, process record, and socket are all
-absent is a successful `absent` no-op. A present Agent path without its expected
+enumerate role-owned resources rather than assuming one global slot. Either
+never-enabled role whose root, sentinel, process record, and socket are all
+absent is a successful `absent` no-op. A present role path without its expected
 sentinel remains unsafe and fails closed. Clear and factory reset cover every
 existing owned root, both role call-log/health records, and both queues under one
 existing durable maintenance fence while preserving the V2 config binding
@@ -326,7 +330,8 @@ cursor. Pre-migration terminal rows retain `NULL` and are not backfilled.
 
 Before enqueue, the store enforces an independent maximum of 500 nonterminal
 Agent rows and at least 512 MiB free on the volume containing `memory.sqlite`.
-At either guard, the scanner records a durable aggregate
+At either guard, the scanner durably declines the otherwise semantically
+eligible source: it records an aggregate
 `missed_queue_full`/`missed_low_disk_space` count and advances past that source
 sequence in the same transaction; it never retains the rejected trajectory
 text. These guards are independent of, and do not consume, Personal Memory's
@@ -356,29 +361,51 @@ ambiguous agent write cannot fence user capture.
 ### Scanner cursor and project bindings
 
 `memory_agent_scan_state` is a singleton containing the last committed terminal
-sequence, enable epoch, optional drain-through sequence/state, durable missed
-counters, and scan/update timestamps. On
-every enable cutover the cursor advances to the primary store's current maximum
-before admission opens. Clear and factory-reset recovery apply the same cutover
+sequence, enable epoch, optional disable/binding drain-through sequence/state,
+durable missed counters, and scan/update timestamps. On every enable cutover
+the cursor advances to the primary store's current maximum before admission
+opens. Clear and factory-reset recovery apply the same cutover
 after deleting or recreating the Memory store: while the shared maintenance
 fence is held, they create the new scan state at the current committed maximum,
 then rebuild bindings, and only then may an enabled scanner start. The scanner
 queries strictly after that sequence in bounded pages. It advances through
 admitted, duplicate, guarded, and closed-skip rows only after the corresponding
 decision is durable. A crash before commit re-reads the same row; the digest
-keeps enqueue idempotent. Adding a binding later does not backfill turns already
-skipped at an earlier cursor.
+keeps enqueue idempotent.
 
-`memory_agent_project_bindings` is a replaceable projection of the V2 config. It
-maps only opaque `binding_key` to exact new-style `project_id`, with
-created/updated timestamps. Settings writes the normalized workdir/project pair
-to V2 config; reconcile derives the opaque key with the current Memory scope key
-and transactionally replaces the projection. Reads expose the config's friendly
-local workdir label, never by reversing the opaque Memory key. Clear may remove
-the projection; factory reset creates a new Memory scope key and rebuilds every
-opaque key from the preserved config before an enabled scanner starts. Deleting
-a config binding stops new admission after reconcile and does not rewrite queued
-or provider data already bound to that project.
+`memory_agent_project_bindings` is an opaque, sequence-versioned projection of
+the V2 config. Each epoch stores `binding_key`, exact new-style `project_id`, an
+exclusive `effective_after_sequence`, an optional inclusive
+`effective_through_sequence`, and created/closed timestamps. The V2 config
+remains the authoritative current owner setting; historical epochs exist only
+to finish committed scanner work.
+
+Under the agent-capture lifecycle lock, every add, reassignment, or removal reads
+the current committed terminal high water `H`. Before the V2 config commit, a
+singleton `memory_agent_binding_reconcile` intent durably records `H`, the
+current and desired config digests, and only the opaque epoch changes. After the
+config commit, reconcile applies those epochs and clears the intent. Startup
+compares the authoritative config digest and either completes the desired
+cutover or discards an intent whose config commit never occurred; a crash cannot
+invent a later cutover.
+
+An added mapping is effective only for `terminal_sequence > H`. Reassignment
+closes the old epoch through `H` and opens the new project after `H`; removal
+only closes the old epoch through `H`. The scanner resolves each source against
+the unique epoch satisfying
+`effective_after_sequence < terminal_sequence <= effective_through_sequence`,
+with a `NULL` through-sequence meaning open. It therefore drains backlog through
+the old project without admitting opt-in or reassignment history to the new
+project. Closed epochs remain until the committed scanner cursor reaches their
+cutover, then compact; immutable queued/provider rows keep their original
+project.
+
+Settings writes friendly normalized workdir/project pairs only to V2 config;
+reconcile derives opaque keys with the current Memory scope key. Reads expose
+the current config labels, never by reversing an opaque key. Clear may remove
+all epochs; factory reset creates a new Memory scope key and rebuilds current
+bindings with an effective-after cutover at the new high water before an enabled
+scanner starts.
 
 ## Provider and Sidecar Contracts
 
@@ -481,11 +508,11 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; disable drains its enabled interval, and every enable or destructive reset starts at the correct high water. |
-| `MEMORY-AGENT-002` | Every eligible non-steered completed interactive or Harness Turn is represented once by its exact dispatch/result pair. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; disable snapshots then drains its enabled interval, every enable/reset starts at the correct high water, and Clear accepts either never-created role as absent. |
+| `MEMORY-AGENT-002` | Every semantically eligible non-steered completed interactive or Harness Turn not durably declined by a specified resource guard is represented once by its exact dispatch/result pair. |
 | `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant, including accepted live steers. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
-| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output. |
+| `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; crash-safe sequence-versioned binding cutovers keep backlog in the project effective at settlement. |
 | `MEMORY-AGENT-006` | Malformed config, legacy Agent identity, and missing project binding fail closed. |
 | `MEMORY-AGENT-007` | Agent-sidecar outage leaves chat and Personal Memory healthy. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
