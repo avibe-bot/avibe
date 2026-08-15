@@ -44,6 +44,11 @@ const NOT_WRITES = [
   // The finding this split exists for. The word is at the tail, exactly where a
   // property has it, and the statement is still a variable.
   ['a variable whose name ends in the word', "const cardShadow = 'compact';"],
+  // The same name as a KEY, which is the branch that outlived the assignment
+  // fix: an options object is shaped exactly like a style object, and only the
+  // name can tell them apart. `cardShadow` is not a CSS property, so it draws
+  // nothing whatever it is nested in.
+  ['an options object with a key ending in the word', "const config = { cardShadow: 'compact' };"],
   ['a let binding', "let hoverShadow = 'none';"],
   ['a reassigned variable', "cardShadow = 'compact';"],
   // The finding before it, which moving the word to the tail did fix.
