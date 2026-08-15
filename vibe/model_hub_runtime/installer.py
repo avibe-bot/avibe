@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import subprocess
+import threading
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +22,7 @@ from core.managed_runtime import (
     env_flag_enabled,
 )
 from core.process_isolation import isolated_subprocess_kwargs
+from storage.lock import MigrationFileLock
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 
 
@@ -28,6 +35,21 @@ _ENGINE_PLATFORM_MAP = {
     "linux-arm64": "linux-arm64",
 }
 _ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
+_INSTALL_STATE_SCHEMA_VERSION = 2
+_INSTALL_STATE_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, _INSTALL_STATE_SCHEMA_VERSION})
+_INSTALL_FAILURE_KEY = "settings.models.install.fail.detail"
+_INSTALL_CLAIM_INVALID_REASON = "model_hub_engine_install_claim_invalid"
+_INSTALL_GENERATION_RE = re.compile(r"^[0-9a-f]{32}$")
+_INSTALL_TARGET_FIELDS = frozenset(
+    {
+        "manifest_sha256",
+        "runtime_version",
+        "platform",
+        "archive_sha256",
+        "binary_sha256",
+    }
+)
+_INSTALL_STATE_UNSET = object()
 _ENGINE_SPEC = ManagedRuntimeSpec(
     runtime_id="model_hub_engine",
     manifest_resource="model_hub_runtime/cliproxyapi_manifest.json",
@@ -36,6 +58,30 @@ _ENGINE_SPEC = ManagedRuntimeSpec(
     archives_field="assets",
     archive_size_field="size_bytes",
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+class InstallClaimTransition(str, Enum):
+    CREATE = "create"
+    RESUME = "resume"
+    ADMISSION_FAILURE = "admission_failure"
+    SETTLE_SUCCESS = "settle_success"
+    SETTLE_FAILURE = "settle_failure"
+    ABANDON = "abandon"
+
+
+class ManifestResolution(str, Enum):
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True)
+class _InstallStateOverride:
+    generation: str
+    payload: dict[str, Any] | None
 
 
 class EngineRuntimeManager(ManagedRuntimeManager):
@@ -59,6 +105,237 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             offline=(env_flag_enabled("VIBE_MODEL_HUB_ENGINE_OFFLINE") if offline is None else offline),
         )
         self._verified_binary_cache: tuple[tuple[object, ...], Path] | None = None
+        self._install_state_lock = threading.RLock()
+        self._install_state_override: object | _InstallStateOverride = _INSTALL_STATE_UNSET
+
+    @property
+    def install_state_path(self) -> Path:
+        return self.runtime_dir / "install-state.json"
+
+    @property
+    def install_state_lock_path(self) -> Path:
+        return self.runtime_dir / ".install-state.lock"
+
+    def host_platform(self) -> str:
+        platform_tag = managed_runtime.runtime_platform_tag()
+        return _ENGINE_PLATFORM_MAP.get(platform_tag, platform_tag)
+
+    def install_failure_reasons(self) -> frozenset[str]:
+        """Return every admission failure emitted by the shared installer."""
+
+        return self._base_install_failure_reasons()
+
+    def install_state(self) -> dict[str, Any] | None:
+        with self._install_state_lock:
+            durable = self._read_install_state_file()
+            override = self._install_state_override
+            if not isinstance(override, _InstallStateOverride):
+                return durable
+            durable_generation = self._installing_generation(durable)
+            if durable is None or durable_generation == override.generation:
+                return dict(override.payload) if override.payload is not None else None
+            self._install_state_override = _INSTALL_STATE_UNSET
+            return durable
+
+    def transition_install_claim(
+        self,
+        transition: InstallClaimTransition,
+        *,
+        generation: str,
+        target: Mapping[str, Any] | None = None,
+        previous_generation: str | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        if not _INSTALL_GENERATION_RE.fullmatch(generation):
+            raise ValueError("invalid Model Hub runtime install generation")
+        resolved_target = self._validated_install_target(target)
+        if transition in {InstallClaimTransition.CREATE, InstallClaimTransition.RESUME}:
+            if resolved_target is None:
+                raise ValueError("invalid Model Hub runtime install target")
+        elif target is not None and resolved_target is None:
+            raise ValueError("invalid Model Hub runtime install target")
+        if transition in {
+            InstallClaimTransition.ADMISSION_FAILURE,
+            InstallClaimTransition.SETTLE_FAILURE,
+            InstallClaimTransition.ABANDON,
+        }:
+            if not reason:
+                raise ValueError("missing Model Hub runtime install failure reason")
+
+        with self._install_state_lock:
+            with MigrationFileLock(self.install_state_lock_path):
+                current = self._read_install_state_file()
+                current_generation = self._installing_generation(current)
+                current_target = (
+                    self._validated_install_target(current.get("target"))
+                    if current is not None
+                    else None
+                )
+
+                if transition is InstallClaimTransition.CREATE:
+                    if current_generation is not None or (
+                        current is not None and current.get("state") == "installing"
+                    ):
+                        return False
+                    self._write_installing_claim(generation, resolved_target)
+                    return True
+
+                if transition is InstallClaimTransition.RESUME:
+                    if (
+                        current is None
+                        or current.get("state") != "installing"
+                        or current_generation != previous_generation
+                        or current_target != resolved_target
+                    ):
+                        return False
+                    self._write_installing_claim(generation, resolved_target)
+                    return True
+
+                if transition is InstallClaimTransition.ADMISSION_FAILURE:
+                    if current is not None and current.get("state") == "installing":
+                        return False
+                    assert reason is not None
+                    payload = self._failed_install_state(
+                        generation=generation,
+                        target=None,
+                        reason=reason,
+                    )
+                    self._write_owned_failure(generation, payload)
+                    return True
+
+                if (
+                    current is None
+                    or current.get("state") != "installing"
+                    or current_generation != generation
+                    or (resolved_target is not None and current_target != resolved_target)
+                ):
+                    return False
+
+                if transition is InstallClaimTransition.SETTLE_SUCCESS:
+                    self._clear_owned_install_state(generation)
+                    return True
+
+                assert reason is not None
+                payload = self._failed_install_state(
+                    generation=generation,
+                    target=current_target,
+                    reason=reason,
+                )
+                self._write_owned_failure(generation, payload)
+                return True
+
+    def _read_install_state_file(self) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(self.install_state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, TypeError):
+            logger.warning("Ignoring invalid Model Hub runtime install state")
+            return None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") not in _INSTALL_STATE_SUPPORTED_SCHEMA_VERSIONS
+        ):
+            logger.warning("Ignoring unsupported Model Hub runtime install state")
+            return None
+        state = payload.get("state")
+        error_key = payload.get("error_key")
+        if state not in {"installing", "not_installed"}:
+            logger.warning("Ignoring invalid Model Hub runtime install state")
+            return None
+        if error_key not in {None, _INSTALL_FAILURE_KEY}:
+            logger.warning("Ignoring invalid Model Hub runtime install state")
+            return None
+        if state == "installing" and error_key is not None:
+            logger.warning("Ignoring contradictory Model Hub runtime install state")
+            return None
+        target = self._validated_install_target(payload.get("target"))
+        generation = payload.get("generation")
+        if generation is not None and (
+            not isinstance(generation, str) or not _INSTALL_GENERATION_RE.fullmatch(generation)
+        ):
+            logger.warning("Ignoring invalid Model Hub runtime install generation")
+            return None
+        if state == "installing" and target is None:
+            logger.warning("Rejecting Model Hub runtime install state without a valid target")
+            return self._failed_install_state(
+                generation=generation,
+                target=None,
+                reason=_INSTALL_CLAIM_INVALID_REASON,
+            )
+        payload["target"] = target
+        payload["generation"] = generation
+        return payload
+
+    @staticmethod
+    def _installing_generation(payload: Mapping[str, Any] | None) -> str | None:
+        if payload is None or payload.get("state") != "installing":
+            return None
+        generation = payload.get("generation")
+        return generation if isinstance(generation, str) else None
+
+    def _write_installing_claim(self, generation: str, target: dict[str, str] | None) -> None:
+        assert target is not None
+        payload = {
+            "schema_version": _INSTALL_STATE_SCHEMA_VERSION,
+            "state": "installing",
+            "generation": generation,
+            "error_key": None,
+            "target": target,
+        }
+        managed_runtime.write_json_atomic(self.install_state_path, payload)
+        self._install_state_override = _INSTALL_STATE_UNSET
+
+    def _write_owned_failure(self, generation: str, payload: dict[str, Any]) -> None:
+        self._install_state_override = _InstallStateOverride(generation, payload)
+        try:
+            managed_runtime.write_json_atomic(self.install_state_path, payload)
+        except Exception:
+            try:
+                self.install_state_path.unlink()
+            except OSError:
+                pass
+            raise
+        self._install_state_override = _INSTALL_STATE_UNSET
+
+    def _clear_owned_install_state(self, generation: str) -> None:
+        self._install_state_override = _InstallStateOverride(generation, None)
+        try:
+            self.install_state_path.unlink()
+        except FileNotFoundError:
+            self._install_state_override = _INSTALL_STATE_UNSET
+        except Exception:
+            raise
+        else:
+            self._install_state_override = _INSTALL_STATE_UNSET
+
+    @staticmethod
+    def _validated_install_target(value: object) -> dict[str, str] | None:
+        if not isinstance(value, Mapping) or set(value) != _INSTALL_TARGET_FIELDS:
+            return None
+        target: dict[str, str] = {}
+        for field in _INSTALL_TARGET_FIELDS:
+            item = value.get(field)
+            if not isinstance(item, str) or not item:
+                return None
+            target[field] = item
+        return target
+
+    @staticmethod
+    def _failed_install_state(
+        *,
+        generation: str | None,
+        target: dict[str, str] | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": _INSTALL_STATE_SCHEMA_VERSION,
+            "state": "not_installed",
+            "generation": generation,
+            "error_key": _INSTALL_FAILURE_KEY,
+            "target": target,
+            "reason": reason,
+        }
 
     def resolve_engine_path(self) -> Path | None:
         return self.resolve_binary()
@@ -121,10 +398,22 @@ class EngineRuntimeManager(ManagedRuntimeManager):
     def contract_manifest(self) -> dict[str, Any]:
         manifest = self._load_manifest(allow_network=False)
         if manifest is None:
-            return {"name": "cliproxyapi", "version": "", "source_sha": "", "assets": []}
+            return {
+                "name": "cliproxyapi",
+                "resolution": ManifestResolution.UNRESOLVED.value,
+                "assets": [],
+            }
+        resolution, _archive = self._resolve_manifest_state(manifest)
+        if resolution is ManifestResolution.UNRESOLVED:
+            return {
+                "name": "cliproxyapi",
+                "resolution": resolution.value,
+                "assets": [],
+            }
         payload = manifest.payload
         return {
             "name": str(payload.get("name") or ""),
+            "resolution": resolution.value,
             "version": manifest.runtime_version,
             "source_sha": str(payload.get("source_sha") or ""),
             "assets": [
@@ -140,13 +429,8 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         }
 
     def _manifest_installable(self, manifest: ManagedRuntimeManifest) -> bool:
-        payload = manifest.payload
-        if not (
-            payload.get("name") == "cliproxyapi"
-            and payload.get("release_tag") == manifest.runtime_version
-            and payload.get("license") == "MIT"
-            and re.fullmatch(r"[0-9a-f]{40}", str(payload.get("source_sha") or ""))
-        ):
+        resolution, _archive = self._resolve_manifest_state(manifest)
+        if resolution is ManifestResolution.UNRESOLVED:
             self._install_reason = "model_hub_engine_manifest_invalid"
             return False
         return True
@@ -155,11 +439,32 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         self,
         manifest: ManagedRuntimeManifest,
     ) -> ManagedRuntimeArchive | None:
+        resolution, archive = self._resolve_manifest_state(manifest)
+        if resolution is ManifestResolution.UNRESOLVED:
+            self._install_reason = "model_hub_engine_manifest_invalid"
+            return None
+        if resolution is ManifestResolution.UNSUPPORTED:
+            self._install_reason = "model_hub_engine_platform_unsupported"
+            return None
+        return archive
+
+    def _resolve_manifest_state(
+        self,
+        manifest: ManagedRuntimeManifest,
+    ) -> tuple[ManifestResolution, ManagedRuntimeArchive | None]:
+        payload = manifest.payload
+        if not (
+            payload.get("name") == "cliproxyapi"
+            and payload.get("release_tag") == manifest.runtime_version
+            and payload.get("license") == "MIT"
+            and re.fullmatch(r"[0-9a-f]{40}", str(payload.get("source_sha") or ""))
+        ):
+            return ManifestResolution.UNRESOLVED, None
         asset_platform = _ENGINE_PLATFORM_MAP.get(managed_runtime.runtime_platform_tag())
         archive = manifest.archives.get(asset_platform) if asset_platform is not None else None
         if archive is None:
-            self._install_reason = "model_hub_engine_platform_unsupported"
-        return archive
+            return ManifestResolution.UNSUPPORTED, None
+        return ManifestResolution.RESOLVED, archive
 
     def _binary_version(self, binary: Path | None) -> str | None:
         if binary is None:

@@ -1,6 +1,10 @@
-import type { RouteHopRef, Source, SourcePatch, SupplyGap } from './types';
+import type { Source, SourcePatch } from './types';
 import { SOURCE_DISPLAY_NAME_MAX_LENGTH } from './types';
-import type { SourceMutationLanding } from './mutationSettlement';
+import {
+  SOURCE_MUTATION_ACTIONS,
+  type SourceMutationAction,
+  type SourceMutationImpact,
+} from './mutationSettlement';
 import { optionalTrimmedTextWithin } from './validation';
 
 /** Management changes a valid Source; repair restores a blocked one. */
@@ -30,7 +34,10 @@ export type SourceEditDraft = {
   baseUrl: string;
 };
 
-export type ManageGuardPlan = { hops: RouteHopRef[]; gaps: SupplyGap[] };
+export type ManageGuardPlan = SourceMutationImpact;
+
+export const MANAGE_COMMIT_ACTIONS = SOURCE_MUTATION_ACTIONS;
+export type ManageCommitAction = SourceMutationAction;
 
 export const MANAGE_STAGE_KINDS = [
   'idle',
@@ -41,8 +48,8 @@ export const MANAGE_STAGE_KINDS = [
   'confirming_delete',
   'submitting_delete',
   'delete_failed',
-  'committed_edit_impact',
-  'committed_delete_impact',
+  'committed_edit',
+  'committed_delete',
 ] as const;
 export type ManageStageKind = (typeof MANAGE_STAGE_KINDS)[number];
 
@@ -55,15 +62,10 @@ export type ManageStage =
   | { kind: 'confirming_delete'; plan: ManageGuardPlan | null }
   | { kind: 'submitting_delete'; plan: ManageGuardPlan | null; forced: boolean }
   | { kind: 'delete_failed'; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
-  | { kind: 'committed_edit_impact'; plan: ManageGuardPlan; complete: () => Promise<SourceMutationLanding>; landingFailed: boolean }
-  | { kind: 'committed_delete_impact'; plan: ManageGuardPlan; complete: () => Promise<SourceMutationLanding>; landingFailed: boolean };
+  | { kind: 'committed_edit' }
+  | { kind: 'committed_delete' };
 
-export const holdsCommittedImpact = (
-  stage: ManageStage,
-): stage is Extract<ManageStage, { landingFailed: boolean }> =>
-  stage.kind === 'committed_edit_impact' || stage.kind === 'committed_delete_impact';
-
-export type ManageFailureSurface = 'none' | 'edit_dialog' | 'guard_dialog' | 'delete_inline' | 'committed_dialog';
+export type ManageFailureSurface = 'none' | 'edit_dialog' | 'guard_dialog' | 'delete_inline';
 
 type ManageStageTransition<Event> = {
   [Kind in ManageStageKind]: (
@@ -76,7 +78,7 @@ type CancelManageStage = { type: 'cancel' };
 type RetryManageStage = { type: 'retry' };
 type EditManageDraft = { type: 'edit_draft'; draft: SourceEditDraft };
 type DismissUnresolvedManageStage = { type: 'dismiss_unresolved' };
-type LandManageStage = { type: 'land'; verdict: SourceMutationLanding };
+type SettleManageStage = { type: 'settled' };
 
 const keepManageStage = <Stage extends ManageStage>(stage: Stage): Stage => stage;
 const idleManageStage = (): ManageStage => ({ kind: 'idle' });
@@ -91,8 +93,8 @@ export const MANAGE_STAGE_CANCEL = {
   confirming_delete: idleManageStage,
   submitting_delete: keepManageStage,
   delete_failed: (stage) => stage.retryRead ? stage : idleManageStage(),
-  committed_edit_impact: keepManageStage,
-  committed_delete_impact: keepManageStage,
+  committed_edit: keepManageStage,
+  committed_delete: keepManageStage,
 } satisfies ManageStageTransition<CancelManageStage>;
 
 export const MANAGE_STAGE_RETRY = {
@@ -126,8 +128,8 @@ export const MANAGE_STAGE_RETRY = {
     plan: stage.plan,
     forced: stage.forced,
   }),
-  committed_edit_impact: keepManageStage,
-  committed_delete_impact: keepManageStage,
+  committed_edit: keepManageStage,
+  committed_delete: keepManageStage,
 } satisfies ManageStageTransition<RetryManageStage>;
 
 export const MANAGE_STAGE_EDIT_DRAFT = {
@@ -139,8 +141,8 @@ export const MANAGE_STAGE_EDIT_DRAFT = {
   confirming_delete: keepManageStage,
   submitting_delete: keepManageStage,
   delete_failed: keepManageStage,
-  committed_edit_impact: keepManageStage,
-  committed_delete_impact: keepManageStage,
+  committed_edit: keepManageStage,
+  committed_delete: keepManageStage,
 } satisfies ManageStageTransition<EditManageDraft>;
 
 export const MANAGE_STAGE_DISMISS_UNRESOLVED = {
@@ -152,11 +154,12 @@ export const MANAGE_STAGE_DISMISS_UNRESOLVED = {
   confirming_delete: keepManageStage,
   submitting_delete: keepManageStage,
   delete_failed: (stage) => stage.retryRead ? idleManageStage() : stage,
-  committed_edit_impact: (stage) => stage.landingFailed ? idleManageStage() : stage,
-  committed_delete_impact: (stage) => stage.landingFailed ? idleManageStage() : stage,
+  committed_edit: keepManageStage,
+  committed_delete: keepManageStage,
 } satisfies ManageStageTransition<DismissUnresolvedManageStage>;
 
-export const MANAGE_STAGE_LANDING = {
+/** Settlement may close only a post-commit stage; every earlier announcement is ignored. */
+export const MANAGE_STAGE_SETTLED = {
   idle: keepManageStage,
   editing: keepManageStage,
   submitting_edit: keepManageStage,
@@ -165,13 +168,9 @@ export const MANAGE_STAGE_LANDING = {
   confirming_delete: keepManageStage,
   submitting_delete: keepManageStage,
   delete_failed: keepManageStage,
-  committed_edit_impact: (stage, event) => event.verdict === 'landed'
-    ? idleManageStage()
-    : { ...stage, landingFailed: true },
-  committed_delete_impact: (stage, event) => event.verdict === 'landed'
-    ? idleManageStage()
-    : { ...stage, landingFailed: true },
-} satisfies ManageStageTransition<LandManageStage>;
+  committed_edit: idleManageStage,
+  committed_delete: idleManageStage,
+} satisfies ManageStageTransition<SettleManageStage>;
 
 export type ManageStageEvent =
   | { type: 'begin_edit'; draft: SourceEditDraft }
@@ -182,13 +181,12 @@ export type ManageStageEvent =
   | { type: 'guard_delete'; plan: ManageGuardPlan }
   | { type: 'fail_edit'; draft: SourceEditDraft; patch: SourcePatch; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
   | { type: 'fail_delete'; plan: ManageGuardPlan | null; forced: boolean; retryRead: boolean; before: Source }
-  | { type: 'commit_impact'; action: 'edit' | 'delete'; plan: ManageGuardPlan; complete: () => Promise<SourceMutationLanding> }
+  | { type: 'commit'; action: ManageCommitAction }
   | { type: 'settled' }
   | CancelManageStage
   | RetryManageStage
   | EditManageDraft
-  | DismissUnresolvedManageStage
-  | LandManageStage;
+  | DismissUnresolvedManageStage;
 
 const applyManageStageTransition = <Event,>(
   transitions: ManageStageTransition<Event>,
@@ -239,15 +237,14 @@ export const transitionManageStage = (stage: ManageStage, event: ManageStageEven
       retryRead: event.retryRead,
       before: event.before,
     };
-    case 'commit_impact': return event.action === 'edit'
-      ? { kind: 'committed_edit_impact', plan: event.plan, complete: event.complete, landingFailed: false }
-      : { kind: 'committed_delete_impact', plan: event.plan, complete: event.complete, landingFailed: false };
-    case 'settled': return idleManageStage();
+    case 'commit': return event.action === 'edit'
+      ? { kind: 'committed_edit' }
+      : { kind: 'committed_delete' };
+    case 'settled': return applyManageStageTransition(MANAGE_STAGE_SETTLED, stage, event);
     case 'cancel': return applyManageStageTransition(MANAGE_STAGE_CANCEL, stage, event);
     case 'retry': return applyManageStageTransition(MANAGE_STAGE_RETRY, stage, event);
     case 'edit_draft': return applyManageStageTransition(MANAGE_STAGE_EDIT_DRAFT, stage, event);
     case 'dismiss_unresolved': return applyManageStageTransition(MANAGE_STAGE_DISMISS_UNRESOLVED, stage, event);
-    case 'land': return applyManageStageTransition(MANAGE_STAGE_LANDING, stage, event);
   }
 };
 
@@ -260,8 +257,8 @@ export const MANAGE_STAGE_FAILURE_SURFACE: Record<ManageStageKind, ManageFailure
   confirming_delete: 'guard_dialog',
   submitting_delete: 'delete_inline',
   delete_failed: 'delete_inline',
-  committed_edit_impact: 'committed_dialog',
-  committed_delete_impact: 'committed_dialog',
+  committed_edit: 'none',
+  committed_delete: 'none',
 };
 
 export type SourceEditInvalidReason =

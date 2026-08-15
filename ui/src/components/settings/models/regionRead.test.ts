@@ -77,8 +77,11 @@ describe('RegionRead', () => {
 
     expect(called).toEqual(keys);
     expect(Object.keys(landing)).toEqual(keys);
-    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
-    const barrier = page.slice(page.indexOf('const readSurfaceLanding'), page.indexOf('\n\nconst surfaceLandingFailed'));
+    const settlement = readFileSync(join(__dirname, 'mutationSettlement.ts'), 'utf8');
+    const barrier = settlement.slice(
+      settlement.indexOf('export const readSurfaceLanding'),
+      settlement.indexOf('\n\nexport type SourceMutationLanding ='),
+    );
     expect(barrier).not.toMatch(/listEvents|events/);
   });
 
@@ -104,20 +107,25 @@ describe('RegionRead', () => {
 
   it('routes every per-model chain read through the per-backend latest authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
-    const definitionStart = page.indexOf('const readAgentChains');
+    const definitionStart = page.indexOf('const readChainRequests');
     const definitionEnd = page.indexOf('\n\nconst settleAgentChainIndex');
     const withoutDefinition = `${page.slice(0, definitionStart)}${page.slice(definitionEnd)}`;
-    const unownedCalls = [...withoutDefinition.matchAll(/\breadAgentChains\(/g)].flatMap((match) => {
-      const before = withoutDefinition.slice(Math.max(0, (match.index ?? 0) - 240), match.index);
-      return before.includes('chainReadAuthority.run') ? [] : [match.index];
-    });
-    const landing = page.slice(page.indexOf('const readSurfaceLanding'), page.indexOf('\n\nconst surfaceLandingFailed'));
+    const affectedRefresh = page.slice(
+      page.indexOf('const refreshAffectedChains'),
+      page.indexOf('\n\n  const refreshAllAgentChains'),
+    );
+    const settlement = readFileSync(join(__dirname, 'mutationSettlement.ts'), 'utf8');
+    const landing = settlement.slice(
+      settlement.indexOf('export const readSurfaceLanding'),
+      settlement.indexOf('\n\nexport type SourceMutationLanding ='),
+    );
 
     expect(definitionStart).toBeGreaterThanOrEqual(0);
     expect(definitionEnd).toBeGreaterThan(definitionStart);
     expect(withoutDefinition).not.toMatch(/modelsApi\.getAgentChain/);
-    expect(unownedCalls).toEqual([]);
-    expect(landing).not.toMatch(/readAgentChains|getAgentChain/);
+    expect(affectedRefresh).toMatch(/chainReadAuthority\.run[\s\S]*readChainRequests/);
+    expect(landing).toMatch(/readers\.chains\(affectedChains\)/);
+    expect(landing).not.toMatch(/getAgentChain/);
     expect(page).not.toMatch(/\breadChains\b/);
     expect(page).toMatch(/chainReadAuthority\.invalidateExcept\(activeBackends\)/);
   });

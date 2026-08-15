@@ -1501,6 +1501,20 @@ class Controller:
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
 
+        model_hub_service = getattr(self, "model_hub_service", None)
+        reconcile_model_hub = getattr(
+            model_hub_service,
+            "reconcile_runtime_installation",
+            None,
+        )
+        if callable(reconcile_model_hub):
+            try:
+                await reconcile_model_hub()
+            except Exception:
+                logger.exception(
+                    "Model Hub runtime recovery failed; continuing without it"
+                )
+
         recover_deliveries = getattr(
             self.session_turns,
             "recover_durable_delivery_state",
@@ -2690,7 +2704,11 @@ class Controller:
             await drain_activity()
 
         service_stops: list[asyncio.Task[None]] = []
-        for service_name in ("scheduled_task_service", "watch_service"):
+        for service_name in (
+            "model_hub_service",
+            "scheduled_task_service",
+            "watch_service",
+        ):
             service = getattr(self, service_name, None)
             stop = getattr(service, "stop", None)
             if callable(stop):

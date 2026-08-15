@@ -8,7 +8,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
+import { MANAGE_COMMIT_ACTIONS } from './manage';
 import { modelsApi } from './modelsApi';
+import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
 import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
 
@@ -21,7 +23,7 @@ const directAgent = (backend: AgentBackend): AgentSupply => ({
 
 const runtime: RuntimeDependency = {
   contract_version: 5,
-  manifest: { name: 'cliproxyapi', version: '1', source_sha: 'a'.repeat(40), assets: [] },
+  manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1', source_sha: 'a'.repeat(40), assets: [] },
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
 
@@ -564,6 +566,119 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.getByText(/^Claude Code$/i)).toBeTruthy();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
+
+  it.each(MANAGE_COMMIT_ACTIONS)(
+    '[MH-SRC-DELETE-001] keeps the page-owned $action impact readable until every referenced projection lands',
+    async (action) => {
+      const modelId = 'claude-opus-4-6';
+      const updatedSource = { ...retainedSource, display_name: 'Updated source' };
+      const hubAgent: AgentSupply = {
+        ...takeoverAgent,
+        backend: 'claude',
+        selected_model_id: modelId,
+        sources: {
+          order: [retainedSource.id],
+          eligibility: [{ source_id: retainedSource.id, eligible: true }],
+        },
+        routes: { [modelId]: { hops: [{ source_id: retainedSource.id, model_id: modelId }] } },
+        model_supply: [{ model_id: modelId, chain_length: 1, has_runnable_hop: true }],
+        builtin_models: [modelId],
+      };
+      const affectedChain: AgentChain = {
+        contract_version: 5,
+        backend: 'claude',
+        model_id: modelId,
+        current: { source_id: retainedSource.id, model_id: modelId },
+        chain: [{
+          source_id: retainedSource.id,
+          model_id: modelId,
+          channel: 'hub',
+          health: 'healthy',
+          runnable: true,
+          reason: null,
+          retry_at: null,
+        }],
+        supply_state: 'ok',
+      };
+      const impact = {
+        removed_hops: [{
+          backend: 'claude' as const,
+          menu_model: modelId,
+          position: 1,
+          source_id: retainedSource.id,
+          model_id: modelId,
+        }],
+        interrupted: [{ backend: 'claude' as const, model_id: modelId, agents: ['Release bot'] }],
+      };
+      const sourceRead = vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+      vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([hubAgent]);
+      vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+      vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+      const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(affectedChain);
+      if (action === 'edit') {
+        vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, ...impact });
+      } else {
+        vi.spyOn(modelsApi, 'deleteSource').mockResolvedValueOnce(impact);
+      }
+
+      render(
+        <ToastProvider>
+          <I18nextProvider i18n={i18n}>
+            <SettingsModelsPage />
+          </I18nextProvider>
+        </ToastProvider>,
+      );
+      await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+      await waitFor(() => expect(chainRead).toHaveBeenCalled());
+
+      await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
+      if (action === 'edit') {
+        await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+        const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+        await userEvent.clear(name);
+        await userEvent.type(name, updatedSource.display_name);
+        await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+      } else {
+        await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+        await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+      }
+
+      const report = await screen.findByRole('dialog', {
+        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+      });
+      expect(report.dataset.reportProjections?.split(' ')).toEqual(
+        Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS),
+      );
+      expect(report.textContent).toContain(modelId);
+      expect(report.textContent).toContain('Release bot');
+
+      const chainLanding = deferred<AgentChain>();
+      chainRead.mockImplementationOnce(() => chainLanding.promise);
+      sourceRead.mockResolvedValue(action === 'edit' ? [updatedSource] : []);
+      const done = within(report).getAllByRole('button', { name: /^Done$|^完成$/i })
+        .find((button) => button.classList.contains('model-hub-guard-action'));
+      await userEvent.click(done!);
+
+      if (action === 'edit') {
+        await waitFor(() => expect(document.querySelector('.model-hub-source-title')?.textContent)
+          .toBe(updatedSource.display_name));
+      } else {
+        await waitFor(() => expect(document.querySelector('.model-hub-source-title')).toBeNull());
+      }
+      expect(screen.getByRole('dialog', {
+        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+      })).toBeTruthy();
+      expect(chainRead).toHaveBeenLastCalledWith('claude', modelId);
+
+      await act(async () => {
+        chainLanding.resolve(affectedChain);
+        await chainLanding.promise;
+      });
+      await waitFor(() => expect(screen.queryByRole('dialog', {
+        name: action === 'edit' ? /source was updated|来源已更新/i : /source was removed|来源已移除/i,
+      })).toBeNull());
+    },
+  );
 
   it('cannot restore chains after the authoritative supply leaves hub mode', async () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };

@@ -1308,6 +1308,9 @@
             "title": "The source was updated, and some supply was affected",
             "detail": "These routes or models were removed or interrupted.",
             "done": "Done"
+          },
+          "settlement": {
+            "title": "The source was updated"
           }
         },
         "remove": {
@@ -1315,6 +1318,9 @@
             "title": "The source was removed, and some supply was affected",
             "detail": "These are the routes and models actually affected by this removal.",
             "done": "Done"
+          },
+          "settlement": {
+            "title": "The source was removed"
           }
         },
         "impact": {

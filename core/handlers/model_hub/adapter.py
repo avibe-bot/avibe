@@ -33,6 +33,7 @@ class EngineHealth(str, Enum):
     DOWN = "down"
     NOT_STARTED = "not_started"
     NOT_INSTALLED = "not_installed"
+    INSTALLING = "installing"
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,12 @@ class EngineStatus:
     listen_host: str  # always "127.0.0.1"
     listen_port: int | None
     last_check_iso: str | None
+    host_platform: str | None = None
+    error_key: str | None = None
+
+
+class RuntimePlatformUnsupportedError(RuntimeError):
+    """The pinned managed runtime has no asset for the server host."""
 
 
 @dataclass(frozen=True)
@@ -323,6 +330,10 @@ class InvokeHandle(Protocol):
 
 class EngineAdapter(Protocol):
     # --- lifecycle -------------------------------------------------------
+    async def install(self) -> EngineStatus: ...
+
+    async def recover_installation(self) -> EngineStatus: ...
+
     async def ensure_installed(self) -> EngineStatus: ...
 
     async def start(self) -> EngineStatus: ...

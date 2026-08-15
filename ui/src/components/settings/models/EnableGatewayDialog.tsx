@@ -8,7 +8,7 @@ import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { resumeGatewayAdoption, type GatewayAdoptionFailure } from './gatewayAdoption';
 import { modelsApi } from './modelsApi';
 import { foldRegionRead, readyRegion, type RegionRead } from './regionRead';
-import { runtimeHasInstallAsset } from './runtimeLifecycle';
+import { runtimeCanAttemptInstall } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency } from './types';
 import { BACKEND_ADOPTION_VENDOR_KEY } from './vendorMeta';
 
@@ -43,7 +43,7 @@ export const EnableGatewayDialog: React.FC<{
   const runtimeValue = runtimeDecision.kind === 'ready' ? runtimeDecision.runtime : null;
   const runtimeUnavailable = runtimeValue === null;
   const needsInstall = runtimeValue?.status.health === 'not_installed';
-  const missing = Boolean(needsInstall && runtimeValue && runtimeHasInstallAsset(runtimeValue));
+  const missing = Boolean(needsInstall && runtimeValue && runtimeCanAttemptInstall(runtimeValue));
   const installUnsupported = Boolean(needsInstall && !missing);
   const effectKeys = agent.backend === 'opencode'
     ? ['1.opencode', '2.opencode', '3', '4'] as const

@@ -11,18 +11,43 @@
     "host_platform": {
       "type": "string",
       "pattern": "^[a-z0-9]+(?:-[a-z0-9_]+)+$",
-      "description": "Server-authoritative platform key for the Avibe host, never the browser device. Installation is supported exactly when manifest.assets contains an exact platform match. OPTIONAL in the reusable schema and REQUIRED on runtime API payloads."
+      "description": "Server-authoritative platform key for the Avibe host, never the browser device. Manifest admission is derived from manifest.resolution. OPTIONAL in the reusable schema and REQUIRED on runtime API payloads."
     },
     "manifest": {
       "type": "object",
-      "required": ["name", "version", "source_sha", "assets"],
+      "required": ["name", "resolution", "assets"],
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "resolution": { "const": "unresolved" } },
+            "required": ["resolution"]
+          },
+          "then": {
+            "properties": { "assets": { "maxItems": 0 } },
+            "not": {
+              "anyOf": [
+                { "required": ["version"] },
+                { "required": ["source_sha"] }
+              ]
+            }
+          },
+          "else": {
+            "required": ["version", "source_sha"]
+          }
+        }
+      ],
       "properties": {
         "name": { "const": "cliproxyapi" },
-        "version": { "type": "string" },
+        "resolution": {
+          "enum": ["resolved", "unresolved", "unsupported"],
+          "description": "resolved means a trusted inventory contains an exact host asset; unresolved means no trusted local inventory exists yet; unsupported means a trusted inventory exists without an exact host asset."
+        },
+        "version": { "type": "string", "minLength": 1 },
         "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "assets": {
           "type": "array",
+          "description": "Trusted pinned assets. Empty is required for unresolved and is not evidence of unsupported host admission.",
           "items": {
             "type": "object",
             "required": ["platform", "url", "size_bytes", "sha256"],
@@ -106,6 +131,7 @@
       "host_platform": "darwin-arm64",
       "manifest": {
         "name": "cliproxyapi",
+        "resolution": "resolved",
         "version": "v7.2.95",
         "source_sha": "f71ec0eb6776854457892452cf28c47f0d658251",
         "assets": [

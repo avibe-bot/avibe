@@ -246,5 +246,8 @@ class ModelHubRemoteService:
     async def runtime_status(self) -> dict:
         return await _rpc("runtime_status")
 
+    async def runtime_install(self) -> dict:
+        return await _rpc("runtime_install")
+
     async def runtime_start(self) -> dict:
         return await _rpc("runtime_start")

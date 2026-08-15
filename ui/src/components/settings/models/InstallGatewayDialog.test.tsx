@@ -13,6 +13,7 @@ const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependen
   contract_version: 5,
   manifest: {
     name: 'cliproxyapi',
+    resolution: 'resolved',
     version: '1',
     source_sha: 'sha',
     assets: [{ platform: 'darwin-arm64', url: 'https://example.invalid/runtime', size_bytes: 1, sha256: '0'.repeat(64) }],

@@ -47,11 +47,8 @@ export const agentHasLiveChainProjection = (
   agent: AgentSupply,
 ): boolean => runtime !== null && runtimeIsRunning(runtime[FRESH_RUNTIME]) && agent.mode === 'hub';
 
-export const runtimeHasInstallAsset = (runtime: RuntimeDependency): boolean => {
-  const host = 'host_platform' in runtime && typeof runtime.host_platform === 'string'
-    ? runtime.host_platform
-    : null;
-  return runtime.manifest.assets.some((asset) => host == null || asset.platform === host);
+export const runtimeCanAttemptInstall = (runtime: RuntimeDependency): boolean => {
+  return runtime.manifest.resolution !== 'unsupported';
 };
 
 const waitForPoll = (intervalMs: number): Promise<void> => new Promise((resolve) => {
