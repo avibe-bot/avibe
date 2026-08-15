@@ -23,10 +23,10 @@ Do not send the attachment fixtures until all of these are true:
 
 1. The authorized local Incus `master` target is healthy and still has its prior
    product state. This checklist requires a separately provisioned five-platform
-   target: the standard regression seed covers Slack, Discord, Lark, and WeChat
-   but does not provision Telegram credentials. If Telegram is not already
-   configured and bound, record the run as `BLOCKED` and stop. Do not add or
-   change credentials as part of this checklist.
+   target: `.env.regression.example` and `scripts/prepare_regression.py` define
+   seed inputs for Slack, Discord, Lark, and WeChat but no Telegram credential
+   path. If Telegram is not already configured and bound, record the run as
+   `BLOCKED` and stop. Do not add or change credentials as part of this checklist.
 2. Memory is enabled. In the Web UI, open **Memory > Processing Record** and verify
    **Engine status** is **Healthy**.
 3. In **Memory > Processing Record**, verify **Call log** is **Recording
@@ -35,7 +35,8 @@ Do not send the attachment fixtures until all of these are true:
    weren't logged or have expired**, stop and record the run as `INCONCLUSIVE`.
    Call recording is runtime state rather than a permanent capability:
    `core/memory/sidecar_lifecycle.py` may disable `records_calls`, and
-   `MemoryLogPanel.tsx` renders the unavailable/expired state.
+   `ui/src/components/settings/memory/MemoryLogPanel.tsx` renders the
+   unavailable/expired state.
 4. In **Memory > Settings**, the **IM attachment processing model (optional)** has
    a complete base URL, model, and API key. This is the explicit opt-in required by
    `MEMORY-IM-ATTACH-003`.
@@ -43,11 +44,12 @@ Do not send the attachment fixtures until all of these are true:
    installation. Use an ordinary, unquoted one-to-one direct message only.
    Group, channel, unbound, forwarded, edited, webhook, system, quoted, and
    replied-to traffic stays outside this human baseline. Quoted/replied-to
-   exclusion is not verified across platforms: Slack accepts ordinary
-   `rich_text_quote` content, while Discord and Telegram expose reference facts
-   that their Memory attachment classifiers do not currently enforce. WeChat
-   bot/self/system source exclusion also remains unverified and is collected
-   below; this checklist does not claim those sources are currently excluded.
+   exclusion is not verified across platforms: `modules/im/message_facts.py`
+   accepts ordinary Slack `rich_text_quote` content, while Discord and Telegram
+   expose reference facts that the Memory attachment classifiers do not
+   currently enforce. WeChat bot/self/system source exclusion also remains
+   unverified and is collected below; this checklist does not claim those
+   sources are currently excluded.
 6. Record a run tag such as `IMA-20260816-0508`. Use it in baseline text and every
    supported caption, but never in an accepted image's pixel-only marker.
 7. From the exact human identity that will send each platform fixture, send one
@@ -57,7 +59,8 @@ Do not send the attachment fixtures until all of these are true:
    product-UI mapping from test identity to principal and the per-principal
    high-water mark. If any of the five identities cannot establish its tagged
    baseline, record the run as `BLOCKED` and stop; do not infer the mapping from
-   the HMAC-derived identifier or use an engineering lookup tool.
+   `core/memory/store.py::derive_principal_id`, which is HMAC-derived and
+   irreversible, or use an engineering lookup tool.
 
 ### Test fixtures
 
@@ -72,25 +75,28 @@ and do not use personal or production data.
   appear in the filename, caption, run tag, title, description, alt text, or any
   other message metadata.
 - **Rejected file:** an SVG under 100 KiB with a different visible marker, for
-  example `REJECT-R9M4`. SVG is intentionally excluded from the
-  pinned Memory modality policy. Where the client supports a caption on that
-  attachment message, use a non-empty caption containing the run tag but not the
-  SVG marker. Use a neutral filename such as `rejected-01.svg`.
+  example `REJECT-R9M4`. SVG is intentionally excluded by
+  `core/memory/modality.py::SUPPORTED_ATTACHMENT_EXTENSIONS`. Where the client
+  supports a caption on that attachment message, use a non-empty caption
+  containing the run tag but not the SVG marker. Use a neutral filename such as
+  `rejected-01.svg`.
 
 The isolation rule covers every text channel retained by the current path:
 
-- `EverOSPort.add()` sends capture text plus attachment `kind`, `name`, `uri`, and
-  `ext`; kind/extension are closed classifier values, while the pinned URI uses an
-  opaque bundle ID and indexed filename rather than the source name;
-- Slack may derive `attachment.name` from file `name` or `title`, so both stay
-  neutral;
-- Discord retains the attachment filename; leave descriptions/alt text absent or
-  neutral as well;
-- Telegram photo names normalize to `telegram-photo.jpg`, while its caption is
-  capture text;
-- Lark image resource keys become the attachment name; do not repeat the pixel
-  marker in surrounding message text; and
-- WeChat item filenames become attachment names, so they stay neutral.
+- `core/memory/everos.py::EverOSPort.add()` sends capture text plus attachment
+  `kind`, `name`, `uri`, and `ext`; kind/extension are closed classifier values,
+  while the pinned URI uses an opaque bundle ID and indexed filename rather than
+  the source name;
+- `modules/im/slack.py` may derive `attachment.name` from file `name` or `title`,
+  so both stay neutral;
+- `modules/im/discord.py` retains the attachment filename; leave descriptions/alt
+  text absent or neutral as well;
+- `modules/im/telegram.py` normalizes photo names to `telegram-photo.jpg`, while
+  its caption is capture text;
+- `modules/im/feishu.py` passes Lark image resource keys into attachment names; do
+  not repeat the pixel marker in surrounding message text; and
+- `modules/im/wechat.py` passes item filenames into attachment names, so they stay
+  neutral.
 
 Use a different complete pixel marker for every accepted platform image. Keep a
 local mapping from neutral fixture name and marker to platform; do not put that
@@ -99,8 +105,9 @@ mapping in any message or platform metadata.
 ## State-driven acceptance flow
 
 The completion condition is visible state, not elapsed wall time. The long-lived
-`master` target has a shared preserved queue and may receive concurrent traffic,
-so no finite delay proves that a missing fixture is a product failure.
+`master` target has a shared preserved queue ordered globally by
+`core/memory/store.py::claim_due` and may receive concurrent traffic, so no finite
+delay proves that a missing fixture is a product failure.
 
 1. Send the eight fixtures as described in the table. Use one fixed order for
    reproducibility, but no pass condition depends on that order.
@@ -110,10 +117,11 @@ so no finite delay proves that a missing fixture is a product failure.
    Discord, and Telegram rejected-caption outcomes. A flush may combine outcomes,
    so do not require eight distinct entries.
 3. Stop waiting 30 minutes after the final fixture. This is an operator stop
-   threshold, chosen at the same scale as `MAX_UNFLUSHED_AGE = 30 minutes`, not a
-   delivery upper bound. If any expected outcome is still absent, mark the whole
-   run `INCONCLUSIVE`, not `FAIL`: a shared preserved queue or concurrent traffic
-   can delay this run without proving a product defect. In an idle environment,
+   threshold, chosen at the same scale as `MAX_UNFLUSHED_AGE = 30 minutes` in
+   `core/memory/coordinator.py`, not a delivery upper bound. If any expected
+   outcome is still absent, mark the whole run `INCONCLUSIVE`, not `FAIL`: a
+   shared preserved queue or concurrent traffic can delay this run without
+   proving a product defect. In an idle environment, that module's
    `IDLE_FLUSH_TIMEOUT = 5 minutes` explains why results commonly appear sooner.
 4. Once all eight outcomes are present, recheck that **Call log** is **Recording
    normally**, then evaluate every row against its visible pass/fail condition.
@@ -124,14 +132,20 @@ session and pauses session-bound tasks and watches
 `master` environment's state-preservation boundary. State-driven completion avoids
 those mutations and returns as soon as the eight observable outcomes are ready.
 
-The processing log is the primary evidence because it covers every user and
-project on the installation; **Memory > Search** is scoped to the current
-principal and is not a substitute for cross-platform verification. For an
-accepted image, open the matching processing entry, expand **Model calls**, and
-inspect the attributed multimodal model call's **Request** and **Response**. The
+The processing log is the primary evidence because its admin reader spans users
+and projects (the
+`test_admin_log_spans_projects_and_principals_with_explicit_scope` case in
+`tests/test_memory_insight.py`); **Memory > Search** is principal-scoped
+(`tests/scenarios/memory_list/catalog.yaml`) and is not a substitute for
+cross-platform verification. For an accepted image, open the matching processing
+entry, expand **Model calls**, and inspect the attributed multimodal model call's
+**Request** and **Response**, which
+`ui/src/components/settings/memory/MemoryLogPanel.tsx` renders as JSON. The
 request must contain the image input and the response must describe or reproduce
-the pixel-only marker. The timeline and Memory snippet preview do not expose
-attachment-derived model output and therefore are not positive evidence.
+the pixel-only marker. The timeline and Memory snippet preview render only
+selected input text and attachment kind/name
+(`core/memory/everos_insight/reader.py::_memcell_preview`), not
+attachment-derived model output, and therefore are not positive evidence.
 
 For a rejected SVG, use only the post-baseline processing entries visible in the
 UI. A caption-bearing rejected turn must preserve its caption without showing the
@@ -263,8 +277,8 @@ Decision:
 - Claiming WeChat bot/self/system exclusion before the raw shapes prove a stable
   discriminator. This checklist exercises only the ordinary human baseline.
 - Capturing SVG, Office/iWork/ODF/RTF documents, or other extensions excluded by
-  the pinned modality policy. WeChat video may reach shared admission, but video
-  processing is not enabled by this acceptance.
+  `core/memory/modality.py::SUPPORTED_ATTACHMENT_EXTENSIONS`. WeChat video may
+  reach shared admission, but video processing is not enabled by this acceptance.
 - Group/channel, unbound, edited, forwarded, webhook, or system-message Memory
   capture, and bot-authored capture on platforms with verified source facts.
   Quoted/replied-to traffic is unverified and out of scope rather than claimed
