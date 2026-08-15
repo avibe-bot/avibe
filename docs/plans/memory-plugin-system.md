@@ -267,12 +267,21 @@ distinguishes queued work, delivered-but-awaiting receipt, successful
 distillation, rejected distillation, and an unknown result without inspecting
 EverOS private files.
 
-Delivery is at least once. A crash or timeout can produce duplicate derived
-memory. Infrastructure outages pause claims without consuming a row's retry
-budget; a failure isolated to one message retries at fixed backoff and becomes
-dead after three failed attempts. Terminal rows contain no source payload. A
-sanitized failure history reports abandoned delivery, rejected distillation,
-and unknown results without provider bodies or user text.
+Personal Memory delivery is at least once. A crash or timeout can produce
+duplicate derived Personal memory. Personal infrastructure outages pause claims
+without consuming a row's retry budget; a failure isolated to one message
+retries at fixed backoff and becomes dead after three failed attempts.
+
+Agent Memory uses its separate schema-v4 queue contract. A failure proven to be
+before submission may retry with its deterministic request, but an `/add`
+timeout or other unknown post-submission outcome immediately becomes a scrubbed
+Agent-only dead letter and is never replayed automatically. A confirmed add
+receipt authorizes payload scrubbing and any required flush retry uses only the
+durable session/app/project scope. This avoids duplicate derived Agent cases or
+skills while preserving Personal Memory's at-least-once behavior. Terminal rows
+in both queues contain no source payload. A sanitized failure history reports
+abandoned delivery, rejected distillation, and unknown results without provider
+bodies or user text.
 
 Important fixed guards are:
 

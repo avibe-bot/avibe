@@ -49,14 +49,15 @@ visible when either role is enabled or recovery is pending, and shared
 credentials can be cleared only when both roles will be disabled and no recovery
 intent needs them. Under the same cross-process controller lifecycle/config lock
 used by scanner, Clear, and reset, each Agent enable or disable first atomically
-records
-a prepared completed-Turn high water and capture intent in the primary state
+records a prepared completed-Turn high water and capture intent in primary state
 transaction that orders Turn settlement, then replaces V2 config. Recovery
-commits that exact boundary only when config has the desired digest, or cancels
-it when the prior digest remains; it never advances the boundary to restart
-time. Clear and Reinitialize record their capture high water after destructive
-deletion completes and before scan-state recreation. The Memory scan state
-projects that exact cutover. Turns
+requires the intent's exact desired revision/digest pair to commit that boundary,
+or its prior pair to cancel it; a third or ABA state degrades closed, and recovery
+never advances the boundary to restart time. Clear and Reinitialize record their
+capture high water after destructive deletion completes and before scan-state
+recreation. In that same primary transaction they scrub both terminal and
+in-flight dispatch snapshots, release their budget, and mark them reset-crossing
+before reporting success. The Memory scan state projects that exact cutover. Turns
 completed before first enable, during a later disabled interval, or before a
 destructive reset are not backfilled. The owner's workdir/project bindings
 remain in Memory settings across Clear and Reinitialize; the reset runtime
@@ -78,11 +79,12 @@ resumes that drain; drained rows remain pending without provider I/O until a
 later enable, which also skips the completed opt-out interval.
 
 Adding, changing, or removing a workdir binding first records a prepared
-terminal high-water cutover and prior/desired config digests in primary state,
+terminal high-water cutover and prior/desired config revision/digest pairs in
+primary state,
 then replaces V2 config. The Agent scanner pauses until the corresponding epoch
 is published, and the save succeeds only after publication. A failed config
 write cancels the prepared cutover; recovery commits its original high water
-only when the desired digest persisted. Backlogged
+only when the desired revision/digest pair persisted. Backlogged
 Turns use the project binding that was effective when they settled; a new project
 never captures pre-cutover work, and removal keeps its closed binding epoch until
 the scanner durably drains through the cutover. That already-settled backlog
@@ -111,14 +113,21 @@ least 512 MiB free before admission; guarded turns are counted without retaining
 their text. Scrubbed terminal tombstones retain at most 90 days and the newest
 100,000 rows.
 Final-dispatch snapshots are admitted only while a committed capture epoch is
-enabled, at most 256 KiB per Turn and 128 MiB total in primary state. A Turn must
-settle in that same epoch. The final native backend request must be text-only;
+enabled and the source workdir has one committed explicit project binding, at
+most 256 KiB per Turn and 128 MiB total in primary state. The Turn persists only
+that binding's opaque key. The start gate checks it against a revision-matched
+controller projection while binding cutovers are fenced; it never reads the
+Memory store or stores a workdir/project. The Turn must settle in the same
+capture epoch, and its project is resolved from the epoch effective at
+settlement. A Turn started unbound is never admitted retroactively. The final
+native backend request must be text-only;
 any Turn with a separate image, attachment, audio, file, or other out-of-band
 input is excluded without copying its path, metadata, or bytes. Disabled,
-transitioning, attachment-bearing, oversized, and over-budget dispatches retain
-only a closed shape/omission reason and still execute normally. Admitted primary
-snapshots are scrubbed after durable enqueue/skip, disabled settlement,
-abandonment, Clear, or Reinitialize.
+transitioning, unbound, attachment-bearing, oversized, and over-budget dispatches
+retain only a closed shape/omission reason, consume no snapshot budget, and still
+execute normally. Admitted primary snapshots are scrubbed after durable
+enqueue/skip, disabled settlement, abandonment, Clear, or Reinitialize;
+destructive operations include snapshots of Turns still in flight.
 
 Agent cases and skills are available only through explicit, scoped Agent Memory
 search/list operations in the CLI or owner Settings UI. CLI ownership comes from
@@ -277,8 +286,9 @@ already sent to providers, or data outside those surfaces (including logs or
 user-created snapshots); it is not a secure wipe.
 
 Clear Memory Data is also the explicit discard path for a timed-out or otherwise
-unknown provider add. It removes the retained `manual_required` queue evidence
-and pinned attachment bundle, clears that session's local fence, and never
+unknown Personal Memory provider add. It removes the retained `manual_required`
+queue evidence and pinned attachment bundle, clears that session's local fence,
+and never
 replays the ambiguous add. Because the provider outcome is unknown, Clear cannot
 remove a copy that may already have reached the provider.
 

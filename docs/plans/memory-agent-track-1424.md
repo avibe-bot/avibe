@@ -52,11 +52,12 @@ Personal Memory admission, prompt, provider root, queue, or retrieval semantics.
    reports them but does not patch EverOS or file an upstream issue. Retrieval
    exposes skill freshness/maturity metadata, and status adds a conservative
    per-Agent skill-count hint; neither mitigation mutates provider state.
-9. Every settings capture/binding cutover first records its terminal-settlement
+9. Every Memory config capture/binding cutover first records its terminal-settlement
    high water and prepared recovery intent atomically in the primary state
    writer transaction, before the V2 config replacement. Recovery commits that
    exact boundary only when the persisted config has the intent's desired
-   digest, or cancels it when the prior digest remains. Clear and factory reset
+   revision/digest pair, or cancels it when the prior pair remains. Clear and
+   factory reset
    retain their documented primary-state destructive-recovery cutover. The
    Memory scan state is an idempotent projection of those records. There is no
    historical, disabled-period, or post-reset replay in v1; only turns admitted
@@ -204,8 +205,8 @@ these invariants hold:
   rename/disable/archive/hard-delete does not rewrite the snapshot;
 - `source_class` is exactly `interactive` or `harness_request`, never `callback`,
   `maintenance`, `agent_callback`, or missing; and
-- the session workdir resolves through an explicit opaque binding to exactly one
-  new-style Memory project.
+- the immutable start-snapshot `binding_key` resolves at the Turn's terminal
+  sequence through exactly one opaque epoch to one new-style Memory project.
 
 Every Delivery snapshots one admission-relevant source class from durable
 provenance. FIFO/scheduled compatibility keys include that class, and Turn claim
@@ -218,18 +219,28 @@ After scheduled attribution, transcription, attachment/file formatting, and all
 other input transformations finish, the shared start boundary classifies the
 final native request as the closed `text_only | out_of_band_attachment`
 `backend_input_shape` and checks the controller-projected primary capture epoch
-without opening the Memory store. Only `text_only` requests are candidates. If
-that epoch is committed enabled, the exact UTF-8 text is at most 256 KiB, and the
-global primary snapshot budget remains below 128 MiB, one primary transaction
-reserves its byte count and persists `backend_dispatch_text`, digest, shape, and
-capture epoch before invoking the native adapter. The adapter must send exactly
-that stored text with no additional native input; an automatic start retry
-reuses the snapshot instead of re-running a text-changing transform.
+without opening the Memory store. The same primary transaction derives the
+source workdir's opaque `binding_key` and requires it in the controller-projected
+primary admission set at the current committed Memory-config revision, with no
+binding cutover intent. That set contains only opaque keys, never workdirs or
+projects; the controller replaces it while the intent fence is closed and opens
+snapshot admission only after V2 config and the projection converge. Only bound
+`text_only` requests are candidates. If that epoch is committed enabled, the
+exact UTF-8 text is at most 256 KiB, and the global primary snapshot budget
+remains below 128 MiB, the transaction reserves its byte count and persists
+`backend_dispatch_text`, digest, shape, opaque binding key, and capture epoch
+before invoking the native adapter. The adapter must send exactly that stored
+text with no additional native input; an automatic start retry reuses the
+snapshot instead of re-running a text-changing transform. The scanner later
+resolves that immutable key against the project epoch effective at terminal
+settlement; a reassignment/removal may therefore change or remove eligibility,
+but a Turn started before its first binding is never admitted retroactively.
 
-Disabled/transitioning epochs, out-of-band attachment input, oversized text, or
-an exhausted snapshot budget record only a closed omission reason, input-shape
-marker, and small counter; they never retain text, attachment paths/bytes, or
-block native dispatch. A successful config transition cannot retroactively
+Disabled/transitioning epochs, missing/transitioning bindings, out-of-band
+attachment input, oversized text, or an exhausted snapshot budget record only a
+closed omission reason, input-shape marker, and small counter; they never retain
+text, attachment paths/bytes, or consume the snapshot budget or block native
+dispatch. A successful config transition cannot retroactively
 admit an in-flight Turn that omitted its snapshot. Persistence failure for a
 snapshot that was admitted still fails closed before native start, because the
 candidate could otherwise diverge from the adapter input. Backend-native
@@ -460,12 +471,15 @@ primary Avibe state schema:
 - `backend_input_shape TEXT`, constrained on new writes to `text_only` or
   `out_of_band_attachment` and derived from the final native request rather
   than transport transcript metadata;
+- `backend_dispatch_binding_key TEXT`, the opaque start-snapshot key for the
+  committed explicit source-workdir binding; it is present only with an admitted
+  dispatch and contains neither workdir nor project id;
 - `backend_dispatch_text TEXT` and `backend_dispatch_sha256 TEXT`, the exact
   bounded final backend-facing input and digest;
 - `backend_dispatch_capture_epoch INTEGER` and
   `backend_dispatch_omission_reason TEXT`, the admitted epoch or a closed
-  `disabled | transition | out_of_band_attachment | oversized | budget` reason,
-  never both; and
+  `disabled | transition | unbound | out_of_band_attachment | oversized |
+  budget | destructive_reset` reason, never both; and
 - `terminal_sequence INTEGER`, with a unique partial index.
 
 The shared `MessageHandler`/dispatch boundary creates the same durable Delivery
@@ -497,15 +511,16 @@ fail-closed for Agent Memory but do not block ordinary execution.
 The primary schema also keeps a singleton snapshot-byte reservation capped at
 128 MiB. Immediately before the first native start call, after every
 shared/backend input transformation, a primary state transaction classifies the
-complete native input shape, checks the committed capture epoch and per-row 256
-KiB bound, reserves bytes, and compares-and-sets the admitted
-text/digest/shape/epoch. The adapter receives that exact stored text without
-additional native input. A retry must reuse it and a conflicting second value
-fails closed; Memory never derives candidate input from the earlier raw
+complete native input shape, checks the committed capture epoch, resolves one
+committed explicit opaque binding key, enforces the per-row 256 KiB bound,
+reserves bytes, and compares-and-sets the admitted
+text/digest/shape/binding-key/epoch. The adapter receives that exact stored text
+without additional native input. A retry must reuse it and a conflicting second
+value fails closed; Memory never derives candidate input from the earlier raw
 `dispatch_text`. When no snapshot is admitted, the same transaction writes only
 the closed shape/omission reason and the adapter proceeds with its in-memory
-native input. Out-of-band attachment metadata and bytes are never copied into
-the Memory source schema.
+native input. Unbound content and out-of-band attachment metadata/bytes are
+never copied into the Memory source schema or charged to its byte reservation.
 Startup and periodic primary-state maintenance recompute the reservation from
 the UTF-8 byte lengths of actual nonempty snapshots before admitting more, so a
 crash cannot leak budget.
@@ -525,17 +540,41 @@ For an eligible terminal Turn, the scanner clears the primary snapshot and
 releases the reservation after its enqueue, duplicate, guarded decline, or
 closed skip is durable. A crash between the Memory-store decision and that
 cleanup is repaired idempotently by comparing terminal sequence with the durable
-scanner cursor. Abandoned-Turn recovery uses the same cleanup. Clear and factory
-reset bulk-scrub every terminal snapshot through their post-deletion high water
-before scan state is recreated. Thus the primary duplicate is bounded while
-live and does not survive final disposition or destructive reset.
+scanner cursor. Abandoned-Turn recovery uses the same cleanup. Clear and
+Reinitialize/factory reset first close new dispatch snapshot admission. After
+destructive deletion, the same serialized primary transaction that records the
+new epoch and terminal high water bulk-scrubs every admitted snapshot, including
+nonterminal/in-flight Turns without a `terminal_sequence`, releases their byte
+reservations, and replaces their admitted epoch/key with the closed
+`destructive_reset` omission reason. Turn settlement cannot interleave with that
+transaction; a later settlement is therefore epoch-crossing and ineligible.
+The destructive operation cannot report success or recreate scan state before
+this scrub commits. Thus the primary duplicate is bounded while live and does
+not survive final disposition or destructive reset, even when native execution
+remains in flight.
 
 The primary state schema also adds bounded singleton
 `memory_agent_capture_cutover` and `memory_agent_binding_cutover` recovery
-records used below. Each contains only its kind, prior/desired config digests,
-epoch, terminal high water, closed `prepared | committed` phase, state, and
-timestamps; normalized workdirs and project ids remain in V2 config, while
-opaque epochs remain in the Memory store.
+records used below. Each contains its kind, prior/desired Agent-block config
+digests, `prior_memory_config_revision`, `desired_memory_config_revision`,
+terminal high water, closed `prepared | committed` phase, and timestamps. The
+capture record also stores its epoch and desired state. The binding record stores
+no normalized workdir/project payload; those remain in V2 config, while opaque
+epochs remain in the Memory store. V2 config persists one monotonic
+`memory.revision` incremented exactly once by each successful controller Memory
+mutation. Recovery requires both revision and digest to match the durable prior
+or desired pair, so an ABA edit cannot masquerade as either state. A released
+config without the internal revision loads as revision `0`; migration preserves
+all other values, and the first successful controller mutation writes `1`.
+
+The primary schema also adds
+`memory_agent_admission_bindings(binding_key, memory_config_revision)` as the
+content-free current binding set used only by the dispatch gate. A binding
+cutover intent fences reads as ineligible, then the controller atomically
+replaces this opaque set and promotes the intent after V2 config persistence.
+Recovery rebuilds it only from an exact desired revision/digest pair. It stores
+neither project ids nor normalized workdirs and is never the scanner's historical
+project authority.
 
 ### Agent trajectory outbox
 
@@ -631,8 +670,8 @@ terminal high water `H` and insert a prepared singleton
 digests, whole-config revisions, and `H`. Terminal settlement cannot interleave
 between that read and intent commit. The scanner is then fenced, V2 config is
 atomically replaced, and the intent is promoted to committed; terminal
-settlement performs no Memory/config
-I/O and never waits for projection work. The UI does not write these bindings
+settlement performs no Memory/config I/O and never waits for projection work.
+The UI does not write these bindings
 before contacting the controller.
 
 When one Settings save changes both `enabled` and bindings, that same primary
@@ -649,18 +688,19 @@ Settings save reports success only after projection converges. A Turn at or
 below `H` uses the old mapping; a later Turn uses the new mapping after a
 successful save, or the old mapping after a failed save cancels the intent.
 
-If config persistence fails, the prior digest cancels the prepared intent and
-leaves the projection unchanged. After a crash, the prior digest cancels it, the
-desired digest promotes it and reuses the exact original `H`, and any third
-digest leaves only Agent Memory fenced and degraded. If projection already
-committed, matching digests make intent cleanup idempotent. Recovery never
-creates a cutover at restart time. A crash therefore cannot backdate the new
-binding, extend a disabled epoch, or block the Agent hot path.
+If config persistence fails, the prior revision/digest pair cancels the prepared
+intent and leaves the projection unchanged. After a crash, the prior pair
+cancels it, the desired pair promotes it and reuses the exact original `H`, and
+any third or ABA state leaves only Agent Memory fenced and degraded. If
+projection already committed, matching revisions and digests make intent cleanup
+idempotent. Recovery never creates a cutover at restart time. A crash therefore
+cannot backdate the new binding, extend a disabled epoch, or block the Agent hot
+path.
 
 An added mapping is effective only for `terminal_sequence > H`. Reassignment
 closes the old epoch through `H` and opens the new project after `H`; removal
-only closes the old epoch through `H`. The scanner resolves each source against
-the unique epoch satisfying
+only closes the old epoch through `H`. The scanner resolves each source's
+immutable start-snapshot binding key against the unique epoch satisfying
 `effective_after_sequence < terminal_sequence <= effective_through_sequence`,
 with a `NULL` through-sequence meaning open. It therefore drains backlog through
 the old project without admitting opt-in or reassignment history to the new
@@ -786,17 +826,17 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every Personal/Agent/endpoint Memory config writer uses one controller transaction with revision conflict detection through cutover cleanup; Agent-only enablement keeps navigation/recovery visible and forbids shared-credential clearing; a failed Agent-role start retains a fenced retryable intent without snapshot admission; post-deletion reset high waters do not drift on recovery; and Clear accepts either never-created role as absent. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; every Personal/Agent/endpoint Memory config writer uses one controller transaction with monotonic revision/digest conflict detection through cutover cleanup; Agent-only enablement keeps navigation/recovery visible and forbids shared-credential clearing; a failed Agent-role start retains a fenced retryable intent without snapshot admission; destructive reset atomically scrubs terminal and in-flight snapshots at its fixed high water; and Clear accepts either never-created role as absent. |
 | `MEMORY-AGENT-002` | Every semantically eligible non-steered completed Workbench, Slack, Discord, Telegram, Feishu/Lark, WeChat, or Harness Turn not durably declined by a specified snapshot/queue/disk guard is represented once by its exact post-transformation backend-dispatch/result pair. |
-| `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks, accepted live steers are excluded, and any final native request with an out-of-band attachment fails closed without retaining attachment metadata or bytes. |
-| `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
+| `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks; accepted live steers are excluded; the revision-matched opaque primary admission set makes an unbound or binding-transition Turn retain no dispatch text or budget; and any final native request with an out-of-band attachment fails closed without retaining attachment metadata or bytes. |
+| `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once; persisted prior/desired config revisions plus digests detect third-state and ABA edits during capture or binding recovery. |
 | `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; capture and trusted-Turn CLI retrieval use the immutable executing Agent without blocking hard deletion, deleted owners remain UI-retrievable, and crash-safe prepared binding cutovers keep backlog in the project effective at settlement. |
 | `MEMORY-AGENT-006` | Malformed config, missing/pre-migration identity/source/final-dispatch snapshots, and missing project binding fail closed. |
 | `MEMORY-AGENT-007` | Agent-sidecar/local pipeline outage leaves chat and Personal Memory healthy; dual-root embedding rebuild preserves and fences both roots through partial failure; shared remote endpoint throttling and effective-home capacity exhaustion are reported as explicit resource couplings without cross-role state mixing. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
 | `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths; a read-only per-Agent project catalog keeps removed-binding output reachable. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
-| `MEMORY-AGENT-011` | Per-row/global primary snapshot guards plus queue/disk exhaustion skip durably; primary copies are scrubbed after disposition/reset, queue payloads are scrubbed immediately after a durable add receipt and before flush, and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
+| `MEMORY-AGENT-011` | Per-row/global primary snapshot guards plus queue/disk exhaustion skip durably; primary copies, including active nonterminal snapshots, are scrubbed after disposition/reset; queue payloads are scrubbed immediately after a durable add receipt and before flush; ambiguous post-submission Agent adds dead-letter without replay; and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
 | `MEMORY-AGENT-012` | Skill retrieval exposes exact freshness/maturity metadata, while the request-budgeted status sampler reports non-blocking per-Agent count hints at 8 and 11 skills. |
 | `MEMORY-AGENT-013` | Opt-in disclosure models raw attribution bytes in exact trajectory content without allowing them to become Memory identity or scope. |
 
