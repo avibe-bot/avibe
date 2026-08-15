@@ -11997,13 +11997,12 @@ def set_opencode_default_provider(payload: dict) -> dict:
         return {"ok": False, "message": "provider_id is required"}
     provider_id = raw.strip()
 
-    with CONFIG_LOCK:
-        try:
-            config = load_config()
-        except FileNotFoundError:
-            config = V2Config()
-        config.agents.opencode.default_provider = provider_id
-        config.save()
+    from config.v2_config import update_config_fields
+
+    def _apply(cfg: V2Config) -> None:
+        cfg.agents.opencode.default_provider = provider_id
+
+    update_config_fields(_apply)
     return {"ok": True, "default_provider": provider_id}
 
 
