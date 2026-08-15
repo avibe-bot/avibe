@@ -89,6 +89,10 @@ skip was only logged at debug level.
     authorization resolution; the Web UI Web Push control consumes the
     `normal_delivery` evaluation and surfaces a localized warning when the
     test channel works but normal delivery is currently gated.
+  - Review round 5 hardening (Codex finding): a paired installation with
+    remote access disabled rejects every remote record (`revoked`, "remote
+    access is disabled") — disabling the connector is a confirmed removal of
+    remote reach, and the local install fallback still delivers.
 - `vibe/ui_server.py`:
   - `_web_push_user_key()` no longer applies the 12-hour refresh cutoff;
     `parse_session_cookie` still enforces signature, expiry, and confirmed

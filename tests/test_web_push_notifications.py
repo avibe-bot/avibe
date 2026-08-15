@@ -1429,6 +1429,63 @@ def test_message_read_during_authorization_retry_is_not_sent(monkeypatch, tmp_pa
     engine.dispose()
 
 
+def test_disabling_remote_access_stops_remote_delivery(monkeypatch, tmp_path):
+    """A paired-but-disabled remote access must not authorize remote records."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_revision_config(41, instance_kind="personal")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-08-15T00:00:00Z"
+
+    with engine.begin() as conn:
+        scope_id = _push_session_fixture(
+            conn,
+            scope_native_id="proj_push_disabled_remote",
+            session_id="ses_push_disabled_remote",
+            title="Disabled Remote",
+            now=now,
+        )
+        _append_user_prompt(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_push_disabled_remote",
+            user_keys=["remote:user-a"],
+            records=[_remote_authorization_record("remote:user-a")],
+        )
+        message = _append_result(conn, scope_id=scope_id, session_id="ses_push_disabled_remote")
+        _upsert_subscriptions(conn, "remote:user-a", "local")
+
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Disabled Remote",
+            "body": "Done",
+            "session_id": "ses_push_disabled_remote",
+            "message_id": message["id"],
+        }
+    )
+
+    # The remote owner is rejected; the local install fallback still delivers.
+    assert [send[0]["endpoint"] for send in sends] == ["https://push.example.test/local"]
+    recent = web_push_notifications.recent_delivery_dispositions()
+    assert recent[0]["owners"]["remote:user-a"]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_REVOKED
+    assert recent[0]["owners"]["remote:user-a"]["reason"] == (
+        "remote access is disabled on this installation"
+    )
+    assert recent[0]["owners"]["local"]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    engine.dispose()
+
+
 def test_scoped_dispositions_redact_other_owners(monkeypatch, tmp_path):
     from core.chat_discovery import set_state_meta
 
