@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from core.memory.attachments import (
+    AttachmentBundleInvalidError,
     AttachmentPinError,
     AttachmentPinStore,
     decode_pinned_bundle,
@@ -530,13 +531,11 @@ class SessionFlushCoordinator:
                     attachment_payload,
                 )
             except AttachmentPinError as failure:
-                await self._settle_failure(
+                await self._settle_attachment_preflight_failure(
                     row,
                     lease_owner=lease_owner,
-                    outcome=MessageFailure(
-                        error=failure.error,
-                        retryable=False,
-                    ),
+                    failure=failure,
+                    retryable=False,
                 )
                 return False
             try:
@@ -545,13 +544,11 @@ class SessionFlushCoordinator:
                     bundle,
                 )
             except AttachmentPinError as failure:
-                await self._settle_failure(
+                await self._settle_attachment_preflight_failure(
                     row,
                     lease_owner=lease_owner,
-                    outcome=MessageFailure(
-                        error=failure.error,
-                        retryable=True,
-                    ),
+                    failure=failure,
+                    retryable=True,
                 )
                 return False
         capture = ProviderCapture(
@@ -713,6 +710,34 @@ class SessionFlushCoordinator:
             row,
             lease_owner=lease_owner,
         )
+
+    async def _settle_attachment_preflight_failure(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+        failure: AttachmentPinError,
+        retryable: bool,
+    ) -> None:
+        bundle_id = None
+        if isinstance(failure, AttachmentBundleInvalidError):
+            bundle_id = await self._store_call(
+                self._store._downgrade_claimed_attachment_to_text,
+                row,
+                lease_owner=lease_owner,
+                now=self._current_time(),
+            )
+        if bundle_id is None:
+            await self._settle_failure(
+                row,
+                lease_owner=lease_owner,
+                outcome=MessageFailure(
+                    error=failure.error,
+                    retryable=retryable,
+                ),
+            )
+            return
+        await self._release_bundle(bundle_id)
 
     async def _settle_failure(
         self,

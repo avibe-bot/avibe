@@ -244,6 +244,40 @@ def test_rejected_attachment_preserves_caption_without_multimodal_provider_call(
     assert harness.memory_bundle_entries == ()
 
 
+def test_claimed_attachment_preflight_failure_retries_caption_as_text_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-009."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    harness = MemoryIMAttachmentScenarioHarness(tmp_path)
+    original_drain = harness.module.drain
+
+    async def corrupt_bundle_then_drain() -> int:
+        bundle_root = harness.home / "memory" / "attachments" / "bundles"
+        pinned_file = next(bundle_root.glob("*/*"))
+        pinned_file.write_bytes(b"corrupt after durable enqueue")
+        return await original_drain()
+
+    monkeypatch.setattr(harness.module, "drain", corrupt_bundle_then_drain)
+    asyncio.run(
+        harness.capture(
+            text="Keep this caption even if the image breaks",
+            payloads={"evidence.png": ("image/png", PNG_BYTES)},
+        )
+    )
+
+    assert len(harness.provider.captures) == 1
+    assert harness.provider.captures[0].text == (
+        "Keep this caption even if the image breaks"
+    )
+    assert harness.provider.captures[0].attachments == ()
+    assert harness.provider.observed_payloads == []
+    assert harness.provider.call_log == []
+    assert harness.memory_bundle_entries == ()
+
+
 class _ScenarioPrincipals:
     def principal_for_user_key(self, user_key: str) -> str:
         assert user_key.split(":", 1)[0] in {"discord", "telegram", "lark", "wechat"}
