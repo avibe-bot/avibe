@@ -149,8 +149,20 @@ Re-enable requires an earlier disable drain to converge, then its own enabled
 cutover skips the completed opt-out interval. Clear/factory reset record the
 same primary-state intent immediately before recreating scan state, after
 destructive deletion is complete. Turn settlement performs no Memory/config I/O
-and never waits for projection or drain work. A failed start leaves only Agent
-Memory unavailable without disabling Personal Memory or restarting Avibe.
+and never waits for projection or drain work.
+
+If Agent runtime/sidecar start fails after the desired enabled config and intent
+commit, Agent Memory remains `enabled=true` but `degraded` with that exact
+committed intent retained; it does not apply Personal Memory's failed-enable
+rollback rule. The dispatch snapshot gate and scanner/provider claims remain
+closed while any enable intent exists, so no trajectory text accumulates. The
+controller's Agent-role Retry/Restart reuses the intent idempotently and clears
+it only after the role is healthy. An explicit Disable may instead supersede the
+failed enable through the normal controller cutover. Personal Memory and normal
+Agent execution remain unchanged. The controller IPC returns a closed
+`memory_agent_start_failed` degradation with `persisted_enabled=true` and
+`recovery_pending=true`; Settings must not report either disabled rollback or
+ready state.
 
 ### Admission
 
@@ -489,9 +501,10 @@ opaque epochs remain in the Memory store.
 - `source_turn_digest` primary key: keyed digest of the durable Turn id;
 - stable provider `session_id`, opaque `agent_id`, and exact `project_id`;
 - bounded input/result payloads and stable input/result timestamps;
-- closed `pending | processing | delivered | dead` state;
+- closed `pending | processing | awaiting_flush | delivered | dead` state;
 - lease token/owner/time, attempts, next retry, closed error, provider request
-  ids/status, and created/completed timestamps.
+  ids/status, durable add receipt/flush requirement, and created/completed
+  timestamps.
 
 Before enqueue, the store enforces an independent maximum of 500 nonterminal
 Agent rows and at least 512 MiB free on the volume containing `memory.sqlite`.
@@ -503,11 +516,15 @@ text. These guards are independent of, and do not consume, Personal Memory's
 500-row allowance. Status reports the counters without source content.
 
 Idempotent enqueue and cursor advancement are one transaction. A duplicate
-source digest returns duplicate without changing the existing row. Successful
-delivery scrubs both source texts. A deterministic rejection or exhausted
-bounded retry dead-letters and scrubs the row; infrastructure unavailability
-pauses claims without consuming a content retry. Agent rows never enter
-`manual_required` or the Personal Memory session-flush coordinator.
+source digest returns duplicate without changing the existing row. Immediately
+after a confirmed add, one queue transaction persists the sanitized add receipt
+and exact session/app/project flush scope, scrubs both source texts, and moves
+the row directly to `delivered` when no flush is required or to
+`awaiting_flush` before any flush attempt. Flush and every flush retry use only
+that scope; provider/infrastructure unavailability can therefore never retain
+trajectory text. A deterministic add rejection, exhausted bounded add retry, or
+unknown post-submission add outcome dead-letters and scrubs the row. Agent rows
+never enter `manual_required` or the Personal Memory session-flush coordinator.
 
 Scrubbed `delivered` and `dead` rows are idempotency tombstones with the same
 bounded retention as Personal Memory: retain at most 90 days and, within that
@@ -517,11 +534,12 @@ tombstones, and never changes the scan cursor, enable/drain state, or aggregate
 missed counters.
 
 Each row uses its own deterministic provider session. The worker performs one
-two-message add and, when needed, one matching flush. Acknowledgement means only
-that EverOS accepted/processed the trajectory boundary; it does not prove a case
-or skill exists. Unknown post-submission outcomes are never replayed
-automatically; they settle to a closed agent-only dead-letter reason so an
-ambiguous agent write cannot fence user capture.
+two-message add and, when needed, one matching flush. A confirmed add receipt
+means only that EverOS accepted the trajectory boundary and authorizes immediate
+payload scrubbing; a successful flush/terminal acknowledgement still does not
+prove a case or skill exists. Unknown post-submission add outcomes are never
+replayed automatically; they settle to a scrubbed agent-only dead-letter reason
+so an ambiguous agent write cannot fence user capture.
 
 ### Scanner cursor and project bindings
 
@@ -718,17 +736,17 @@ stable ids:
 
 | ID | Invariant |
 |---|---|
-| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; one controller IPC owns prepared settings cutovers, post-deletion reset high waters do not drift on recovery, and Clear accepts either never-created role as absent. |
+| `MEMORY-AGENT-001` | The absent/default config leaves the second root, scanner, and worker off; one controller IPC owns prepared settings cutovers, a failed Agent-role start retains a fenced retryable intent without snapshot admission, post-deletion reset high waters do not drift on recovery, and Clear accepts either never-created role as absent. |
 | `MEMORY-AGENT-002` | Every semantically eligible non-steered completed Workbench, Slack, Discord, Telegram, Feishu/Lark, WeChat, or Harness Turn not durably declined by a specified snapshot/queue/disk guard is represented once by its exact post-transformation backend-dispatch/result pair. |
 | `MEMORY-AGENT-003` | Admission excludes every terminal shape that does not satisfy the completed-result invariant; source-class batching separates callbacks and accepted live steers are excluded. |
 | `MEMORY-AGENT-004` | Commit ordering and crash/replay cannot lose or enqueue one source Turn more than once. |
 | `MEMORY-AGENT-005` | Agent and project partitions cannot read or write each other's output; capture and trusted-Turn CLI retrieval use the immutable executing Agent without blocking hard deletion, deleted owners remain UI-retrievable, and crash-safe prepared binding cutovers keep backlog in the project effective at settlement. |
 | `MEMORY-AGENT-006` | Malformed config, missing/pre-migration identity/source/final-dispatch snapshots, and missing project binding fail closed. |
-| `MEMORY-AGENT-007` | Agent-sidecar/local pipeline outage leaves chat and Personal Memory healthy; shared remote endpoint throttling is reported as an external quota coupling without cross-role state corruption. |
+| `MEMORY-AGENT-007` | Agent-sidecar/local pipeline outage leaves chat and Personal Memory healthy; dual-root embedding rebuild preserves and fences both roots through partial failure, while shared remote endpoint throttling is reported as an external quota coupling without cross-role state corruption. |
 | `MEMORY-AGENT-008` | Both role sidecars reject every payload outside their exact owner/shape contract. |
 | `MEMORY-AGENT-009` | CLI/UI retrieval is explicit, bounded, inert, and absent from Agent prompts/install paths; a read-only per-Agent project catalog keeps removed-binding output reachable. |
 | `MEMORY-AGENT-010` | Accepted processing with zero cases or skills is a truthful valid outcome. |
-| `MEMORY-AGENT-011` | Per-row/global primary snapshot guards plus queue/disk exhaustion skip durably; primary copies are scrubbed after disposition/reset, and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
+| `MEMORY-AGENT-011` | Per-row/global primary snapshot guards plus queue/disk exhaustion skip durably; primary copies are scrubbed after disposition/reset, queue payloads are scrubbed immediately after a durable add receipt and before flush, and 90-day/100,000-row tombstone compaction bounds closed-row storage without degrading Personal Memory. |
 | `MEMORY-AGENT-012` | Skill retrieval exposes exact freshness/maturity metadata, while the request-budgeted status sampler reports non-blocking per-Agent count hints at 8 and 11 skills. |
 | `MEMORY-AGENT-013` | Opt-in disclosure models raw attribution bytes in exact trajectory content without allowing them to become Memory identity or scope. |
 

@@ -56,6 +56,12 @@ destructive reset are not backfilled. The owner's workdir/project bindings
 remain in Memory settings across Clear and Reinitialize; the reset runtime
 derives fresh opaque internal keys from them.
 
+If the Agent role fails to start after enable commits, the desired enabled
+setting and exact recovery intent remain in degraded state, while dispatch
+snapshot admission and scanner/provider claims stay closed. **Retry/Restart**
+reuses that intent; explicit Disable may replace it through the same controller
+cutover. The Personal Memory failed-enable rollback behavior is unchanged.
+
 Disable closes new Agent provider claims, then commits its primary capture
 cutover and projects that exact high water as the old epoch's drain target. It
 waits for any current bounded provider request to settle, stops the sidecar, and
@@ -113,8 +119,11 @@ status reports a non-blocking per-Agent skill-count hint:
 8-10 is approaching the upstream prompt limit and more than 10 is the risk zone.
 A global incremental sampler limits one refresh to 32 Agent/project count reads
 with concurrency two; incomplete observations are shown as unknown or stale.
-A successful add/flush means the trajectory was processed, not that EverOS
-necessarily produced a case or skill.
+A terminal add that requires no flush, or a successful required flush, means the
+trajectory was processed, not that EverOS necessarily produced a case or skill.
+After Agent `/add` is confirmed, Avibe durably stores only its receipt and flush
+scope and immediately scrubs both trajectory texts before any required
+`/flush`; an unavailable flush therefore cannot retain the source payload.
 
 EverOS 1.2.3 may produce zero output through quality gates. Skill retirement is
 not implemented; sanitized skill-name collisions can overwrite a prior file;
@@ -223,7 +232,11 @@ finish before starting another one.
 3. **Rebuild index**: Use it after changing the Embedding endpoint or model,
    or to recover a pending rebuild. Confirming **Save and rebuild** saves the
    new settings before rebuilding the local vector index and preserves Markdown
-   memory. If rebuilding fails before settlement, the confirmed change remains
+   memory. When Agent Memory owns a nonempty second root, the same operation
+   fences and quiesces both roles and rebuilds each nonempty root without Clear;
+   neither role activates on the new vector identity until both converge. A
+   partial failure leaves both fenced for **Retry rebuild**. If rebuilding fails
+   before settlement, the confirmed change remains
    saved, the recovery intent and rebuild warning remain, and **Restart engine**
    stays unavailable. An Embedding endpoint or model correction changes the
    vector-space identity, so edit it and reconfirm **Save and rebuild**; do not

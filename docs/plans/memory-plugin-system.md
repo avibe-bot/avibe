@@ -52,10 +52,14 @@ The setup flow is deliberately staged:
    reached from Dependencies.
 
 Enablement requires complete endpoint blocks, bounded authenticated probes, a
-verified runtime, an owned provider root, and a healthy sidecar. A failed enable
-rolls the persisted setting back to disabled. API keys are write-only: responses
-expose only `has_api_key`, omission preserves an existing key, and explicit key
-clearing is allowed only while the resulting configuration is disabled.
+verified runtime, an owned provider root, and a healthy sidecar. A failed
+Personal Memory enable rolls its persisted setting back to disabled. Agent
+Memory follows its separate cutover contract: a post-commit role-start failure
+retains the desired enabled setting and recovery intent in degraded state, keeps
+capture/claims closed, and retries only through the controller role-recovery
+path. API keys are write-only: responses expose only `has_api_key`, omission
+preserves an existing key, and explicit key clearing is allowed only while the
+resulting configuration is disabled.
 
 The Settings page provides:
 
@@ -317,9 +321,18 @@ pending Agent rows claimable. Neither toggle mode-flips or deletes the other
 root.
 
 Changing only an API key is allowed without replacing the vector space.
-Changing the embedding endpoint or model while provider data exists is rejected.
-The supported replacement flow is: disable Memory, Clear all, change the
-embedding configuration, then re-enable.
+Changing the embedding endpoint or model while either sentinel-owned role root
+contains data requires explicit **Save and rebuild** confirmation; Disable,
+Clear, and re-enable is not the replacement flow. The controller persists the
+candidate plus durable rebuild intent, performs one bounded preflight, fences
+both roles, quiesces both sidecars, and rebuilds each nonempty chat/Agent root
+independently while preserving its Markdown/provider data. Neither role may
+activate against the new vector-space identity until every nonempty owned root
+has converged. A partial failure retains the candidate and intent, keeps both
+roles fenced, and resumes idempotently through **Retry rebuild**. If rebuild
+settled but later role activation fails, the repaired roots remain intact and
+the degraded role uses **Restart engine**; Clear remains only the explicit
+destructive recovery action.
 
 ### Clear all
 
