@@ -169,6 +169,39 @@ def test_runtime_owner_recovery_fails_closed_after_delivery_failure() -> None:
     assert not controller._delivery_recovery_complete.is_set()
 
 
+def test_runtime_owner_recovery_isolates_optional_model_hub_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    controller = Controller.__new__(Controller)
+    controller.model_hub_service = SimpleNamespace(
+        reconcile_runtime_installation=AsyncMock(
+            side_effect=OSError("runtime directory is unwritable")
+        )
+    )
+    controller.session_turns = SimpleNamespace(
+        recover_durable_delivery_state=AsyncMock(return_value=[]),
+        recover_persisted_agent_run_queue=AsyncMock(return_value=[]),
+    )
+    controller.scheduled_task_service = SimpleNamespace(
+        recover_processing_requests=Mock()
+    )
+    controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
+    controller._delivery_recovery_complete = asyncio.Event()
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(controller._recover_runtime_owners())
+
+    controller.model_hub_service.reconcile_runtime_installation.assert_awaited_once_with()
+    controller.session_turns.recover_durable_delivery_state.assert_awaited_once_with(
+        service_restart=True
+    )
+    controller.session_turns.recover_persisted_agent_run_queue.assert_awaited_once_with()
+    controller.scheduled_task_service.recover_processing_requests.assert_called_once_with()
+    controller.runtime_work_supervisor.activate.assert_awaited_once_with()
+    assert controller._delivery_recovery_complete.is_set()
+    assert "Model Hub runtime recovery failed" in caplog.text
+
+
 def test_runtime_ready_fails_closed_after_queue_recovery_failure() -> None:
     controller = Controller.__new__(Controller)
     controller.agent_service = SimpleNamespace(agents={})

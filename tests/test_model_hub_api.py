@@ -31,6 +31,7 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
+    RuntimePlatformUnsupportedError,
     SOURCE_PROTOCOLS,
     SourceObservation,
 )
@@ -846,7 +847,7 @@ def test_runtime_install_rejects_unsupported_server_host_without_mutation(
 ):
     class NotInstalledAdapter(FakeAdapter):
         async def install(self):
-            raise AssertionError("unsupported host must not start installation")
+            raise RuntimePlatformUnsupportedError
 
         async def status(self):
             return EngineStatus(

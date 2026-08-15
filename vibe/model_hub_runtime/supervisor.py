@@ -75,6 +75,12 @@ class EngineSupervisor:
             self._stop_locked()
             self._start_locked()
 
+    def note_installation_settled(self) -> None:
+        """Expose a newly verified binary as lazy-started, not previously down."""
+        with self._lock:
+            if not self._is_running_locked():
+                self._start_attempted = False
+
     def invalidate_configs(self) -> None:
         """Remove secret-bearing configs and recreate one only for a live engine."""
         with self._lock:
@@ -104,7 +110,9 @@ class EngineSupervisor:
             elif installed:
                 health = "down" if self._start_attempted else "not_started"
             else:
-                health = "down" if self._start_attempted else "not_installed"
+                # A missing or unverifiable binary remains installable even
+                # after an earlier start attempt exposed its absence.
+                health = "not_installed"
             host_platform_reader = getattr(self.installer, "host_platform", None)
             host_platform = (
                 host_platform_reader()
@@ -115,8 +123,12 @@ class EngineSupervisor:
                 "host_platform": host_platform,
                 "manifest": self.installer.contract_manifest(),
                 "status": {
-                    "installed_version": managed.get("version") if installed else None,
-                    "verified": installed,
+                    "installed_version": (
+                        managed.get("version")
+                        if installed and health != "installing"
+                        else None
+                    ),
+                    "verified": installed and health != "installing",
                     "listening": listening,
                     "health": health,
                     "last_check": self._last_check,

@@ -78,9 +78,6 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         platform_tag = managed_runtime.runtime_platform_tag()
         return _ENGINE_PLATFORM_MAP.get(platform_tag, platform_tag)
 
-    def platform_supported(self) -> bool:
-        return self._install_target() is not None
-
     def install_state(self) -> dict[str, Any] | None:
         with self._install_state_lock:
             try:
@@ -107,7 +104,9 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             return payload
 
     def mark_installing(self) -> bool:
-        target = self._install_target()
+        # Status reads stay offline, but install admission may fetch an explicit
+        # remote manifest that has not been cached on this host yet.
+        target = self._install_target(allow_network=not self.offline)
         if target is None:
             return False
         with self._install_state_lock:
@@ -125,7 +124,9 @@ class EngineRuntimeManager(ManagedRuntimeManager):
     def mark_install_failed(self) -> None:
         with self._install_state_lock:
             current = self.install_state() or {}
-            target = current.get("target") or self._install_target()
+            target = current.get("target") or self._install_target(
+                allow_network=False,
+            )
             managed_runtime.write_json_atomic(
                 self.install_state_path,
                 {
@@ -161,8 +162,8 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         finally:
             self._release_mutation_lock(file_lock)
 
-    def _install_target(self) -> dict[str, Any] | None:
-        manifest = self._load_manifest(allow_network=False)
+    def _install_target(self, *, allow_network: bool) -> dict[str, Any] | None:
+        manifest = self._load_manifest(allow_network=allow_network)
         if manifest is None or not self._manifest_installable(manifest):
             return None
         archive = self._manifest_archive_for_platform(manifest)

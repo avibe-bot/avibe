@@ -913,6 +913,9 @@ class ModelHubService:
             self._runtime_install_reconciled = True
             return recovered if isinstance(recovered, EngineStatus) else None
 
+    async def stop(self) -> None:
+        await self.adapter.stop()
+
     @staticmethod
     def _credential_was_already_revoked(error: Exception) -> bool:
         # The frozen adapter surface has no typed not-found result. Match the
@@ -4312,12 +4315,6 @@ class ModelHubService:
         status = self._runtime_status_after_demand(status)
         if status.health is not EngineHealth.NOT_INSTALLED:
             return _runtime_payload(status)
-        current = _runtime_payload(status)
-        if not any(
-            asset.get("platform") == current["host_platform"]
-            for asset in current["manifest"]["assets"]
-        ):
-            raise ModelHubError("runtime_platform_unsupported", status=422)
         install = getattr(self.adapter, "install", None)
         if not callable(install):
             raise ModelHubError("engine_down", status=503)

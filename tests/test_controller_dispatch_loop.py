@@ -562,6 +562,7 @@ async def test_runtime_work_stack_drains_run_activity_before_executor_stop() -> 
             stopped.append("supervisor")
 
     controller.message_dispatcher = _Dispatcher()
+    controller.model_hub_service = _Service("model-hub")
     controller.scheduled_task_service = _Service("tasks")
     controller.watch_service = _Service("watch")
     controller.runtime_work_supervisor = _Supervisor()
@@ -569,8 +570,8 @@ async def test_runtime_work_stack_drains_run_activity_before_executor_stop() -> 
     await controller._stop_runtime_work_stack()
 
     assert stopped[0:2] == ["quiesce", "activity"]
-    assert set(stopped[2:4]) == {"tasks", "watch"}
-    assert stopped[4] == "supervisor"
+    assert set(stopped[2:5]) == {"model-hub", "tasks", "watch"}
+    assert stopped[5] == "supervisor"
 
 
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
