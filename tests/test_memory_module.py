@@ -385,7 +385,9 @@ async def test_capture_pins_a_real_attachment_and_forwards_the_private_copy(tmp_
     attachment = _source_attachment("diagram.png", b"real image bytes")
     source_path = Path(attachment.uri.removeprefix("file://"))
 
-    assert await module.capture(_request(attachments=(attachment,))) == CaptureAccepted()
+    assert await module.capture(_request(attachments=(attachment,))) == CaptureAccepted(
+        captured_attachment_count=1
+    )
     queued = store.list_queue_rows()[0]
     assert queued.payload_attachments is not None
     assert queued.attachment_bundle_id is not None
@@ -402,7 +404,6 @@ async def test_capture_pins_a_real_attachment_and_forwards_the_private_copy(tmp_
 async def test_capture_pin_failure_preserves_mixed_turn_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-004."""
 
@@ -417,48 +418,27 @@ async def test_capture_pin_failure_preserves_mixed_turn_text(
         )
 
     monkeypatch.setattr(attachment_store, "pin", fail_pin)
-    caplog.set_level("INFO", logger="core.memory.admission")
-
     mixed = replace(
         _request(source="mixed-pin-failure", attachments=(attachment,)),
         text="keep this caption",
         attachment_config_generation=7,
     )
-    assert await module.capture(
-        mixed,
-        attachment_platform="slack",
-    ) == CaptureAccepted()
+    assert await module.capture(mixed) == CaptureAccepted()
 
     rows = store.list_queue_rows()
     assert len(rows) == 1
     assert rows[0].payload_text == "keep this caption"
     assert rows[0].payload_attachments is None
     assert rows[0].attachment_bundle_id is None
-    records = [
-        record
-        for record in caplog.records
-        if record.message.startswith("memory_attachment_capture_skipped")
-    ]
-    assert len(records) == 1
-    assert "count=1 reason=pin_failed" in records[0].getMessage()
-
     attachment_only = replace(
         mixed,
         source_message_id="attachment-only-pin-failure",
         text="",
     )
-    caplog.clear()
     assert await module.capture(attachment_only) == OperationFailed(
         error="memory_store_unavailable"
     )
     assert len(store.list_queue_rows()) == 1
-    records = [
-        record
-        for record in caplog.records
-        if record.message.startswith("memory_attachment_capture_skipped")
-    ]
-    assert len(records) == 1
-    assert "count=1 reason=pin_failed" in records[0].getMessage()
 
 
 async def test_unexpected_capture_pin_failure_preserves_mixed_turn_text(
@@ -532,7 +512,7 @@ async def test_boot_reconcile_waits_for_attachment_admission_and_preserves_accep
         assert completed == set()
 
         allow_pin_return.set()
-        assert await capture == CaptureAccepted()
+        assert await capture == CaptureAccepted(captured_attachment_count=1)
         await recovery
     finally:
         allow_pin_return.set()

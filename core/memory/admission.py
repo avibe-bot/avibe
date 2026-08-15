@@ -27,7 +27,6 @@ from core.memory.im_attachments import (
     IM_ATTACHMENT_CAPTURE_PLATFORMS,
     select_memory_attachments,
 )
-from core.memory_telemetry import log_attachment_skip
 from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 
 
@@ -77,7 +76,6 @@ class InboundTurnFacts:
     attachment_lease: object = None
     attachment_capture_status: object = None
     attachment_config_generation: object = None
-    attachment_failures: object = None
     attachment_selection: object = None
     memory_enabled: bool = False
 
@@ -201,6 +199,8 @@ class CaptureAdmission:
                     try:
                         selection = facts.attachment_selection
                         if selection is None:
+                            # Production IM callers precompute selection off the
+                            # event loop. This fallback serves direct callers only.
                             selection = select_memory_attachments(facts.attachment_lease)  # type: ignore[arg-type]
                     except Exception as error:
                         logger.warning(
@@ -210,31 +210,8 @@ class CaptureAdmission:
                             native_files,
                             type(error).__name__,
                         )
-                        log_attachment_skip(platform, native_files, "unavailable")
                     else:
                         attachments = selection.attachments
-                        skipped = (
-                            *_materialization_failures(
-                                facts.attachment_failures,
-                                maximum=native_files,
-                            ),
-                            *selection.skipped,
-                        )[:native_files]
-                        if skipped:
-                            reasons = set(skipped)
-                            reason = (
-                                skipped[0]
-                                if len(reasons) == 1
-                                else "mixed_rejections"
-                            )
-                            log_attachment_skip(
-                                platform,
-                                len(skipped),
-                                reason,
-                            )
-                else:
-                    reason = "not_configured" if status == "not_configured" else "unavailable"
-                    log_attachment_skip(platform, native_files, reason)
                 if not facts.text.strip() and not attachments:
                     return CaptureSkipped(reason="memory_invalid_input")
             elif not _asserted_true(facts.is_ordinary_text) or not facts.text.strip():
@@ -275,17 +252,6 @@ def _attachment_config_generation(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
-
-
-def _materialization_failures(
-    value: object,
-    *,
-    maximum: int,
-) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    closed = {"download_failed", "file_too_large"}
-    return tuple(reason for reason in value if reason in closed)[:maximum]
 
 
 def _native_file_count(value: object) -> int | None:

@@ -264,7 +264,6 @@ class MemoryIMAttachmentScenarioHarness:
                 attachment_lease=memory_lease,
                 attachment_reservation=reservation,
                 attachment_config_generation=config_generation,
-                attachment_failure_reasons=batch.errors,
             )
             batch.lease.adopt()
         finally:

@@ -501,11 +501,9 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             attachment_lease,
             attachment_reservation,
             attachment_config_generation,
-            attachment_failure_reasons,
         ):
             self.assertIs(attachment_reservation, reservation)
             self.assertEqual(attachment_config_generation, 1)
-            self.assertEqual(attachment_failure_reasons, ("download_failed",))
             events.append(("capture", attachment_lease))
 
         controller.capture_user_memory = capture_user_memory
@@ -626,15 +624,10 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             is_ordinary_attachment=True,
         )
 
-        with self.assertLogs("core.memory.admission", level="INFO") as logs:
-            await handler.handle_user_message(context, "remember this")
-            await handler.drain_memory_capture_tasks()
+        await handler.handle_user_message(context, "remember this")
+        await handler.drain_memory_capture_tasks()
 
         self.assertEqual(captured, ["remember this"])
-        self.assertEqual(
-            sum("reason=lease_retain_failed" in line for line in logs.output),
-            1,
-        )
         lease.retain.assert_called_once_with()
         lease.adopt.assert_called_once_with()
         lease.release.assert_called_once_with()
@@ -1245,10 +1238,9 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         assert reset_completed.is_set()
         assert not turn.done()
 
-        with self.assertLogs("core.memory.admission", level="INFO") as logs:
-            release_download.set()
-            await asyncio.wait_for(turn, timeout=1.0)
-            await handler.drain_memory_capture_tasks()
+        release_download.set()
+        await asyncio.wait_for(turn, timeout=1.0)
+        await handler.drain_memory_capture_tasks()
 
         controller.reserve_memory_attachment_capture.assert_not_called()
         lease.retain.assert_not_called()
@@ -1257,10 +1249,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(capture_call.args[1], "keep this caption")
         self.assertIsNone(capture_call.kwargs["attachment_reservation"])
         self.assertIsNone(capture_call.kwargs["attachment_config_generation"])
-        self.assertEqual(
-            sum("reason=stale_session" in line for line in logs.output),
-            1,
-        )
 
     async def test_second_same_session_attachment_turn_does_not_wait_for_first_capture(
         self,

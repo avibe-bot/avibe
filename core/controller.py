@@ -50,7 +50,7 @@ from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
-from core.memory import CaptureReceipt, CaptureRequest, CaptureSkipped
+from core.memory import CaptureAccepted, CaptureReceipt, CaptureRequest, CaptureSkipped
 import core.memory.admission as memory_admission
 from core.memory.admission import (
     WORKBENCH_PLATFORM,
@@ -59,7 +59,7 @@ from core.memory.admission import (
 )
 from core.memory.blocking import run_blocking
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
-from core.memory_telemetry import log_attachment_skip
+from core.memory_telemetry import log_attachment_capture
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -1873,7 +1873,6 @@ class Controller:
         attachment_lease: object = None,
         attachment_capture_status: object = None,
         attachment_config_generation: object = None,
-        attachment_failures: object = None,
         include_workdir: bool = True,
     ) -> InboundTurnFacts:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
@@ -1897,7 +1896,6 @@ class Controller:
             attachment_lease=attachment_lease,
             attachment_capture_status=attachment_capture_status,
             attachment_config_generation=attachment_config_generation,
-            attachment_failures=attachment_failures,
             memory_enabled=bool(
                 getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
             ),
@@ -1934,11 +1932,6 @@ class Controller:
             or not isinstance(principal_id, str)
             or not isinstance(project_id, str)
         ):
-            log_attachment_skip(
-                CaptureAdmission.platform_of(facts),
-                len(context.files or ()),
-                "reservation_failed",
-            )
             return None
         read_generation = getattr(
             runtime,
@@ -1963,11 +1956,6 @@ class Controller:
                 session_id=session_id,
             )
         except Exception:
-            log_attachment_skip(
-                CaptureAdmission.platform_of(facts),
-                len(context.files or ()),
-                "reservation_failed",
-            )
             return None
         return _MemoryAttachmentCaptureReservation(
             module=module,
@@ -2372,7 +2360,6 @@ class Controller:
         attachment_lease: object = None,
         attachment_reservation: object = None,
         attachment_config_generation: int | None = None,
-        attachment_failure_reasons: object = None,
         attachment_text_only: bool = False,
         admission_ready: asyncio.Event | None = None,
     ) -> Awaitable[None]:
@@ -2390,7 +2377,6 @@ class Controller:
             attachment_lease=attachment_lease,
             attachment_reservation=attachment_reservation,
             attachment_config_generation=attachment_config_generation,
-            attachment_failure_reasons=attachment_failure_reasons,
             attachment_text_only=attachment_text_only,
             admission_ready=admission_ready,
             observed_runtime=getattr(self, "memory_runtime", None),
@@ -2405,7 +2391,6 @@ class Controller:
         attachment_lease: object = None,
         attachment_reservation: object = None,
         attachment_config_generation: int | None = None,
-        attachment_failure_reasons: object = None,
         attachment_text_only: bool = False,
         admission_ready: asyncio.Event | None = None,
         observed_runtime: object,
@@ -2427,14 +2412,13 @@ class Controller:
             session_id=session_id,
             attachment_lease=attachment_lease,
             attachment_config_generation=attachment_config_generation,
-            attachment_failures=attachment_failure_reasons,
         )
         try:
             if admission.admits_attachment_turn(facts):
                 if reservation is None:
                     await self._capture_user_memory_decided(
                         admission,
-                        self._memory_attachment_text_fallback(facts),
+                        self._memory_attachment_unavailable(facts),
                         attachment_lease=None,
                         observed_runtime=observed_runtime,
                     )
@@ -2462,7 +2446,7 @@ class Controller:
                         await self._capture_user_memory_decided(
                             admission,
                             (
-                                self._memory_attachment_text_fallback(facts)
+                                self._memory_attachment_unavailable(facts)
                                 if attachment_text_only
                                 else facts
                             ),
@@ -2488,20 +2472,16 @@ class Controller:
                 admission_ready.set()
 
     @staticmethod
-    def _memory_attachment_text_fallback(
+    def _memory_attachment_unavailable(
         facts: InboundTurnFacts,
     ) -> InboundTurnFacts:
-        """Keep an admitted attachment turn's caption after attachment failure."""
+        """Finalize an unavailable attachment set while preserving its caption."""
 
         return replace(
             facts,
-            files=(),
-            is_ordinary_text=True,
-            is_ordinary_attachment=False,
             attachment_lease=None,
-            attachment_capture_status=None,
+            attachment_capture_status="unavailable",
             attachment_config_generation=None,
-            attachment_failures=None,
         )
 
     async def _capture_user_memory_decided(
@@ -2515,29 +2495,31 @@ class Controller:
     ) -> None:
         platform = CaptureAdmission.platform_of(facts)
         if admission.admits_attachment_turn(facts):
-            status = "not_configured"
+            status = facts.attachment_capture_status
             attachment_selection = None
-            if (
-                platform == WORKBENCH_PLATFORM
-                or facts.attachment_config_generation is not None
-            ):
-                status = "unavailable"
-                read_status = getattr(
-                    observed_runtime,
-                    "attachment_capture_status",
-                    None,
-                )
-                if callable(read_status):
-                    try:
-                        observed_status = await read_status()
-                    except Exception:
-                        observed_status = "unavailable"
-                    if observed_status in {
-                        "ready",
-                        "not_configured",
-                        "unavailable",
-                    }:
-                        status = observed_status
+            if status not in {"ready", "not_configured", "unavailable"}:
+                status = "not_configured"
+                if (
+                    platform == WORKBENCH_PLATFORM
+                    or facts.attachment_config_generation is not None
+                ):
+                    status = "unavailable"
+                    read_status = getattr(
+                        observed_runtime,
+                        "attachment_capture_status",
+                        None,
+                    )
+                    if callable(read_status):
+                        try:
+                            observed_status = await read_status()
+                        except Exception:
+                            observed_status = "unavailable"
+                        if observed_status in {
+                            "ready",
+                            "not_configured",
+                            "unavailable",
+                        }:
+                            status = observed_status
             if status == "ready" and platform != WORKBENCH_PLATFORM:
                 try:
                     attachment_selection = await run_blocking(
@@ -2591,11 +2573,6 @@ class Controller:
                         isinstance(current_generation, bool)
                         or current_generation != request.attachment_config_generation
                     ):
-                        log_attachment_skip(
-                            platform,
-                            len(request.attachments),
-                            "configuration_changed",
-                        )
                         request = replace(
                             request,
                             attachments=(),
@@ -2608,11 +2585,19 @@ class Controller:
                     capture_options["admission"] = held_admission
                 if request.attachments and attachment_lease is not None:
                     capture_options["source_lease"] = attachment_lease
-                await runtime.module.capture(
+                result = await runtime.module.capture(
                     request,
-                    attachment_platform=platform,
                     **capture_options,
                 )
+                if platform != WORKBENCH_PLATFORM and isinstance(facts.files, (list, tuple)):
+                    total = len(facts.files)
+                    if total:
+                        captured = (
+                            result.captured_attachment_count
+                            if isinstance(result, CaptureAccepted)
+                            else 0
+                        )
+                        log_attachment_capture(platform, total, captured)
             logger.info(
                 "Memory capture platform=%s latency_ms=%d",
                 platform,

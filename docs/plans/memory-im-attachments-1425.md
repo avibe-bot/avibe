@@ -129,8 +129,8 @@ telemetry, or adapter exception text.
 
 Absent multimodal configuration or parser capability skips IM attachments before
 pinning, enqueueing, or calling `/add`. Each rejected item degrades independently.
-Avibe emits one scrub-safe `memory_attachment_capture_skipped` event per turn with
-platform, count, and one closed reason only.
+Avibe emits one scrub-safe `memory_attachment_capture` event per capture attempt
+with platform, total, captured, and dropped counts only.
 
 Configured adds retain the existing retry and ambiguity semantics. Deterministic
 EverOS `UNSUPPORTED_FORMAT` and `CAPABILITY_UNAVAILABLE` attachment outcomes are
@@ -263,10 +263,9 @@ until slice 5 adds contract evidence for the other four adapters.
   no attachment pin, provider attachment, or call-log row. Attachment-only turns
   with no surviving item are skipped.
 - Per-attachment selection uses the closed format and limit table. A rejected
-  sibling does not remove eligible text or valid siblings. Skip telemetry is one
-  structured event containing only platform, total rejected count, and a closed
-  reason. When one turn has different rejection classes, the reason is the fixed
-  `mixed_rejections` value rather than attachment-specific detail.
+  sibling does not remove eligible text or valid siblings. Attachment telemetry
+  reports only the attempt's total, captured, and dropped counts; it does not
+  attribute reasons to individual files.
 - The hermetic Slack scenario drives the shared materializer, admission, durable
   pin/outbox worker, fake EverOS add/flush, redacted multimodal call log, and
   `vibe memory search`. It proves a single adapter download and zero temp or
@@ -314,36 +313,14 @@ all capture work to one late stage.
   implicit compatibility path. Eligible text remains independently best effort, and
   that invariant must hold at every attachment-path failure or early return rather
   than only for failures with an existing closed classification.
-- **Drop-accounting invariant.** Every attachment deterministically dropped in one
-  turn is counted exactly once across that turn's scrub-safe
-  `memory_attachment_capture_skipped` records. A turn may produce multiple records:
-  each drop point accounts only for the attachments it discards, and the records'
-  attachment sets must be disjoint with a union equal to every deterministic drop in
-  the turn. From successful materialization onward, Admission aggregates the
-  eligibility and selection reasons it owns; every deterministic drop outside
-  Admission emits the same platform/count/closed-reason shape itself. The complete
-  post-materialization injection matrix is:
-
-  | Drop point | Closed reason represented in the matrix | Accounting owner |
-  | --- | --- | --- |
-  | Admission selection rejection | `unsupported_type` | Admission aggregate |
-  | Partial materialization failure | `download_failed` | Admission aggregate |
-  | Capture reservation failure | `reservation_failed` | Controller |
-  | Lease-retention failure | `lease_retain_failed` | Message handler |
-  | Configuration-generation mismatch | `configuration_changed` | Controller |
-  | Pin failure with a caption | `pin_failed` | Memory module |
-  | Pin failure without a caption | `pin_failed` | Memory module |
-  | Materialization rejection followed by survivor pin failure | `download_failed` + `pin_failed` | Admission + Memory module, disjointly |
-
-  This table maps one-to-one to the parameter rows in
-  `tests/test_memory_attachment_drop_accounting.py`. Adding a deterministic drop
-  point requires both a table row naming its single accounting owner and a matrix
-  row; either omission violates the contract. Each row asserts that every affected
-  attachment is accounted exactly once across the full turn; the cross-layer row
-  proves that distinct owners may emit distinct records without overlapping counts.
-  All-shape pin failure, not only mixed turn fallback, is owned before the pin-error
-  result branches. Silent loss and duplicate attachment counting are both contract
-  violations.
+- **Attachment telemetry invariant.** Every capture attempt produces exactly one
+  result object. When that result returns to the controller, it emits exactly one
+  scrub-safe `memory_attachment_capture` record containing `platform`, `total`,
+  `captured`, and `dropped`. `captured` is supplied by
+  `CaptureAccepted.captured_attachment_count` and comes from the final bundle that
+  the attempt actually enqueued; every other result type counts as zero.
+  `dropped = total - captured` is computed at that one call site. No per-attachment
+  reason attribution or cross-call-site accounting state is retained.
 - **Reservation boundary.** While holding per-session `SessionTurn` lifecycle
   admission, the handler performs only an O(1), non-blocking, local registration of
   an exact-session Memory capture ticket. Registration records FIFO order but never

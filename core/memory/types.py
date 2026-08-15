@@ -247,6 +247,7 @@ def decode_capture_attachments(payload: str | None) -> tuple[CaptureAttachment, 
 @dataclass(frozen=True)
 class CaptureAccepted:
     status: Literal["accepted"] = "accepted"
+    captured_attachment_count: int = 0
 
 
 @dataclass(frozen=True)

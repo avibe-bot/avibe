@@ -19,7 +19,6 @@ from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_context_thread_id,
 )
-from core.memory_telemetry import log_attachment_skip
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
@@ -748,7 +747,6 @@ class MessageHandler(BaseHandler):
             # owns stable local media references and can survive a restart.
             processed_files = None
             attachment_errors: List[str] = []
-            attachment_failure_reasons: tuple[str, ...] = ()
             downloaded_attachment_paths: list[str] = []
             if context.files:
                 existing_local_paths = {
@@ -764,9 +762,6 @@ class MessageHandler(BaseHandler):
                 attachment_lease = attachment_batch.lease
                 processed_files = list(attachment_batch.attachments) or None
                 attachment_errors = list(attachment_batch.display_errors)
-                attachment_failure_reasons = tuple(
-                    getattr(attachment_batch, "errors", ())
-                )
                 if processed_files:
                     downloaded_attachment_paths = [
                         str(attachment.local_path)
@@ -804,12 +799,6 @@ class MessageHandler(BaseHandler):
                                 memory_session_pre_epoch,
                             )
                         )
-                        if stale_attachment_capture:
-                            log_attachment_skip(
-                                str(context.platform or "unknown"),
-                                len(context.files),
-                                "stale_session",
-                            )
                         reserve_attachment = getattr(
                             self.controller,
                             "reserve_memory_attachment_capture",
@@ -841,21 +830,10 @@ class MessageHandler(BaseHandler):
                                     "capturing text only error_type=%s",
                                     type(error).__name__,
                                 )
-                                retained_attachment_count = len(processed_files or ())
-                                if retained_attachment_count:
-                                    log_attachment_skip(
-                                        str(context.platform or "unknown"),
-                                        retained_attachment_count,
-                                        "lease_retain_failed",
-                                    )
                         capture_options = {
                             "attachment_reservation": memory_capture_reservation,
                             "attachment_config_generation": attachment_config_generation,
                         }
-                        if attachment_failure_reasons:
-                            capture_options["attachment_failure_reasons"] = (
-                                attachment_failure_reasons
-                            )
                         if memory_attachment_lease is not None:
                             capture_options["attachment_lease"] = memory_attachment_lease
                         if attachment_text_only:

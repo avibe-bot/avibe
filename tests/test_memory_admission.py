@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -347,31 +346,28 @@ def test_denied_attachment_turn_never_reads_the_lease(
     assert isinstance(_admission().decide(facts), CaptureSkipped)
 
 
-def test_attachment_skip_log_contains_only_closed_metadata(caplog: pytest.LogCaptureFixture) -> None:
+def test_not_configured_attachment_turn_keeps_safe_caption() -> None:
     secret_name = "quarterly-secret.pdf"
     secret_url = "https://files.slack.test/token-bearing-url"
     native_file = SimpleNamespace(name=secret_name, url=secret_url)
 
-    with caplog.at_level(logging.INFO, logger="core.memory.admission"):
-        request = _admission().decide(
-            _facts(
-                text="safe caption",
-                files=[native_file],
-                is_ordinary_text=False,
-                is_ordinary_attachment=True,
-                attachment_capture_status="not_configured",
-            )
+    request = _admission().decide(
+        _facts(
+            text="safe caption",
+            files=[native_file],
+            is_ordinary_text=False,
+            is_ordinary_attachment=True,
+            attachment_capture_status="not_configured",
         )
+    )
 
     assert isinstance(request, CaptureRequest)
-    assert "memory_attachment_capture_skipped platform=slack count=1 reason=not_configured" in caplog.text
-    assert secret_name not in caplog.text
-    assert secret_url not in caplog.text
+    assert request.text == "safe caption"
+    assert request.attachments == ()
 
 
-def test_mixed_attachment_rejections_emit_one_aggregate_log(
+def test_mixed_attachment_rejections_keep_caption(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(
         "core.memory.admission.select_memory_attachments",
@@ -381,107 +377,20 @@ def test_mixed_attachment_rejections_emit_one_aggregate_log(
         ),
     )
 
-    with caplog.at_level(logging.INFO, logger="core.memory.admission"):
-        request = _admission().decide(
-            _facts(
-                text="safe caption",
-                files=[object(), object()],
-                is_ordinary_text=False,
-                is_ordinary_attachment=True,
-                attachment_lease=object(),
-                attachment_capture_status="ready",
-                attachment_config_generation=1,
-            )
+    request = _admission().decide(
+        _facts(
+            text="safe caption",
+            files=[object(), object()],
+            is_ordinary_text=False,
+            is_ordinary_attachment=True,
+            attachment_lease=object(),
+            attachment_capture_status="ready",
+            attachment_config_generation=1,
         )
-
-    assert isinstance(request, CaptureRequest)
-    records = [
-        record
-        for record in caplog.records
-        if record.message.startswith("memory_attachment_capture_skipped")
-    ]
-    assert len(records) == 1
-    assert "count=2 reason=mixed_rejections" in records[0].getMessage()
-
-
-def test_materialization_failures_join_attachment_skip_telemetry(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Scenario: MEMORY-IM-ATTACH-004."""
-
-    attachment = CaptureAttachment(
-        kind="pdf",
-        name="receipt.pdf",
-        uri="file:///leased/receipt.pdf",
-        ext="pdf",
-    )
-    monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
-        lambda _lease: SimpleNamespace(attachments=(attachment,), skipped=()),
     )
 
-    with caplog.at_level(logging.INFO, logger="core.memory.admission"):
-        request = _admission().decide(
-            _facts(
-                text="keep the valid sibling",
-                files=[object(), object()],
-                is_ordinary_text=False,
-                is_ordinary_attachment=True,
-                attachment_lease=object(),
-                attachment_capture_status="ready",
-                attachment_config_generation=7,
-                attachment_failures=("download_failed",),
-            )
-        )
-
     assert isinstance(request, CaptureRequest)
-    assert request.attachments == (attachment,)
-    assert request.attachment_config_generation == 7
-    records = [
-        record
-        for record in caplog.records
-        if record.message.startswith("memory_attachment_capture_skipped")
-    ]
-    assert len(records) == 1
-    assert "count=1 reason=download_failed" in records[0].getMessage()
-
-
-def test_all_materialization_failures_keep_text_and_emit_one_skip(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Scenario: MEMORY-IM-ATTACH-004."""
-
-    monkeypatch.setattr(
-        "core.memory.admission.select_memory_attachments",
-        lambda _lease: SimpleNamespace(attachments=(), skipped=()),
-    )
-
-    with caplog.at_level(logging.INFO, logger="core.memory.admission"):
-        request = _admission().decide(
-            _facts(
-                text="keep this caption",
-                files=[object()],
-                is_ordinary_text=False,
-                is_ordinary_attachment=True,
-                attachment_lease=object(),
-                attachment_capture_status="ready",
-                attachment_config_generation=9,
-                attachment_failures=("download_failed",),
-            )
-        )
-
-    assert isinstance(request, CaptureRequest)
-    assert request.text == "keep this caption"
     assert request.attachments == ()
-    records = [
-        record
-        for record in caplog.records
-        if record.message.startswith("memory_attachment_capture_skipped")
-    ]
-    assert len(records) == 1
-    assert "count=1 reason=download_failed" in records[0].getMessage()
 
 
 def test_unexpected_attachment_selection_failure_keeps_text(

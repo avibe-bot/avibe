@@ -14,12 +14,18 @@ import logging
 logger = logging.getLogger("core.memory.admission")
 
 
-def log_attachment_skip(platform: str, count: int, reason: str) -> None:
-    """Record one aggregate attachment drop without native attachment detail."""
+def log_attachment_capture(
+    platform: str,
+    total: int,
+    captured: int,
+) -> None:
+    """Record one finalized attachment set without native attachment detail."""
 
+    dropped = total - captured
     logger.info(
-        "memory_attachment_capture_skipped platform=%s count=%d reason=%s",
+        "memory_attachment_capture platform=%s total=%d captured=%d dropped=%d",
         platform,
-        count,
-        reason,
+        total,
+        captured,
+        dropped,
     )

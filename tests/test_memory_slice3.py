@@ -153,7 +153,9 @@ class _CaptureModule:
             return CaptureDuplicate()
         self.seen.add(request.source_message_id)
         self.accepted.append(request)
-        return CaptureAccepted()
+        return CaptureAccepted(
+            captured_attachment_count=len(request.attachments)
+        )
 
 
 def _controller(*, user=None):
@@ -649,10 +651,10 @@ def test_attachment_capture_fails_closed_when_config_generation_changes(
     records = [
         record
         for record in caplog.records
-        if record.message.startswith("memory_attachment_capture_skipped")
+        if record.message.startswith("memory_attachment_capture ")
     ]
     assert len(records) == 1
-    assert "count=1 reason=configuration_changed" in records[0].getMessage()
+    assert "platform=slack total=1 captured=0 dropped=1" in records[0].getMessage()
 
 
 @pytest.mark.parametrize(
