@@ -511,8 +511,18 @@ function layerParts(layer) {
   return shadowLayers(layer.replace(/_/g, ',')).filter((part) => part !== '');
 }
 
-const ZERO_LENGTH = /^0(px)?$/;
-const RAW_COLOUR = /rgba?\(|#[0-9a-fA-F]{3,8}\b/;
+// Both halves of the test below are stated as properties, the colour half
+// deliberately so. Asking "does this layer contain `rgba(` or a hex?" would be
+// an enumeration of two spellings while CSS has many more -- `hsl()`,
+// `oklch()`, `lab()`, `color-mix()`, a bare `red` -- so it would wave through
+// the very literals it exists to catch. The positive question has no such gap:
+// in a shadow layer whatever is not a length IS the colour, so a glow's colour
+// must be a reference to a managed one, and every literal spelling fails
+// without being named. `currentColor` counts as managed -- it is not a value
+// but a pointer at the element's own text colour, which the theme already owns.
+const ZERO_LENGTH = /^0(px|rem|em)?$/;
+const LENGTH = /^[+-]?(\d+(\.\d+)?|\.\d+)(px|rem|em|ch|vw|vh)?$/;
+const MANAGED_COLOUR = /^(var\(--[^)]*\)|currentColor)$/;
 
 function assertGlowsReadThroughTokens(root) {
   const offenders = [];
@@ -525,10 +535,19 @@ function assertGlowsReadThroughTokens(root) {
       for (const layer of shadowLayers(value)) {
         const parts = layerParts(layer);
         if (parts[0] === 'inset') parts.shift();
+        // CSS lets the colour lead instead of trail, so move a leading literal
+        // to the back and let the lengths line up. A leading `var()` is left
+        // alone: it only means this layer is not read as a glow, and a managed
+        // colour is not an offender either way.
+        if (parts.length > 1 && !LENGTH.test(parts[0]) && !MANAGED_COLOUR.test(parts[0])) {
+          parts.push(parts.shift());
+        }
         const [x, y, blur] = parts;
         const isGlow = ZERO_LENGTH.test(x ?? '') && ZERO_LENGTH.test(y ?? '')
           && blur !== undefined && !ZERO_LENGTH.test(blur);
-        if (isGlow && RAW_COLOUR.test(layer)) {
+        if (!isGlow) continue;
+        const literal = parts.some((part) => !LENGTH.test(part) && !MANAGED_COLOUR.test(part));
+        if (literal) {
           offenders.push(`${file}: ${layer}`);
         }
       }
