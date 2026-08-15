@@ -378,6 +378,8 @@ watch 与 `vibe task`、`vibe agent run` 共用 `--session-id`、`--create-sessi
 `--same-scope` 和 `--scope-id` 语义；`--create-session-per-run`
 只属于 `vibe task` 和 `vibe watch` 这类 stored definitions。需要可管理、可暂停、可查看的
 后台等待任务时，优先使用 `vibe watch`，不要随手起 `nohup`。
+`--timeout` 默认是 21600 秒；显式传入 `--timeout 0` 会关闭单次 cycle 的
+超时限制，任何正数值都会原样持久化。
 
 ### `vibe version`
 
