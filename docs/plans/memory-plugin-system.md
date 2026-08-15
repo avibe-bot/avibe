@@ -81,9 +81,11 @@ Busy Workbench sessions preserve the same rule. Consecutive queued messages are
 merged only within one user segment, the flushed segment keeps that user's
 identity and final message id, and the segment is captured once.
 
-Workbench attachments are forwarded only when their existing local files are
-inside Avibe's controlled attachment root. Memory does not copy the files. IM
-attachments are excluded and no provider-side download pipeline is exposed.
+Workbench attachments are accepted only when their existing local files are
+inside Avibe's controlled attachment root. Memory validates and copies admitted
+files into a private pinned bundle before enqueueing; provider access remains
+confined to that bundle root. IM attachments are currently excluded pending the
+bounded acquisition and admission contract in #1425.
 
 ### User isolation
 
@@ -243,7 +245,7 @@ Important fixed guards are:
 | Guard | Limit |
 |---|---|
 | Automatic capture text | 32 KiB UTF-8 |
-| Workbench attachments | 8; 16 KiB total descriptor metadata |
+| Memory attachment bundle | 8 files; 25 MiB/file; 100 MiB total; 16 KiB descriptor metadata |
 | Nonterminal queue | 500 rows |
 | Minimum free disk for capture | 512 MiB |
 | Terminal idempotency tombstones | 90 days, newest 100,000 rows |
@@ -377,8 +379,8 @@ platform identities belong to the same human.
 
 ## Deliberate Non-goals
 
-The beta does not include automatic recall, assistant-message capture, IM
-attachments, group/workspace/shared memory, cross-platform identity linking,
+The beta does not include automatic recall, assistant-message capture,
+group/workspace/shared memory, cross-platform identity linking,
 registered backend-specific Memory tools, item-level edit/delete, export/import,
 provider migration, editable provider Markdown, exactly-once provider delivery,
 or agent-driven configuration and Clear all. Each requires a separate product

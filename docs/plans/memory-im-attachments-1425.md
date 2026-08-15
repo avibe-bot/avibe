@@ -1,0 +1,194 @@
+# IM attachment capture via EverOS multimodal ingest
+
+Issue: [#1425](https://github.com/avibe-bot/avibe/issues/1425)
+
+## Goal
+
+Let an eligible attachment sent in a bound one-to-one IM conversation enter the
+existing durable Memory capture pipeline without changing ordinary Agent file
+delivery. Avibe acquires each native attachment once, pins only admitted content
+inside the existing private Memory bundle root, and sends the same closed
+`ContentItem` kinds that the Workbench path already uses to EverOS.
+
+This is a multi-platform, provider-neutral capability. Platform adapters expose
+bounded acquisition primitives; shared core owns admission, lifetime, limits,
+redaction, and capture behavior.
+
+## Locked product decisions
+
+- IM attachment capture requires an explicit, complete
+  `memory.processing.multimodal` endpoint. Workbench keeps the released implicit
+  main-LLM inheritance for one compatibility cycle; loading an old config must
+  not copy or persist that inherited API key.
+- A complete multimodal endpoint is the opt-in. There is no second attachment
+  toggle.
+- A mixed turn degrades per attachment. Eligible text and every valid attachment
+  survive independently; one unsupported, oversized, or failed download never
+  rejects the turn.
+- The first release keeps the existing Avibe allowlist in
+  `core/memory/modality.py`: bitmap images, PDF, supported audio, direct text,
+  CSV, VTT, HTML, and EML. Office/iWork/ODF/RTF, SVG, and video remain excluded
+  even where EverOS can parse them.
+- The Memory consumer alone applies the limit of 8 files, 25 MiB per file, and
+  100 MiB per bundle. Ordinary Agent attachment behavior is unchanged.
+- Multimodal preflight sends a tiny generated image containing no user or
+  conversation data.
+
+## Admission contract
+
+Adapters add a literal-true native fact for an ordinary human attachment turn,
+separate from `is_ordinary_text`. `core/memory/admission.py` remains the only
+authority. Memory may retain an IM file only after all of these properties hold:
+
+- Memory is enabled and explicit multimodal configuration is complete;
+- platform, stable native message id, and stable session id are recognized;
+- the event is a one-to-one DM from a human and is positively classified as an
+  ordinary attachment shape;
+- the user is bound and enabled; and
+- the principal and the default v3 Memory project resolve successfully.
+
+Missing or non-boolean facts fail closed. Groups, channels, edited, forwarded,
+shared, rich, system, bot, and self-authored events remain ineligible. Admission
+must complete before Memory retains a lease or performs Memory-only acquisition.
+The Agent path may still use the same materialized file under its existing rules.
+
+An attachment-only turn with no surviving attachment is skipped. A mixed turn
+with no surviving attachment may still capture eligible text. Admission and
+attachment failure never annotate or fail the chat turn.
+
+## Acquisition and lifetime contract
+
+`core/handlers/inbound_attachments.py` owns shared native-file materialization.
+It calls the platform's `BaseIMClient.download_file_to_path` implementation,
+uses sanitized names, removes partial files, and publishes only an opaque,
+reference-counted local lease. Consumers never receive a native URL, token,
+encryption material, or mutable `MessageContext` as their durable contract.
+
+The message handler materializes before scheduling Memory capture. Agent delivery
+and Memory retain independent lease references, so Agent cleanup, retry, or
+durable-delivery failure cannot race the Memory pin. Downloads are sequential or
+at most two concurrent and keep the existing 30-second per-file timeout.
+
+Slack, Discord, and Feishu/Lark use their existing authenticated streaming path
+downloads with declared, response-header, and streamed-byte limits. Telegram is
+changed to a bounded-to-disk Bot API download; it must not buffer the entire file
+before checking the limit. WeChat checks declared size before acquisition and
+bounds ciphertext/decrypted output while writing; a post-download-only check is
+not sufficient.
+
+`core/memory/im_attachments.py` accepts only shared-materializer leases. It checks
+declared size before retaining a Memory consumer and checks final size, MIME,
+extension, and magic after acquisition through the closed modality table. It
+produces immutable `CaptureAttachment` values for surviving files.
+
+`core/memory/attachments.py` accepts either the fixed Workbench upload root or a
+fixed leased-IM source handle. Both paths keep no-follow opens, owner and mode
+checks, copy-time size enforcement, hashing, atomic bundle publication, existing
+free-disk checks, and crash reconciliation. Source kind is not persisted; bundle
+manifest v1 and the store schema do not change.
+
+## Provider and degradation contract
+
+Prepared captures use the existing path:
+
+```text
+MemoryModule -> durable outbox -> coordinator -> EverOSPort.add(ContentItem[]) -> flush
+```
+
+The outbox and logs may contain only sanitized display name, closed content kind
+and extension, byte count, bundle-relative metadata, keyed source digests, and
+closed skip reasons. They must not contain native URLs, credentials, encryption
+material, raw attachment bytes, absolute source paths, filenames supplied for
+telemetry, or adapter exception text.
+
+Absent multimodal configuration or parser capability skips IM attachments before
+pinning, enqueueing, or calling `/add`. Each rejected item degrades independently.
+Avibe emits one scrub-safe `memory_attachment_capture_skipped` event per turn with
+platform, count, and one closed reason only.
+
+Configured adds retain the existing retry and ambiguity semantics. Deterministic
+EverOS `UNSUPPORTED_FORMAT` and `CAPABILITY_UNAVAILABLE` attachment outcomes are
+terminal, release their bundle, and cannot open an endless processing fault.
+Transient and ambiguous outcomes retain the bundle exactly as the current capture
+coordinator does.
+
+The sidecar gains no route. Its existing exact `POST /api/v2/memory/add` envelope
+remains unchanged; `_valid_workbench_attachment` becomes pinned-attachment
+validation without accepting platform URLs or widening the confined provider root.
+
+## Configuration, preflight, and status
+
+Add optional all-or-none values at:
+
+```text
+memory.processing.multimodal.base_url
+memory.processing.multimodal.model
+memory.processing.multimodal.api_key
+```
+
+The block follows the released rerank behavior: an absent old key loads and saves
+without shape churn, an empty block normalizes to absent, partial API input is
+rejected, and a malformed persisted optional block disables only multimodal with a
+warning so startup continues. API keys remain write-only.
+
+Only allowlisted child environment variables carry
+`EVEROS_MULTIMODAL__BASE_URL`, `EVEROS_MULTIMODAL__MODEL`, and
+`EVEROS_MULTIMODAL__API_KEY`. Generated TOML contains the confined attachment root
+and `file_uri_max_bytes = 26214400`, but no credential. Saving a changed endpoint
+runs bounded preflight and rolling sidecar reconciliation; it does not rebuild
+embeddings or restart Avibe.
+
+`MemoryPreflightDiagnostic.side` adds `multimodal`. Its real compatibility probe is
+a tiny generated image request with no user data. Missing optional configuration
+does not block Memory enablement. Insight-reader and preflight redaction include the
+independent multimodal URL and key; a configured parse may produce a bounded,
+redacted `multimodal_llm` record, while an unconfigured skip produces no provider
+add or call-log row.
+
+Settings exposes an optional Multimodal endpoint card with the same write-only-key
+and clear semantics as rerank. Status continues to project EverOS
+`multimodal_llm`, `parser`, and `disabled_features` and adds a concise attachment
+capture availability line. Configuration remains UI-only; no CLI config flags are
+added.
+
+## Scenario contract
+
+The canonical capability is `memory_im_attachment_capture` under
+`tests/scenarios/memory_im_attachment_capture/`:
+
+- `MEMORY-IM-ATTACH-001`: a bound Slack DM image/PDF is downloaded once, pinned,
+  added, flushed, extracted, and retrievable through `vibe memory search`;
+- `MEMORY-IM-ATTACH-002`: group and unbound denial performs no Memory acquisition;
+- `MEMORY-IM-ATTACH-003`: absent multimodal configuration captures eligible text
+  only and creates no attachment provider/call-log activity; and
+- `MEMORY-IM-ATTACH-004`: count, per-file, total-size, unsupported-type, and partial
+  download failures preserve valid siblings and leave no temp or bundle leak.
+
+The closed-loop harness uses a stub platform client, a real test-owned bundle path,
+and local fake OpenAI-compatible providers. It must not use live credentials,
+running Avibe services, real user paths, or production state.
+
+## Delivery slices
+
+1. Contract and scenario catalog, including the stale Workbench-copy and IM
+   non-goal corrections in `memory-plugin-system.md`.
+2. Optional multimodal config, child environment, preflight/redaction, UI, and
+   status. IM capture stays gated.
+3. Shared leased materializer, bounded Telegram/WeChat acquisition, and pin-source
+   generalization. IM capture stays gated.
+4. Attachment classification/admission and the Slack closed loop with call-log
+   proof.
+5. Discord, Telegram, Feishu/Lark, and WeChat enablement and contract tests, plus
+   final user documentation and manual verification matrix.
+
+Each PR is based on the latest merged `master`; there are no stacked PRs. Shared
+files with the #1424 lane receive only additive, narrowly scoped changes. If that
+lane lands first, this work rebases and re-runs the complete review loop before the
+next slice.
+
+## Residual manual checks
+
+Hermetic tests prove the product contracts without live platform credentials.
+After all five slices merge, the orchestrator's integration pass should verify one
+eligible image and one rejected file on every configured IM platform in the local
+Incus regression environment, preserving accumulated product state.
