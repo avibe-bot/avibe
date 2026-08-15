@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import pytest
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -12321,6 +12322,104 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     assert replayed["interrupt_reason"] == "delivery_target_missing", (
         f"and the structured cause survives the replay: {replayed}"
     )
+
+
+def test_watch_cycle_outcome_pair_is_published_atomically(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A reader sees one completed-cycle snapshot, never half of the next one."""
+
+    from core.watches import ManagedWatch, ManagedWatchStore
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="atomic outcome",
+        session_key="",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    assert store.mark_cycle_result(watch.id, exit_code=0, error=None)
+    visible_before = store.get_watch(watch.id)
+    assert visible_before is not None
+    previous_outcome = (0, None)
+    next_outcome = (75, "watch command exited with status 75")
+
+    writer_reached_publish_boundary = threading.Event()
+    release_writer = threading.Event()
+    writer_errors: list[BaseException] = []
+    original_setattr = ManagedWatch.__setattr__
+    original_write = store._write_watch
+
+    def _block_legacy_field_write(self, name, value):
+        original_setattr(self, name, value)
+        if self is visible_before and (
+            (name == "last_exit_code" and value != previous_outcome[0])
+            or (name == "last_error" and value != previous_outcome[1])
+        ):
+            writer_reached_publish_boundary.set()
+            release_writer.wait(timeout=5)
+
+    def _block_snapshot_before_publish(candidate, expect, **kwargs):
+        if candidate is not visible_before:
+            writer_reached_publish_boundary.set()
+            release_writer.wait(timeout=5)
+        return original_write(candidate, expect, **kwargs)
+
+    monkeypatch.setattr(ManagedWatch, "__setattr__", _block_legacy_field_write)
+    monkeypatch.setattr(store, "_write_watch", _block_snapshot_before_publish)
+
+    def _write_result() -> None:
+        try:
+            assert store.mark_cycle_result(
+                watch.id,
+                exit_code=next_outcome[0],
+                error=next_outcome[1],
+            )
+        except BaseException as exc:
+            writer_errors.append(exc)
+
+    writer = threading.Thread(target=_write_result)
+    writer.start()
+    try:
+        assert writer_reached_publish_boundary.wait(timeout=5)
+        visible_during_write = store.get_watch(watch.id)
+        assert visible_during_write is not None
+        visible_outcome = (
+            visible_during_write.last_exit_code,
+            visible_during_write.last_error,
+        )
+        assert visible_outcome in {previous_outcome, next_outcome}
+        persisted_during_write = ManagedWatchStore(tmp_path / "watches.json").get_watch(
+            watch.id
+        )
+        assert persisted_during_write is not None
+        persisted_outcome = (
+            persisted_during_write.last_exit_code,
+            persisted_during_write.last_error,
+        )
+        assert persisted_outcome in {previous_outcome, next_outcome}
+    finally:
+        release_writer.set()
+        writer.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not writer_errors
+    visible_after = store.get_watch(watch.id)
+    assert visible_after is not None
+    assert (visible_after.last_exit_code, visible_after.last_error) == next_outcome
+    persisted_after = ManagedWatchStore(tmp_path / "watches.json").get_watch(watch.id)
+    assert persisted_after is not None
+    assert (persisted_after.last_exit_code, persisted_after.last_error) == next_outcome
 
 
 def test_a_forever_watch_repeating_the_field_failure_notifies_once(

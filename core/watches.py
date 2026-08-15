@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -390,11 +390,22 @@ class ManagedWatchStore:
         self.load()
         return True
 
-    def _save(self) -> None:
+    def _save(self, *, replacement: Optional[ManagedWatch] = None) -> None:
         if self._sqlite is not None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"watches": [watch.to_dict() for watch in self.list_watches()]}
+        watches = dict(self._watches)
+        if replacement is not None:
+            watches[replacement.id] = replacement
+        payload = {
+            "watches": [
+                watch.to_dict()
+                for watch in sorted(
+                    watches.values(),
+                    key=lambda item: (item.created_at, item.id),
+                )
+            ]
+        }
         with tempfile.NamedTemporaryFile(
             mode="w",
             dir=self.path.parent,
@@ -491,15 +502,16 @@ class ManagedWatchStore:
         failure leaves neither behind. Only the SQLite backend can do that, and passing
         one to the file backend is a caller bug -- see ``sqlite_backend``.
 
-        EVERY way this write can fail to land reloads the mirror (HFR-271). This store is
-        a write-through cache: each caller mutates the cached ``ManagedWatch`` and hands
-        the whole row here, so if the write does not stick, the mutation must not either.
-        Reloading on the ``False`` return alone was half the job -- a raised exception
-        rolls the transaction back just as completely, and left the process serving edits
-        the database never accepted. ``reconcile_watches`` chooses which watches keep
-        running from this dict, ``_read_state`` derives the NEXT compare-and-set's
-        expectation from it, and ``_watch_store_call`` swallows the exception, so nothing
-        downstream would ever have corrected it.
+        EVERY way this write can fail to land reloads the mirror (HFR-271). Callers may
+        pass either the cached object or a detached candidate; a landed write publishes
+        that whole object to the mirror in one dictionary assignment. If the write does
+        not stick, its mutation must not either. Reloading on the ``False`` return alone
+        was half the job -- a raised exception rolls the transaction back just as
+        completely, and left the process serving edits the database never accepted.
+        ``reconcile_watches`` chooses which watches keep running from this dict,
+        ``_read_state`` derives the NEXT compare-and-set's expectation from it, and
+        ``_watch_store_call`` swallows the exception, so nothing downstream would ever
+        have corrected it.
         """
 
         try:
@@ -508,7 +520,8 @@ class ManagedWatchStore:
                     raise ValueError(
                         "a file-backed watch store cannot commit a queued run with the watch row"
                     )
-                self._save()
+                self._save(replacement=watch)
+                self._watches[watch.id] = watch
                 _publish_watch_definitions_updated()
                 return True
             if queued_run is None:
@@ -526,6 +539,7 @@ class ManagedWatchStore:
             self._reload_after_lost_write(watch.id)
             raise
         if landed:
+            self._watches[watch.id] = watch
             _publish_watch_definitions_updated()
             return True
         self.load()
@@ -844,39 +858,40 @@ class ManagedWatchStore:
         if watch is None:
             return False
         expect = self._read_state(watch)
+        candidate = replace(watch)
         now = _utc_now_iso()
         # Retirement is state, not a conclusion drawn from cycle history.
         # Only the cycle that changes enabled -> disabled may write it. A cycle
         # landing after a manual pause must preserve that pause; a later result
         # must likewise not erase a genuine earlier retirement.
-        was_enabled = watch.enabled
+        was_enabled = candidate.enabled
         if was_enabled:
-            watch.last_finished_at = now if disable or pause else None
-            watch.retired_at = now if disable else None
+            candidate.last_finished_at = now if disable or pause else None
+            candidate.retired_at = now if disable else None
         # Once retirement commits, these fields describe that terminal outcome.
         # A late cycle still owns its individual Run row, but it cannot replace
         # the definition outcome written by the cycle that retired the Watch.
-        if was_enabled or watch.retired_at is None:
-            watch.last_exit_code = exit_code
-            watch.last_error = error
+        if was_enabled or candidate.retired_at is None:
+            candidate.last_exit_code = exit_code
+            candidate.last_error = error
         if event_detected:
-            watch.last_event_at = now
+            candidate.last_event_at = now
         if metadata_updates or (event_detected and acknowledge_event):
             # A NEW dict: ``expect`` above was derived from the stored one and has to
             # keep describing the row as it was read.
-            watch.metadata = {
-                **watch.metadata,
+            candidate.metadata = {
+                **candidate.metadata,
                 **(metadata_updates or {}),
             }
             if event_detected and acknowledge_event:
-                watch.metadata[DELIVERY_ACK_METADATA_KEY] = _delivered_reports(watch) + 1
+                candidate.metadata[DELIVERY_ACK_METADATA_KEY] = _delivered_reports(candidate) + 1
         if disable or pause:
-            watch.enabled = False
-        watch.updated_at = _utc_now_iso()
+            candidate.enabled = False
+        candidate.updated_at = _utc_now_iso()
         # Guarded for the reason ``mark_task_result`` is: a cycle result landing after a
         # ``/new`` reclaim would otherwise re-enable the watch and restore the binding
         # the teardown cleared.
-        return self._write_watch(watch, expect, queued_run=queued_run)
+        return self._write_watch(candidate, expect, queued_run=queued_run)
 
 
 class WatchRuntimeStateStore:
