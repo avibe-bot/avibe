@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260812_0053"
+HEAD_REVISION = "20260815_0054"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -54,6 +54,82 @@ def _index_sql(conn: sqlite3.Connection, name: str) -> str:
     row = conn.execute("select sql from sqlite_master where type = 'index' and name = ?", (name,)).fetchone()
     assert row is not None
     return str(row[0] or "")
+
+
+def test_remote_authorization_context_migration_preserves_legacy_rows_both_directions(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260812_0053")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into remote_access_authorizations (
+                id, instance_id, subject, claims_json, expires_at, created_at
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-auth-reference",
+                "inst-1",
+                "user-1",
+                '{"legacy":true}',
+                200,
+                100,
+            ),
+        )
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        legacy = conn.execute(
+            "select claims_json, expires_at, scope_kind from remote_access_authorizations "
+            "where id = 'legacy-auth-reference'"
+        ).fetchone()
+        conn.execute(
+            """
+            insert into remote_access_authorizations (
+                id, instance_id, subject, email, scope_kind, scope_ref,
+                authorization_state, claims_json, expires_at, created_at,
+                last_checked_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "scoped-auth-reference",
+                "inst-1",
+                "user-1",
+                "user@example.com",
+                "instance",
+                "inst-1",
+                "current",
+                '{"current":true}',
+                None,
+                101,
+                101,
+                101,
+            ),
+        )
+    assert legacy == ('{"legacy":true}', 200, None)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260812_0053")
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "select id, claims_json, expires_at from remote_access_authorizations"
+        ).fetchall()
+        expires_column = next(
+            row for row in conn.execute("pragma table_info(remote_access_authorizations)")
+            if row[1] == "expires_at"
+        )
+        columns = {row[1] for row in conn.execute("pragma table_info(remote_access_authorizations)")}
+
+    assert rows == [("legacy-auth-reference", '{"legacy":true}', 200)]
+    assert expires_column[3] == 1
+    assert not {
+        "email",
+        "scope_kind",
+        "scope_ref",
+        "authorization_state",
+        "last_checked_at",
+        "updated_at",
+    } & columns
 
 
 @pytest.mark.parametrize(

@@ -26,7 +26,7 @@ export const InstanceAuthorizationProvider = ({
         capabilities: session.capabilities ?? OWNER_INSTANCE_CAPABILITIES,
       };
     }
-    if (!session.authenticated) {
+    if (!session.authenticated || session.authorization_state !== 'current') {
       return {
         remote: true,
         instanceKind: null,

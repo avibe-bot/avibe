@@ -31,6 +31,8 @@ import {
   type SessionDraftServerState,
   type SessionDraftWrite,
 } from '../lib/sessionDraftPersistence';
+import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
+import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
 
 export type { InstanceCapabilities, SessionInfo };
 export type { ShowPageAccess };
@@ -2845,6 +2847,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onAuthorizationChanged?.(envelope.data);
       });
     });
+    source.addEventListener('remote.authorization', (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data) as { state?: RemoteAuthorizationState };
+        if (payload.state) reportRemoteAuthorizationState(payload.state);
+      } catch (err) {
+        console.error('[workbench-events] remote authorization parse failed', err, e.data);
+      }
+    });
     source.addEventListener('message.new', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<WorkbenchMessage>(e.data);
       if (!envelope) return;
@@ -4039,7 +4049,18 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
     getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
-    signOut: () => postJson('/auth/logout', {}),
+    signOut: async () => {
+      let endpoint: string | undefined;
+      try {
+        endpoint = (await getExistingWebPushSubscription())?.endpoint;
+      } catch {
+        // Logout remains authoritative when Push APIs are unavailable.
+      }
+      return postJson('/auth/logout', {
+        device_id: getWebPushDeviceId(),
+        ...(endpoint ? { endpoint } : {}),
+      });
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [sessionDraftPersistence, showToast, t]);
 

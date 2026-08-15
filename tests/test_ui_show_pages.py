@@ -5868,7 +5868,7 @@ def test_private_show_page_hmr_websocket_requires_remote_session(monkeypatch, tm
         ):
             raise AssertionError("websocket should not connect")
     except Exception as exc:
-        assert getattr(exc, "code", None) == 1008
+        assert getattr(exc, "code", None) == ui_server._AUTHORIZATION_LOGIN_REQUIRED_WEBSOCKET_CLOSE_CODE
 
 
 def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp_path):
@@ -5896,7 +5896,10 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
         set_show_runtime_manager_for_tests(None)
 
 
-def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadline(monkeypatch, tmp_path):
+def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
     class RecordingWebSocket:
         def __init__(self):
             self.calls = []
@@ -5934,12 +5937,13 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
         )
     engine.dispose()
     monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_websocket_is_local_request", lambda *args: False)
     monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
     monkeypatch.setattr(ui_server, "_project_session_access_allowed", lambda *args: True)
     monkeypatch.setattr(
         ui_server,
         "_show_runtime_websocket_resource_context",
-        lambda websocket: resource_access_service.ResourceUserContext(
+        lambda websocket, **kwargs: resource_access_service.ResourceUserContext(
             instance_role="viewer",
             subject="remote-member",
             instance_access_source="organization_group",
@@ -5949,24 +5953,29 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
             is_remote=True,
         ),
     )
+    remote_payload = {
+        "sub": "remote-member",
+        "vibe_instance_role": "viewer",
+        "vibe_instance_access_source": "organization_group",
+        "vibe_organization_id": "org-1",
+        "vibe_organization_member_id": "membership-1",
+        "vibe_organization_role": "member",
+    }
+
+    async def authorize(*args, **kwargs):
+        return {"sub": "remote-member"}, remote_access.AuthorizationResolution(
+            "current",
+            payload=remote_payload,
+        )
+
+    async def authorization_loss(*args, **kwargs):
+        return "unavailable"
+
+    monkeypatch.setattr(ui_server, "_remote_access_websocket_authorization", authorize)
     monkeypatch.setattr(
         ui_server,
-        "_remote_access_websocket_session_claims",
-        lambda websocket, config: {
-            "sub": "remote-member",
-            "vibe_instance_role": "viewer",
-            "vibe_instance_access_source": "organization_group",
-            "vibe_organization_id": "org-1",
-            "vibe_organization_member_id": "membership-1",
-            "vibe_organization_role": "member",
-            "claims_issued_at": 1,
-        },
-    )
-    monkeypatch.setattr(remote_access, "session_authorization_is_current", lambda *args: True)
-    monkeypatch.setattr(
-        remote_access,
-        "session_authorization_refresh_deadline",
-        lambda payload: ui_server.time.time() + 0.01,
+        "_wait_for_remote_session_authorization_loss",
+        authorization_loss,
     )
     monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
     websocket = RecordingWebSocket()
@@ -5975,7 +5984,7 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
 
     assert websocket.calls == [
         ("accept", "vite-hmr"),
-        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+        ("close", ui_server._AUTHORIZATION_UNAVAILABLE_WEBSOCKET_CLOSE_CODE),
     ]
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
@@ -6025,25 +6034,38 @@ def test_remote_org_show_page_hmr_closes_when_resource_access_is_revoked(
         )
     engine.dispose()
     monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_websocket_is_local_request", lambda *args: False)
     monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    remote_payload = {
+        "sub": "remote-editor",
+        "email": "alice@example.com",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "organization_group",
+        "vibe_organization_id": "org-1",
+        "vibe_organization_member_id": "member-remote-editor",
+        "vibe_organization_role": "member",
+        "vibe_group_ids": ["group-engineering"],
+    }
+
+    async def authorize(*args, **kwargs):
+        return {"sub": "remote-editor"}, remote_access.AuthorizationResolution(
+            "current",
+            payload=remote_payload,
+        )
+
+    async def authorization_loss(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ui_server, "_remote_access_websocket_authorization", authorize)
     monkeypatch.setattr(
         ui_server,
-        "_remote_access_websocket_session_claims",
-        lambda websocket, config: {
-            "sub": "remote-editor",
-            "email": "alice@example.com",
-            "vibe_instance_role": "editor",
-            "vibe_instance_access_source": "organization_group",
-            "vibe_organization_id": "org-1",
-            "vibe_organization_member_id": "member-remote-editor",
-            "vibe_organization_role": "member",
-            "vibe_group_ids": ["group-engineering"],
-        },
+        "_wait_for_remote_session_authorization_loss",
+        authorization_loss,
     )
     monkeypatch.setattr(
         ui_server,
         "_show_runtime_websocket_resource_context",
-        lambda websocket: resource_access_service.ResourceUserContext(
+        lambda websocket, **kwargs: resource_access_service.ResourceUserContext(
             subject="remote-editor",
             email="alice@example.com",
             organization_id="org-1",
@@ -6084,7 +6106,7 @@ def test_remote_org_show_page_hmr_closes_when_resource_access_is_revoked(
 
     assert websocket.calls == [
         ("accept", "vite-hmr"),
-        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+        ("close", ui_server._AUTHORIZATION_REVOKED_WEBSOCKET_CLOSE_CODE),
     ]
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 

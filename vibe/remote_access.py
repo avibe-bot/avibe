@@ -45,13 +45,22 @@ logger = logging.getLogger(__name__)
 
 CLOUDFLARED_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download"
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
-SESSION_TTL_SECONDS = 24 * 60 * 60
-SESSION_AUTHORIZATION_REFRESH_SECONDS = SESSION_TTL_SECONDS // 2
+PERSONAL_SESSION_TTL_SECONDS = 24 * 60 * 60
+PERSONAL_SESSION_RENEW_AFTER_SECONDS = PERSONAL_SESSION_TTL_SECONDS // 2
+ORGANIZATION_SESSION_TTL_SECONDS = 24 * 60 * 60
+ORGANIZATION_AUTHORIZATION_REFRESH_SECONDS = 12 * 60 * 60
+ORGANIZATION_AUTHORIZATION_OUTAGE_GRACE_SECONDS = 6 * 60 * 60
+# Compatibility aliases for released callers and persisted metadata. Policy
+# decisions below use the independently named Personal/Organization values.
+SESSION_TTL_SECONDS = PERSONAL_SESSION_TTL_SECONDS
+SESSION_AUTHORIZATION_REFRESH_SECONDS = ORGANIZATION_AUTHORIZATION_REFRESH_SECONDS
 # Keep enough headroom for the cookie name and attributes under the common
 # 4096-byte per-cookie browser limit.
 SESSION_COOKIE_MAX_VALUE_BYTES = 3800
 _SESSION_AUTHORIZATION_REFERENCE_KEY = "authorization_ref"
 _SESSION_AUTHORIZATION_REFERENCE_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
+_SESSION_BROWSER_ID_KEY = "browser_session_id"
+_SESSION_BROWSER_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
 _INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset(
@@ -69,11 +78,27 @@ _STATUS_REPORT_ATEXIT_REGISTERED = False
 _ACTIVE_HOSTNAMES_LOCK = threading.Lock()
 _ACTIVE_HOSTNAMES_CACHE: tuple[Path, str, frozenset[str], float | None] | None = None
 _AUTHORIZATION_REVISION_KEY = "vibe_instance_authorization_revision"
+_AUTHORIZATION_CHECKED_REVISION_KEY = "_authorization_checked_revision"
 _AUTHORIZATION_REVISION_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_CACHE: tuple[Path, str, int, float] | None = None
 _AUTHORIZATION_REVISION_SYNC_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_POLL_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_POLL_STARTED = False
+_AUTHORIZATION_REFRESH_LOCK = threading.Lock()
+_AUTHORIZATION_REFRESH_FAILURES: dict[tuple[str, str, str, str], float] = {}
+_AUTHORIZATION_REFRESH_RESULTS: dict[
+    tuple[str, str, str, str],
+    tuple[float, str, str | None, int | None],
+] = {}
+_AUTHORIZATION_REFRESH_FLIGHTS: dict[
+    tuple[str, str, str, str],
+    tuple[threading.Lock, int],
+] = {}
+_AUTHORIZATION_BACKGROUND_REFRESH_LOCK = threading.Lock()
+_AUTHORIZATION_BACKGROUND_REFRESHES: set[tuple[str, str, str, str]] = set()
+AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS = 5.0
+_REVOKED_BROWSER_SESSIONS_LOCK = threading.Lock()
+_REVOKED_BROWSER_SESSIONS: dict[str, int] = {}
 STATUS_HEARTBEAT_SECONDS = 5 * 60
 RESOURCE_ACL_SYNC_INTERVAL_SECONDS = 30
 AUTHORIZATION_REVISION_SYNC_INTERVAL_SECONDS = 15
@@ -146,6 +171,19 @@ class BackendRequestError(Exception):
         super().__init__(payload.get("detail") or payload.get("error") or f"HTTP {status}")
         self.status = status
         self.payload = payload
+
+
+@dataclass(frozen=True)
+class AuthorizationResolution:
+    state: str
+    payload: dict[str, Any] | None = None
+    policy: str | None = None
+    refreshed: bool = False
+    reason: str | None = None
+
+    @property
+    def current(self) -> bool:
+        return self.state == "current" and self.payload is not None
 
 
 @dataclass(frozen=True)
@@ -1427,8 +1465,22 @@ def cloud_token_for_request(
     if scope != "asr":
         return None
     config = config or V2Config.load()
-    payload = parse_session_cookie(config, cookie_value)
-    if payload is None or session_needs_authorization_refresh(payload):
+    identity = parse_session_identity(config, cookie_value)
+    if identity is None:
+        return None
+    resolution = resolve_current_authorization(config, identity)
+    if not resolution.current:
+        return None
+    return cloud_token_for_authorization(config, resolution.payload, scope=scope)
+
+
+def cloud_token_for_authorization(
+    config: V2Config,
+    payload: Mapping[str, Any],
+    *,
+    scope: str = "asr",
+) -> dict[str, Any] | None:
+    if scope != "asr":
         return None
     from vibe.authorization import context_from_session_payload
 
@@ -1591,6 +1643,16 @@ def sync_authorization_revision_once(
             config,
             result.get("authorization_revision"),
         )
+        try:
+            from storage import remote_access_authorization_service
+
+            remote_access_authorization_service.mark_matching_revision_checked(
+                instance_id=str(config.remote_access.vibe_cloud.instance_id),
+                authorization_revision=revision,
+                checked_at=int(time.time()),
+            )
+        except Exception:
+            logger.warning("Authorization revision context update failed", exc_info=True)
         return {"ok": True, "authorization_revision": revision}
     except BackendRequestError as exc:
         error = exc.payload.get("error")
@@ -4162,6 +4224,10 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
         }
+    try:
+        previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
+    except Exception:
+        previous_instance_id = ""
     config = api.save_config(
         {
             "remote_access": {
@@ -4185,6 +4251,13 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             }
         }
     )
+    if previous_instance_id and previous_instance_id != str(result["instance_id"]):
+        try:
+            from storage import remote_access_authorization_service
+
+            remote_access_authorization_service.delete_for_instance(previous_instance_id)
+        except Exception:
+            logger.warning("Old remote authorization cleanup failed after pairing", exc_info=True)
     start_result = start(config)
     _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     return {**status(config), "ok": True, "pairing": {"ok": True}, "start": start_result}
@@ -4350,6 +4423,85 @@ def _encode_session_cookie(secret: str, payload: Mapping[str, Any]) -> str:
     return cookie_value
 
 
+_SESSION_AUTHORIZATION_CLAIM_KEYS = (
+    "vibe_instance_id",
+    "vibe_instance_role",
+    "vibe_instance_access_source",
+    "vibe_instance_authorization_revision",
+    "vibe_show_page_id",
+    *_ORGANIZATION_SESSION_CLAIM_KEYS,
+)
+
+
+def _authorization_scope(
+    config: V2Config,
+    claims: Mapping[str, Any],
+) -> tuple[str, str]:
+    if claims.get("vibe_instance_access_source") == "show_page_email":
+        show_page_id = claims.get("vibe_show_page_id")
+        if isinstance(show_page_id, str) and show_page_id:
+            return "show_page", show_page_id
+    return "instance", str(config.remote_access.vibe_cloud.instance_id)
+
+
+def _authorization_claims_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    claims = {
+        key: payload[key]
+        for key in _SESSION_AUTHORIZATION_CLAIM_KEYS
+        if key in payload
+    }
+    claims_issued_at = payload.get("claims_issued_at")
+    if isinstance(claims_issued_at, int) and not isinstance(claims_issued_at, bool):
+        claims["claims_issued_at"] = claims_issued_at
+    return claims
+
+
+def _authorization_revision_from_claims(claims: Mapping[str, Any]) -> int | None:
+    try:
+        return _normalize_authorization_revision(claims.get(_AUTHORIZATION_REVISION_KEY))
+    except ValueError:
+        return None
+
+
+def _authorization_checked_revision(claims: Mapping[str, Any]) -> int | None:
+    try:
+        checked_revision = _normalize_authorization_revision(
+            claims.get(_AUTHORIZATION_CHECKED_REVISION_KEY)
+        )
+    except ValueError:
+        checked_revision = None
+    if checked_revision is not None:
+        return checked_revision
+    return _authorization_revision_from_claims(claims)
+
+
+def _store_scoped_authorization(
+    config: V2Config,
+    *,
+    reference: str | None,
+    subject: str,
+    email: str,
+    claims: Mapping[str, Any],
+    authorization_state: str,
+    checked_at: int,
+) -> str:
+    from storage import remote_access_authorization_service
+
+    scope_kind, scope_ref = _authorization_scope(config, claims)
+    return remote_access_authorization_service.upsert_scoped(
+        reference=reference,
+        instance_id=str(config.remote_access.vibe_cloud.instance_id),
+        subject=subject,
+        email=email,
+        scope_kind=scope_kind,
+        scope_ref=scope_ref,
+        authorization_state=authorization_state,
+        claims=claims,
+        last_checked_at=checked_at,
+        updated_at=checked_at,
+    )
+
+
 def make_session_cookie(
     config: V2Config,
     email: str,
@@ -4361,44 +4513,90 @@ def make_session_cookie(
     if not cloud.session_secret:
         raise ValueError("Remote access session secret is not configured")
     issued_at = int(time.time())
+    validated_claims = session_claims_from_oidc(config, session_claims)
+    revision = _authorization_revision_from_claims(validated_claims)
+    if revision is not None:
+        try:
+            _replace_authorization_revision(config, revision)
+        except ValueError as exc:
+            raise OAuthCodeExchangeError("stale_authorization_revision") from exc
+    stored_claims = {**validated_claims, "claims_issued_at": issued_at}
+    reference = _store_scoped_authorization(
+        config,
+        reference=None,
+        subject=subject,
+        email=email,
+        claims=stored_claims,
+        authorization_state="current",
+        checked_at=issued_at,
+    )
     payload = {
         "email": email,
         "sub": subject,
         "instance_id": cloud.instance_id,
         "iat": issued_at,
-        "exp": issued_at + SESSION_TTL_SECONDS,
+        "exp": issued_at + PERSONAL_SESSION_TTL_SECONDS,
+        "claims_issued_at": issued_at,
+        _SESSION_BROWSER_ID_KEY: secrets.token_urlsafe(24),
+        _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
     }
-    validated_claims = session_claims_from_oidc(config, session_claims)
-    if not session_authorization_is_current(config, validated_claims):
-        if current_authorization_revision(config) is None:
-            raise OAuthCodeExchangeError("authorization_revision_unavailable")
-        raise OAuthCodeExchangeError("stale_authorization_revision")
-    # Instance roles and optional organization membership must be refreshed
-    # through OIDC instead of being slid indefinitely from a local cookie.
-    payload["claims_issued_at"] = issued_at
+    return _encode_session_cookie(cloud.session_secret, payload)
 
-    if any(key in validated_claims for key in _ORGANIZATION_SESSION_CLAIM_KEYS):
-        from storage import remote_access_authorization_service
 
-        reference = secrets.token_urlsafe(24)
-        payload[_SESSION_AUTHORIZATION_REFERENCE_KEY] = reference
-        cookie_value = _encode_session_cookie(cloud.session_secret, payload)
-        remote_access_authorization_service.store(
-            reference=reference,
-            instance_id=cloud.instance_id,
-            subject=subject,
-            claims=validated_claims,
-            expires_at=issued_at + SESSION_TTL_SECONDS,
-            created_at=issued_at,
+def _prune_revoked_browser_sessions(now: int) -> None:
+    for session_id in [
+        value
+        for value, expires_at in _REVOKED_BROWSER_SESSIONS.items()
+        if expires_at <= now
+    ]:
+        _REVOKED_BROWSER_SESSIONS.pop(session_id, None)
+
+
+def _legacy_browser_session_id(secret: str, cookie_value: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        f"legacy-browser-session:{cookie_value}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
+    session_id = payload.get(_SESSION_BROWSER_ID_KEY)
+    if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
+        return False
+    try:
+        expires_at = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        return False
+    with _REVOKED_BROWSER_SESSIONS_LOCK:
+        _prune_revoked_browser_sessions(int(time.time()))
+        _REVOKED_BROWSER_SESSIONS[session_id] = expires_at
+    try:
+        from vibe.sse_broker import broker
+
+        broker.publish(
+            "authorization.session-revoked",
+            {"browser_session_id": session_id},
         )
-        return cookie_value
-
-    payload.update(validated_claims)
-    cookie_value = _encode_session_cookie(cloud.session_secret, payload)
-    return cookie_value
+    except Exception:
+        logger.debug("failed to publish browser session revocation", exc_info=True)
+    return True
 
 
-def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
+def _browser_session_is_revoked(payload: Mapping[str, Any], *, now: int) -> bool:
+    session_id = payload.get(_SESSION_BROWSER_ID_KEY)
+    if session_id is None:
+        return False
+    if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
+        return True
+    with _REVOKED_BROWSER_SESSIONS_LOCK:
+        _prune_revoked_browser_sessions(now)
+        return session_id in _REVOKED_BROWSER_SESSIONS
+
+
+def parse_session_identity(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
+    """Verify browser identity without evaluating current authorization."""
+
     if not cookie_value or "." not in cookie_value:
         return None
     if len(cookie_value.encode("utf-8")) > SESSION_COOKIE_MAX_VALUE_BYTES:
@@ -4420,8 +4618,16 @@ def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str
     subject = payload.get("sub")
     if instance_id != cloud.instance_id or not isinstance(subject, str) or not subject:
         return None
+    email = payload.get("email")
+    if not isinstance(email, str) or not email.strip():
+        return None
+    try:
+        issued_at = int(payload.get("iat", 0))
+        expires_at = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        return None
     current = int(time.time())
-    if int(payload.get("exp", 0)) <= current:
+    if issued_at <= 0 or expires_at <= current or expires_at <= issued_at:
         return None
     authorization_reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
     if authorization_reference is not None:
@@ -4429,34 +4635,634 @@ def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str
             authorization_reference
         ):
             return None
-        try:
-            from storage import remote_access_authorization_service
+    browser_session_id = payload.get(_SESSION_BROWSER_ID_KEY)
+    if browser_session_id is not None and (
+        not isinstance(browser_session_id, str)
+        or not _SESSION_BROWSER_ID_RE.fullmatch(browser_session_id)
+    ):
+        return None
+    if browser_session_id is None:
+        payload[_SESSION_BROWSER_ID_KEY] = _legacy_browser_session_id(
+            cloud.session_secret,
+            cookie_value,
+        )
+    if _browser_session_is_revoked(payload, now=current):
+        return None
+    return payload
 
-            stored_claims = remote_access_authorization_service.load(
-                reference=authorization_reference,
-                instance_id=instance_id,
-                subject=subject,
-                now=current,
-            )
-        except Exception:
-            logger.warning("remote session authorization lookup failed", exc_info=True)
-            return None
-        if stored_claims is None:
-            return None
-        payload.update(stored_claims)
+
+def session_identity_is_current(payload: Mapping[str, Any], *, now: int | None = None) -> bool:
+    current = int(time.time()) if now is None else now
+    try:
+        expires_at = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        return False
+    return expires_at > current and not _browser_session_is_revoked(payload, now=current)
+
+
+def _load_authorization_record(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    *,
+    now: int,
+) -> dict[str, Any] | None:
+    from storage import remote_access_authorization_service
+
+    instance_id = str(identity.get("instance_id") or "")
+    subject = str(identity.get("sub") or "")
+    reference = identity.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
+    if isinstance(reference, str):
+        record = remote_access_authorization_service.load_reference_record(
+            reference=reference,
+            instance_id=instance_id,
+            subject=subject,
+            now=now,
+        )
+        if record is not None:
+            return record
+
+    inline_claims = _authorization_claims_from_payload(identity)
+    if not inline_claims:
+        return None
+    try:
+        validated = session_claims_from_oidc(config, inline_claims)
+        checked_at = int(inline_claims.get("claims_issued_at", identity.get("iat", 0)))
+    except (OAuthCodeExchangeError, TypeError, ValueError):
+        return None
+    if checked_at <= 0:
+        return None
+    claims = {**validated, "claims_issued_at": checked_at}
+    scope_kind, scope_ref = _authorization_scope(config, claims)
+    existing = remote_access_authorization_service.load_scoped(
+        instance_id=instance_id,
+        subject=subject,
+        scope_kind=scope_kind,
+        scope_ref=scope_ref,
+    )
+    if existing is not None:
+        return existing
+    try:
+        stored_reference = _store_scoped_authorization(
+            config,
+            reference=None,
+            subject=subject,
+            email=str(identity.get("email") or ""),
+            claims=claims,
+            authorization_state="current",
+            checked_at=checked_at,
+        )
+        return remote_access_authorization_service.load_reference_record(
+            reference=stored_reference,
+            instance_id=instance_id,
+            subject=subject,
+            now=now,
+        )
+    except Exception:
+        logger.warning("legacy remote authorization migration failed", exc_info=True)
+        return {
+            "id": None,
+            "instance_id": instance_id,
+            "subject": subject,
+            "email": identity.get("email"),
+            "scope_kind": scope_kind,
+            "scope_ref": scope_ref,
+            "authorization_state": "current",
+            "claims": claims,
+            "expires_at": identity.get("exp"),
+            "created_at": checked_at,
+            "last_checked_at": checked_at,
+            "updated_at": checked_at,
+        }
+
+
+def _validated_authorization_payload(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    claims = record.get("claims")
+    if not isinstance(claims, Mapping):
+        return None
+    payload = dict(identity)
+    payload.update(claims)
+    reference = record.get("id")
+    if isinstance(reference, str):
+        payload[_SESSION_AUTHORIZATION_REFERENCE_KEY] = reference
     try:
         session_claims_from_oidc(config, payload)
     except OAuthCodeExchangeError:
         return None
-    if not session_authorization_is_current(config, payload):
-        return None
-    try:
-        claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
-    except (TypeError, ValueError):
-        return None
-    if claims_issued_at <= 0:
-        return None
     return payload
+
+
+def _authorization_within_grace(record: Mapping[str, Any], *, now: int) -> bool:
+    try:
+        last_checked_at = int(
+            record.get("last_checked_at")
+            or record.get("created_at")
+            or 0
+        )
+    except (TypeError, ValueError):
+        return False
+    age = now - last_checked_at
+    return 0 <= age <= ORGANIZATION_AUTHORIZATION_OUTAGE_GRACE_SECONDS
+
+
+def _authorization_refresh_due(payload: Mapping[str, Any], *, now: int) -> bool:
+    try:
+        issued_at = int(payload.get("claims_issued_at", 0))
+    except (TypeError, ValueError):
+        return True
+    return issued_at <= 0 or now >= issued_at + ORGANIZATION_AUTHORIZATION_REFRESH_SECONDS
+
+
+def _fetch_authorization_context(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+    *,
+    now: int,
+    observed_revision: int | None,
+) -> AuthorizationResolution:
+    subject = str(identity.get("sub") or "").strip()
+    email = str(identity.get("email") or "").strip()
+    request_payload: dict[str, Any] = {"sub": subject, "email": email}
+    if record is not None and record.get("scope_kind") == "show_page":
+        request_payload["show_page_id"] = record.get("scope_ref")
+    try:
+        response = _device_json_request(
+            config,
+            "POST",
+            "authorization-context",
+            request_payload,
+            timeout=8.0,
+        )
+    except BackendRequestError as exc:
+        if exc.status == 403 and exc.payload.get("error") == "access_denied":
+            previous_claims = record.get("claims") if record is not None else {}
+            if not isinstance(previous_claims, Mapping):
+                previous_claims = {}
+            revoked_claims = dict(previous_claims)
+            if observed_revision is not None:
+                revoked_claims[_AUTHORIZATION_CHECKED_REVISION_KEY] = observed_revision
+            try:
+                _store_scoped_authorization(
+                    config,
+                    reference=(
+                        str(record.get("id"))
+                        if record is not None and record.get("id")
+                        else None
+                    ),
+                    subject=subject,
+                    email=email,
+                    claims=revoked_claims,
+                    authorization_state="revoked",
+                    checked_at=now,
+                )
+            except Exception:
+                logger.warning("remote authorization revocation persistence failed", exc_info=True)
+            return AuthorizationResolution("revoked", reason="access_denied")
+        return AuthorizationResolution("unavailable", reason="authorization_context_unavailable")
+    except Exception:
+        return AuthorizationResolution("unavailable", reason="authorization_context_unavailable")
+
+    if response.get("sub") != subject or response.get("email") != email:
+        return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
+    instance_kind = _normalized_instance_kind(response.get("instance_kind"))
+    if instance_kind is None:
+        return AuthorizationResolution("unavailable", reason="instance_kind_unavailable")
+    try:
+        claims = session_claims_from_oidc(config, response)
+        revision = _authorization_revision_from_claims(claims)
+        if revision is not None:
+            _replace_authorization_revision(config, revision)
+        stored_claims = {**claims, "claims_issued_at": now}
+        reference = _store_scoped_authorization(
+            config,
+            reference=(
+                str(record.get("id"))
+                if record is not None and record.get("id")
+                else None
+            ),
+            subject=subject,
+            email=email,
+            claims=stored_claims,
+            authorization_state="current",
+            checked_at=now,
+        )
+        from storage import remote_access_authorization_service
+
+        refreshed_record = remote_access_authorization_service.load_reference_record(
+            reference=reference,
+            instance_id=str(identity.get("instance_id") or ""),
+            subject=subject,
+            now=now,
+        )
+    except Exception:
+        logger.warning("remote authorization context validation failed", exc_info=True)
+        return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
+    config.remote_access.vibe_cloud.instance_kind = instance_kind
+    try:
+        _persist_instance_kind(str(identity.get("instance_id") or ""), instance_kind)
+    except Exception:
+        # The authoritative response and durable context are already valid.
+        # A config write failure must not turn accepted access into an outage;
+        # this in-memory config immediately follows the discovered policy and a
+        # later runtime status/auth refresh can retry the persistent backfill.
+        logger.warning("Remote instance kind backfill failed", exc_info=True)
+    if refreshed_record is None:
+        return AuthorizationResolution("unavailable", reason="authorization_context_persistence_failed")
+    payload = _validated_authorization_payload(config, identity, refreshed_record)
+    if payload is None:
+        return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
+    return AuthorizationResolution(
+        "current",
+        payload=payload,
+        policy=instance_kind,
+        refreshed=True,
+    )
+
+
+def _refresh_authorization_context(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+    *,
+    now: int,
+    force: bool = False,
+) -> AuthorizationResolution:
+    key = _authorization_refresh_key(identity, record)
+    with _AUTHORIZATION_REFRESH_LOCK:
+        flight = _AUTHORIZATION_REFRESH_FLIGHTS.get(key)
+        if flight is None:
+            flight_lock = threading.Lock()
+            flight_users = 0
+        else:
+            flight_lock, flight_users = flight
+        _AUTHORIZATION_REFRESH_FLIGHTS[key] = (flight_lock, flight_users + 1)
+    flight_lock.acquire()
+    try:
+        monotonic_now = time.monotonic()
+        with _AUTHORIZATION_REFRESH_LOCK:
+            recent_result = _AUTHORIZATION_REFRESH_RESULTS.get(key)
+            last_failure = _AUTHORIZATION_REFRESH_FAILURES.get(key)
+        observed_revision = (
+            current_authorization_revision(config)
+            if _authorization_revision_sync_configured(config)
+            else None
+        )
+        if (
+            not force
+            and recent_result is not None
+            and monotonic_now - recent_result[0] < AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
+            and (
+                observed_revision is None
+                or recent_result[3] == observed_revision
+            )
+        ):
+            from storage import remote_access_authorization_service
+
+            current_record = remote_access_authorization_service.load_scoped(
+                instance_id=key[0],
+                subject=key[1],
+                scope_kind=key[2],
+                scope_ref=key[3],
+            )
+            if recent_result[1] == "revoked":
+                return AuthorizationResolution("revoked", reason="access_denied")
+            if current_record is not None:
+                if current_record.get("authorization_state") == "revoked":
+                    return AuthorizationResolution("revoked", reason="access_denied")
+                if recent_result[1] == "current":
+                    current_payload = _validated_authorization_payload(
+                        config,
+                        identity,
+                        current_record,
+                    )
+                    if current_payload is not None:
+                        return AuthorizationResolution(
+                            "current",
+                            payload=current_payload,
+                            policy=recent_result[2],
+                            refreshed=True,
+                        )
+        if (
+            not force
+            and last_failure is not None
+            and monotonic_now - last_failure < AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
+        ):
+            return AuthorizationResolution("unavailable", reason="authorization_refresh_backoff")
+        refreshed = _fetch_authorization_context(
+            config,
+            identity,
+            record,
+            now=now,
+            observed_revision=observed_revision,
+        )
+        completed_at = time.monotonic()
+        with _AUTHORIZATION_REFRESH_LOCK:
+            _AUTHORIZATION_REFRESH_RESULTS.pop(key, None)
+            if refreshed.state == "unavailable":
+                _AUTHORIZATION_REFRESH_FAILURES[key] = completed_at
+                if len(_AUTHORIZATION_REFRESH_FAILURES) > 1024:
+                    cutoff = completed_at - AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
+                    for stale_key in [
+                        item
+                        for item, failed_at in _AUTHORIZATION_REFRESH_FAILURES.items()
+                        if failed_at < cutoff
+                    ]:
+                        _AUTHORIZATION_REFRESH_FAILURES.pop(stale_key, None)
+            else:
+                _AUTHORIZATION_REFRESH_FAILURES.pop(key, None)
+                if refreshed.state in {"current", "revoked"}:
+                    refreshed_revision = (
+                        observed_revision
+                        if refreshed.state == "revoked"
+                        else _authorization_revision_from_claims(refreshed.payload)
+                        if refreshed.payload is not None
+                        else None
+                    )
+                    _AUTHORIZATION_REFRESH_RESULTS[key] = (
+                        completed_at,
+                        refreshed.state,
+                        refreshed.policy,
+                        refreshed_revision,
+                    )
+            if len(_AUTHORIZATION_REFRESH_RESULTS) > 1024:
+                cutoff = completed_at - AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
+                for stale_key in [
+                    item
+                    for item, (finished_at, _state, _policy, _revision) in _AUTHORIZATION_REFRESH_RESULTS.items()
+                    if finished_at < cutoff
+                ]:
+                    _AUTHORIZATION_REFRESH_RESULTS.pop(stale_key, None)
+        return refreshed
+    finally:
+        flight_lock.release()
+        with _AUTHORIZATION_REFRESH_LOCK:
+            current_flight = _AUTHORIZATION_REFRESH_FLIGHTS.get(key)
+            if current_flight is not None and current_flight[0] is flight_lock:
+                if current_flight[1] <= 1:
+                    _AUTHORIZATION_REFRESH_FLIGHTS.pop(key, None)
+                else:
+                    _AUTHORIZATION_REFRESH_FLIGHTS[key] = (
+                        flight_lock,
+                        current_flight[1] - 1,
+                    )
+
+
+def _authorization_refresh_key(
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+) -> tuple[str, str, str, str]:
+    scope_kind = str(record.get("scope_kind") or "instance") if record else "instance"
+    scope_ref = (
+        str(record.get("scope_ref") or identity.get("instance_id") or "")
+        if record
+        else str(identity.get("instance_id") or "")
+    )
+    return (
+        str(identity.get("instance_id") or ""),
+        str(identity.get("sub") or ""),
+        scope_kind,
+        scope_ref,
+    )
+
+
+def _schedule_authorization_refresh(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+    *,
+    now: int,
+) -> None:
+    key = _authorization_refresh_key(identity, record)
+    with _AUTHORIZATION_BACKGROUND_REFRESH_LOCK:
+        if key in _AUTHORIZATION_BACKGROUND_REFRESHES:
+            return
+        _AUTHORIZATION_BACKGROUND_REFRESHES.add(key)
+
+    def run() -> None:
+        try:
+            _refresh_authorization_context(config, identity, record, now=now)
+        except Exception:
+            logger.warning("Background remote authorization refresh failed", exc_info=True)
+        finally:
+            with _AUTHORIZATION_BACKGROUND_REFRESH_LOCK:
+                _AUTHORIZATION_BACKGROUND_REFRESHES.discard(key)
+
+    threading.Thread(
+        target=run,
+        name="remote-authorization-refresh",
+        daemon=True,
+    ).start()
+
+
+def resolve_current_authorization(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    *,
+    now: int | None = None,
+    allow_refresh: bool = True,
+    refresh_revoked: bool = False,
+) -> AuthorizationResolution:
+    """Resolve current access without turning control-plane failure into logout."""
+
+    revision_now = None if now is None else float(now)
+    current = int(time.time()) if now is None else now
+    if not session_identity_is_current(identity, now=current):
+        return AuthorizationResolution("invalid_identity", reason="identity_expired")
+    try:
+        record = _load_authorization_record(config, identity, now=current)
+    except Exception:
+        logger.warning("remote authorization record load failed", exc_info=True)
+        record = None
+    if record is not None and record.get("authorization_state") == "revoked":
+        claims = record.get("claims")
+        record_revision = (
+            _authorization_checked_revision(claims)
+            if isinstance(claims, Mapping)
+            else None
+        )
+        observed_revision = (
+            current_authorization_revision(config, now=revision_now)
+            if _authorization_revision_sync_configured(config)
+            else None
+        )
+        authority_changed = (
+            observed_revision is not None
+            and record_revision is not None
+            and observed_revision != record_revision
+        )
+        if allow_refresh and (refresh_revoked or authority_changed):
+            refreshed = _refresh_authorization_context(
+                config,
+                identity,
+                record,
+                now=current,
+                force=refresh_revoked,
+            )
+            if refreshed.state != "unavailable":
+                return refreshed
+        return AuthorizationResolution("revoked", reason="access_denied")
+    payload = (
+        _validated_authorization_payload(config, identity, record)
+        if record is not None
+        else None
+    )
+    if payload is None:
+        return (
+            _refresh_authorization_context(config, identity, record, now=current)
+            if allow_refresh
+            else AuthorizationResolution("unavailable", reason="authorization_context_missing")
+        )
+
+    instance_kind = _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind)
+    signed_revision = _authorization_revision_from_claims(payload)
+    current_revision = (
+        current_authorization_revision(config, now=revision_now)
+        if _authorization_revision_sync_configured(config)
+        else None
+    )
+
+    if instance_kind == "personal":
+        if (
+            current_revision is not None
+            and signed_revision is not None
+            and current_revision != signed_revision
+            and allow_refresh
+        ):
+            _schedule_authorization_refresh(config, identity, record, now=current)
+        return AuthorizationResolution("current", payload=payload, policy="personal")
+
+    if instance_kind == "organization":
+        revision_unknown = current_revision is None or signed_revision is None
+        revision_changed = (
+            current_revision is not None
+            and signed_revision is not None
+            and current_revision != signed_revision
+        )
+        scheduled_refresh = _authorization_refresh_due(payload, now=current)
+        within_grace = _authorization_within_grace(record, now=current)
+        if (
+            scheduled_refresh
+            and not revision_unknown
+            and not revision_changed
+            and within_grace
+            and allow_refresh
+        ):
+            _schedule_authorization_refresh(config, identity, record, now=current)
+            return AuthorizationResolution(
+                "current",
+                payload=payload,
+                policy="organization",
+                reason="authorization_refresh_scheduled",
+            )
+        if (revision_changed or scheduled_refresh) and allow_refresh:
+            refreshed = _refresh_authorization_context(config, identity, record, now=current)
+            if refreshed.state != "unavailable":
+                return refreshed
+        if revision_unknown or revision_changed or scheduled_refresh:
+            if within_grace:
+                return AuthorizationResolution(
+                    "current",
+                    payload=payload,
+                    policy="organization",
+                    reason="authorization_grace",
+                )
+            return AuthorizationResolution(
+                "unavailable",
+                policy="organization",
+                reason="authorization_grace_expired",
+            )
+        return AuthorizationResolution("current", payload=payload, policy="organization")
+
+    # Pre-kind pairings keep the former strict freshness contract until a
+    # successful backchannel response fills the kind. They fail unavailable,
+    # never as a fake browser logout.
+    if not _authorization_revision_sync_configured(config):
+        return AuthorizationResolution("current", payload=payload, policy=None)
+    legacy_current = (
+        current_revision is not None
+        and signed_revision == current_revision
+        and not _authorization_refresh_due(payload, now=current)
+    )
+    if legacy_current:
+        return AuthorizationResolution("current", payload=payload, policy=None)
+    if allow_refresh:
+        return _refresh_authorization_context(config, identity, record, now=current)
+    return AuthorizationResolution("unavailable", reason="instance_kind_unavailable")
+
+
+async def resolve_current_authorization_async(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    *,
+    now: int | None = None,
+    allow_refresh: bool = True,
+    refresh_revoked: bool = False,
+) -> AuthorizationResolution:
+    import asyncio
+
+    return await asyncio.to_thread(
+        resolve_current_authorization,
+        config,
+        identity,
+        now=now,
+        allow_refresh=allow_refresh,
+        refresh_revoked=refresh_revoked,
+    )
+
+
+def renew_session_cookie(
+    config: V2Config,
+    payload: Mapping[str, Any],
+    *,
+    now: int | None = None,
+) -> str:
+    """Slide browser identity without pretending cached claims were refreshed."""
+
+    cloud = config.remote_access.vibe_cloud
+    if not cloud.session_secret:
+        raise ValueError("Remote access session secret is not configured")
+    current = int(time.time()) if now is None else now
+    reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
+    if not isinstance(reference, str):
+        claims = _authorization_claims_from_payload(payload)
+        checked_at = int(payload.get("claims_issued_at", payload.get("iat", current)))
+        reference = _store_scoped_authorization(
+            config,
+            reference=None,
+            subject=str(payload.get("sub") or ""),
+            email=str(payload.get("email") or ""),
+            claims=claims,
+            authorization_state="current",
+            checked_at=checked_at,
+        )
+    browser_session_id = payload.get(_SESSION_BROWSER_ID_KEY)
+    if not isinstance(browser_session_id, str):
+        browser_session_id = secrets.token_urlsafe(24)
+    identity = {
+        "email": str(payload.get("email") or ""),
+        "sub": str(payload.get("sub") or ""),
+        "instance_id": str(payload.get("instance_id") or ""),
+        "iat": current,
+        "exp": current + PERSONAL_SESSION_TTL_SECONDS,
+        "claims_issued_at": int(payload.get("claims_issued_at", payload.get("iat", current))),
+        _SESSION_BROWSER_ID_KEY: browser_session_id,
+        _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
+    }
+    return _encode_session_cookie(cloud.session_secret, identity)
+
+
+def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
+    """Compatibility wrapper returning only a currently authorized session."""
+
+    identity = parse_session_identity(config, cookie_value)
+    if identity is None:
+        return None
+    result = resolve_current_authorization(config, identity)
+    return result.payload if result.current else None
 
 
 def validate_session_cookie(config: V2Config, cookie_value: str | None) -> bool:

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const remoteAuth = vi.hoisted(() => ({
   deferRemoteAuthRedirect: vi.fn(),
+  reportRemoteAuthorizationState: vi.fn(),
   remoteLoginPath: vi.fn((target: string) => `/auth/login?next=${encodeURIComponent(target)}`),
 }));
 
@@ -42,7 +43,9 @@ describe('apiFetch remote auth recovery', () => {
       const response = await apiFetch('/api/inbox');
 
       expect(response.status).toBe(401);
-      await vi.waitFor(() => expect(remoteAuth.deferRemoteAuthRedirect).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(remoteAuth.reportRemoteAuthorizationState).toHaveBeenCalledWith(
+        'login_required',
+      ));
       expect(window.location.assign).not.toHaveBeenCalled();
     },
   );
@@ -56,7 +59,7 @@ describe('apiFetch remote auth recovery', () => {
     await apiFetch('/api/inbox');
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(remoteAuth.deferRemoteAuthRedirect).not.toHaveBeenCalled();
+    expect(remoteAuth.reportRemoteAuthorizationState).not.toHaveBeenCalled();
   });
 
   it('replays a rejected mutation with the cookie that replaced its header token', async () => {
@@ -386,12 +389,11 @@ describe('apiFetch remote auth recovery', () => {
       authorization_refresh_required: true,
     }));
 
-    expect(remoteAuth.deferRemoteAuthRedirect).toHaveBeenCalledOnce();
+    expect(remoteAuth.reportRemoteAuthorizationState).toHaveBeenCalledWith('login_required');
     expect(window.location.assign).not.toHaveBeenCalled();
   });
 
-  it('uses the dedicated login endpoint outside an iOS standalone PWA', async () => {
-    remoteAuth.deferRemoteAuthRedirect.mockReturnValue(false);
+  it('reports login-required responses to the shared recovery owner', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -401,10 +403,9 @@ describe('apiFetch remote auth recovery', () => {
 
     await apiFetch('/api/inbox');
 
-    await vi.waitFor(() => expect(window.location.assign).toHaveBeenCalledWith(
-      '/auth/login?next=%2Finbox%3Ffilter%3Dopen',
+    await vi.waitFor(() => expect(remoteAuth.reportRemoteAuthorizationState).toHaveBeenCalledWith(
+      'login_required',
     ));
-    expect(remoteAuth.remoteLoginPath).toHaveBeenCalledWith('/inbox?filter=open');
   });
 
   it('evicts a stalled shared CSRF refresh after a rejected mutation aborts', async () => {

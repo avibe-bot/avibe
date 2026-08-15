@@ -18,6 +18,17 @@
     "body": "使用 Avibe Cloud 登录后即可安全地继续访问。",
     "action": "重新登录"
   },
+  "remoteAuthorization": {
+    "revoked": {
+      "title": "访问权限已移除",
+      "body": "你已无法访问这个 Avibe 实例。"
+    },
+    "unavailable": {
+      "title": "暂时无法验证访问权限",
+      "body": "Avibe 目前无法验证访问权限，将自动重连。"
+    },
+    "retry": "立即重试"
+  },
   "preview": {
     "title": "预览",
     "unsupported": "此文件无法预览。",

@@ -1,4 +1,4 @@
-import { deferRemoteAuthRedirect, remoteLoginPath } from './remoteAuth';
+import { reportRemoteAuthorizationState } from './remoteAuth';
 
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
 const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
@@ -7,6 +7,8 @@ const REMOTE_AUTH_RECOVERY_ERRORS = new Set([
   'remote_access_login_required',
   'remote_access_authorization_refresh_required',
 ]);
+const REMOTE_AUTH_REVOKED_ERROR = 'remote_access_revoked';
+const REMOTE_AUTH_UNAVAILABLE_ERROR = 'remote_access_authorization_unavailable';
 
 let csrfTokenPromise: Promise<string> | null = null;
 // Preserve owned-deadline identity across the operation boundary without
@@ -265,18 +267,14 @@ export async function apiFetch(
   // answering /api/* with a remote login/authorization-refresh 401. Detect it
   // here and trigger the same full-page login redirect the guard uses, so the
   // user lands on the login flow instead of a wall of silently-failing fetches.
-  if (response.status === 401) {
-    void maybeRedirectOnRemoteAuthExpiry(response.clone());
+  if (response.status === 401 || response.status === 403 || response.status === 503) {
+    void maybeReportRemoteAuthorizationResponse(response.clone());
   }
   return response;
 }
 
-let redirectingForRemoteAuth = false;
-
-async function maybeRedirectOnRemoteAuthExpiry(response: Response): Promise<void> {
-  if (redirectingForRemoteAuth || typeof window === 'undefined') {
-    return;
-  }
+async function maybeReportRemoteAuthorizationResponse(response: Response): Promise<void> {
+  if (typeof window === 'undefined') return;
   let payload: unknown;
   try {
     payload = await response.json();
@@ -285,10 +283,14 @@ async function maybeRedirectOnRemoteAuthExpiry(response: Response): Promise<void
     return;
   }
   const error = (payload as { error?: string } | null)?.error;
-  if (!error || !REMOTE_AUTH_RECOVERY_ERRORS.has(error)) {
-    return;
+  if (!error) return;
+  if (REMOTE_AUTH_RECOVERY_ERRORS.has(error)) {
+    reportRemoteAuthorizationState('login_required');
+  } else if (error === REMOTE_AUTH_REVOKED_ERROR) {
+    reportRemoteAuthorizationState('revoked');
+  } else if (error === REMOTE_AUTH_UNAVAILABLE_ERROR) {
+    reportRemoteAuthorizationState('unavailable');
   }
-  beginRemoteAuthRecovery();
 }
 
 export async function recoverRemoteAuthFromSessionProbe(response: Response): Promise<void> {
@@ -303,26 +305,25 @@ export async function recoverRemoteAuthFromSessionProbe(response: Response): Pro
     remote?: boolean;
     authenticated?: boolean;
     authorization_refresh_required?: boolean;
+    authorization_state?: 'current' | 'revoked' | 'unavailable';
   } | null;
+  if (session?.authorization_state === 'revoked') {
+    reportRemoteAuthorizationState('revoked');
+    return;
+  }
+  if (session?.authorization_state === 'unavailable') {
+    reportRemoteAuthorizationState('unavailable');
+    return;
+  }
+  if (session?.authorization_state === 'current') {
+    reportRemoteAuthorizationState('current');
+    return;
+  }
   if (
     session?.remote === true
     && session.authenticated === false
     && session.authorization_refresh_required === true
   ) {
-    beginRemoteAuthRecovery();
+    reportRemoteAuthorizationState('login_required');
   }
-}
-
-function beginRemoteAuthRecovery(): void {
-  if (redirectingForRemoteAuth || typeof window === 'undefined') {
-    return;
-  }
-  // A cross-origin OAuth redirect from an iOS Home-Screen app opens in a
-  // separate browser sheet. Never raise that sheet automatically: hand control
-  // back to AuthGuard so the PWA can ask for an explicit sign-in action.
-  if (deferRemoteAuthRedirect()) return;
-
-  redirectingForRemoteAuth = true;
-  const target = window.location.pathname + window.location.search;
-  window.location.assign(remoteLoginPath(target));
 }

@@ -18,6 +18,11 @@ import {
 import { IS_APPLE } from '../../lib/platform';
 import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { useLatestRef } from '@/lib/useLatestRef';
+import {
+  REMOTE_AUTH_STATE_EVENT,
+  reportRemoteAuthorizationState,
+  type RemoteAuthorizationState,
+} from '@/lib/remoteAuth';
 
 // xterm.js wired to the /api/terminal/{id} WebSocket. Protocol (locked with the
 // backend): client sends raw stdin as BINARY frames and JSON control as TEXT
@@ -28,7 +33,10 @@ export type TerminalStatus = 'connecting' | 'ready' | 'closed' | 'disabled' | 'e
 
 const ENC = new TextEncoder();
 const MAX_BUSY_RETRIES = 3; // auto-retry a transient "busy" (1013) close this many times
-const AUTHORIZATION_REFRESH_CLOSE_CODE = 4401;
+const AUTHORIZATION_LOGIN_REQUIRED_CLOSE_CODE = 4401;
+const AUTHORIZATION_REVOKED_CLOSE_CODE = 4403;
+const AUTHORIZATION_UNAVAILABLE_CLOSE_CODE = 4503;
+const AUTHORIZATION_CHANGED_CLOSE_CODE = 1012;
 
 // The terminal window is theme-locked to dark (registry lockTheme: a shell is conventionally
 // dark, like a code editor), so xterm carries a fixed dark palette regardless of the global theme.
@@ -143,6 +151,7 @@ export const TerminalView: React.FC<{
   const ctrlStickyRef = useRef(false);
   const busyRetriesRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
+  const authorizationRecoveryPendingRef = useRef(false);
   // Auto-dismiss timer for the mobile Paste key's "clipboard blocked" hint.
   const pasteHintTimerRef = useRef<number | null>(null);
   // Report actual session persistence (from the backend 'ready' frame) up to the tab bar, so its
@@ -167,6 +176,17 @@ export const TerminalView: React.FC<{
   useEffect(() => {
     onStatusRef.current?.(status, exitCode);
   }, [status, exitCode]);
+
+  useEffect(() => {
+    const onAuthorizationState = (event: Event) => {
+      const state = (event as CustomEvent<{ state?: RemoteAuthorizationState }>).detail?.state;
+      if (state !== 'current' || !authorizationRecoveryPendingRef.current) return;
+      authorizationRecoveryPendingRef.current = false;
+      setReconnectKey((key) => key + 1);
+    };
+    window.addEventListener(REMOTE_AUTH_STATE_EVENT, onAuthorizationState);
+    return () => window.removeEventListener(REMOTE_AUTH_STATE_EVENT, onAuthorizationState);
+  }, []);
 
   useEffect(() => {
     const term = new Terminal({
@@ -333,8 +353,31 @@ export const TerminalView: React.FC<{
       term.write(new Uint8Array(ev.data as ArrayBuffer));
     };
     ws.onclose = (ev: CloseEvent) => {
-      if (ev.code === AUTHORIZATION_REFRESH_CLOSE_CODE) {
-        window.location.reload();
+      if (ev.code === AUTHORIZATION_LOGIN_REQUIRED_CLOSE_CODE) {
+        authorizationRecoveryPendingRef.current = true;
+        setStatus('error');
+        reportRemoteAuthorizationState('login_required');
+        return;
+      }
+      if (ev.code === AUTHORIZATION_REVOKED_CLOSE_CODE) {
+        authorizationRecoveryPendingRef.current = false;
+        setStatus('disabled');
+        reportRemoteAuthorizationState('revoked');
+        return;
+      }
+      if (ev.code === AUTHORIZATION_UNAVAILABLE_CLOSE_CODE) {
+        authorizationRecoveryPendingRef.current = true;
+        setStatus('error');
+        reportRemoteAuthorizationState('unavailable');
+        return;
+      }
+      if (ev.code === AUTHORIZATION_CHANGED_CLOSE_CODE) {
+        setStatus('connecting');
+        reportRemoteAuthorizationState('changed');
+        retryTimerRef.current = window.setTimeout(
+          () => setReconnectKey((key) => key + 1),
+          250,
+        );
         return;
       }
       // 1013 = transient "try again shortly" (the session id is mid-open/teardown, or the cap

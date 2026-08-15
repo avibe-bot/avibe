@@ -2654,25 +2654,30 @@ def test_workbench_events_allow_show_events_when_show_page_acl_allows(monkeypatc
     assert "/private/host/path.png" not in body
 
 
-def test_workbench_events_end_at_authorization_refresh_deadline():
+def test_local_workbench_events_ignore_legacy_authorization_refresh_deadline():
     from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
     from vibe.ui_compat import g
 
     async def collect_until_expired() -> list[str | bytes]:
-        with app.test_request_context("/api/events"):
-            g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
-            g.remote_authorization_refresh_at = ui_server.time.time()
-            response = await ui_server.workbench_events()
-            iterator = response.body_iterator.__aiter__()
-            try:
-                chunks = [await iterator.__anext__() for _ in range(3)]
-                with pytest.raises(StopAsyncIteration):
-                    await asyncio.wait_for(iterator.__anext__(), timeout=1)
-            finally:
-                await iterator.aclose()
-        return chunks
+            with app.test_request_context("/api/events"):
+                g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
+                g.remote_authorization_refresh_at = ui_server.time.time()
+                response = await ui_server.workbench_events()
+                iterator = response.body_iterator.__aiter__()
+                try:
+                    chunks = [await iterator.__anext__() for _ in range(3)]
+                    next_chunk = asyncio.create_task(iterator.__anext__())
+                    await asyncio.sleep(0)
+                    broker.publish("authorization.changed", {"project_ids": []})
+                    chunks.append(await asyncio.wait_for(next_chunk, timeout=1))
+                finally:
+                    await iterator.aclose()
+            return chunks
 
-    assert len(asyncio.run(collect_until_expired())) == 3
+    chunks = asyncio.run(collect_until_expired())
+    assert len(chunks) == 4
+    assert "event: authorization.changed" in chunks[-1]
 
 
 def test_json_api_gzip_skips_attachments_and_existing_encoding():
