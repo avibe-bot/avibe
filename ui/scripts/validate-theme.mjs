@@ -570,6 +570,28 @@ function isZeroLength(part) {
 // closed from the outside by SHADOW_MENTION, which now derives from the word
 // itself instead of from these entries, so the next spelling nobody here has
 // imagined arrives as a loud failure the day it lands.
+
+// The one shape where the property is NAMED rather than written: CSSOM's
+// `setProperty(name, value)` passes `box-shadow` as a string argument, so the
+// word is followed by the quote that closes it and then a comma -- never by the
+// `:`, `=` or opening delimiter that every other spelling puts there. Both the
+// channel and SHADOW_MENTION key off that introducing punctuation, so this went
+// unread AND uncounted: the exact double silence they exist to prevent.
+//
+// The narrow anchor on `.setProperty(` is deliberate and is not the enumeration
+// that cost the earlier rounds. Those were open sets -- property names, quote
+// styles, delimiters -- where the next member was always someone's next idea.
+// This one is closed by the DOM: `setProperty` is the only by-name setter on
+// CSSStyleDeclaration, and `style.boxShadow =` / `style['boxShadow'] =` are
+// assignments the channel above already reads. Widening it to "any quoted
+// property name followed by a comma" was tried and is wrong in the other
+// direction: `cn('shadow-mint-card', …)` is a class list, not an assignment,
+// and three of those already ship.
+//
+// `\x60` is a backtick -- a template-literal property name is exotic, but
+// "exotic" is the argument that lost the last six rounds.
+const CSSOM_SETTER = /\.setProperty\(\s*(?<quote>['"\x60])[^'"\x60]*shadow[^'"\x60]*\k<quote>\s*,/;
+
 const SHADOW_CHANNELS = [
   // `shadow-[0_0_16px_-4px_var(--x)]`, including variants such as `hover:shadow-[…]`.
   { pattern: /shadow-\[([^\]]*)\]/g, valuesOf: (match) => [match[1]] },
@@ -635,6 +657,17 @@ const SHADOW_CHANNELS = [
     // `boxShadow: glow` case, where an identifier could hold anything and the
     // value stays unreadable rather than becoming innocent.
     provablyNotAShadow: (match) => NON_STRING_LITERAL.test(match[1]),
+  },
+  // `el.style.setProperty('box-shadow', '0 0 93px red')`. Read through the
+  // shared CSSOM_SETTER source rather than a pattern of its own, because the
+  // measurement below has to recognise the identical span: these two have been
+  // widened in lockstep by hand for three rounds, and a shared source is the
+  // version of that discipline which cannot be forgotten.
+  {
+    pattern: new RegExp(`${CSSOM_SETTER.source}([^;\\n]*)`, 'gi'),
+    valuesOf: (match) => [...match[2].matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`/g)]
+      .map(([, single, double, template]) => single ?? double ?? template),
+    provablyNotAShadow: (match) => NON_STRING_LITERAL.test(match[2]),
   },
 ];
 
@@ -736,7 +769,19 @@ function blankCssComments(source) {
 // `-(` is neither of the first two, so a glow parked in `--rogue-glow` and used
 // as `shadow-(--rogue-glow)` was, once again, not scanned and not reported. The
 // enumeration had moved out of the word and into the punctuation after it.
-const SHADOW_MENTION = /(?<![\w-])(?!--)[A-Za-z-]*shadow[A-Za-z]*(?:['"]?\s*\]?\s*[:=]|-?[([])/gi;
+//
+// The second branch is CSSOM_SETTER's own source, not a copy of it. The first
+// branch says "the word, then punctuation that hands it a value", which is the
+// grammar of every spelling written as syntax; `setProperty('box-shadow', …)`
+// names the property instead of writing it, so it has no such punctuation and
+// no restatement of the first branch can reach it. Sharing the source is what
+// keeps the channel and this measurement describing one span: widen one alone
+// and a spelling becomes either scanned-but-uncounted or counted-but-unscannable,
+// and both of those are silence.
+const SHADOW_MENTION = new RegExp(
+  `(?<![\\w-])(?!--)[A-Za-z-]*shadow[A-Za-z]*(?:['"]?\\s*\\]?\\s*[:=]|-?[([])|${CSSOM_SETTER.source}`,
+  'gi',
+);
 
 // Every custom property declared anywhere in the scanned stylesheets, name to
 // the set of values it is given. A name is collected once per distinct value
@@ -755,21 +800,34 @@ function collectCustomProperties(root) {
   return values;
 }
 
-// The names declared inside an `@theme` block -- the token layer itself, as
-// opposed to everything that merely looks like it. This is collected separately
-// from `collectCustomProperties` because the two answer different questions:
-// that one asks what a name is worth, this one asks whether the name is one of
-// ours.
-function collectThemeTokens(root) {
-  const names = new Set();
+// The VALUES declared inside an `@theme` block, per name -- the token layer
+// itself, as opposed to everything that merely looks like it. Collected
+// separately from `collectCustomProperties` because the two answer different
+// questions: that one asks what a name is worth anywhere, this one asks which
+// of those worths were sanctioned.
+//
+// Values rather than names, because a name is not a place either. Recording
+// membership as a name made the sanction transferable: `--shadow-glow-wire-cyan`
+// is declared in `@theme`, so the name is managed forever, and a component
+// stylesheet redeclaring it as `0 0 93px red` inherited that trust -- the
+// override was collected, marked managed and discarded unread, while the
+// cascade handed the call site the override at runtime. That is the same
+// name-for-place substitution the previous round made one level up, still
+// standing one level down; asking which declarations are sanctioned rather than
+// which names appear closes it, because an out-of-theme declaration is then a
+// value the set does not contain and falls through to ordinary classification.
+function collectThemeDeclarations(root) {
+  const values = new Map();
   for (const relative of intendedFiles(root, { extensions: ['.css'] })) {
     postcss.parse(fs.readFileSync(path.join(root, relative), 'utf8')).walkAtRules('theme', (rule) => {
       rule.walkDecls((decl) => {
-        if (decl.prop.startsWith('--')) names.add(decl.prop);
+        if (!decl.prop.startsWith('--')) return;
+        if (!values.has(decl.prop)) values.set(decl.prop, new Set());
+        values.get(decl.prop).add(decl.value);
       });
     });
   }
-  return names;
+  return values;
 }
 
 const CSS_WIDE_KEYWORDS = new Set(['none', 'inherit', 'initial', 'unset', 'revert', 'revert-layer']);
@@ -852,8 +910,15 @@ function glowOffencesInLayer(layer, tokens, seen, depth) {
     // that block is what design.pen is read against -- and a name that only
     // looks managed now falls through to the ordinary classification, where its
     // geometry is judged like any other literal.
-    const managed = GLOW_TOKEN.test(name) && tokens.managed.has(name);
-    const resolved = managed ? [] : [...declared];
+    //
+    // The sanction attaches to the DECLARATION, not to the name: subtracting
+    // the `@theme` values from everything collected for this name leaves
+    // exactly the declarations made somewhere else, and those are classified.
+    // A token declared only in `@theme` subtracts to nothing and stops the
+    // recursion as before; a managed name redeclared in a component stylesheet
+    // keeps the override in the list, which is what the cascade does too.
+    const sanctioned = GLOW_TOKEN.test(name) ? tokens.managed.get(name) : undefined;
+    const resolved = sanctioned ? [...declared].filter((value) => !sanctioned.has(value)) : [...declared];
     const deeper = [...resolved, ...(fallback ? [fallback] : [])]
       .flatMap((declaredValue) => glowOffencesInValue(declaredValue, tokens, next, depth + 1));
     return deeper.map((offence) => `${offence}  <- reached through ${shown}`);
@@ -909,7 +974,7 @@ function assertGlowsReadThroughTokens(root) {
   const offenders = [];
   const unscanned = [];
   const unreadable = [];
-  const tokens = { values: collectCustomProperties(root), managed: collectThemeTokens(root) };
+  const tokens = { values: collectCustomProperties(root), managed: collectThemeDeclarations(root) };
 
   for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
     const file = path.join(root, relative);
