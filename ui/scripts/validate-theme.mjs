@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import postcss from 'postcss';
 
 import { intendedFiles } from './lintPolicy.mjs';
+import { withoutNonRenderingText } from './nonRenderingText.mjs';
 
 const html = fs.readFileSync('index.html', 'utf8');
 const css = fs.readFileSync('src/index.css', 'utf8');
@@ -590,7 +591,20 @@ function isZeroLength(part) {
 //
 // `\x60` is a backtick -- a template-literal property name is exotic, but
 // "exotic" is the argument that lost the last six rounds.
-const CSSOM_SETTER = /\.setProperty\(\s*(?<quote>['"\x60])[^'"\x60]*shadow[^'"\x60]*\k<quote>\s*,/;
+// The `(?!--)` is the same judgement `SHADOW_MENTION` already made on the CSS
+// side, brought to the branch that had not heard it: `--shadow-color` is a
+// custom property, not a shadow property, and `setProperty('--shadow-color',
+// '#fff')` therefore draws nothing. Reading its value as a whole box-shadow
+// failed `validate:theme` on a colour -- a false positive, in CI, on a file that
+// was correct.
+//
+// Excluding it is not a gap, because a custom property is inert: it renders only
+// where some declaration spends it, that declaration IS scanned, and a name no
+// stylesheet declares already fails as unreadable. The rendering path stays
+// covered; what leaves is the position that never rendered. Rejecting "values
+// that look like glow geometry" here instead would be one more enumeration of
+// spellings, which is the shape that cost rounds three through eight.
+const CSSOM_SETTER = /\.setProperty\(\s*(?<quote>['"\x60])(?!--)[^'"\x60]*shadow[^'"\x60]*\k<quote>\s*,/;
 
 const SHADOW_CHANNELS = [
   // `shadow-[0_0_16px_-4px_var(--x)]`, including variants such as `hover:shadow-[…]`.
@@ -736,46 +750,6 @@ function balancedArgument(source, openIndex) {
 // literal followed by something that could hold anything -- stays unreadable.
 const CUSTOM_PROPERTY = /^--[A-Za-z0-9_-]+$/;
 const NON_STRING_LITERAL =/^\s*(true|false|null|undefined|[+-]?\d+(\.\d+)?)\s*($|[,;}\])])/;
-
-// A CSS comment renders nothing, so a shadow spelled inside one is prose ABOUT a
-// glow, not a glow. Blanking comment bodies -- preserving length and line breaks
-// so every offset and line number below still points where it did -- lets a
-// stylesheet explain itself in the vocabulary it is explaining. index.css earns
-// this immediately: the note on the `wire` role has to name `drop-shadow(…)` to
-// say why the sized roles cannot be spelled into one.
-//
-// Widening the scan is what made this necessary and it is worth being clear that
-// it is not a hole. A commented-out declaration does not reach the page, so
-// nothing can be smuggled through here that could have drawn light. The quote
-// tracking is the part that matters: `/*` inside a string starts no comment, and
-// blanking from one would hide the real declarations after it.
-function blankCssComments(source) {
-  let out = '';
-  let quote = null;
-  let index = 0;
-  while (index < source.length) {
-    const char = source[index];
-    if (quote) {
-      if (char === '\\') { out += source.slice(index, index + 2); index += 2; continue; }
-      if (char === quote) quote = null;
-      out += char;
-      index += 1;
-    } else if (char === '"' || char === "'") {
-      quote = char;
-      out += char;
-      index += 1;
-    } else if (char === '/' && source[index + 1] === '*') {
-      const closed = source.indexOf('*/', index + 2);
-      const stop = closed === -1 ? source.length : closed + 2;
-      out += source.slice(index, stop).replace(/[^\n]/g, ' ');
-      index = stop;
-    } else {
-      out += char;
-      index += 1;
-    }
-  }
-  return out;
-}
 
 // A glow is a *value*, and there are only so many ways to introduce one: a `:`
 // in a declaration or an object literal, an `=` in an assignment, a `(` opening
@@ -1033,7 +1007,7 @@ function assertGlowsReadThroughTokens(root) {
   for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
     const file = path.join(root, relative);
     const raw = fs.readFileSync(file, 'utf8');
-    const source = file.endsWith('.css') ? blankCssComments(raw) : raw;
+    const source = withoutNonRenderingText(raw, file);
     const claimed = [];
 
     for (const { pattern, valuesOf, provablyNotAShadow } of SHADOW_CHANNELS) {
