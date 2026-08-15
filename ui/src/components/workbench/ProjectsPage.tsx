@@ -39,7 +39,7 @@ import { useSessionActions } from './useSessionActions';
 import { SessionPinIndicator } from './SessionPinIndicator';
 
 const DOT: Record<string, string> = {
-  running: 'bg-mint shadow-[0_0_7px_rgba(91,255,160,0.9)]',
+  running: 'bg-mint shadow-glow-dot-mint',
   failed: 'bg-destructive',
   idle: 'bg-muted',
 };

@@ -21,7 +21,7 @@ export const WorkbenchModulePlaceholder: React.FC<WorkbenchModulePlaceholderProp
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col items-center gap-5 py-16 text-center">
-      <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-[0_0_24px_-6px_rgba(91,255,160,0.5)]">
+      <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
         {icon}
       </div>
       <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-mint-ink">

@@ -1,6 +1,9 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import vm from 'node:vm';
 import postcss from 'postcss';
+
+import { intendedFiles } from './lintPolicy.mjs';
 
 const html = fs.readFileSync('index.html', 'utf8');
 const css = fs.readFileSync('src/index.css', 'utf8');
@@ -475,6 +478,76 @@ function assertAccentAliasesKeepTheirTokenName(source) {
 }
 
 assertAccentAliasesKeepTheirTokenName(css);
+
+// A glow is a shadow layer drawn at the element's own position: both offsets
+// zero, a blur, and an accent colour. Written as a literal it is invisible to
+// every assertion in this file -- which is how 72 of them accumulated 52
+// distinct spellings of the same four shapes, and how the eight card washes
+// came to retype `--shadow-mint-card`'s value and so keep the dark frame's
+// neon on a white page. A token cannot drift that way: it is one value, it is
+// read against design.pen, and light re-anchors it in one place. So a glow
+// names a token, and this asserts the property rather than listing the
+// spellings, because the next literal will be a spelling nobody listed.
+//
+// Only the glow layer is held to it. An offset shadow is directional light,
+// not a glow, and `0 0 0 2px` is a ring -- no blur, nothing to colour-manage.
+function shadowLayers(value) {
+  const layers = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    if (value[i] === '(') depth += 1;
+    else if (value[i] === ')') depth -= 1;
+    else if (value[i] === ',' && depth === 0) {
+      layers.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  layers.push(value.slice(start));
+  return layers;
+}
+
+function layerParts(layer) {
+  return shadowLayers(layer.replace(/_/g, ',')).filter((part) => part !== '');
+}
+
+const ZERO_LENGTH = /^0(px)?$/;
+const RAW_COLOUR = /rgba?\(|#[0-9a-fA-F]{3,8}\b/;
+
+function assertGlowsReadThroughTokens(root) {
+  const offenders = [];
+
+  for (const relative of intendedFiles(root)) {
+    const file = path.join(root, relative);
+    const source = fs.readFileSync(file, 'utf8');
+
+    for (const [, value] of source.matchAll(/shadow-\[([^\]]*)\]/g)) {
+      for (const layer of shadowLayers(value)) {
+        const parts = layerParts(layer);
+        if (parts[0] === 'inset') parts.shift();
+        const [x, y, blur] = parts;
+        const isGlow = ZERO_LENGTH.test(x ?? '') && ZERO_LENGTH.test(y ?? '')
+          && blur !== undefined && !ZERO_LENGTH.test(blur);
+        if (isGlow && RAW_COLOUR.test(layer)) {
+          offenders.push(`${file}: ${layer}`);
+        }
+      }
+    }
+  }
+
+  if (offenders.length > 0) {
+    throw new Error(
+      `${offenders.length} glow shadow(s) spell a colour inline instead of reading a --shadow-glow-* `
+      + `token. A literal cannot be re-anchored for light and cannot be checked against design.pen, `
+      + `so pick the token whose blur it is nearest -- dot, sm, md, lg or cta -- and use `
+      + `shadow-glow-<role>-<accent>, or var(--shadow-glow-<role>-<accent>) inside a composite `
+      + `shadow. Add the token to @theme if that accent does not have one yet.\n  `
+      + offenders.join('\n  '),
+    );
+  }
+}
+
+assertGlowsReadThroughTokens('src');
 assertEveryAcceptedRatioStillExists();
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });

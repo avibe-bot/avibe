@@ -778,7 +778,7 @@ export const UserList: React.FC = () => {
                   className={clsx(
                     'rounded-xl border transition-colors',
                     expanded
-                      ? 'border-mint/30 bg-surface-2/70 shadow-[0_0_32px_-8px_rgba(91,255,160,0.45)]'
+                      ? 'border-mint/30 bg-surface-2/70 shadow-glow-lg-mint'
                       : userConfig.enabled
                         ? 'border-border bg-background hover:border-border-strong'
                         : 'border-border bg-background/60 opacity-70'

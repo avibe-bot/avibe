@@ -31,7 +31,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
             className={cn(
               'h-1 flex-1 rounded-full transition-all duration-300',
               filled
-                ? 'bg-mint shadow-[0_0_12px_rgba(91,255,160,0.45)]'
+                ? 'bg-mint shadow-glow-dot-mint'
                 : 'bg-foreground/[0.06]'
             )}
           />

@@ -25,7 +25,7 @@ export const StepCard: React.FC<StepCardProps> = ({
   <div
     className={cn(
       'flex flex-col gap-4 rounded-xl border border-mint/[0.20] bg-surface-2 p-8',
-      'shadow-[0_24px_48px_-12px_rgba(91,255,160,0.078)]',
+      'shadow-mint-card',
       className
     )}
     {...props}

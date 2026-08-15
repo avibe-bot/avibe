@@ -460,7 +460,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                   key={i}
                   className={clsx(
                     'h-1 w-5 rounded-full',
-                    i < completedCount ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.6)]' : 'bg-foreground/[0.08]'
+                    i < completedCount ? 'bg-mint shadow-glow-dot-mint' : 'bg-foreground/[0.08]'
                   )}
                 />
               ))}

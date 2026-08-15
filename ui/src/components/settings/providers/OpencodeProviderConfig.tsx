@@ -1231,7 +1231,7 @@ export const OpencodeProviderConfig: React.FC<{
                         key={provider.id}
                         className={clsx(
                           'flex flex-col rounded-lg border bg-surface transition-colors',
-                          expanded ? 'border-mint/40 shadow-[0_0_24px_-12px_rgba(91,255,160,0.6)]' : 'border-border hover:border-border-strong',
+                          expanded ? 'border-mint/40 shadow-glow-md-mint' : 'border-border hover:border-border-strong',
                           expanded && 'md:col-span-2'
                         )}
                       >

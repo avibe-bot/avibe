@@ -191,7 +191,7 @@ export const SettingsServicePage: React.FC = () => {
             <span
               className={clsx(
                 'size-1.5 rounded-full',
-                isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
+                isRunning ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
               )}
             />
             {isRunning ? t('common.running') : t('common.stopped')}

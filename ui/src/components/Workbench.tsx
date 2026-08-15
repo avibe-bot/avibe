@@ -71,7 +71,7 @@ export const Workbench: React.FC = () => {
     <div className="flex flex-col items-center gap-5 md:min-h-[calc(100dvh-7rem)] md:justify-center">
       {/* Hero panel — a centered card, not a full-bleed fill. */}
       <div className="flex w-full max-w-[640px] flex-col items-center gap-6 rounded-2xl border border-border bg-surface-2 px-6 py-10">
-        <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/40 bg-mint-soft text-mint-ink shadow-[0_0_24px_-6px_rgba(91,255,160,0.6)]">
+        <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/40 bg-mint-soft text-mint-ink shadow-glow-md-mint">
           <Sparkles className="size-6" />
         </div>
         <div className="flex max-w-[520px] flex-col items-center gap-3 text-center">

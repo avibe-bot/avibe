@@ -35,13 +35,13 @@ export const buttonVariants = cva(
         // always a CSS variable. design.pen has no glow on any Button, so the value is
         // ours to hold, not the design's; keep the four in lockstep.
         brand:
-          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_var(--brand-glow-blur)_-4px_rgba(91,255,160,0.6)] hover:bg-mint-hover disabled:shadow-none',
+          'gap-2 bg-mint font-bold text-primary-foreground shadow-glow-cta-mint hover:bg-mint-hover disabled:shadow-none',
         'brand-cyan':
-          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_var(--brand-glow-blur)_-4px_rgba(63,224,229,0.6)] hover:bg-cyan-hover disabled:shadow-none',
+          'gap-2 bg-cyan font-bold text-accent-foreground shadow-glow-cta-cyan hover:bg-cyan-hover disabled:shadow-none',
         'brand-gold':
-          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_var(--brand-glow-blur)_-4px_rgba(255,200,87,0.55)] hover:bg-gold-hover disabled:shadow-none',
+          'gap-2 bg-gold font-bold text-gold-foreground shadow-glow-cta-gold hover:bg-gold-hover disabled:shadow-none',
         'brand-violet':
-          'gap-2 bg-violet font-bold text-violet-foreground shadow-[0_0_var(--brand-glow-blur)_-4px_rgba(124,91,255,0.55)] hover:bg-violet-hover disabled:shadow-none',
+          'gap-2 bg-violet font-bold text-violet-foreground shadow-glow-cta-violet hover:bg-violet-hover disabled:shadow-none',
         secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong',
         // Outline — bg matches page surface so it sits cleanly on glow gradients.
         outline:

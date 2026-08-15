@@ -105,8 +105,47 @@
   --radius-3xl: 24px;
 
   /* Card glow shadows (matches design.pen). */
+  --shadow-mint-card-sm: 0 8px 32px -8px rgba(91, 255, 160, 0.078);
   --shadow-mint-card: 0 24px 48px -12px rgba(91, 255, 160, 0.078);
   --shadow-mint-card-lg: 0 32px 64px -12px rgba(91, 255, 160, 0.078);
+
+  /* The accent glow scale, read off design.pen's Landing Page frame: `dot` is
+     its status dot, `sm` its icon tile, `md` its nav CTA and eyebrow badge,
+     `lg` its hero button. Geometry and alpha come from that frame, with one
+     departure: its dot glows at full alpha over near-black, and ours also sit
+     on lit panels, so `dot` is clamped to 0.9 -- the brightest value the call
+     sites were already using.
+
+     `cta` is the exception that is not from design.pen. Its blur is themed
+     because a neon that reads on black barely registers over a white card
+     (owner decision 2026-08-14); its 0.6 is likewise owner-set.
+
+     The colour, unlike the blur, does NOT vary by theme. design.pen's Light
+     frame recolours the card washes below to the light brand mint and keeps
+     every glow on the dark neon, so these stay literal instead of reading
+     through `--mint` and friends. */
+  --shadow-glow-dot-mint: 0 0 8px rgba(91, 255, 160, 0.9);
+  --shadow-glow-dot-gold: 0 0 8px rgba(255, 200, 87, 0.9);
+  --shadow-glow-dot-danger: 0 0 8px rgba(255, 107, 107, 0.9);
+
+  --shadow-glow-sm-mint: 0 0 16px -2px rgba(91, 255, 160, 0.44);
+  --shadow-glow-sm-cyan: 0 0 16px -2px rgba(63, 224, 229, 0.44);
+  --shadow-glow-sm-violet: 0 0 16px -2px rgba(124, 91, 255, 0.44);
+  --shadow-glow-sm-gold: 0 0 16px -2px rgba(255, 200, 87, 0.44);
+
+  --shadow-glow-md-mint: 0 0 24px -4px rgba(91, 255, 160, 0.4);
+  --shadow-glow-md-cyan: 0 0 24px -4px rgba(63, 224, 229, 0.4);
+  --shadow-glow-md-violet: 0 0 24px -4px rgba(124, 91, 255, 0.4);
+  --shadow-glow-md-gold: 0 0 24px -4px rgba(255, 200, 87, 0.4);
+
+  --shadow-glow-lg-mint: 0 0 32px -6px rgba(91, 255, 160, 0.44);
+  --shadow-glow-lg-cyan: 0 0 32px -6px rgba(63, 224, 229, 0.44);
+  --shadow-glow-lg-violet: 0 0 32px -6px rgba(124, 91, 255, 0.44);
+
+  --shadow-glow-cta-mint: 0 0 var(--brand-glow-blur) -4px rgba(91, 255, 160, 0.6);
+  --shadow-glow-cta-cyan: 0 0 var(--brand-glow-blur) -4px rgba(63, 224, 229, 0.6);
+  --shadow-glow-cta-violet: 0 0 var(--brand-glow-blur) -4px rgba(124, 91, 255, 0.6);
+  --shadow-glow-cta-gold: 0 0 var(--brand-glow-blur) -4px rgba(255, 200, 87, 0.6);
 }
 
 :root,
@@ -338,9 +377,11 @@
 
     --bg-page: var(--gradient-console);
 
-    /* Light card glow — much softer than dark. */
-    --shadow-mint-card: 0 12px 24px -16px rgba(16, 185, 129, 0.20);
-    --shadow-mint-card-lg: 0 16px 32px -16px rgba(16, 185, 129, 0.22);
+    /* Light card wash — design.pen's Light frame keeps the dark frame's
+       geometry and 0.078 and swaps only the hue to the light brand mint. */
+    --shadow-mint-card-sm: 0 8px 32px -8px rgba(16, 185, 129, 0.078);
+    --shadow-mint-card: 0 24px 48px -12px rgba(16, 185, 129, 0.078);
+    --shadow-mint-card-lg: 0 32px 64px -12px rgba(16, 185, 129, 0.078);
 
     /* Wider CTA glow than dark: the same neon spreads far less over a white card,
        so 16px read as almost nothing here (owner decision 2026-08-14). */
@@ -442,9 +483,11 @@
 
   --bg-page: var(--gradient-console);
 
-  /* Light card glow — much softer than dark. */
-  --shadow-mint-card: 0 12px 24px -16px rgba(16, 185, 129, 0.20);
-  --shadow-mint-card-lg: 0 16px 32px -16px rgba(16, 185, 129, 0.22);
+  /* Light card wash — design.pen's Light frame keeps the dark frame's
+     geometry and 0.078 and swaps only the hue to the light brand mint. */
+  --shadow-mint-card-sm: 0 8px 32px -8px rgba(16, 185, 129, 0.078);
+  --shadow-mint-card: 0 24px 48px -12px rgba(16, 185, 129, 0.078);
+  --shadow-mint-card-lg: 0 32px 64px -12px rgba(16, 185, 129, 0.078);
 
   /* Wider CTA glow than dark: the same neon spreads far less over a white card,
      so 16px read as almost nothing here (owner decision 2026-08-14). */
