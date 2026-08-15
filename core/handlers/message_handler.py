@@ -760,12 +760,12 @@ class MessageHandler(BaseHandler):
                         except Exception:
                             attachment_config_generation = None
                     try:
-                        if attachment_config_generation is not None:
-                            memory_attachment_lease = attachment_lease.retain()
                         turn_lifecycle_admission = await self._acquire_memory_capture_admission(
                             memory_session_id,
                             turn_lifecycle_admission,
                         )
+                        if attachment_config_generation is not None:
+                            memory_attachment_lease = attachment_lease.retain()
                         admission_ready = asyncio.Event()
                         capture_options = {
                             "admission_ready": admission_ready,

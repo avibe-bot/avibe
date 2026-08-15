@@ -1045,6 +1045,67 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         await handler.drain_memory_capture_tasks()
         retained_lease.release.assert_called_once_with()
 
+    async def test_attachment_capture_cancelled_during_admission_does_not_retain_lease(
+        self,
+    ):
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        acquisition_started = asyncio.Event()
+        never_acquired = asyncio.Event()
+
+        async def acquire_lifecycle_admission(session_id):
+            self.assertEqual(session_id, "base-session")
+            acquisition_started.set()
+            await never_acquired.wait()
+            raise AssertionError("unreachable")
+
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            acquire_lifecycle_admission=acquire_lifecycle_admission,
+        )
+        controller.memory_attachment_capture_admitted = Mock(return_value=1)
+        controller.capture_user_memory = AsyncMock()
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="review this")
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                lease=lease,
+            )
+        )
+        context = MessageContext(
+            user_id="U1",
+            channel_id="D1",
+            message_id="m-cancelled-memory-admission",
+            platform="slack",
+            platform_specific={"is_dm": True},
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+            is_ordinary_attachment=True,
+        )
+
+        task = asyncio.create_task(
+            handler.handle_user_message(context, "remember this")
+        )
+        await asyncio.wait_for(acquisition_started.wait(), timeout=1.0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        lease.retain.assert_not_called()
+        lease.release.assert_called_once_with()
+        controller.capture_user_memory.assert_not_called()
+
     async def test_scope_model_and_reasoning_override_vibe_agent_defaults(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.settings_manager.routing = type(
