@@ -315,12 +315,37 @@ const isStyleElementChild = (node, tree) => {
 // kind that can also be real.
 //
 // So the rule is where the text is handed to a CSS parser, not what the text
-// spells. A string reaches one three ways beyond `<style>`: `.style.cssText`
-// takes a whole declaration list, `setAttribute('style', …)` takes the same list
-// through the attribute, and `insertRule` takes a whole rule. Each names CSS at
-// the point of use, which is the same place `styleWrite.mjs` answers the CSSOM
-// question -- at the target, because a name never can.
+// spells. Which calls do that is a fact about the web platform rather than
+// about this codebase, so it is a LIST -- there is no property of an expression
+// that separates `sheet.replaceSync(css)` from `log(css)`, and pretending
+// otherwise is how the list stayed short. Written once, here, with a test that
+// walks every member: a sink added to this array without a case is a failing
+// test, which is the cheap way to find out, and a sink missing from it is a
+// review round, which is the expensive one.
 //
+// The cost of a short list is worse than a miss now that a match can be REFUSED.
+// `sheet.replaceSync('.card { box-shadow: 0 0 93px red }')` was claimed by the
+// declaration channel, found outside every range, and therefore reported as
+// provably not CSS -- so an unrecognised sink did not merely go unread, it went
+// unread QUIETLY, past the completeness check that exists to make gaps loud.
+// Each entry below is one shape a string can sit in.
+const CSS_TEXT_SINKS = [
+  // `el.style.cssText = '…'` -- a whole declaration list, assigned.
+  { assignedTo: /(^|\.)cssText$/ },
+  // `el.setAttribute('style', '…')` -- the same list, through the attribute.
+  { called: /(^|\.)setAttribute$/, at: 1, guardedBy: /^(['"`])style\1$/ },
+  // `sheet.insertRule('…')`, and the identical spelling on a grouping rule.
+  { called: /(^|\.)insertRule$/ },
+  // `sheet.replaceSync('…')` -- a constructable stylesheet's entire text, which
+  // paints like any other once the sheet is adopted.
+  { called: /(^|\.)replaceSync$/ },
+  // `sheet.replace('…')` -- the async twin, and the one spelling here that
+  // another builtin also owns. `String.prototype.replace` is always given a
+  // replacement as well, so arity separates them without needing types: one
+  // argument is a stylesheet, two is a substitution.
+  { called: /(^|\.)replace$/, arity: 1 },
+];
+
 // What this cannot follow is a value that arrives through a variable:
 // `const rule = '…'; el.style.cssText = rule` hands CSS to CSS with no literal
 // at the sink to read. That is the dataflow limit this scan has everywhere --
@@ -331,18 +356,20 @@ const HANDS_TEXT_TO_CSS = (node, tree) => {
   if (!parent) return false;
 
   if (parent.kind === ts.SyntaxKind.BinaryExpression) {
-    return parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
-      && node === parent.right
-      && /(^|\.)cssText$/.test(parent.left.getText(tree));
+    if (parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || node !== parent.right) return false;
+    const target = parent.left.getText(tree);
+    return CSS_TEXT_SINKS.some(({ assignedTo }) => assignedTo?.test(target));
   }
 
   if (parent.kind === ts.SyntaxKind.CallExpression) {
     const callee = parent.expression.getText(tree);
-    const [first, second] = parent.arguments;
-    if (/(^|\.)setAttribute$/.test(callee)) {
-      return node === second && /^(['"`])style\1$/.test(first?.getText(tree) ?? '');
-    }
-    return /(^|\.)insertRule$/.test(callee) && parent.arguments.includes(node);
+    return CSS_TEXT_SINKS.some(({ called, at, guardedBy, arity }) => {
+      if (!called?.test(callee)) return false;
+      if (arity !== undefined && parent.arguments.length !== arity) return false;
+      if (at === undefined) return parent.arguments.includes(node);
+      return node === parent.arguments[at]
+        && guardedBy.test(parent.arguments[at - 1]?.getText(tree) ?? '');
+    });
   }
 
   return false;
@@ -362,17 +389,45 @@ const CSS_TEXT_KINDS = new Set([
   ts.SyntaxKind.TemplateExpression,
 ]);
 
-// Every stretch of a file whose text is CSS, in that file's own coordinates. A
-// `.css` file is CSS end to end; a TypeScript file is CSS only where it hands
-// text to a parser.
+// The children of a `<style>`, as text rather than as JavaScript.
 //
-// `<style>` is answered by the ELEMENT rather than by its children, which is the
-// difference between a rule and a list of the ways a rule can be written. Its
-// children are CSS however they are spelled -- bare text, a string in an
-// expression, a template with substitutions, several of those in a row -- and
-// asking each child kind in turn is how the JSX half of this module has been
-// wrong before. Everything between the tags is CSS because that is what the tag
-// means.
+// The element is still what decides -- its children are CSS however they are
+// spelled, and enumerating the ways a child can be written is how the JSX half
+// of this module has been wrong before. What this enumerates is one level down
+// and closed: a child is either text in the file or a literal holding text, and
+// `CSS_TEXT_KINDS` already names every literal that can hold any.
+//
+// Taking the raw span between the tags instead was nearly right, and wrong in
+// the one way that matters to a caller holding a parser: `<style>{'…'}</style>`
+// puts `{'` and `'}` inside that span, so postcss reads a JavaScript brace as
+// the start of a rule. A scanner never noticed, because every byte of the CSS
+// is in the span either way and a regex simply steps over the rest.
+const styleChildRanges = (element, tree, into) => {
+  const visit = (node) => {
+    if (node.kind === ts.SyntaxKind.JsxText) {
+      if (node.getText(tree).trim()) into.push([node.getStart(tree), node.getEnd()]);
+      return;
+    }
+    if (CSS_TEXT_KINDS.has(node.kind)) {
+      into.push(cssTextRange(node, tree));
+      return;
+    }
+    node.getChildren(tree).forEach(visit);
+  };
+
+  element.children.forEach(visit);
+};
+
+// Every stretch of a file whose text is CSS, in that file's own coordinates. A
+// `.css` file is CSS end to end; a TypeScript file is CSS where it hands text to
+// a parser, and inside a `<style>`.
+//
+// One answer for both kinds of caller. This file used to give a scanner the raw
+// span and had nobody else; now that the token layer folds these stretches
+// through postcss and the declaration spans are parsed out of them, a span that
+// is CSS "apart from the JavaScript around it" is not an answer -- and keeping
+// two nearly-identical range functions in step is the thing that has cost this
+// scan a round every time it was tried.
 function cssRangesIn(source, file) {
   if (file.endsWith('.css')) return source.length > 0 ? [[0, source.length]] : [];
 
@@ -382,8 +437,77 @@ function cssRangesIn(source, file) {
   const visit = (node) => {
     if (node.kind === ts.SyntaxKind.JsxElement
       && node.openingElement?.tagName?.getText(tree) === 'style') {
-      ranges.push([node.openingElement.getEnd(), node.closingElement.getStart(tree)]);
+      styleChildRanges(node, tree, ranges);
     } else if (CSS_TEXT_KINDS.has(node.kind) && HANDS_TEXT_TO_CSS(node, tree)) {
+      ranges.push(cssTextRange(node, tree));
+    }
+    node.getChildren(tree).forEach(visit);
+  };
+  visit(tree);
+
+  return ranges;
+}
+
+// A body is not a place, it is a promise to compute one later. `onClick={() =>
+// log('drop-shadow(…)')}` sits inside an attribute and hands that attribute
+// nothing; walking through it would call every string in every handler CSS.
+const DEFERS_ITS_BODY = new Set([
+  ts.SyntaxKind.ArrowFunction,
+  ts.SyntaxKind.FunctionExpression,
+  ts.SyntaxKind.FunctionDeclaration,
+  ts.SyntaxKind.MethodDeclaration,
+]);
+
+// `el.style.filter = '…'` -- the CSSOM half, where the property is named at the
+// assignment target rather than in the text, exactly as `styleWrite.mjs` reads
+// it one property over.
+const STYLE_TARGET = /(^|\.)style\.[A-Za-z][\w$]*$/;
+
+const REACHES_A_RENDERER = (node, tree) => {
+  for (let current = node; current.parent; current = current.parent) {
+    const parent = current.parent;
+    if (DEFERS_ITS_BODY.has(parent.kind)) return false;
+    if (parent.kind === ts.SyntaxKind.JsxAttribute) return true;
+    if (parent.kind === ts.SyntaxKind.BinaryExpression
+      && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && current === parent.right
+      && STYLE_TARGET.test(parent.left.getText(tree))) return true;
+  }
+  return false;
+};
+
+// Every stretch whose text reaches the browser AS CSS, which is a wider question
+// than the one above and has to be, because not all rendered CSS is a
+// stylesheet. `filter: drop-shadow(…)` ships three ways -- in a rule, in a
+// utility class, and as a style value -- and only the first is text a CSS parser
+// is handed whole.
+//
+// Reading it in none of those places was the bug: the `drop-shadow(` channel
+// asked nothing at all, so `log('filter: drop-shadow(0 0 93px red)')` -- a
+// sentence in a diagnostic -- failed the gate, which is CI rejecting a pull
+// request over a log line. Reading it only where `cssRangesIn` says would have
+// been the same mistake wearing the other sign, because a Tailwind arbitrary
+// property lives in a className and a style value lives in an object, and
+// neither is a stylesheet.
+//
+// So: a stylesheet, or a literal that reaches an attribute or a CSSOM property
+// without passing through a function body. What that still cannot see is the
+// same dataflow limit as everywhere else -- a class string assembled in a
+// variable, or a style value read out of a map -- recorded rather than guessed
+// at.
+//
+// A union of two answers, so a stretch both agree on -- `el.style.cssText = '…'`
+// is a sink AND a CSSOM write -- appears twice. Callers ask this whether an
+// offset is inside any range, which is membership rather than counting, so the
+// repeat costs nothing and deduplicating it would only hide that both said yes.
+function cssBearingRangesIn(source, file) {
+  if (file.endsWith('.css')) return cssRangesIn(source, file);
+
+  const tree = parseSource(source, file);
+  const ranges = cssRangesIn(source, file);
+
+  const visit = (node) => {
+    if (CSS_TEXT_KINDS.has(node.kind) && REACHES_A_RENDERER(node, tree)) {
       ranges.push(cssTextRange(node, tree));
     }
     node.getChildren(tree).forEach(visit);
@@ -481,7 +605,9 @@ const rendersAtAll = (file) => !NON_RENDERING_FILES.test(file.replaceAll('\\', '
 export {
   blankCssComments,
   blankTypeScriptComments,
+  cssBearingRangesIn,
   cssRangesIn,
+  CSS_TEXT_SINKS,
   parseSource,
   rendersAtAll,
   typeScriptComments,

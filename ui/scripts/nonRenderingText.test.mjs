@@ -1,10 +1,17 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import postcss from 'postcss';
 import { describe, expect, it } from 'vitest';
 
 import { intendedFiles } from './lintPolicy.mjs';
-import { cssRangesIn, rendersAtAll, withoutNonRenderingText } from './nonRenderingText.mjs';
+import {
+  cssBearingRangesIn,
+  cssRangesIn,
+  CSS_TEXT_SINKS,
+  rendersAtAll,
+  withoutNonRenderingText,
+} from './nonRenderingText.mjs';
 import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // `validate:theme` reads whole source files with regular expressions, so the set
@@ -267,16 +274,36 @@ describe('cssRangesIn', () => {
     expect(cssIn(source, file)).toEqual([]);
   });
 
-  // `<style>` is answered by the ELEMENT, not by its children, and this is why:
-  // its children are CSS however they are spelled, and asking each child kind in
-  // turn is how the JSX half of this module has been wrong before. A rule that
-  // enumerates spellings is missing the one nobody wrote down.
+  // `<style>` is still answered by the ELEMENT: its children are CSS however
+  // they are spelled, and asking each child kind in turn is how the JSX half of
+  // this module has been wrong before.
+  //
+  // What the children are read AS changed, and JSX is what bounds it. `{` opens
+  // an expression container, so a rule cannot be written unquoted inside a
+  // `<style>` at all -- every one in compiling TSX holds a literal. Reading the
+  // children therefore loses no CSS that can ship, where taking the raw span
+  // between the tags handed a parser the `{'` and `'}` around it and had it read
+  // a JavaScript brace as the start of a rule.
   it.each([
-    ['bare text', `<style>.a { box-shadow: ${GLOW} }</style>`],
-    ['a string in an expression', `<style>{'.a { box-shadow: ${GLOW} }'}</style>`],
-    ['a template with a substitution', '<style>{`.a { box-shadow: 0 0 93px ${c} }`}</style>'],
-  ])('reads a <style> child written as %s as CSS', (_label, element) => {
-    expect(cssIn(`const a = ${element};`, 'probe.tsx').join('')).toContain('box-shadow');
+    ['bare text', '<style>@import url("a.css");</style>', '@import'],
+    ['a string in an expression', `<style>{'.a { box-shadow: ${GLOW} }'}</style>`, 'box-shadow'],
+    ['a template with a substitution', '<style>{`.a { box-shadow: 0 0 93px ${c} }`}</style>', 'box-shadow'],
+  ])('reads a <style> child written as %s as CSS', (_label, element, css) => {
+    expect(cssIn(`const a = ${element};`, 'probe.tsx').join('')).toContain(css);
+  });
+
+  // And reads it as text a parser accepts, which the raw span was not. Stated as
+  // a parse rather than as an offset, because the point is not where the range
+  // falls but that postcss can be handed what is inside it -- the token layer
+  // now folds exactly these stretches, and a stretch it cannot parse contributes
+  // no tokens at all while looking like it did.
+  it('reads a <style> child as text postcss accepts', () => {
+    const source = `const a = <style>{'.a { --tint: red }'}</style>;`;
+
+    const declared = cssRangesIn(source, 'probe.tsx')
+      .flatMap(([start, end]) => [...postcss.parse(source.slice(start, end)).nodes]);
+
+    expect(declared.map((node) => node.selector)).toEqual(['.a']);
   });
 
   // A `.css` file is CSS end to end, which is the boundary case a suffix test
@@ -285,5 +312,92 @@ describe('cssRangesIn', () => {
   it('reads a stylesheet whole', () => {
     expect(cssRangesIn('.a { color: red }', 'probe.css')).toEqual([[0, 17]]);
     expect(cssRangesIn('', 'probe.css')).toEqual([]);
+  });
+
+  // Which calls hand text to a CSS parser is a fact about the web platform, not
+  // about this codebase, so it is a list -- and a list is the shape that is
+  // silently short. `replaceSync` was missing, and a constructable stylesheet
+  // full of glow read as prose; worse, once the declaration channel learned to
+  // REFUSE a match outside CSS, the same gap stopped being a miss and became a
+  // proof that the glow was not CSS at all.
+  //
+  // The array is the single declaration and this is the test that walks it: a
+  // sink added without a case fails here, which costs one edit, instead of
+  // shipping unread, which costs a review round.
+  const sinkKey = ({ assignedTo, called }) => String(assignedTo ?? called);
+
+  const SINK_PROBES = {
+    '/(^|\\.)cssText$/': `el.style.cssText = 'box-shadow: ${GLOW}';`,
+    '/(^|\\.)setAttribute$/': `el.setAttribute('style', 'box-shadow: ${GLOW}');`,
+    '/(^|\\.)insertRule$/': `sheet.insertRule('.a { box-shadow: ${GLOW} }');`,
+    '/(^|\\.)replaceSync$/': `sheet.replaceSync('.a { box-shadow: ${GLOW} }');`,
+    '/(^|\\.)replace$/': `sheet.replace('.a { box-shadow: ${GLOW} }');`,
+  };
+
+  it('reads every sink it enumerates, and enumerates every sink it reads', () => {
+    expect(Object.keys(SINK_PROBES).sort()).toEqual(CSS_TEXT_SINKS.map(sinkKey).sort());
+
+    for (const [sink, source] of Object.entries(SINK_PROBES)) {
+      expect(cssIn(source, 'probe.ts'), `${sink} is enumerated but not read`).not.toEqual([]);
+    }
+  });
+
+  // The one spelling on that list another builtin also owns. A stylesheet's
+  // `replace` is handed its whole text and nothing else, while a string's is
+  // always handed a replacement too, so arity tells them apart without types --
+  // and reading the string one as CSS would fail every file that edits a string.
+  it('reads a two-argument .replace as a substitution, not a stylesheet', () => {
+    expect(cssIn(`const s = css.replace('box-shadow: ${GLOW}', '');`, 'probe.ts')).toEqual([]);
+  });
+
+  // The limit, stated rather than guessed at. A value that arrives through a
+  // variable hands CSS to CSS with no literal at the sink to read, and treating
+  // every string as a possible stylesheet to cover it would fail every file that
+  // merely quotes a declaration. This is the dataflow boundary the whole scan
+  // has; recording it here is what keeps it a known gap instead of a surprise.
+  it('does not follow a value that reaches a sink through a variable', () => {
+    const source = `const rule = 'box-shadow: ${GLOW}';\nel.style.cssText = rule;`;
+
+    expect(cssIn(source, 'probe.ts')).toEqual([]);
+  });
+});
+
+// The wider question, and the reason it has to be asked separately. `cssRangesIn`
+// answers WHICH TEXT IS A STYLESHEET; this answers WHICH TEXT REACHES A RENDERER
+// AS CSS, which is weaker, because `filter: drop-shadow(…)` ships three ways --
+// in a rule, in a utility class and in a style object -- and only the first is
+// text a CSS parser is handed whole.
+//
+// The `drop-shadow(` channel asked neither and failed a log line; asking the
+// narrower one instead would have swapped that false positive for two misses.
+// Both directions are stated here, because either alone is satisfiable by the
+// wrong answer.
+describe('cssBearingRangesIn', () => {
+  const borne = (source, file) => cssBearingRangesIn(source, file)
+    .map(([start, end]) => source.slice(start, end).trim());
+
+  it.each([
+    ['a Tailwind arbitrary property', `const a = <div className="[filter:drop-shadow(${GLOW})]" />;`],
+    ['a style object value', `const a = <div style={{ filter: 'drop-shadow(${GLOW})' }} />;`],
+    ['a CSSOM property write', `el.style.filter = 'drop-shadow(${GLOW})';`],
+    ['a stylesheet handed to a parser', `sheet.replaceSync('.a { filter: drop-shadow(${GLOW}) }');`],
+  ])('bears %s', (_label, source) => {
+    expect(borne(source, 'probe.tsx').join('')).toContain('drop-shadow');
+  });
+
+  it.each([
+    ['a diagnostic', `log('filter: drop-shadow(${GLOW})');`],
+    ['a documented constant', `export const EXAMPLE = 'drop-shadow(${GLOW})';`],
+    // An attribute holding a function holds a promise to compute a value later,
+    // not a value. Walking through the body would read every string in every
+    // event handler as CSS.
+    ['a handler body inside an attribute', `const a = <div onClick={() => log('drop-shadow(${GLOW})')} />;`],
+    ['page copy', `const a = <code>drop-shadow(${GLOW})</code>;`],
+  ])('does not bear %s', (_label, source) => {
+    expect(borne(source, 'probe.tsx')).toEqual([]);
+  });
+
+  it('reads a stylesheet whole, exactly as the narrower question does', () => {
+    expect(cssBearingRangesIn('.a { color: red }', 'probe.css')).toEqual([[0, 17]]);
   });
 });

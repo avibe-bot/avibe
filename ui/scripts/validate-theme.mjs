@@ -14,6 +14,7 @@ import { intendedFiles } from './lintPolicy.mjs';
 import { colourRegistrationsIn, customPropertiesIn } from './customProperties.mjs';
 import { declarationSpansIn, declaresAt } from './cssDeclarations.mjs';
 import {
+  cssBearingRangesIn,
   cssRangesIn,
   parseSource,
   rendersAtAll,
@@ -705,8 +706,8 @@ const SHADOW_CHANNELS = [
   // is innocent, but that there is no declaration here to have a value.
   {
     pattern: new RegExp(`(?<!\\[)${CSS_SHADOW_PROPERTY}\\s*:([^;}'"\`]*)`, PROPERTY_FLAGS),
-    valuesOf: (match, tree, declares) => (declares(match.index) ? [match[1]] : []),
-    provablyNotAShadow: (match, tree, declares) => !declares(match.index),
+    valuesOf: (match, tree, where) => (where.declares(match.index) ? [match[1]] : []),
+    provablyNotAShadow: (match, tree, where) => !where.declares(match.index),
   },
   // `filter: drop-shadow(0 0 4px …)`. Matched at the FUNCTION rather than at the
   // property, because the property is not the thing there is only one of: a drop
@@ -716,9 +717,22 @@ const SHADOW_CHANNELS = [
   // entries here that would then need a sixth. The argument list is taken by
   // balancing parentheses because a shadow colour is routinely a `color-mix(…)`
   // and a `[^)]*` would stop inside it.
+  //
+  // Covering five spellings at once is only sound while the match is somewhere
+  // CSS renders, and this channel used to ask nothing: `log('filter:
+  // drop-shadow(0 0 93px red)')` is a diagnostic string that no browser reads,
+  // and the gate failed the file for containing it. That is the same defect the
+  // declaration channel above carried, one language and one round apart -- but
+  // it does NOT take the same oracle, because the three places a drop shadow
+  // ships from are a rule, a utility class and a style value, and only the first
+  // is a stylesheet. `cssBearingRangesIn` is the wider question, and asking the
+  // narrower one here would have swapped a false positive for two misses.
   {
     pattern: /drop-shadow\(/gi,
-    valuesOf: (match) => [balancedArgument(match.input, match.index + match[0].length - 1)],
+    valuesOf: (match, tree, where) => (where.bears(match.index)
+      ? [balancedArgument(match.input, match.index + match[0].length - 1)]
+      : []),
+    provablyNotAShadow: (match, tree, where) => !where.bears(match.index),
   },
   // `style={{ boxShadow: … }}` and `el.style.boxShadow = …`. What follows is an
   // expression rather than a value, so read the string literals out of it: a
@@ -900,62 +914,111 @@ const SHADOW_MENTIONS = [
   new RegExp(SHADOW_KEY, 'g'),
 ];
 
-// Every custom property declared anywhere in the scanned stylesheets, name to
-// the set of values it is given. A name is collected once per distinct value
-// rather than last-write-wins, because a property is routinely declared several
-// times -- dark, `prefers-color-scheme: light`, `[data-theme="light"]` -- and a
-// glow smuggled into just one of those blocks is still a glow that ships.
-// What counts as a declaration of a name lives in `customProperties.mjs`, where
-// it can be called from a test; this is only the fold across stylesheets.
-function collectCustomProperties(root) {
-  const values = new Map();
-  for (const relative of intendedFiles(root, { extensions: ['.css'] })) {
-    customPropertiesIn(fs.readFileSync(path.join(root, relative), 'utf8'), values);
+// Every stretch of stylesheet text the project ships, parsed once each.
+//
+// `.css` was the wrong unit. It is a FILE EXTENSION, and the question this fold
+// asks is the same one the scan loop below asks about its call sites -- where in
+// this project is text CSS -- which `cssRangesIn` already answers and which no
+// extension can. A `<style>` body and a string handed to `insertRule` are
+// stylesheets that ship, so a token declared in one was invisible here while a
+// call site reading that token was scanned; the name resolved to nothing and the
+// gate reported correct CSS as unanchored. That is a false positive, which fails
+// somebody else's pull request over code that is right.
+//
+// One walk feeds all three folds below, where it used to be three reads and
+// three parses of every stylesheet for three different questions about the same
+// tree.
+function* eachStylesheet(root) {
+  for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
+    // A fixture stylesheet is not the token layer, by the same argument that
+    // keeps a test file out of the scan: it documents values rather than
+    // shipping them.
+    if (!rendersAtAll(relative)) continue;
+
+    const file = path.join(root, relative);
+    const source = fs.readFileSync(file, 'utf8');
+
+    // `origin` names the stretch, not just the file, because a `.tsx` file can
+    // hold several and a line number inside one of them counts from its own
+    // start. For the two `.css` files this project actually has, that is the
+    // path and nothing more.
+    const ranges = cssRangesIn(source, file);
+    for (const [start, end] of ranges) {
+      const text = source.slice(start, end);
+      const origin = ranges.length > 1 ? `${relative} (offset ${start})` : relative;
+
+      // A `.css` file is parsed unguarded on purpose, and `nonRenderingText.mjs`
+      // depends on that: text a stylesheet cannot parse is a broken stylesheet,
+      // and the gate should say so out loud. A stretch lifted out of TypeScript
+      // carries no such promise -- a template can interpolate a whole rule, and
+      // `` `${rules} .a {}` `` is CSS only after the substitution runs -- so one
+      // that will not parse is a stretch this fold cannot read, not a file that
+      // is wrong, and failing the build over it would be the same false positive
+      // one layer along. What it cannot read it also cannot scan, so the miss is
+      // symmetric; `src` has no such stretch today.
+      if (file.endsWith('.css')) {
+        yield [origin, postcss.parse(text)];
+        continue;
+      }
+      let sheet;
+      try {
+        sheet = postcss.parse(text);
+      } catch {
+        continue;
+      }
+      yield [origin, sheet];
+    }
   }
-  return values;
 }
 
-// The names a registration constrains to colours, which is the one thing that
-// can prove a `var()` in a shadow's third slot holds no radius. Folded across
-// stylesheets by the same shape as the values above, and answered in
-// `customProperties.mjs` for the same reason: what a registration promises is a
-// question about CSS grammar, and a question about grammar wants cases.
-function collectColourRegistrations(root) {
-  const names = new Set();
-  for (const relative of intendedFiles(root, { extensions: ['.css'] })) {
-    colourRegistrationsIn(fs.readFileSync(path.join(root, relative), 'utf8'), names);
-  }
-  return names;
-}
-
-// The VALUES declared inside an `@theme` block, per name -- the token layer
-// itself, as opposed to everything that merely looks like it. Collected
-// separately from `collectCustomProperties` because the two answer different
-// questions: that one asks what a name is worth anywhere, this one asks which
-// of those worths were sanctioned.
+// The token layer, in three answers that want one walk.
+//
+// `values`: every custom property declared anywhere, name to the set of values
+// it is given. A name is collected once per distinct value rather than
+// last-write-wins, because a property is routinely declared several times --
+// dark, `prefers-color-scheme: light`, `[data-theme="light"]` -- and a glow
+// smuggled into just one of those blocks is still a glow that ships. What counts
+// as a declaration of a name lives in `customProperties.mjs`, where it can be
+// called from a test; this is only the fold.
+//
+// `colours`: the names a registration constrains to colours, which is the one
+// thing that can prove a `var()` in a shadow's third slot holds no radius.
+// Answered in `customProperties.mjs` for the same reason -- what a registration
+// promises is a question about CSS grammar, and a question about grammar wants
+// cases.
+//
+// `managed`: the VALUES declared inside an `@theme` block -- the token layer
+// itself, as opposed to everything that merely looks like it. Separate from
+// `values` because the two ask different questions: that one asks what a name is
+// worth anywhere, this one asks which of those worths were sanctioned.
 //
 // Values rather than names, because a name is not a place either. Recording
 // membership as a name made the sanction transferable: `--shadow-glow-wire-cyan`
 // is declared in `@theme`, so the name is managed forever, and a component
 // stylesheet redeclaring it as `0 0 93px red` inherited that trust -- the
 // override was collected, marked managed and discarded unread, while the
-// cascade handed the call site the override at runtime. That is the same
-// name-for-place substitution the previous round made one level up, still
-// standing one level down; asking which declarations are sanctioned rather than
-// which names appear closes it, because an out-of-theme declaration is then a
-// value the set does not contain and falls through to ordinary classification.
-function collectThemeDeclarations(root) {
+// cascade handed the call site the override at runtime. Asking which
+// declarations are sanctioned rather than which names appear closes it, because
+// an out-of-theme declaration is then a value the set does not contain and falls
+// through to ordinary classification.
+function collectTokenLayer(root) {
   const values = new Map();
-  for (const relative of intendedFiles(root, { extensions: ['.css'] })) {
-    postcss.parse(fs.readFileSync(path.join(root, relative), 'utf8')).walkAtRules('theme', (rule) => {
+  const colours = new Set();
+  const managed = new Map();
+
+  for (const [, sheet] of eachStylesheet(root)) {
+    customPropertiesIn(sheet, values);
+    colourRegistrationsIn(sheet, colours);
+    sheet.walkAtRules('theme', (rule) => {
       rule.walkDecls((decl) => {
         if (!decl.prop.startsWith('--')) return;
-        if (!values.has(decl.prop)) values.set(decl.prop, new Set());
-        values.get(decl.prop).add(decl.value);
+        if (!managed.has(decl.prop)) managed.set(decl.prop, new Set());
+        managed.get(decl.prop).add(decl.value);
       });
     });
   }
-  return values;
+
+  return { values, managed, colours };
 }
 
 
@@ -969,11 +1032,7 @@ function assertGlowsReadThroughTokens(root) {
   const offenders = [];
   const unscanned = [];
   const unreadable = [];
-  const tokens = {
-    values: collectCustomProperties(root),
-    managed: collectThemeDeclarations(root),
-    colours: collectColourRegistrations(root),
-  };
+  const tokens = collectTokenLayer(root);
 
   for (const relative of intendedFiles(root, { extensions: ['.ts', '.tsx', '.css'] })) {
     // A test is not a page. Its strings document values rather than drawing
@@ -1004,11 +1063,23 @@ function assertGlowsReadThroughTokens(root) {
     // the whole file a declaration. Nothing is lost by asking the real text:
     // blanking has already been applied to the matches themselves, so a span that
     // does not render produces no match to ask about.
+    //
+    // Two questions, not one, because CSS reaches a browser two ways. `declares`
+    // asks whether an offset is a declaration in a stylesheet -- the question a
+    // property name followed by a colon poses. `bears` asks the weaker thing:
+    // whether the text there reaches a renderer as CSS at all, which is also
+    // true of a utility class and of a style value, neither of which any
+    // stylesheet contains. They are handed over as one `where` so the next
+    // question about position joins them instead of lengthening this call.
     const declarations = cssRangesIn(raw, file).reduce(
       (spans, [start, end]) => declarationSpansIn(raw.slice(start, end), start, spans),
       [],
     );
-    const declares = (index) => declaresAt(declarations, index);
+    const bearing = cssBearingRangesIn(raw, file);
+    const where = {
+      declares: (index) => declaresAt(declarations, index),
+      bears: (index) => declaresAt(bearing, index),
+    };
     const claimed = [];
 
     for (const { pattern, valuesOf, provablyNotAShadow } of SHADOW_CHANNELS) {
@@ -1021,9 +1092,9 @@ function assertGlowsReadThroughTokens(root) {
         // case: the expression holds no string literal, so there is no value to
         // test, and moving a literal into a constant would slip the gate. A
         // channel that claims a mention owes a value, and owing nothing fails.
-        const values = valuesOf(match, tree, declares).filter((value) => value && value.trim());
+        const values = valuesOf(match, tree, where).filter((value) => value && value.trim());
         if (values.length === 0) {
-          if (provablyNotAShadow?.(match, tree, declares)) continue;
+          if (provablyNotAShadow?.(match, tree, where)) continue;
           unreadable.push(`${file}:${source.slice(0, match.index).split('\n').length}: ${
             match[0].split('\n')[0].slice(0, 80)}`);
           continue;
@@ -1122,25 +1193,35 @@ function assertGlowsReadThroughTokens(root) {
 // light overrides sat directly above it looking correct. Theming therefore
 // happens in the variable an alias POINTS AT, never in the alias, and a dead
 // redeclaration now fails here instead of rendering.
-function assertInlineThemeTokensAreNotRedeclared(source) {
-  const root = postcss.parse(source);
+//
+// Across every stylesheet, not the entry one: substitution is a property of the
+// BUILD, so a component stylesheet redeclaring an inlined token is dead in
+// exactly the same way and was the only half this could not see. Reading one
+// file was the third spelling of this round's mistake -- a place assumed rather
+// than asked -- and it is the cheapest of the three to stop assuming.
+function assertInlineThemeTokensAreNotRedeclared(root) {
+  const sheets = [...eachStylesheet(root)];
   const inlined = new Set();
 
-  root.walkAtRules('theme', (atRule) => {
-    if (!atRule.params.split(/\s+/).includes('inline')) return;
-    atRule.walkDecls((decl) => {
-      if (decl.prop.startsWith('--')) inlined.add(decl.prop);
+  for (const [, sheet] of sheets) {
+    sheet.walkAtRules('theme', (atRule) => {
+      if (!atRule.params.split(/\s+/).includes('inline')) return;
+      atRule.walkDecls((decl) => {
+        if (decl.prop.startsWith('--')) inlined.add(decl.prop);
+      });
     });
-  });
+  }
 
   const dead = [];
-  root.walkDecls((decl) => {
-    if (!inlined.has(decl.prop)) return;
-    for (let node = decl.parent; node; node = node.parent) {
-      if (node.type === 'atrule' && node.name === 'theme') return;
-    }
-    dead.push(`line ${decl.source?.start?.line}: ${decl.prop}`);
-  });
+  for (const [origin, sheet] of sheets) {
+    sheet.walkDecls((decl) => {
+      if (!inlined.has(decl.prop)) return;
+      for (let node = decl.parent; node; node = node.parent) {
+        if (node.type === 'atrule' && node.name === 'theme') return;
+      }
+      dead.push(`${origin} line ${decl.source?.start?.line}: ${decl.prop}`);
+    });
+  }
 
   if (dead.length > 0) {
     throw new Error(
@@ -1154,7 +1235,7 @@ function assertInlineThemeTokensAreNotRedeclared(source) {
 }
 
 assertGlowsReadThroughTokens('src');
-assertInlineThemeTokensAreNotRedeclared(css);
+assertInlineThemeTokensAreNotRedeclared('src');
 assertEveryAcceptedRatioStillExists();
 
 const modelHub = (options) => resolveThemeTokens({ ...options, source: modelHubCss });

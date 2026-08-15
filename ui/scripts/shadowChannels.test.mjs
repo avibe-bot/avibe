@@ -201,16 +201,56 @@ describe('the shadow channels and the completeness matcher', () => {
     );
 
     expect(declaration, 'the CSS declaration channel is no longer spelled this way').toBeDefined();
-    expect(declaration).toContain('declares(match.index)');
+    expect(declaration).toContain('where.declares(match.index)');
     expect(declaration).toContain('provablyNotAShadow');
   });
 
-  // Both hooks, or the refusal above lands in the wrong branch: `valuesOf`
+  // The seventh quantity, and the reason the sixth could not just be reused:
+  // WHETHER TEXT REACHES A RENDERER AS CSS AT ALL, which is a weaker question
+  // than "is this a declaration in a stylesheet". `drop-shadow(` asked neither,
+  // so `log('filter: drop-shadow(0 0 93px red)')` -- a sentence in a diagnostic
+  // -- failed the gate; but answering it with `declares` would have swapped that
+  // false positive for two misses, because `[filter:drop-shadow(…)]` lives in a
+  // className and `{ filter: '…' }` lives in an object, and no stylesheet
+  // contains either.
+  it('asks the wider question where a shadow need not be a declaration', () => {
+    const dropShadow = eachChannel().find((channel) =>
+      channel.trimStart().startsWith('/drop-shadow\\(/gi')
+    );
+
+    expect(dropShadow, 'the drop-shadow channel is no longer spelled this way').toBeDefined();
+    expect(dropShadow).toContain('where.bears(match.index)');
+    expect(dropShadow).not.toContain('where.declares');
+  });
+
+  // And the two are answered by two different readers, which is the whole claim.
+  // Pointing `bears` at the declaration spans would satisfy every assertion above
+  // while reintroducing the misses -- so the sources are named here, once.
+  it('answers the two questions from two different readers', () => {
+    const dispatch = section('const declarations = cssRangesIn(raw, file)', '\n    const claimed');
+
+    expect(dispatch).toContain('declares: (index) => declaresAt(declarations, index)');
+    expect(dispatch).toContain('const bearing = cssBearingRangesIn(raw, file)');
+    expect(dispatch).toContain('bears: (index) => declaresAt(bearing, index)');
+  });
+
+  // Both hooks, or the refusals above land in the wrong branch: `valuesOf`
   // yielding nothing without a `provablyNotAShadow` that agrees is reported as
   // unreadable, which is the same false positive wearing a different message.
-  it('hands that answer to both of a channel\'s readers', () => {
-    expect(SCAN).toContain('valuesOf(match, tree, declares)');
-    expect(SCAN).toContain('provablyNotAShadow?.(match, tree, declares)');
+  it('hands those answers to both of a channel\'s readers', () => {
+    expect(SCAN).toContain('valuesOf(match, tree, where)');
+    expect(SCAN).toContain('provablyNotAShadow?.(match, tree, where)');
+  });
+
+  // Stated over every channel rather than over the two that ask today. Which
+  // channels consult a position is exactly the set that keeps growing -- it was
+  // one last round and is two now -- and each addition that forgot its proof
+  // bought a review round on its own.
+  it('pairs every positional refusal with a proof, not a silent empty read', () => {
+    const asking = eachChannel().filter((channel) => /\bwhere\.\w+\(/.test(channel));
+
+    expect(asking.length, 'no channel asks where its match is').toBeGreaterThanOrEqual(2);
+    for (const channel of asking) expect(channel).toContain('provablyNotAShadow');
   });
 
   it('measures a style write with the very key the channel reads it by', () => {
