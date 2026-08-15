@@ -52,6 +52,11 @@ from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.ui_server import app
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
+SOURCE_EDIT_VALIDATION_CASES = json.loads(
+    Path("tests/fixtures/model_hub_source_edit_validation.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 
 @pytest.fixture(autouse=True)
@@ -4517,6 +4522,47 @@ def test_source_patch_rejects_credential_bearing_base_url(tmp_path):
 
     assert exc_info.value.code == "discovery_failed"
     assert store.config.sources[0].base_url == "https://relay.example/v1?api-version=2026-07-23"
+
+
+@pytest.mark.parametrize(
+    ("field", "case"),
+    [
+        (field, case)
+        for field, cases in SOURCE_EDIT_VALIDATION_CASES.items()
+        for case in cases
+    ],
+    ids=lambda value: value.get("id", value) if isinstance(value, dict) else value,
+)
+def test_source_edit_validation_contract_fixture(tmp_path, field, case):
+    service, store, _ = _service(tmp_path)
+    source = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "display_name": "Original source",
+                "base_url": "https://relay.example/v1",
+                "key": "sk-test-transient-only",
+            },
+        )
+    )
+    payload_field = "display_name" if field == "display_names" else "base_url"
+
+    if not case["valid"]:
+        with pytest.raises(ModelHubError) as exc_info:
+            asyncio.run(
+                service.patch_source(source["id"], {payload_field: case["value"]})
+            )
+        assert exc_info.value.code == "discovery_failed"
+        return
+
+    updated = asyncio.run(
+        service.patch_source(source["id"], {payload_field: case["value"]})
+    )
+    expected = case.get("normalized", case["value"])
+    assert updated["source"][payload_field] == expected
+    assert getattr(store.config.sources[0], payload_field) == expected
 
 
 def test_source_display_names_reject_credential_material(tmp_path):

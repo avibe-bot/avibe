@@ -1,0 +1,83 @@
+{
+  "display_names": [
+    {
+      "id": "ordinary",
+      "value": "Relay key",
+      "valid": true
+    },
+    {
+      "id": "empty",
+      "value": "",
+      "valid": false,
+      "reason": "displayNameRequired"
+    },
+    {
+      "id": "too_long",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false,
+      "reason": "displayNameTooLong"
+    },
+    {
+      "id": "credential_material",
+      "value": "sk-test-never-persist-this",
+      "valid": false,
+      "reason": "displayNameCredential"
+    }
+  ],
+  "base_urls": [
+    {
+      "id": "https_trailing_slash",
+      "value": "https://relay.example/v2/",
+      "valid": true,
+      "normalized": "https://relay.example/v2"
+    },
+    {
+      "id": "uppercase_scheme",
+      "value": "HTTPS://relay.example/v2/",
+      "valid": true,
+      "normalized": "https://relay.example/v2"
+    },
+    {
+      "id": "safe_query",
+      "value": "https://relay.example/v2?api-version=2026-08-15",
+      "valid": true,
+      "normalized": "https://relay.example/v2?api-version=2026-08-15"
+    },
+    {
+      "id": "empty_explicit_endpoint",
+      "value": "",
+      "valid": false,
+      "reason": "baseUrlRequired"
+    },
+    {
+      "id": "bad_scheme",
+      "value": "ftp://relay.example/v2",
+      "valid": false,
+      "reason": "baseUrlInvalid"
+    },
+    {
+      "id": "userinfo",
+      "value": "https://user:password@relay.example/v2",
+      "valid": false,
+      "reason": "baseUrlInvalid"
+    },
+    {
+      "id": "fragment",
+      "value": "https://relay.example/v2#token",
+      "valid": false,
+      "reason": "baseUrlInvalid"
+    },
+    {
+      "id": "credential_query",
+      "value": "https://relay.example/v2?access_token=do-not-store",
+      "valid": false,
+      "reason": "baseUrlCredential"
+    },
+    {
+      "id": "credential_pattern",
+      "value": "https://relay.example/sk-test-never-persist-this",
+      "valid": false,
+      "reason": "baseUrlCredential"
+    }
+  ]
+}

@@ -1296,7 +1296,27 @@
           "cancel": "Cancel",
           "save": "Save",
           "saving": "Saving…",
-          "fail": "The source was not saved"
+          "fail": "The source was not saved",
+          "validation": {
+            "displayNameRequired": "Enter a display name",
+            "displayNameTooLong": "Use 64 characters or fewer",
+            "displayNameCredential": "A display name cannot contain a credential",
+            "baseUrlRequired": "This source requires a Base URL",
+            "baseUrlInvalid": "Enter a valid HTTP or HTTPS Base URL without user info or a fragment",
+            "baseUrlCredential": "Remove credentials and credential-shaped query parameters from the Base URL"
+          },
+          "impact": {
+            "title": "The source was updated, and some supply was affected",
+            "detail": "These routes or models were removed or interrupted.",
+            "done": "Done"
+          }
+        },
+        "remove": {
+          "impact": {
+            "title": "The source was removed, and some supply was affected",
+            "detail": "These are the routes and models actually affected by this removal.",
+            "done": "Done"
+          }
         },
         "refetch": {
           "added": "New",

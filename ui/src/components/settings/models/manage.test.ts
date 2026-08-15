@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
@@ -8,9 +10,26 @@ import {
   manageActions,
   MANAGE_DESTINATION,
   MANAGE_LABEL_KEY,
+  MANAGE_STAGE_CANCEL,
+  MANAGE_STAGE_FAILURE_SURFACE,
+  MANAGE_STAGE_KINDS,
+  MANAGE_STAGE_RETRY,
+  SOURCE_EDIT_REASON_KEY,
 } from './manage';
-import { SOURCE_STATUSES } from './types';
 import type { Source } from './types';
+
+type ValidationCase = {
+  id: string;
+  value: string;
+  valid: boolean;
+  normalized?: string;
+  reason?: string;
+};
+
+const validationFixture = JSON.parse(readFileSync(join(
+  process.cwd(),
+  '../tests/fixtures/model_hub_source_edit_validation.json',
+), 'utf8')) as { display_names: ValidationCase[]; base_urls: ValidationCase[] };
 
 const source = (over: Partial<Source> = {}): Source => ({
   id: 'src_manage',
@@ -36,10 +55,7 @@ const translated = (bundle: unknown, key: string): unknown =>
 
 describe('source management capabilities', () => {
   it('keeps management available independently of repair state', () => {
-    const capabilitySet = Object.keys(MANAGE_DESTINATION);
-    for (const status of SOURCE_STATUSES) {
-      expect(manageActions(source({ state: { status } }))).toEqual(capabilitySet);
-    }
+    expect(manageActions()).toEqual(Object.keys(MANAGE_DESTINATION));
   });
 
   it('limits endpoint ownership to Avibe-held API-key sources', () => {
@@ -49,21 +65,49 @@ describe('source management capabilities', () => {
     expect(canEditSourceEndpoint(source({ credential_ref: null }))).toBe(false);
   });
 
-  it('normalizes changed metadata and rejects credential-bearing drafts', () => {
+  it('defines every stage cancel, retry, and visible-failure destination', () => {
+    for (const record of [MANAGE_STAGE_CANCEL, MANAGE_STAGE_RETRY, MANAGE_STAGE_FAILURE_SURFACE]) {
+      expect(new Set(Object.keys(record))).toEqual(new Set(MANAGE_STAGE_KINDS));
+      for (const kind of MANAGE_STAGE_KINDS) expect(record[kind]).toEqual(expect.any(String));
+    }
+  });
+
+  it('normalizes changed metadata', () => {
     expect(assessSourceEdit(source(), {
       displayName: '  Relay key  ',
       baseUrl: 'HTTPS://relay.example/v2/',
     })).toEqual({
       valid: true,
       patch: { display_name: 'Relay key', base_url: 'https://relay.example/v2' },
+      reason: null,
     });
-    expect(assessSourceEdit(source(), {
-      displayName: 'Production key',
-      baseUrl: 'https://relay.example/v1?api_key=secret',
-    })).toEqual({ valid: false, patch: null });
+  });
+
+  it('holds the same display-name and Base-URL contract fixture as the server', () => {
+    for (const item of validationFixture.display_names) {
+      const assessment = assessSourceEdit(source(), {
+        displayName: item.value,
+        baseUrl: source().base_url ?? '',
+      });
+      expect(assessment.valid, item.id).toBe(item.valid);
+      expect(assessment.reason, item.id).toBe(item.reason ?? null);
+    }
+    for (const item of validationFixture.base_urls) {
+      const assessment = assessSourceEdit(source(), {
+        displayName: source().display_name,
+        baseUrl: item.value,
+      });
+      expect(assessment.valid, item.id).toBe(item.valid);
+      expect(assessment.reason, item.id).toBe(item.reason ?? null);
+      if (item.valid) expect(assessment.patch?.base_url, item.id).toBe(item.normalized);
+    }
   });
 
   it.each(Object.entries(MANAGE_LABEL_KEY))('translates the %s action in both locales', (_kind, key) => {
+    for (const bundle of [en, zh]) expect(typeof translated(bundle, key)).toBe('string');
+  });
+
+  it.each(Object.entries(SOURCE_EDIT_REASON_KEY))('translates the %s validation reason in both locales', (_reason, key) => {
     for (const bundle of [en, zh]) expect(typeof translated(bundle, key)).toBe('string');
   });
 });

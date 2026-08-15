@@ -193,6 +193,63 @@ describe('SourceDetailPanel', () => {
     expect(await screen.findByRole('heading', { name: 'Relay key' })).toBeTruthy();
   });
 
+  it('explains client validation instead of leaving a mute disabled save', async () => {
+    renderEchoPanel();
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+
+    const endpoint = screen.getByLabelText(/^Base URL$/i);
+    await userEvent.clear(endpoint);
+    expect(screen.getByText(/requires a Base URL|必须填写 Base URL/i)).toBeTruthy();
+    expect((screen.getByRole('button', { name: /^Save$|^保存$/i }) as HTMLButtonElement).disabled).toBe(true);
+
+    await userEvent.type(endpoint, 'https://relay.example/v2?access_token=do-not-store');
+    expect(screen.getByText(/Remove credentials|移除凭据/i)).toBeTruthy();
+  });
+
+  it('renders the proved protocol through its product-facing locale key', async () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceDetailPanel
+          source={{ ...source, vendor: 'custom', protocol: 'openai_chat' }}
+          trackMutation={immediateTrack}
+          onReauth={noReauth}
+        />
+      </I18nextProvider>,
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+
+    expect(screen.getByText(/OpenAI Chat Completions/i)).toBeTruthy();
+    expect(screen.queryByText('openai_chat')).toBeNull();
+  });
+
+  it('holds a committed edit impact envelope until the user completes the report', async () => {
+    const updated = { ...source, display_name: 'Impacted source' };
+    vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
+      source: updated,
+      removed_hops: [{ backend: 'claude', menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }],
+      interrupted: [{ backend: 'claude', model_id: 'claude-opus-4-6', agents: ['Release bot'] }],
+    });
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, updated.display_name);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    const impactDialog = await screen.findByRole('dialog', { name: /source was updated|来源已更新/i });
+    expect(screen.queryByRole('heading', { name: updated.display_name })).toBeNull();
+    const done = within(impactDialog)
+      .getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    expect(done).toBeTruthy();
+    await userEvent.click(done!);
+    expect(await screen.findByRole('heading', { name: updated.display_name })).toBeTruthy();
+  });
+
   it('echoes a non-empty server plan exactly when deleting a source', async () => {
     const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 2, source_id: source.id, model_id: 'model-a' }];
     const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
@@ -225,6 +282,13 @@ describe('SourceDetailPanel', () => {
       would_remove_hops: hops,
       would_interrupt: gaps,
     });
+    expect(screen.queryByTestId('source-gone')).toBeNull();
+    const impactDialog = await screen.findByRole('dialog', { name: /source was removed|来源已移除/i });
+    const done = within(impactDialog)
+      .getAllByRole('button', { name: /^Done$|^完成$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    expect(done).toBeTruthy();
+    await userEvent.click(done!);
     expect(await screen.findByTestId('source-gone')).toBeTruthy();
   });
 
@@ -252,10 +316,12 @@ describe('SourceDetailPanel', () => {
   });
 
   it('keeps a refused deletion visible and offers a retry', async () => {
+    let requests = 0;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
       if (url === `/api/models/sources/${source.id}`) {
+        requests += 1;
         return Response.json({ error: 'engine_down' }, { status: 503 });
       }
       throw new Error(`unexpected request: ${url}`);
@@ -269,7 +335,105 @@ describe('SourceDetailPanel', () => {
     expect(await screen.findByRole('heading', { name: source.display_name })).toBeTruthy();
     const retry = await screen.findByRole('button', { name: /^Try again$|^重试$/i });
     await userEvent.click(retry);
-    expect(await screen.findByRole('dialog', { name: /Remove Production key|移除 Production key/i })).toBeTruthy();
+    await waitFor(() => expect(requests).toBe(2));
+    expect(await screen.findByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
+  });
+
+  it('returns an edit guard cancellation to the held draft', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === `/api/models/sources/${source.id}`) {
+        return Response.json({
+          error: 'source_last_supplier',
+          would_remove_hops: [{ backend: 'claude', menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }],
+          would_interrupt: [],
+        }, { status: 409 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Held draft');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    const guardDialog = await screen.findByRole('dialog', { name: /save changes|保存.*更改/i });
+    const cancel = within(guardDialog)
+      .getAllByRole('button', { name: /^Cancel$|^取消$/i })
+      .find((button) => button.classList.contains('model-hub-guard-action'));
+    expect(cancel).toBeTruthy();
+    await userEvent.click(cancel!);
+
+    expect(await screen.findByDisplayValue('Held draft')).toBeTruthy();
+  });
+
+  it('returns a failed forced edit to its held draft and visible error', async () => {
+    let attempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url === `/api/models/sources/${source.id}`) {
+        attempts += 1;
+        if (attempts === 1) {
+          return Response.json({
+            error: 'source_last_supplier',
+            would_remove_hops: [{ backend: 'claude', menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }],
+            would_interrupt: [],
+          }, { status: 409 });
+        }
+        return Response.json({ error: 'engine_down' }, { status: 503 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑来源$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Held failure');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Save anyway$|^仍要保存$/i }));
+
+    expect(await screen.findByDisplayValue('Held failure')).toBeTruthy();
+    expect(screen.getByText(/source was not saved|来源没有保存上/i)).toBeTruthy();
+  });
+
+  it('retries a failed forced delete with the exact held server plan', async () => {
+    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
+    const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
+    const requests: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (url.startsWith(`/api/models/sources/${source.id}`)) {
+        requests.push({ url, init });
+        if (requests.length === 1) return Response.json({ error: 'source_last_supplier', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
+        if (requests.length === 2) return Response.json({ error: 'engine_down' }, { status: 503 });
+        return Response.json({ removed_hops: [], interrupted: [] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    renderEchoPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove source$|^移除来源$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Try again$|^重试$/i }));
+
+    await waitFor(() => expect(requests).toHaveLength(3));
+    for (const request of requests.slice(1)) {
+      expect(request.url).toContain('?force=true');
+      expect(JSON.parse(String(request.init?.body))).toEqual({
+        would_remove_hops: hops,
+        would_interrupt: gaps,
+      });
+    }
+    expect(await screen.findByTestId('source-gone')).toBeTruthy();
   });
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
@@ -379,8 +543,8 @@ describe('SourceDetailPanel', () => {
     expect(detail).toMatch(/const refetch = \(confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const addManualModel = \(\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const remove = \(model: SuppliedModel, confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
-    expect(detail).toMatch(/const saveSource = \(patch: SourcePatch, confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
-    expect(detail).toMatch(/const deleteSource = \(confirmation\?: GuardConfirmation\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
+    expect(detail).toMatch(/const submitEdit = \(draft: SourceEditDraft, patch: SourcePatch, plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
+    expect(detail).toMatch(/const submitDelete = \(plan: ManageGuardPlan \| null\)[\s\S]*?return trackMutation\(async \(latest, settlement\)/);
     expect(detail).toMatch(/const commit = async[\s\S]*?setSaving\(true\)[\s\S]*?trackMutation\(async \(latest, settlement\)[\s\S]*?tierMutationPayload\(latest/);
   });
 

@@ -1296,7 +1296,27 @@
           "cancel": "取消",
           "save": "保存",
           "saving": "保存中…",
-          "fail": "来源没有保存上"
+          "fail": "来源没有保存上",
+          "validation": {
+            "displayNameRequired": "请输入显示名称",
+            "displayNameTooLong": "最多输入 64 个字符",
+            "displayNameCredential": "显示名称不能包含凭据",
+            "baseUrlRequired": "这个来源必须填写 Base URL",
+            "baseUrlInvalid": "请输入不含用户信息和片段的有效 HTTP 或 HTTPS Base URL",
+            "baseUrlCredential": "请从 Base URL 中移除凭据和疑似凭据的查询参数"
+          },
+          "impact": {
+            "title": "来源已更新，部分供给受到影响",
+            "detail": "以下路由或型号已被移除或中断。",
+            "done": "完成"
+          }
+        },
+        "remove": {
+          "impact": {
+            "title": "来源已移除，部分供给受到影响",
+            "detail": "以下是这次移除实际影响的路由和型号。",
+            "done": "完成"
+          }
         },
         "refetch": {
           "added": "新增",
