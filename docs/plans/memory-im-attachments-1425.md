@@ -24,7 +24,9 @@ redaction, and capture behavior.
   toggle.
 - A mixed turn degrades per attachment. Eligible text and every valid attachment
   survive independently; one unsupported, oversized, or failed download never
-  rejects the turn.
+  rejects the turn. If a selected attachment later fails descriptor/hash
+  verification during durable pinning, the same capture is retried once as
+  text-only; an attachment-only turn retains the closed pin failure.
 - The first release keeps the existing Avibe allowlist in
   `core/memory/modality.py`: bitmap images, PDF, supported audio, direct text,
   CSV, VTT, HTML, and EML. Office/iWork/ODF/RTF, SVG, and video remain excluded

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from config import paths
-from core.memory.attachments import AttachmentPinStore, PinnedBundle
+from core.memory.attachments import AttachmentPinError, AttachmentPinStore, PinnedBundle
 from core.memory.everos import FakeMemoryProvider, MemoryProviderFailure
 from core.memory.module import (
     MAX_CAPTURE_ATTACHMENT_METADATA_BYTES,
@@ -397,6 +397,48 @@ async def test_capture_pins_a_real_attachment_and_forwards_the_private_copy(tmp_
     assert forwarded.name == attachment.name
     assert forwarded.uri != attachment.uri
     assert store.list_queue_rows()[0].payload_attachments is None
+
+
+async def test_capture_pin_failure_preserves_mixed_turn_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-004."""
+
+    attachment_store = _attachment_store()
+    module, store, _provider = _module(tmp_path, attachment_store=attachment_store)
+    attachment = _source_attachment("changed.png", b"original bytes")
+
+    def fail_pin(*_args, **_kwargs):
+        raise AttachmentPinError(
+            "memory_store_unavailable",
+            "leased source changed before pinning",
+        )
+
+    monkeypatch.setattr(attachment_store, "pin", fail_pin)
+
+    mixed = replace(
+        _request(source="mixed-pin-failure", attachments=(attachment,)),
+        text="keep this caption",
+        attachment_config_generation=7,
+    )
+    assert await module.capture(mixed) == CaptureAccepted()
+
+    rows = store.list_queue_rows()
+    assert len(rows) == 1
+    assert rows[0].payload_text == "keep this caption"
+    assert rows[0].payload_attachments is None
+    assert rows[0].attachment_bundle_id is None
+
+    attachment_only = replace(
+        mixed,
+        source_message_id="attachment-only-pin-failure",
+        text="",
+    )
+    assert await module.capture(attachment_only) == OperationFailed(
+        error="memory_store_unavailable"
+    )
+    assert len(store.list_queue_rows()) == 1
 
 
 async def test_boot_reconcile_waits_for_attachment_admission_and_preserves_accepted_bundle(

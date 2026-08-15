@@ -11,6 +11,7 @@ import unicodedata
 import weakref
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -791,6 +792,16 @@ class MemoryModule:
                 nonterminal_limit=MAX_NONTERMINAL_QUEUE_ROWS,
             )
         except AttachmentPinError as error:
+            if normalized_text.strip() and request.attachments:
+                return await self._capture_under_root(
+                    replace(
+                        request,
+                        attachments=(),
+                        attachment_config_generation=None,
+                    ),
+                    normalized_text,
+                    source_lease=None,
+                )
             return await self._capture_pin_failure(error.error)
         except UnicodeError:
             if pinned_bundle is not None:
