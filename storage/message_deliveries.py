@@ -333,8 +333,10 @@ def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     return [delivery_payload(dict(row)) for row in rows]
 
 
-def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
-    snapshot = _json_object(row.get("snapshot_json"))
+def _delivery_payload_from_snapshot(
+    row: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
     content = _json_object(snapshot.get("content_json"))
     metadata = _json_object(snapshot.get("metadata_json"))
     return {
@@ -366,6 +368,13 @@ def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
         "retired_at": row.get("retired_at"),
         "version": row.get("version"),
     }
+
+
+def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return _delivery_payload_from_snapshot(
+        row,
+        _json_object(row.get("snapshot_json")),
+    )
 
 
 def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
@@ -1215,6 +1224,31 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
     first["content_json"] = _canonical_json(merged_content)
     first["metadata_json"] = _canonical_json(metadata)
     return first
+
+
+def claimed_workbench_message_payload(
+    conn: Connection,
+    turn_id: str,
+) -> dict[str, Any] | None:
+    """Project one claimed Web batch exactly as native acceptance will merge it."""
+
+    deliveries = initial_deliveries_for_turn(conn, turn_id)
+    if not deliveries or any(delivery["state"] != "claimed" for delivery in deliveries):
+        return None
+    snapshot = _merged_initial_snapshot(deliveries)
+    if not (
+        snapshot.get("platform") == "avibe"
+        and snapshot.get("author") == "user"
+        and snapshot.get("type") == "user"
+        and snapshot.get("source") == "user"
+    ):
+        return None
+    payload = _delivery_payload_from_snapshot(deliveries[0], snapshot)
+    payload["metadata"] = {
+        **payload["metadata"],
+        "workbench_claimed_delivery": True,
+    }
+    return payload
 
 
 def materialize_start_acceptance(

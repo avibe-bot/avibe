@@ -504,6 +504,21 @@ class ConsolidatedMessageDispatcher:
     async def _clear_consolidated_state(self, context: MessageContext) -> None:
         await self._drop_status_keys(self._get_consolidated_message_key(context))
 
+    async def finish_prewrite_stop_surfaces(self, context: MessageContext) -> None:
+        """Retire IM-only progress surfaces without claiming Turn terminal ownership."""
+
+        try:
+            await self._collapse_status_bubble(
+                context,
+                self._get_im_client(context),
+                reason="stopped",
+            )
+        finally:
+            try:
+                await self._clear_consolidated_state(context)
+            finally:
+                await self._finish_processing_indicator_turn(context)
+
     # ------------------------------------------------------------------
     # Concise status bubble (Slack / Discord)
     # ------------------------------------------------------------------

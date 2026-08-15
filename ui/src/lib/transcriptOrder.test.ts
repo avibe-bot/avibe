@@ -7,6 +7,7 @@ import {
   mergeAnchorWindow,
   mergeById,
   insertMessageOrdered,
+  reconcileWorkbenchClaimedDeliveries,
   messageOrderTimeMs,
   transcriptWindowsOverlap,
   timestampOrderTimeMs,
@@ -21,6 +22,12 @@ const t = (s: number) => `2024-01-01T00:00:${String(s).padStart(2, '0')}Z`;
 const mk = (id: string, created_at: string, delivered_at: string | null = null): WorkbenchMessage =>
   ({ id, created_at, delivered_at }) as unknown as WorkbenchMessage;
 const ids = (list: WorkbenchMessage[]): string[] => list.map((m) => m.id);
+const claimed = (id: string, createdAt: string, text = 'pending'): WorkbenchMessage =>
+  ({
+    ...mk(id, createdAt),
+    text,
+    metadata: { workbench_claimed_delivery: true },
+  }) as WorkbenchMessage;
 
 describe('messageOrderTimeMs', () => {
   it('recovers subsecond positions from canonical message ids', () => {
@@ -248,6 +255,12 @@ describe('insertMessageOrdered', () => {
     expect(insertMessageOrdered(list, mk('c', t(3)))).toBe(list);
   });
 
+  it('replaces a claimed Delivery projection with its materialized live row', () => {
+    const materialized = { ...mk('c', t(3)), text: 'accepted', metadata: {} } as WorkbenchMessage;
+    const next = insertMessageOrdered([claimed('c', t(3))], materialized);
+    expect(next).toEqual([materialized]);
+  });
+
   it('binary-inserts an out-of-order arrival at the head', () => {
     expect(ids(insertMessageOrdered(base(), mk('0', t(0))))).toEqual(['0', 'a', 'c', 'e']);
   });
@@ -274,5 +287,17 @@ describe('insertMessageOrdered', () => {
     for (const probe of [mk('0', t(0)), mk('b', t(2)), mk('z', t(7)), mk('cc', t(3))]) {
       expect(ids(insertMessageOrdered(list, probe))).toEqual(ids(mergeById(list, [probe])));
     }
+  });
+});
+
+describe('reconcileWorkbenchClaimedDeliveries', () => {
+  it('replaces accepted projections and removes retired projections', () => {
+    const accepted = { ...mk('accepted', t(2)), text: 'materialized', metadata: {} } as WorkbenchMessage;
+    const existing = [claimed('retired', t(1)), claimed('accepted', t(2)), mk('stable', t(3))];
+
+    const reconciled = reconcileWorkbenchClaimedDeliveries(existing, [accepted]);
+
+    expect(ids(reconciled)).toEqual(['accepted', 'stable']);
+    expect(reconciled[0]).toEqual(accepted);
   });
 });

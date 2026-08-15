@@ -1399,7 +1399,9 @@ def test_agent_service_schedules_terminal_tidy_on_cancellation() -> None:
     asyncio.run(_run())
 
 
-def test_agent_service_prewrite_stop_releases_gate_without_terminal_tidy() -> None:
+def test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy() -> None:
+    """MESSAGE-DELIVERY-023: a prewrite Stop cannot retain runtime ownership."""
+
     async def _run() -> None:
         controller = _Controller()
         stalled_tidy = asyncio.Event()
@@ -1409,6 +1411,14 @@ def test_agent_service_prewrite_stop_releases_gate_without_terminal_tidy() -> No
 
         controller.emit_agent_message = AsyncMock(side_effect=_stall_terminal_tidy)
         controller.session_turns = Mock()
+        surface_cleanup_release = asyncio.Event()
+
+        async def _stall_surface_cleanup(*_args, **_kwargs) -> None:
+            await surface_cleanup_release.wait()
+
+        controller.message_dispatcher = SimpleNamespace(
+            finish_prewrite_stop_surfaces=AsyncMock(side_effect=_stall_surface_cleanup),
+        )
         service = AgentService(controller=controller)
         controller.agent_service = service
         entered = asyncio.Event()
@@ -1437,11 +1447,16 @@ def test_agent_service_prewrite_stop_releases_gate_without_terminal_tidy() -> No
         assert gate.token == ""
         controller.emit_agent_message.assert_not_awaited()
         controller.session_turns.on_native_terminal.assert_not_called()
+        controller.message_dispatcher.finish_prewrite_stop_surfaces.assert_awaited_once_with(
+            first.context
+        )
 
         second = _request("second")
         await asyncio.wait_for(service.handle_message("claude", second), timeout=0.5)
         assert agent.started == ["first", "second"]
         service.release_runtime_turn(second.context)
+        surface_cleanup_release.set()
+        await asyncio.sleep(0)
 
     asyncio.run(_run())
 

@@ -652,6 +652,19 @@ class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m, _, _ in controller.im_client.sent], ["msg-1"])  # still one send
         self.assertEqual(controller.im_client.edits, [("msg-1", "🔧 Bash {}", "⌛ 0s · 1 st")])
 
+    async def test_prewrite_stop_cleanup_retires_bubble_without_terminal_emit(self):
+        controller = _StubController(platform="slack")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        await d.begin_status_bubble(ctx)
+        key = d._get_consolidated_message_key(ctx)
+
+        await d.finish_prewrite_stop_surfaces(ctx)
+
+        self.assertIn(("msg-1", "", "⏹ stopped · 0s"), controller.im_client.edits)
+        self.assertNotIn(key, d._consolidated_message_ids)
+        self.assertNotIn(key, d._concise_bubble_keys)
+
     async def test_begin_is_idempotent(self):
         controller = _StubController(platform="slack")
         d = _dispatcher(controller)

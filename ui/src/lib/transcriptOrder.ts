@@ -95,6 +95,9 @@ function mergeReconcileMetadata(
   return changed ? { ...existing, metadata } : existing;
 }
 
+export const isWorkbenchClaimedDelivery = (message: WorkbenchMessage): boolean =>
+  message.metadata?.workbench_claimed_delivery === true;
+
 /** Merge a fetched anchor window without trimming away the row it is meant to reveal. */
 export const mergeAnchorWindow = (
   existing: WorkbenchMessage[],
@@ -139,6 +142,7 @@ export const mergeById = (
   // untouched, and unseen incoming ids are appended as before.
   const patched = existing.map((m) => {
     const inc = incomingById.get(m.id);
+    if (inc && isWorkbenchClaimedDelivery(m)) return inc;
     if (
       inc &&
       ((m.source_session_id == null && inc.source_session_id != null) ||
@@ -182,7 +186,14 @@ export const insertMessageOrdered = (
   existing: WorkbenchMessage[],
   msg: WorkbenchMessage,
 ): WorkbenchMessage[] => {
-  if (existing.some((m) => m.id === msg.id)) return existing;
+  const existingIndex = existing.findIndex((m) => m.id === msg.id);
+  if (existingIndex >= 0) {
+    if (!isWorkbenchClaimedDelivery(existing[existingIndex])) return existing;
+    const next = existing.slice();
+    next[existingIndex] = msg;
+    next.sort(byCreatedThenId);
+    return next;
+  }
   const n = existing.length;
   if (n === 0 || byCreatedThenId(msg, existing[n - 1]) > 0) return [...existing, msg];
   let lo = 0;
@@ -195,4 +206,19 @@ export const insertMessageOrdered = (
   const next = existing.slice();
   next.splice(lo, 0, msg);
   return next;
+};
+
+/** Replace or remove only claimed Delivery projections from an authoritative tail read. */
+export const reconcileWorkbenchClaimedDeliveries = (
+  existing: WorkbenchMessage[],
+  incoming: WorkbenchMessage[],
+): WorkbenchMessage[] => {
+  const incomingById = new Map(incoming.map((message) => [message.id, message]));
+  const reconciled = existing.flatMap((message) => {
+    if (!isWorkbenchClaimedDelivery(message)) return [message];
+    const replacement = incomingById.get(message.id);
+    return replacement ? [replacement] : [];
+  });
+  reconciled.sort(byCreatedThenId);
+  return reconciled;
 };

@@ -16,6 +16,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -175,49 +176,46 @@ def _settle_reserved_delivery(payload: dict, *, state: str) -> dict:
         return settled
 
 
-def _seed_claimed_delivery(
+def _seed_claimed_batch(
     *,
     scope_id: str,
     session_id: str,
-    text: str,
-) -> dict:
+    texts: list[str],
+    platform: str = "avibe",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Create the pre-native-write state that must remain visible in Chat."""
 
     with create_sqlite_engine().begin() as conn:
-        delivery = message_deliveries.insert_delivery(
-            conn,
-            delivery_id="msg_claimed_active",
-            session_id=session_id,
-            priority="p1",
-            state="reserved",
-            snapshot=message_deliveries.message_snapshot(
-                scope_id=scope_id,
+        deliveries = [
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=f"msg_claimed_{session_id}_{index}",
                 session_id=session_id,
-                platform="avibe",
-                author="user",
-                source="user",
-                text=text,
-            ),
-            dispatch_text=text,
-        )
+                priority="p1",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    platform=platform,
+                    author="user",
+                    source="user",
+                    text=text,
+                    metadata=metadata,
+                ),
+                dispatch_text=text,
+            )
+            for index, text in enumerate(texts)
+        ]
         turn_id = message_deliveries.new_turn_id()
-        message_deliveries.insert_turn(
+        return message_deliveries.claim_start_batch(
             conn,
             turn_id=turn_id,
             session_id=session_id,
-            initial_delivery_id=delivery["id"],
-            state="starting",
             backend="opencode",
+            deliveries=deliveries,
+            dispatch_text="\n".join(texts),
         )
-        claimed = message_deliveries.open_start_attempt(
-            conn,
-            delivery["id"],
-            expected_version=int(delivery["version"]),
-            turn_id=turn_id,
-            attempt_id=message_deliveries.new_attempt_id(),
-        )
-        assert claimed is not None
-        return claimed
 
 
 def _accepted_dispatch(session_id: str) -> AsyncMock:
@@ -1230,7 +1228,12 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert body["turn_state"]["connection"] == "connected"
 
 
-def test_claimed_active_input_survives_transcript_reload(isolated_state, tmp_path):
+def test_message_delivery_024_claimed_active_input_survives_transcript_reload(
+    isolated_state,
+    tmp_path,
+):
+    """MESSAGE-DELIVERY-024: claimed Web input survives and then reconciles."""
+
     from vibe.ui_server import app
 
     scope_id, session_id = _make_session(
@@ -1238,11 +1241,13 @@ def test_claimed_active_input_survives_transcript_reload(isolated_state, tmp_pat
         agent_name="opencode-worker",
         agent_backend="opencode",
     )
-    claimed = _seed_claimed_delivery(
+    claimed = _seed_claimed_batch(
         scope_id=scope_id,
         session_id=session_id,
-        text="message waiting for native start",
+        texts=["first input", "second input"],
+        metadata={"resource_user_context": {"sub": "must-not-leak"}},
     )
+    first_delivery = claimed["deliveries"][0]
 
     turn_state = AsyncMock(
         return_value={
@@ -1267,14 +1272,63 @@ def test_claimed_active_input_survives_transcript_reload(isolated_state, tmp_pat
         messages_response.get_json()["messages"],
         bootstrap_response.get_json()["messages"],
     ):
-        assert [row["id"] for row in rows] == [claimed["id"]]
-        assert rows[0]["text"] == "message waiting for native start"
+        assert [row["id"] for row in rows] == [first_delivery["id"]]
+        assert rows[0]["text"] == "first input\nsecond input"
         assert rows[0]["type"] == "user"
+        assert rows[0]["metadata"]["merged_delivery_ids"] == [
+            delivery["id"] for delivery in claimed["deliveries"]
+        ]
+        assert rows[0]["metadata"]["workbench_claimed_delivery"] is True
+        assert "resource_user_context" not in rows[0]["metadata"]
 
     with create_sqlite_engine().connect() as conn:
         assert conn.execute(
             select(messages.c.id).where(messages.c.session_id == session_id)
         ).scalar_one_or_none() is None
+
+    with create_sqlite_engine().begin() as conn:
+        turn = message_deliveries.get_turn(conn, claimed["turn"]["id"])
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn["id"],
+            expected_version=int(turn["version"]),
+            runtime_key="runtime:accepted",
+            runtime_turn_id="runtime-turn:accepted",
+            native_turn_id="native:accepted",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn["id"],
+            evidence={"kind": "test_native_acceptance"},
+        )
+
+    accepted_response = client.get(f"/api/sessions/{session_id}/messages?tail=1")
+    accepted_rows = accepted_response.get_json()["messages"]
+    assert accepted_rows[0]["id"] == first_delivery["id"]
+    assert accepted_rows[0]["text"] == "first input\nsecond input"
+    assert "workbench_claimed_delivery" not in accepted_rows[0]["metadata"]
+
+    from core.services import sessions as sessions_service
+
+    im_agent = _ensure_vibe_agent("im-opencode-worker", "opencode")
+    with create_sqlite_engine().begin() as conn:
+        im_session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend=im_agent.backend,
+            agent_id=im_agent.id,
+            agent_name=im_agent.name,
+        )
+    im_session_id = im_session["id"]
+    _seed_claimed_batch(
+        scope_id=scope_id,
+        session_id=im_session_id,
+        texts=["unaccepted IM input"],
+        platform="slack",
+    )
+    im_response = client.get(f"/api/sessions/{im_session_id}/messages?tail=1")
+    assert im_response.get_json()["messages"] == []
 
 
 def test_chat_bootstrap_filters_harness_activities_for_viewer(isolated_state, tmp_path):

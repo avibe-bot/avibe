@@ -151,13 +151,13 @@ scenarios:
     status: covered
     kind: concurrency
     layer: contract
-    test: tests/test_agent_service.py::test_agent_service_prewrite_stop_releases_gate_without_terminal_tidy
+    test: tests/test_agent_service.py::test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy
   - id: MESSAGE-DELIVERY-024
     name: Workbench reload keeps an active claimed input visible before native acceptance
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_ui_session_stream.py::test_claimed_active_input_survives_transcript_reload
+    test: tests/test_ui_session_stream.py::test_message_delivery_024_claimed_active_input_survives_transcript_reload
   - id: MESSAGE-DELIVERY-025
     name: The send gesture cannot activate the newly rendered Stop control
     status: covered

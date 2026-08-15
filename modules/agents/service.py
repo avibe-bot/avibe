@@ -388,6 +388,30 @@ class AgentService:
             # leave the next turn waiting forever if that best-effort emit stalls.
             if prewrite_user_stop_requested(request.context):
                 self.release_runtime_turn_key(runtime_key, gate.token)
+                cleanup = getattr(
+                    getattr(self.controller, "message_dispatcher", None),
+                    "finish_prewrite_stop_surfaces",
+                    None,
+                )
+                if callable(cleanup):
+                    try:
+                        async def _cleanup_prewrite_stop_surfaces() -> None:
+                            try:
+                                await cleanup(request.context)
+                            except Exception:
+                                logger.debug(
+                                    "Failed to clean prewrite Stop surfaces",
+                                    exc_info=True,
+                                )
+
+                        cleanup_task = asyncio.create_task(_cleanup_prewrite_stop_surfaces())
+                        self._background_tasks.add(cleanup_task)
+                        cleanup_task.add_done_callback(self._background_tasks.discard)
+                    except Exception:
+                        logger.debug(
+                            "Failed to schedule prewrite Stop surface cleanup",
+                            exc_info=True,
+                        )
                 raise
 
             emit = getattr(self.controller, "emit_agent_message", None)

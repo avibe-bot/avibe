@@ -161,7 +161,7 @@ describe('Composer draft retry', () => {
 });
 
 describe('Composer Stop activation', () => {
-  it('does not let the send click burst hit the newly-rendered Stop control', async () => {
+  it('MESSAGE-DELIVERY-025 blocks a send click burst from the new Stop control', async () => {
     vi.useFakeTimers();
     const onStop = vi.fn();
 

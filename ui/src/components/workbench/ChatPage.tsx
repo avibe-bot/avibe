@@ -65,6 +65,7 @@ import {
   isTranscriptWindowDisjoint,
   mergeById,
   insertMessageOrdered,
+  reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import {
@@ -926,15 +927,19 @@ export const ChatPage: React.FC = () => {
   // Does NOT touch ``working``: ``turn.end`` is the authoritative end signal, and
   // clearing on a fetched (possibly older) result could hide Stop on a newer
   // queued turn that is still in flight (Codex P2). Cheap + idempotent.
-  const reconcile = useCallback(async () => {
+  const reconcile = useCallback(async (settleClaimedDeliveries = false) => {
     if (!sessionId) return;
-    if (historicalWindowRef.current) return;
+    if (historicalWindowRef.current && !settleClaimedDeliveries) return;
     // Reader scrolled up in an already-capped window: don't recover tail rows they
     // aren't looking at into the DOM — detach the live tail so jump-to-latest
     // reloads it. Synchronous flip (not via the [messages] effect) so the same
     // commit gates mark-read. Bounds repeated-gap growth: once historical, this
     // early-returns above. Mirrors the onMessageNew ingest policy.
-    if (!followingTailRef.current && messagesRef.current.length >= MAX_RETAINED_MESSAGES) {
+    if (
+      !settleClaimedDeliveries &&
+      !followingTailRef.current &&
+      messagesRef.current.length >= MAX_RETAINED_MESSAGES
+    ) {
       setHistoricalWindow(true);
       return;
     }
@@ -944,23 +949,26 @@ export const ChatPage: React.FC = () => {
       const res = await api.listSessionMessages(sessionId, { limit: 50, tail: true, cache: false });
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
       const fresh = res.messages.filter(isTranscriptMessage);
+      setMessages((prev) => {
+        const reconciled = settleClaimedDeliveries
+          ? reconcileWorkbenchClaimedDeliveries(prev, fresh)
+          : prev;
+        if (historicalWindowRef.current) return reconciled;
+        const merged = mergeById(reconciled, fresh);
+        // Following the tail: keep the window capped. A gap larger than the tail
+        // fetch, recovered here, would otherwise blow past the cap until the next
+        // live append. Drop the oldest and re-point the cursor below.
+        if (followingTailRef.current && merged.length > MAX_RETAINED_MESSAGES) {
+          trimmedOldestRef.current = true;
+          return merged.slice(merged.length - MAX_RETAINED_MESSAGES);
+        }
+        return merged;
+      });
+      if (historicalWindowRef.current) return;
       if (fresh.length) {
         const tailOldest = fresh[0];
         const previousOldestId = oldestLoadedIdRef.current;
         const previousNewest = messagesRef.current[messagesRef.current.length - 1];
-        setMessages((prev) => {
-          const merged = mergeById(prev, fresh);
-          // Following the tail: keep the window capped. A gap larger than the tail
-          // fetch, recovered here, would otherwise blow past the cap until the next
-          // live append (Codex). Drop the oldest; the [messages] effect re-points
-          // the older cursor (it overrides the cursor set below, which stays for
-          // the no-trim case).
-          if (followingTailRef.current && merged.length > MAX_RETAINED_MESSAGES) {
-            trimmedOldestRef.current = true;
-            return merged.slice(merged.length - MAX_RETAINED_MESSAGES);
-          }
-          return merged;
-        });
         if (
           !previousOldestId ||
           !previousNewest ||
@@ -1202,7 +1210,7 @@ export const ChatPage: React.FC = () => {
       // visibility decision too — unfiltered, a queued annotation opened the chat
       // as a delivered bubble *and* sat in the queue strip, the exact double
       // render the live path already rejects.
-      setMessages((prev) => mergeById(bootstrap.messages.filter(isTranscriptMessage), prev));
+      setMessages((prev) => mergeById(prev, bootstrap.messages.filter(isTranscriptMessage)));
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
       setOlderCursor(bootstrap.next_before_id ?? null);
@@ -1392,6 +1400,7 @@ export const ChatPage: React.FC = () => {
           // so the header picks up both that route and a first native bind.
           void refreshSessionRow();
           void syncTurnState();
+          void reconcile(true);
         }
       },
       onQueueUpdated: (data) => {

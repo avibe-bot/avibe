@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   events: null as null | {
     onConnected: () => void;
     onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
+    onTurnEnd: (data: { session_id: string }) => void;
   },
 }));
 
@@ -143,6 +144,14 @@ describe('ChatPage transcript hydration', () => {
   let bootstrap: Deferred<never>;
 
   beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
     sessionRow = deferred();
     bootstrap = deferred();
     mocks.events = null;
@@ -162,7 +171,10 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.onSessionArchived.mockReturnValue(() => {});
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   it('keeps the loading view when SSE Session-row recovery beats transcript bootstrap', async () => {
     render(
@@ -235,5 +247,51 @@ describe('ChatPage transcript hydration', () => {
 
     expect(screen.getByText('common.loading')).toBeTruthy();
     expect(screen.queryByText('chat.transcriptEmpty')).toBeNull();
+  });
+
+  it('removes a retired claimed Delivery projection when the turn settles', async () => {
+    const projected = {
+      id: 'delivery-claimed',
+      scope_id: 'scope-1',
+      session_id: 'session-new',
+      platform: 'avibe',
+      author: 'user',
+      type: 'user',
+      source: 'user',
+      author_id: null,
+      author_name: null,
+      native_message_id: null,
+      parent_native_message_id: null,
+      text: 'claimed input still visible',
+      content: {},
+      metadata: { workbench_claimed_delivery: true },
+      created_at: '2026-08-15T00:00:00Z',
+      updated_at: '2026-08-15T00:00:00Z',
+      delivered_at: null,
+      read_at: null,
+    };
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      messages: [projected],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText(projected.text)).toBeTruthy());
+    act(() => mocks.events?.onTurnEnd({ session_id: 'session-new' }));
+
+    await waitFor(() => expect(screen.queryByText(projected.text)).toBeNull());
+    expect(mocks.api.listSessionMessages).toHaveBeenCalledWith('session-new', {
+      limit: 50,
+      tail: true,
+      cache: false,
+    });
   });
 });

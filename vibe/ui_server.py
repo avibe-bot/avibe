@@ -8971,14 +8971,13 @@ def _active_unmaterialized_input(conn, session_id: str) -> dict[str, Any] | None
     turn = message_deliveries.active_turn(conn, session_id)
     if turn is None:
         return None
-    delivery = message_deliveries.delivery_for_turn(conn, str(turn["id"]))
-    if (
-        delivery is None
-        or delivery.get("state") != "claimed"
-        or delivery.get("message_id")
-    ):
+    payload = message_deliveries.claimed_workbench_message_payload(
+        conn,
+        str(turn["id"]),
+    )
+    if payload is None:
         return None
-    payload = message_deliveries.public_delivery_payload(delivery)
+    payload = message_deliveries.public_delivery_payload(payload)
     payload.update(delivered_at=None, read_at=None)
     return payload
 
