@@ -783,3 +783,76 @@ def test_official_key_oauth_save_prepersists_marker_clear(
     assert result.get("ok") is True
     # The clear was durably recorded even though the owning save failed.
     assert persisted == [None]
+
+
+def test_save_codex_auth_reports_v2_mirror_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A failed V2Config mirror write surfaces a partial-failure notice
+    instead of a silent success while runtime reconciliation would see
+    the stale config."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"id_token": "x"}, "auth_mode": "chatgpt"}),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\nmodel = "gpt-5.4"\n', encoding="utf-8"
+    )
+
+    def failing_save():
+        raise OSError("config.json unwritable")
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="oauth", api_key=None, base_url=None, oauth_relay_marker=None
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=failing_save
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    result = api.save_codex_auth({"auth_mode": "api_key", "api_key": "sk-new"})
+    assert result.get("ok") is True
+    codes = [n["code"] for n in (result.get("notices") or [])]
+    assert "v2_mirror_save_failed" in codes
+
+
+def test_remove_backend_api_key_appends_v2_clear_failure_notice(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An earlier ``cleared_custom_relay_pointer`` notice survives a
+    later V2Config clear failure — both facts are true and both must
+    reach the client."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-relay"}),
+        encoding="utf-8",
+    )
+    # User-owned relay pointer: remove-key clears it (notice) first.
+    (codex_home / "config.toml").write_text(
+        'model_provider = "OpenAI"\n\n[model_providers.OpenAI]\nbase_url = "https://relay.example/v1"\n',
+        encoding="utf-8",
+    )
+
+    def failing_save():
+        raise OSError("disk full")
+
+    fake_codex = types.SimpleNamespace(
+        auth_mode="api_key", api_key="sk-relay", base_url=None, oauth_relay_marker=None
+    )
+    fake_config = types.SimpleNamespace(
+        agents=types.SimpleNamespace(codex=fake_codex), save=failing_save
+    )
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+
+    result = api.remove_backend_api_key("codex")
+    assert result.get("ok") is True
+    codes = [n["code"] for n in (result.get("notices") or [])]
+    assert "cleared_custom_relay_pointer" in codes
+    assert "v2_clear_failed" in codes

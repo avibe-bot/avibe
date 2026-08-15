@@ -9760,7 +9760,9 @@ def remove_backend_api_key(backend: str) -> dict:
         # relay marker) may still hold stale auth state (#1451). Surface
         # it as a notice so the UI can say "removed, but saved settings
         # may be stale" instead of silently claiming a clean wipe.
-        notices = [
+        # Append: an earlier ``cleared_custom_relay_pointer`` notice from
+        # ``apply_codex_auth`` is still true and must survive.
+        notices = notices + [
             {
                 "code": "v2_clear_failed",
                 "backend": backend,
@@ -10195,7 +10197,16 @@ def save_codex_auth(payload: dict) -> dict:
         try:
             config.save()
         except Exception:
+            # The on-disk codex files are authoritative and the durable
+            # marker state was pre-persisted, but the V2Config mirror
+            # (auth_mode / base_url intent the controller reloads via
+            # ``_load_backend_runtime_config``) did NOT land — surface a
+            # partial-failure notice instead of silently reporting
+            # success while runtime reconciliation sees stale config.
             logger.warning("V2Config mirror write failed during codex auth save", exc_info=True)
+            notices = notices + [
+                {"code": "v2_mirror_save_failed", "detail": "saved to codex files but not to Avibe config"}
+            ]
 
     restart_result = restart_backend(
         "codex",
