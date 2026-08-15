@@ -280,6 +280,7 @@ export class MockStore {
   private readonly transitions: Map<string, RecordedTransition>;
   private readonly registrations: Map<ModelHubOperation, OperationRegistration>;
   private readonly volatileAliases = new VolatileAliases();
+  private transitionQueue: Promise<void> = Promise.resolve();
   private readonly events = buildMockEvents();
   private readonly runtime = buildMockRuntime();
 
@@ -339,56 +340,65 @@ export class MockStore {
   }
 
   private replay<T>(request: RecordedRequest, signal?: AbortSignal): Promise<T> {
-    let transition: RecordedTransition | undefined;
-    return modelHubOperationRegistry[request.operation].execute(
-      async () => {
-        const key = await this.transitionKey(request);
-        transition = this.transitions.get(key.id);
-        if (!transition) {
-          const proof = key.registration.recording.proven_transitions.find(
-            (candidate) => candidate.id === key.id,
-          );
-          const generatorCommand = key.registration.recording.command && proof
-            ? `${key.registration.recording.command} --record-miss ${key.id} --request-token ${proof.request_token}`
-            : null;
-          throw new UncontractedMockTransitionError(
-            key.id,
-            request.operation,
-            generatorCommand,
-            key.request,
-            proof
-              ? null
-              : key.registration.recording.unproven_reason,
-          );
-        }
+    const recordedRequest = clone(request);
+    const replaySerial = (): Promise<T> => {
+      let transition: RecordedTransition | undefined;
+      return modelHubOperationRegistry[recordedRequest.operation].execute(
+        async () => {
+          const key = await this.transitionKey(recordedRequest);
+          transition = this.transitions.get(key.id);
+          if (!transition) {
+            const proof = key.registration.recording.proven_transitions.find(
+              (candidate) => candidate.id === key.id,
+            );
+            const generatorCommand = key.registration.recording.command && proof
+              ? `${key.registration.recording.command} --record-miss ${key.id} --request-token ${proof.request_token}`
+              : null;
+            throw new UncontractedMockTransitionError(
+              key.id,
+              recordedRequest.operation,
+              generatorCommand,
+              key.request,
+              proof
+                ? null
+                : key.registration.recording.unproven_reason,
+            );
+          }
 
-        if (transition.outcome.kind === 'error') {
-          const data = transition.outcome.data;
-          throw new ApiCallError(
-            transition.outcome.error,
-            transition.outcome.detail,
-            true,
-            supplyGaps(data.would_interrupt),
-            supplyGaps(data.interrupted_pairs),
-            routeHopRefs(data.would_remove_hops),
-            transition.outcome.status,
-            typeof data.observation === 'object' && data.observation !== null
-              ? data.observation as SourceObservation
-              : undefined,
-          );
-        }
-        return clone(transition.outcome.value);
-      },
-      {
-        signal,
-        commit: () => {
-          if (!transition) return;
-          this.reads = clone(transition.post.reads);
-          this.configHash = transition.post.model_hub_config_sha256;
-          this.fixtureWorldHash = transition.post.fixture_world_sha256;
+          if (transition.outcome.kind === 'error') {
+            const data = transition.outcome.data;
+            throw new ApiCallError(
+              transition.outcome.error,
+              transition.outcome.detail,
+              true,
+              supplyGaps(data.would_interrupt),
+              supplyGaps(data.interrupted_pairs),
+              routeHopRefs(data.would_remove_hops),
+              transition.outcome.status,
+              typeof data.observation === 'object' && data.observation !== null
+                ? data.observation as SourceObservation
+                : undefined,
+            );
+          }
+          return clone(transition.outcome.value);
         },
-      },
-    ) as Promise<T>;
+        {
+          signal,
+          commit: () => {
+            if (!transition) return;
+            this.reads = clone(transition.post.reads);
+            this.configHash = transition.post.model_hub_config_sha256;
+            this.fixtureWorldHash = transition.post.fixture_world_sha256;
+          },
+        },
+      ) as Promise<T>;
+    };
+    const queued = this.transitionQueue.then(replaySerial, replaySerial);
+    this.transitionQueue = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
   }
 
   listSources(): Promise<Source[]> {

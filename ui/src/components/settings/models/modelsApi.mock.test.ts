@@ -173,6 +173,66 @@ describe('Model Hub mock replay boundary', () => {
       .toEqual(['src_anthkey01', 'src_relay9c1x']);
   });
 
+  it('serializes every state-changing transition from the same pre-state', async () => {
+    const corpus = mockCorpusJson as unknown as MockCorpus;
+    type Request = MockCorpus['transitions'][number]['key']['request'];
+    type InternalState = {
+      configHash: string;
+      fixtureWorldHash: string;
+    };
+    const replay = async (store: MockStore, request: Request) => {
+      try {
+        const value = await (
+          store as unknown as { replay<T>(candidate: Request): Promise<T> }
+        ).replay<unknown>(request);
+        return { kind: 'success' as const, value };
+      } catch (error) {
+        if (error instanceof UncontractedMockTransitionError) {
+          return {
+            kind: 'uncontracted' as const,
+            operation: error.operation,
+            missingKey: error.missingKey,
+          };
+        }
+        if (error instanceof ApiCallError) {
+          return { kind: 'api_error' as const, code: error.code };
+        }
+        throw error;
+      }
+    };
+    const state = (store: MockStore) => {
+      const internal = store as unknown as InternalState;
+      return {
+        configHash: internal.configHash,
+        fixtureWorldHash: internal.fixtureWorldHash,
+        sources: store.sources,
+        agents: store.agents,
+      };
+    };
+    const seed = corpus.seed;
+    const requests = corpus.transitions
+      .filter((transition) =>
+        transition.outcome.kind === 'success'
+        && transition.key.pre.model_hub_config_sha256 === seed.model_hub_config_sha256
+        && transition.key.pre.fixture_world_sha256 === seed.fixture_world_sha256
+        && (
+          transition.post.model_hub_config_sha256 !== transition.key.pre.model_hub_config_sha256
+          || transition.post.fixture_world_sha256 !== transition.key.pre.fixture_world_sha256
+        ))
+      .map((transition) => transition.key.request);
+    expect(requests.length).toBeGreaterThan(1);
+
+    const sequential = new MockStore(corpus);
+    const expected = [];
+    for (const request of requests) expected.push(await replay(sequential, request));
+
+    const concurrent = new MockStore(corpus);
+    const actual = await Promise.all(requests.map((request) => replay(concurrent, request)));
+
+    expect(actual).toEqual(expected);
+    expect(state(concurrent)).toEqual(state(sequential));
+  });
+
   it('runs every registered recovery path and applies the shared response transform', async () => {
     const corpus = mockCorpusJson as unknown as MockCorpus;
     const nonMutationMembers = new Set([

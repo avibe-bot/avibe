@@ -83,7 +83,8 @@ const ShowPageRoute = lazy(() =>
 // stay out of the main entry. The backend capability gate below must accept the
 // route before React renders this lazy component and requests its chunk.
 const SettingsModelsPage = lazy(() =>
-  import('./components/settings/models/SettingsModelsPage').then((m) => ({ default: m.SettingsModelsPage })),
+  import('./components/settings/models/modelsApiMode')
+    .then(({ loadSettingsModelsPage }) => loadSettingsModelsPage()),
 );
 import {
   LegacyModelHubRoute,

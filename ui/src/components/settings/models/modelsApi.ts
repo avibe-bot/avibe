@@ -1,7 +1,7 @@
-// Model Hub API client. Presents one typed live surface over the frozen
-// `/api/models/*` REST endpoints. Hermetic tests load the recorded replay client
-// through `mock-only/modelsApi.mockEntry.ts`; the build validates that this
-// directory is unreachable from the live module graph.
+// Model Hub API client. Presents one stable typed surface over the frozen
+// `/api/models/*` REST endpoints. The route loader may install the recorded
+// replay client before the product surface renders; this module never imports the
+// mock, so the build can keep corpus bytes outside the live graph.
 //
 // Methods unwrap the frozen envelope ({ok:true, …} | {ok:false, error}) and
 // throw an Error carrying the machine code on failure, so callers work with
@@ -739,5 +739,32 @@ const liveApi: ModelsApi = {
   ),
 };
 
-/** The single client instance. Stable across renders (safe in effect deps). */
-export const modelsApi: ModelsApi = liveApi;
+export const MODEL_HUB_CLIENT_OPERATIONS = Object.freeze(
+  Object.keys(liveApi) as ModelHubOperation[],
+);
+
+let activeModelsApi: ModelsApi = liveApi;
+
+/** Install a complete client before the Model Hub product surface renders. */
+export const installModelsApi = (client: ModelsApi): void => {
+  activeModelsApi = client;
+};
+
+export const installLiveModelsApi = (): ModelsApi => {
+  activeModelsApi = liveApi;
+  return liveApi;
+};
+
+/**
+ * The single client instance. Its methods stay stable across renders while the
+ * route loader selects the implementation once, before importing consumers.
+ */
+export const modelsApi = Object.fromEntries(
+  MODEL_HUB_CLIENT_OPERATIONS.map((operation) => [
+    operation,
+    (...args: unknown[]) => {
+      const method = activeModelsApi[operation] as (...params: unknown[]) => unknown;
+      return method.apply(activeModelsApi, args);
+    },
+  ]),
+) as ModelsApi;
