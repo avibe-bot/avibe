@@ -897,8 +897,7 @@ def test_runtime_start_sync_failure_is_reported_as_down(
     assert runtime["status"]["health"] == "down"
 
     adapter.fail_sync = False
-    config = store.load()
-    asyncio.run(service._commit_synced(config, service._clone_config(config)))
+    asyncio.run(service._ensure_engine_synced())
 
     recovered = asyncio.run(service.runtime_status())
     assert recovered["status"]["health"] == recovered_health

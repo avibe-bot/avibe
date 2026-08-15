@@ -823,7 +823,13 @@ class ModelHubService:
         await self._engine_call(self.adapter.sync_sources(bindings))
         self._engine_preparation_failed = False
 
-    async def _commit_synced(self, previous: ModelHubConfig, updated: ModelHubConfig) -> None:
+    async def _commit_synced(
+        self,
+        previous: ModelHubConfig,
+        updated: ModelHubConfig,
+        *,
+        rollback_on_sync_failure: bool = True,
+    ) -> None:
         """Persist the authoritative config before updating its engine projection."""
 
         updated = ModelHubConfig.from_payload(updated.to_payload())
@@ -845,6 +851,8 @@ class ModelHubService:
             self._engine_synced = False
             raise
         except Exception:
+            if not rollback_on_sync_failure:
+                raise
             self._save_config(previous)
             try:
                 await self._sync_sources(previous, force_empty=bool(updated_bindings))
@@ -1355,7 +1363,11 @@ class ModelHubService:
             status="needs_action",
             detail_key="models.source.needs_action.oauth_expired",
         )
-        await self._commit_synced(previous, config)
+        await self._commit_synced(
+            previous,
+            config,
+            rollback_on_sync_failure=False,
+        )
 
     async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
         if flow.credential_ref:
@@ -2134,7 +2146,11 @@ class ModelHubService:
             status="needs_action",
             detail_key="models.source.needs_action.oauth_expired",
         )
-        await self._commit_synced(previous, config)
+        await self._commit_synced(
+            previous,
+            config,
+            rollback_on_sync_failure=False,
+        )
         return config
 
     async def _materialize_failed_hub_reauth(

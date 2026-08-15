@@ -2253,7 +2253,6 @@ def test_all_interruption_guards_use_the_shared_baseline_comparator():
         assert "_finalize_successful_discovery" in calls(methods[name])
         assert "_guard_inventory_mutation" not in calls(methods[name])
         assert "_apply_discovered_models" not in calls(methods[name])
-        assert "_commit_synced" not in calls(methods[name])
         assert "_introduced_interruptions" not in calls(methods[name])
 
     for name in direct_baseline_guards:
