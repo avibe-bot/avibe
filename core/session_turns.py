@@ -719,8 +719,9 @@ class SessionTurnManager:
             ) from exc
         try:
             pre_epoch = self.session_lifecycle_epoch(raw_session_id)
+            result = await operation()
             self._session_lifecycle_epochs[raw_session_id] = pre_epoch + 1
-            return await operation()
+            return result
         finally:
             admission.release()
 

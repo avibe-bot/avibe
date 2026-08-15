@@ -240,9 +240,10 @@ gaps in the probe model rather than independent endpoint bugs.
 
 ### Slack activation contract
 
-Delivery slice 4 makes Slack the reference platform and flips
-`IM_ATTACHMENT_CAPTURE_AVAILABLE`. The platform allowlist remains closed to Slack
-until slice 5 adds contract evidence for the other four adapters.
+Delivery slice 4 makes Slack the reference platform. The settings availability
+projection is derived from the intersection of the installation's enabled IM
+platforms and `IM_ATTACHMENT_CAPTURE_PLATFORMS`; that allowlist remains closed to
+Slack until slice 5 adds contract evidence for the other four adapters.
 
 - Slack `message` and `app_mention` events publish a separate literal-true
   `is_ordinary_attachment` fact only for a native, human `file_share` shape with
@@ -290,10 +291,11 @@ all capture work to one late stage.
   that consumes it; a mismatch fails closed, and no bounded waiter waits for the
   indeterminate span. Attachment turns snapshot the canonical session lifecycle
   epoch before materialization, then revalidate it while holding `SessionTurn`
-  immediately before reservation. `/new` advances that local epoch after acquiring
-  `SessionTurn`; therefore a reset never waits for a download, while an attachment
-  that finishes after the reset is dropped as `stale_session` and eligible caption
-  text is still captured independently.
+  immediately before reservation. `/new` advances that local epoch only after its
+  destructive operation succeeds and before releasing `SessionTurn`; a failed
+  operation leaves the epoch unchanged. Therefore a reset never waits for a
+  download, while an attachment that finishes after a successful reset is dropped
+  as `stale_session` and eligible caption text is still captured independently.
 - **Bounded-wait invariant.** No deadline-bound provider or subprocess read may
   occur in a span that blocks any bounded waiter. The bounded waiters here include
   both the user-visible Agent dispatch path and `/new`'s five-second lifecycle
@@ -391,15 +393,15 @@ running Avibe services, real user paths, or production state.
 1. Contract and scenario catalog, including the stale Workbench-copy and IM
    non-goal corrections in `memory-plugin-system.md`.
 2. Optional multimodal config, child environment, preflight/redaction, UI, and
-   status. IM capture stays gated: `IM_ATTACHMENT_CAPTURE_AVAILABLE` remains false,
-   the settings response hides the card, and configured capture cannot report
-   `ready`; absent configuration retains the locked `not_configured` projection.
+   status. IM capture stays gated: the platform allowlist remains empty, the
+   settings response hides the card, and configured capture cannot report `ready`;
+   absent configuration retains the locked `not_configured` projection.
 3. Shared leased materializer, bounded Telegram/WeChat acquisition, and pin-source
    generalization. IM capture stays gated.
 4. Attachment classification/admission and the Slack closed loop with call-log
-   proof. This slice flips `IM_ATTACHMENT_CAPTURE_AVAILABLE` only after the capture
-   path and its closed-loop evidence land, revealing the endpoint card and enabling
-   health-derived readiness without adding a user-facing toggle.
+   proof. This slice adds Slack to the platform allowlist only after the capture path
+   and its closed-loop evidence land, revealing the endpoint card when Slack is
+   enabled and enabling health-derived readiness without a user-facing toggle.
 5. Discord, Telegram, Feishu/Lark, and WeChat enablement and contract tests, plus
    final user documentation and manual verification matrix.
 

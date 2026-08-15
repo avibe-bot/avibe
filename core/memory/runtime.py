@@ -36,7 +36,7 @@ from core.memory.artifact import (
     MemoryRuntimeActivationError,
     get_memory_artifact_manager,
 )
-from core.memory.attachments import IM_ATTACHMENT_CAPTURE_AVAILABLE
+from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.blocking import run_blocking
 from core.memory.clear_intent import ClearSurface
 from core.memory.confined_filesystem import required_no_follow_flag
@@ -3716,7 +3716,7 @@ def _attachment_capture_status(
 
     if config.processing.multimodal is None:
         return "not_configured"
-    if not IM_ATTACHMENT_CAPTURE_AVAILABLE:
+    if not IM_ATTACHMENT_CAPTURE_PLATFORMS:
         return "unavailable"
     if not config.enabled:
         return "unavailable"

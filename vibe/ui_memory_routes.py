@@ -115,10 +115,12 @@ def _memory_settings_projection(memory: object) -> dict:
     return payload
 
 
-def _memory_im_attachment_capture_available() -> bool:
-    from core.memory.attachments import IM_ATTACHMENT_CAPTURE_AVAILABLE
+def _memory_im_attachment_capture_available(config: V2Config) -> bool:
+    from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 
-    return IM_ATTACHMENT_CAPTURE_AVAILABLE
+    return bool(
+        IM_ATTACHMENT_CAPTURE_PLATFORMS.intersection(config.enabled_platforms())
+    )
 
 
 def _memory_repair_available() -> bool:
@@ -133,11 +135,12 @@ def _memory_repair_available() -> bool:
 def _memory_settings_payload() -> dict:
     # Tag the response, not `memory_config_to_payload` itself: the same helper
     # feeds the persisted config, which must stay free of result envelopes.
-    memory = V2Config.load().memory
+    config = V2Config.load()
+    memory = config.memory
     payload = _memory_settings_projection(memory)
     payload["status"] = "ok"
     payload["im_attachment_capture_available"] = (
-        _memory_im_attachment_capture_available()
+        _memory_im_attachment_capture_available(config)
     )
     # Read-only projection while a durable rebuild marker is pending.
     payload["rebuild_required"] = memory.recovery_intent == "rebuild"
@@ -714,13 +717,14 @@ def _memory_repair_request_task(*, user_key: str) -> asyncio.Task[tuple[dict, in
     )
 
 
-async def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> dict:
+async def _settings_ok_payload(config: V2Config, runtime_payload: dict | None = None) -> dict:
     from core.memory.blocking import run_blocking
 
+    memory = config.memory
     payload = _memory_settings_projection(memory)
     payload["status"] = "ok"
     payload["im_attachment_capture_available"] = (
-        _memory_im_attachment_capture_available()
+        _memory_im_attachment_capture_available(config)
     )
     payload["rebuild_required"] = getattr(memory, "recovery_intent", None) == "rebuild"
     payload["factory_reset_required"] = getattr(memory, "recovery_intent", None) == "factory_reset"
@@ -828,7 +832,7 @@ async def _apply_memory_settings_patch(
                 )
             # Do not reconcile here: the durable reset marker remains the
             # authority and Retry must perform the fenced deletion/activation.
-            return _memory_response(await _settings_ok_payload(saved.memory))
+            return _memory_response(await _settings_ok_payload(saved))
 
         # An exact credential-only update under an existing marker updates the
         # candidate without touching the fenced runtime. Every broader patch
@@ -850,7 +854,7 @@ async def _apply_memory_settings_patch(
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
             except Exception:
                 return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
-            return _memory_response(await _settings_ok_payload(saved.memory))
+            return _memory_response(await _settings_ok_payload(saved))
 
         recovery_intent = "rebuild" if pending_marker or identity_changed else None
 
@@ -912,7 +916,7 @@ async def _apply_memory_settings_patch(
             )
             runtime_payload = body if isinstance(body, dict) else {}
             latest = await asyncio.to_thread(V2Config.load)
-            payload = await _settings_ok_payload(latest.memory, runtime_payload)
+            payload = await _settings_ok_payload(latest, runtime_payload)
             if status_code != 200 or runtime_payload.get("ok") is not True:
                 error = _memory_closed_error(
                     runtime_payload,
@@ -937,7 +941,7 @@ async def _apply_memory_settings_patch(
             )
             # Pending-marker reconcile that only needs rebuild is not a rollback.
             if closed_error == "memory_embedding_rebuild_required":
-                payload = await _settings_ok_payload(saved.memory, runtime_payload)
+                payload = await _settings_ok_payload(saved, runtime_payload)
                 payload["rebuild_required"] = True
                 return _memory_response(payload)
             # Ordinary non-identity saves must not outrun the controller's closed
@@ -973,7 +977,7 @@ async def _apply_memory_settings_patch(
         if response.status_code >= 500:
             return response
         latest = await asyncio.to_thread(V2Config.load)
-        return _memory_response(await _settings_ok_payload(latest.memory, runtime_payload))
+        return _memory_response(await _settings_ok_payload(latest, runtime_payload))
 
 
 def register_memory_routes(app) -> None:

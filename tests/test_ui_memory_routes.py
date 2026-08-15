@@ -63,6 +63,33 @@ def test_memory_rebuild_result_preserves_closed_preflight_diagnostic() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("enabled_platforms", "expected"),
+    [
+        (["slack"], True),
+        (["discord"], False),
+        (["discord", "slack"], True),
+        ([], False),
+    ],
+)
+def test_attachment_capture_availability_follows_enabled_platform_allowlist(
+    enabled_platforms: list[str],
+    expected: bool,
+) -> None:
+    """MEMORY-IM-ATTACH-003: UI availability follows enabled capture platforms."""
+
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.platforms.enabled = enabled_platforms
+
+    assert ui_memory_routes._memory_im_attachment_capture_available(config) is expected
+
+
 def test_memory_settings_patch_accepts_optional_complete_rerank_endpoint() -> None:
     current = V2Config(
         mode="self_host",

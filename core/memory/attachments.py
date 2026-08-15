@@ -39,9 +39,7 @@ if TYPE_CHECKING:
 MAX_PINNED_ATTACHMENTS = 8
 MAX_PINNED_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_PINNED_BUNDLE_BYTES = 100 * 1024 * 1024
-# Delivery gate: Slack is the reference platform in PR4. Remaining adapters
-# acquire their native classification in PR5 before admission expands to them.
-IM_ATTACHMENT_CAPTURE_AVAILABLE = True
+IM_ATTACHMENT_CAPTURE_PLATFORMS = frozenset({"slack"})
 
 _COPY_CHUNK_BYTES = 1024 * 1024
 _MAX_ATTACHMENT_NAME_BYTES = 512

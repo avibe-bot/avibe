@@ -12,6 +12,7 @@ from core.handlers.inbound_attachments import (
     open_leased_attachment_record,
 )
 from core.memory.attachments import (
+    IM_ATTACHMENT_CAPTURE_PLATFORMS,
     MAX_PINNED_ATTACHMENTS,
     MAX_PINNED_ATTACHMENT_BYTES,
     MAX_PINNED_BUNDLE_BYTES,
@@ -27,9 +28,6 @@ AttachmentSkipReason = Literal[
     "bundle_too_large",
     "unsupported_type",
 ]
-
-IM_ATTACHMENT_CAPTURE_PLATFORMS = frozenset({"slack"})
-
 
 @dataclass(frozen=True, slots=True)
 class MemoryAttachmentSelection:

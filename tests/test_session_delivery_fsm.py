@@ -248,12 +248,12 @@ async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> No
 
 
 @pytest.mark.anyio
-async def test_session_lifecycle_advances_local_epoch_before_operation(managers) -> None:
+async def test_session_lifecycle_advances_local_epoch_after_operation(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
     pre_epoch = manager.session_lifecycle_epoch("ses_fsm")
 
     async def lifecycle_operation() -> str:
-        assert manager.session_lifecycle_epoch("ses_fsm") == pre_epoch + 1
+        assert manager.session_lifecycle_epoch("ses_fsm") == pre_epoch
         return "reset"
 
     assert await manager.run_session_lifecycle(
@@ -261,6 +261,26 @@ async def test_session_lifecycle_advances_local_epoch_before_operation(managers)
         lifecycle_operation,
     ) == "reset"
     assert manager.session_lifecycle_epoch_matches("ses_fsm", pre_epoch + 1)
+
+
+@pytest.mark.anyio
+async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> None:
+    """MEMORY-IM-ATTACH-001: failed reset preserves an in-flight turn epoch."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    sampled_epoch = manager.session_lifecycle_epoch("ses_fsm")
+
+    async def lifecycle_operation() -> str:
+        raise RuntimeError("reset failed")
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await manager.run_session_lifecycle("ses_fsm", lifecycle_operation)
+
+    admission = await manager.acquire_lifecycle_admission("ses_fsm")
+    try:
+        assert manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
+    finally:
+        admission.release()
 
 
 async def _activate(
