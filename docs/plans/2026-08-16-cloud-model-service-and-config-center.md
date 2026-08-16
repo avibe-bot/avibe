@@ -149,23 +149,28 @@ scope per instance behind them.
   and enforcement), timestamps, `updated_by_user_id`. Exactly one platform row (unique partial index).
 - `model_service_slots`: PK (`config_id`, `capability`); `provider_label`, `base_url`, `model`,
   `realtime_model` (nullable), `api_key_ciphertext`, `enabled`, timestamps, `updated_by_user_id`.
-- `model_usage_events`: `id`, `occurred_at`, `instance_id`, `organization_id` (nullable),
+- `model_usage_events`: `id`, `call_id` (unique index — shared with the reservation's call
+  identity; a retried insert after an ambiguous database result is idempotent), `occurred_at`,
+  `instance_id`, `organization_id` (nullable),
   `scope_kind`, `capability`, `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`,
   `status` (`ok` | `error`). Indexes: (`organization_id`, `occurred_at`), (`instance_id`,
   `occurred_at`), (`scope_kind`, `occurred_at`). v1 dashboards aggregate on read; add rollups only
   if measurably slow.
 - `model_quota_reservations`: `id` (caller-supplied call identity — the idempotency key),
   `instance_id`, `capability`, `window_bucket` (`YYYY-MM`, UTC), `reserved_tokens`, `state`
-  (`reserved` | `settled` | `released`), `created_at`, `expires_at`. Settlement is idempotent on
-  the call identity; a crashed worker's expired, unsettled reservation is reaped as a retained
-  conservative charge (possibly-accepted semantics, §6.4). Reservations exist only on
+  (`reserved` | `settled` | `released`), `created_at`, `expires_at`, `dispatched_at` (stamped
+  just before the upstream call). Settlement is idempotent on the call identity; the reaper
+  **releases** expired reservations that were never dispatched (certainly-not-sent) and **retains**
+  dispatched ones as conservative charges (possibly-accepted semantics, §6.4). Reservations exist only on
   enforcement-on paths.
 - `model_access_keys`: `instance_id` (PK), `key_hash`, `created_at`, `rotated_at`, plus
   `previous_key_hash` + `previous_valid_until`. Opaque key (`mak_` prefix), shown once at mint,
   SHA-256 stored — same custody discipline as device secrets. **Rotation is dual-validity**: on
   rotate, the prior key stays accepted for a 24 h grace window, because the still-running sidecar
   and the probe-then-restart settings flow must never race the swap. Rotation retains as
-  `previous` the most-recently-**authenticated** key rather than the last-minted one: a
+  `previous` the most-recently-**authenticated** key rather than the last-minted one (each key
+  hash carries `last_seen_at`, stamped on successful authentication, making that distinction
+  durable): a
   minted-but-never-used key (e.g. a lost rotation response) is discarded by the next rotation
   without consuming the grace slot, so retrying after a lost response can never orphan the key the
   sidecar is still using. There is no scheduled rotation; rotation is an on-demand operation
@@ -188,8 +193,9 @@ scope per instance behind them.
   slot (1-token chat, `"OK"` embedding, minimal ASR) through the shared egress client, allowed
   regardless of plan (the org admin exercising the org's own keys); probe calls are metered as
   organization-scope usage with `probe: true` and `instance_id: null` (the caller is an admin
-  session, not an instance) — totals include them, per-instance tables exclude them. Ships with M1
-  so stage → verify → flip needs no plan flip to test.
+  session, not an instance) — totals include them, per-instance tables exclude them. Probes cover
+  HTTP wire shapes only; the realtime WS protocol is not probed in v1 (recorded follow-up, §12).
+  Ships with M1 so stage → verify → flip needs no plan flip to test.
 - **Platform admin (user session; email ∈ `PLATFORM_ADMIN_EMAILS`, new env following the
   `ORGANIZATION_CREATION_ALLOWED_EMAILS` pattern)**:
   `GET/PUT /api/admin/model-service` (platform slots + limits), `GET /api/admin/model-service/usage`
@@ -215,6 +221,11 @@ scope per instance behind them.
   path has **no verified in-session retry**, so that route alone accepts claimless tokens for a
   12 h transition window after deploy (attributed to platform scope as unattributed-legacy), then
   enforces; every other rewired route enforces immediately.
+  **Error mapping on legacy voice routes** (invariant 6): `model_service_not_configured` surfaces
+  through the existing voice error vocabulary (`asr_not_configured` 503 family; a missing chat
+  slot degrades cleanup per §6.5-5); `model_quota_exhausted` (429) and `model_service_unavailable`
+  (503) pass through as new additive codes — released clients already treat unknown codes as
+  generic errors of their status class.
 
 ### 6.4 Quota (platform scope only, v1)
 
@@ -288,6 +299,9 @@ shape is not extended for this.
 - **Memory**: in `organization`/`platform` modes, the runtime feeds the sidecar cloud endpoints +
   `mak_` key via the existing `EVEROS_*` env plumbing (`core/memory/process.py`); `custom` mode is
   the unchanged current path. Mode changes route through the existing settings-change ladder.
+  Cloud mode injects **fixed model aliases** into `EVEROS_*__MODEL` (the proxy selects the real
+  upstream model and ignores client-sent names); the embedding alias embeds `embedding_identity`
+  so provider-call diagnostics stay distinguishable across identity changes.
 - **Embedding identity**: the cloud config's `embedding_identity` participates in the sidecar's
   vector-space identity exactly like a local embedding config change — an org admin changing the
   embedding slot triggers the existing rebuild flow on every member instance, with the admin UI
@@ -302,6 +316,9 @@ shape is not extended for this.
   the existing managed settings ladder: preflight probe child with candidate env → quiesce (30 s;
   in-flight flushes awaited via `asyncio.shield`, durable outbox, no double-write) → graceful
   sidecar restart. A failed probe leaves the old sidecar running and rolls the config back.
+  These managed-restart semantics apply only to keys the sidecar itself holds (custom-mode slot
+  keys, the mak). **Org/platform slot keys live server-side only**: rotating them requires no
+  client action, restarts nothing, and changes nothing in the status payload.
 - **Mode-switch semantics**: switching `custom ↔ cloud` changes the base_url the sidecar sees and
   is an identity change by definition unless the upstream is identical — the existing
   rebuild-confirmation flow governs it. In cloud modes the client's identity input is the status
@@ -311,7 +328,11 @@ shape is not extended for this.
   enterprise-managed, the client pauses memory processing (capture keeps queuing in the durable
   outbox; nothing is lost), surfaces a one-time transition notice, and performs the identity change
   through the same rebuild-confirmation flow on the user's acknowledgment — forced management
-  changes the model source, but the rebuild is never silent.
+  changes the model source, but the rebuild is never silent. If the org provides no memory
+  capability (`embedding_identity: null`), no transition fires: an existing working `custom`
+  configuration keeps running unchanged (the org has not provided a replacement model source), and
+  the manual editor stays hidden only for *new* configuration; the transition applies when the org
+  later enables memory slots.
 - **Settings UI (Memory)**: three states per §5.3. Copy through `ui/src/i18n/{en,zh}.json`; show
   state, not mechanism; the enterprise state is one sentence, not a tour.
 - **Voice**: no changes.
@@ -392,7 +413,9 @@ in a controlled way. Fail-closed metering is deliberately deferred to M3, when e
 ## 9. Invariants (acceptance is verified against these, not case lists)
 
 1. Every cloud-served model call resolves to exactly one scope and writes **at most one** usage
-   event carrying that scope and the calling instance id — exactly one, except when the metering
+   event carrying that scope and the calling instance id (verification probes and transition-window
+   legacy calls carry their documented alternative attribution instead: `probe: true` /
+   unattributed-legacy) — exactly one, except when the metering
    write itself fails, which is loudly surfaced and never breaks the served call (accepted,
    monitored v1 gap while enforcement is off; enforcement-on paths are governed by fail-closed
    reservations per §6.4). Failure responses bearing upstream usage are metered with that usage.
@@ -404,7 +427,8 @@ in a controlled way. Fail-closed metering is deliberately deferred to M3, when e
    key appears exactly once — in the body of its own mint/rotate response (shown once by design) —
    and nowhere else; config reads expose only `has_api_key`.
 4. The upstream model invoked is always the configured slot's model, regardless of any
-   client-supplied model string.
+   client-supplied model string (documented exception: the legacy env cleanup chain, until a
+   platform config is saved — each attempt's actual model is metered per §6.6).
 5. A fresh personal instance **paired with Avibe Cloud** gets working voice and (post-M2) memory
    with zero model configuration; unpaired installations keep today's behavior (cloud voice
    unavailable, memory manual-only); an enterprise member instance renders no manual
@@ -464,4 +488,6 @@ design-fidelity supervision runs as a separate codex thread against design.pen f
 ## 12. Follow-ups (explicitly v2+)
 
 Cost/currency conversion and per-provider pricing tables; billing/settlement; plan purchase flows;
-rerank in cloud mode; non-OpenAI-compatible providers; per-user attribution; usage rollup tables.
+rerank in cloud mode; non-OpenAI-compatible providers; per-user attribution; usage rollup tables;
+cursor pagination on usage reports; realtime-WS verification probe in the org verify endpoint;
+cloud-token revocation-on-use.
