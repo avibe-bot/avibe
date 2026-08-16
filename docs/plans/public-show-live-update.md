@@ -129,28 +129,50 @@ Only the page owner or existing sharing-control authority may change
 cannot read these settings APIs, mutate the audience, load the Workbench, or
 promote itself through a broader Instance endpoint.
 
-Audience changes use one Apply action and a fail-closed coordinator rather than
-three independent writes:
+Audience changes use one Apply action and one durable fail-closed coordinator
+rather than three independent writes. Every Apply allocates a client mutation ID
+and first commits a local transition record containing the source revision, target
+mode/set, and phase. Any transition that can add, remove, or replace page-email
+authority also sets `page_email_gate=closed_pending` in that same transaction.
+While that durable barrier exists, neither `/p/` nor the page-email branch of the
+canonical `/show/` ACL accepts a page-email claim, including a claim minted before
+the transition. Owner and organization resource ACLs remain independent.
+
+The backend atomically replaces the exact-email set with the mutation ID and
+expected authorization revision. It retains an idempotent mutation result that the
+device can query after a lost response or process restart. The device reopens the
+page-email gate only after a read-after-write reconciliation proves that the
+backend's committed mutation ID, exact set, and returned authorization revision all
+match the local target and the revision has been persisted locally. An unavailable,
+ambiguous, conflicting, or unpersisted result leaves the durable gate closed; a
+periodic revision poll is recovery evidence, never the security boundary.
+
+The coordinator applies that invariant to every transition:
 
 1. Entering `limited` from `public` first closes the local share gate to
-   `private`, then atomically replaces the cloud email set, then commits
-   `limited` with the existing or newly allocated slug. Failure leaves the page
-   private, never anonymously readable.
-2. Entering `limited` from `private` writes the email set before opening the
-   route. At least one address is required.
-3. Editing a live limited list uses the backend's atomic replace and authorization
-   revision. Removed viewers fail subsequent requests immediately and their
-   existing session is rejected when its revision is revalidated.
-4. Leaving `limited` commits `private` or `public` locally first, which makes all
-   page-email claims inapplicable. The backend list is then cleared. Failed
-   cleanup is retried and surfaced as pending but cannot reopen the route.
+   `private`, then replaces and reconciles the cloud email set, then commits
+   `limited` with the existing or newly allocated slug and opens the page-email
+   gate. Failure leaves the page private, never anonymously readable.
+2. Entering `limited` from `private` follows the same closed-barrier protocol.
+   At least one address is required.
+3. Editing a live limited list closes the page-email gate before sending the
+   replacement. Removed and retained viewers are both denied during ambiguity;
+   the reconciled revision reopens the new set together.
+4. Leaving `limited` commits `private` or `public` locally first. Page-email
+   claims are accepted only when the current durable mode is exactly `limited`,
+   so the local commit removes their authority from both `/p/` and `/show/`
+   before best-effort backend cleanup. Failed cleanup is retried and surfaced as
+   pending but cannot restore authority.
 5. Switching `private` and `public` is one local transaction. Link allocation,
    mode, revision, and old-route invalidation commit together.
 
-The UI does not optimistically display a new mode until the coordinator reaches
-its authoritative terminal state. A retry carries an idempotency key and expected
-`audience_revision`, so reconnects and double clicks cannot resurrect an older
-audience.
+Every request that considers page-email authority requires active availability,
+current mode `limited`, the current share binding where applicable,
+`page_email_gate=open`, and a claim revision equal to the reconciled local
+authorization revision. The UI does not optimistically display a new mode or set
+until the coordinator reaches its authoritative terminal state. Reconnects and
+double clicks reuse the mutation ID and expected audience revision, so they cannot
+resurrect an older audience.
 
 ### One editor capability
 
@@ -367,15 +389,25 @@ The shared context continues to use inert, versioned `@vite/client` and React
 Refresh shims. It exposes neither Runtime diagnostics nor a message channel.
 
 Vite's native `/@fs/<absolute-path>` form cannot cross that shared boundary.
-When a shared transform references an allowed absolute file, Runtime first checks
-the canonical path against the existing allowed-root, sensitive-segment, and
-symlink policy, then allocates a stable opaque handle from a Runtime-process secret,
-the Session, the current share generation, and the canonical path. The browser
-receives only `/p/<share>/__avibe_asset/<namespace>/<handle>`; Runtime's
-process-local registry resolves that handle only inside the matching shared
-namespace. A browser cannot submit a raw `/@fs/` path or mint a mapping, handles
-reveal no path bytes, and share rotation or Runtime replacement prevents new
-admission into the old namespace.
+When a shared transform references an allowed absolute file, Runtime opens it
+through a confinement-safe root descriptor: resolution cannot escape the selected
+allowed root or traverse a symlink prohibited by the existing policy, the final
+descriptor is verified against the allowed-root and sensitive-segment policy, and
+bounded bytes are copied into a namespace-owned immutable snapshot.
+Runtime compares descriptor metadata before and after the copy and rejects a file
+that changes during capture. It then allocates a stable opaque handle from a
+Runtime-process secret, the Session, the current share generation, the namespace,
+and the snapshot digest, not from a pathname.
+
+The browser receives only
+`/p/<share>/__avibe_asset/<namespace>/<handle>`; Runtime's process-local registry
+serves the immutable snapshot inside the matching shared namespace and never
+reopens the source path for a handle read. Replacing the original file or any
+parent with a symlink therefore cannot retarget an existing handle. A later valid
+source edit creates a new snapshot in a new transformed graph; a newly unsafe path
+is rejected before allocation. A browser cannot submit a raw `/@fs/` path or mint a
+mapping, handles reveal no path bytes, and share rotation or Runtime replacement
+prevents new admission into the old namespace.
 
 Each transformed entry graph owns one bounded 30-minute idle namespace lease.
 Every successful document, module, or lazy-asset read refreshes its lease. The
@@ -385,10 +417,12 @@ individual handles. A document that remains idle beyond the lease may fail a
 later lazy import and must reload; it never receives a handle from another graph.
 The Runtime bounds namespaces and handles globally and per Session. When every
 slot is actively leased, new admission fails closed instead of evicting a live
-namespace. Thus loaded documents retain their complete referenced set during the
-lease, while successive edits and rotations cannot consume capacity until
-process restart. The same chokepoint covers every emitted URL, including an
-absolute path nested inside another Vite URL.
+namespace. Snapshot bytes count against the same global and per-Session bounds and
+are reclaimed with their namespace. Thus loaded documents retain their complete
+referenced set during the lease, while successive edits and rotations cannot
+permanently consume capacity: expiry releases snapshot bytes without a process
+restart. The same chokepoint covers every emitted URL, including an absolute path
+nested inside another Vite URL.
 
 Runtime also labels every loopback response as `application`, `asset`, or
 `development-diagnostic` in a stripped response metadata header. Avibe forwards
@@ -423,10 +457,14 @@ redirect that selected `/show/`.
 
 That editor requirement applies to HMR, annotation writes, and the share-link
 redirect, not to ordinary private document and module reads. `/show/` keeps the
-existing resource-reader ACL so a read-only user can load the complete private
-module graph without receiving an HMR channel. A downgrade from editor to viewer
-closes HMR but does not manufacture a blank page by denying modules the viewer is
-still entitled to read.
+existing owner/organization resource-reader ACL so a read-only collaborator can
+load the complete private module graph without receiving an HMR channel. Its
+page-email branch is narrower: it can authorize a read only while the current local
+mode is `limited`, the page-email gate is open, and the claim revision is current.
+A transition to `private` or `public` therefore rejects stale page-email cookies on
+the canonical path even if hosted cleanup fails. A downgrade from editor to an
+independently entitled resource viewer closes HMR but does not manufacture a blank
+page by denying modules that viewer is still entitled to read.
 
 `/p/<share>/__vite_hmr` is removed for every viewer. A redirected editor uses the
 canonical private socket, while every document that remains at `/p/` contains no
@@ -503,7 +541,9 @@ request.
 | Private Runtime unavailable after an editor redirect | Existing private sanitized recovery behavior; never fall through to a raw shared-route socket | Private Runtime log |
 | Shared context unavailable | Existing sanitized shared unavailable/static fallback | Shared Runtime log without source detail |
 | Runtime emits a development diagnostic or unsafe URL header | Preserve only a safe status class/body and filtered headers | Redacted operator-only diagnostic |
+| Limited-list replacement has an ambiguous result | Keep the durable page-email gate closed across retries and restarts until read-after-write reconciliation persists the exact mutation result | Mutation ID, target digest, and redacted reconciliation state |
 | Limited email removed | Reject the viewer's next network request and invalidate its stale revision; no HMR or annotation channel exists to close | Authorization-revision log |
+| Limited page becomes private/public while hosted cleanup fails | Reject page-email claims on both `/p/` and `/show/` from the local mode commit; retry cleanup without reopening authority | Durable audience state and cleanup-pending record |
 | Editor role revoked but read ACL remains | Close private HMR; retain entitled private document/module reads; next `/p/` navigation stays shared only if its audience read rule succeeds | Existing authorization-revision/resource-revocation log |
 | Show Page read access revoked | Close private HMR and reject later private document/module reads; `/p/` is re-evaluated independently | Existing resource-revocation log |
 | Share rotates or becomes private | Old network-reached `/p/` reads fail immediately; an entitled canonical private socket remains independent; previously cached bytes remain a client-cache limitation | Durable Show Page state |
@@ -581,12 +621,12 @@ feature, not a prerequisite for capability-gated editor HMR.
 2. Replace workspace audience plus public-link switch with the three-option
    select. Render exact emails only for `limited`, and link controls only for
    `limited | public`; keep availability separate.
-3. Implement the fail-closed access coordinator and idempotent revision contract.
-   Retire the independent visibility and email mutation paths after compatibility
-   callers migrate.
+3. Implement the persistent page-email barrier, idempotent backend mutation-result
+   lookup, and fail-closed access coordinator. Retire the independent visibility
+   and email mutation paths after compatibility callers migrate.
 4. Make `/p/<share>/` resolve both `limited` and `public`. Add the limited login,
-   exact page-entitlement check, generic denial, current-revision check, and
-   private/no-store response policy.
+   mode-scoped exact page-entitlement check on both `/p/` and `/show/`, generic
+   denial, current-revision check, and private/no-store response policy.
 5. Factor annotation authorization into the shared, resource-aware
    `ShowEditorCapability`, explicitly excluding page-email entitlement, and use
    the same result for top-level editor navigation.
@@ -602,13 +642,14 @@ feature, not a prerequisite for capability-gated editor HMR.
 8. Preserve resource-viewer authorization for ordinary private modules while
    requiring editor capability for HMR, annotation writes, and share-link
    redirect selection.
-9. Add leased opaque shared file namespaces, Runtime response provenance, and
-   URL-bearing header filtering so raw `/@fs/` paths, stale unbounded handles,
-   and development diagnostics cannot cross the shared boundary.
+9. Add leased opaque shared file namespaces backed by immutable bounded snapshots,
+   Runtime response provenance, and URL-bearing header filtering so raw `/@fs/`
+   paths, mutable-path handles, and development diagnostics cannot cross the
+   shared boundary.
 10. Add the coalesced durable availability monitor for private HMR sockets.
 11. Add cache, Service Worker scope, network-revocation, mixed-version,
-    negotiation retry, total context propagation, concurrency, path-confinement,
-    and audience-transition contract tests.
+    negotiation retry, total context propagation, concurrency, rollback-write,
+    path-swap confinement, and audience-transition contract tests.
 12. Run local Incus regression with editor, exact-email, anonymous, denied, and
     revoked viewers open concurrently.
 
@@ -639,12 +680,30 @@ after the local public state is authoritative. Organization resource policies
 are not mapped into external audience modes; they remain canonical `/show/`
 collaborator policy.
 
-The compatibility read API may project old `visibility` fields for one release,
-and new writes maintain a rollback-safe projection: public maps to old `public`,
+The compatibility read API projects old `visibility` fields for one rollback
+window, and new writes maintain a safe projection: public maps to old `public`,
 private and limited map to old `private`, and offline maps to old `offline`.
-Authoritative writes still go only through `ShowAccess`. A rollback therefore
-treats `limited` as private because older code cannot enforce its `/p/`
-authentication gate.
+The migration also installs a durable legacy-write marker triggered by every
+assignment to the legacy visibility column, including an assignment whose value is
+unchanged. A new writer updates `ShowAccess`, writes its legacy projection, and
+clears the marker only after both values are committed in the same transaction.
+An old binary cannot clear it, so any old-binary write remains distinguishable from
+a projection on the next upgrade. The compatibility column, marker, and trigger
+survive application rollback and schema downgrade for the entire supported
+rollback window; cleanup is a later migration after old binaries are no longer
+supported.
+
+On startup or re-upgrade, a set marker makes the last legacy visibility assignment
+the user intent to reconcile before serving the page. Legacy `private` becomes
+active `private`, legacy `offline` becomes offline `private`, and an explicit legacy
+`public` becomes active `public`; a missing/corrupt marker state fails to private.
+The reconciled transaction invalidates the prior share binding where the target no
+longer uses it, makes page-email claims inapplicable unless the result is later
+opened as `limited` through the connected coordinator, writes the new projection,
+and only then clears the marker. A rollback therefore treats `limited` as private
+because older code cannot enforce its `/p/` authentication gate, while a later
+private/offline write by that old binary cannot be overwritten by stale
+`ShowAccess` on re-upgrade.
 
 ## Verification Plan
 
@@ -677,6 +736,15 @@ authentication gate.
 - prove migration maps old public, private-with-grants, private-without-grants,
   and offline rows exactly as specified, with disconnected reconciliation staying
   private
+- perform a real new-write, binary rollback, legacy public/private/offline write,
+  and re-upgrade round trip; the legacy-write marker must preserve the last user
+  action, including an unchanged-value private assignment, and ambiguous state must
+  fail closed
+- interrupt every limited-list mutation before send, after backend commit, after a
+  lost response, and before local revision persistence; the durable page-email gate
+  stays closed across process restart until the exact mutation result reconciles
+- prove a page-email cookie is rejected by both `/p/` and `/show/` immediately after
+  the local mode leaves `limited`, even while backend cleanup is unavailable
 
 ### Runtime and proxy tests
 
@@ -693,8 +761,9 @@ authentication gate.
 - shared requests never change, close, or rebuild the private context
 - authorized top-level `/p/` navigations redirect before document bytes to the
   equivalent canonical `/show/` route
-- unprivileged documents reference only shared paths, opaque allowed-file handles,
-  and immutable shims; raw `/@fs/`, host paths, and Session paths are denied
+- unprivileged documents reference only shared paths, opaque immutable-snapshot
+  handles, and immutable shims; raw `/@fs/`, host paths, and Session paths are
+  denied
 - Runtime response provenance preserves authored application errors while every
   development diagnostic receives a fixed shared body; unsafe `SourceMap`,
   `X-SourceMap`, `Content-Location`, `Refresh`, `Location`, and `Link` values are
@@ -702,6 +771,9 @@ authentication gate.
 - old opaque namespaces survive lazy loads while leased, expire as a whole after
   30 idle minutes, never cross graph/share boundaries, and do not make admission
   capacity permanently consumable across successive edits
+- after handle allocation, replace the source or any parent with an out-of-root or
+  sensitive symlink; the old handle serves only its captured immutable bytes, a new
+  allocation is denied, and no handle read reopens the pathname
 - `/p/<share>/__vite_hmr` rejects every connection
 - private document/module requests retain resource-reader ACL; private HMR repeats
   editor/resource/origin checks, closes on authorization-revision or resource
@@ -741,6 +813,10 @@ authentication gate.
 | `SHOW-LIVE-018` | Direct CLI changes an active page to offline with private HMR connected | The coalesced durable monitor closes every socket for the Session within five seconds without relying on an in-process event |
 | `SHOW-LIVE-019` | Public changes to limited and the cloud write fails | The local gate remains private; neither anonymous nor stale listed viewers can read until a complete retry succeeds |
 | `SHOW-LIVE-020` | Old private/public/offline rows and exact-email grants upgrade | Each page matches the migration table; a disconnected private-with-grants page stays private and pending |
+| `SHOW-LIVE-021` | A live limited-list replacement commits remotely, its response is lost, and Avibe restarts | All page-email reads remain closed until the mutation result and revision reconcile; removed viewers never regain access |
+| `SHOW-LIVE-022` | Limited changes to private while hosted cleanup is unavailable | A stale page-email cookie is rejected on both `/p/` and `/show/`; independent resource collaborators retain their canonical access |
+| `SHOW-LIVE-023` | A public page upgrades, rolls back, is set private by the old binary, then re-upgrades | The legacy marker wins and the page stays private; stale `ShowAccess` cannot reopen anonymous access |
+| `SHOW-LIVE-024` | An allowed source is replaced by a sensitive symlink after an opaque handle is issued | The issued handle returns only immutable captured bytes, and the changed path cannot receive a new handle |
 
 Focused unit/contract tests, Ruff, repository CI, and local Incus browser
 regression are required. Green unit tests do not replace simultaneous editor,
@@ -758,7 +834,11 @@ The design is implemented when all of the following are true:
   exact page grant and fully public remains anonymously readable.
 - Page-email authority is view-only and cannot contribute evidence to
   `ShowEditorCapability`, settings, Workbench, Agents annotations, HMR, or another
-  Show Page.
+  Show Page. It authorizes page reads only while current mode is `limited`, the
+  durable mutation gate is open, and its revision is current.
+- Every grant-set mutation closes a persistent local page-email gate before remote
+  work and reopens it only after idempotent read-after-write reconciliation; an
+  ambiguous response or restart cannot leave stale grants usable.
 - Authorized share-link editor navigations redirect to the corresponding private URL
   and get the same Vite HMR and React Fast Refresh behavior as private editors.
 - Annotation writes and the share-link editor redirect consume one validated,
@@ -782,9 +862,13 @@ The design is implemented when all of the following are true:
   shared context and retry without permanently disabling the feature.
 - Context selection is mandatory at every Runtime app-graph call site, including
   prewarm and fallback paths, and missing selection fails before Vite ownership.
-- Shared file references use leased context-bound opaque handles after path
-  validation; raw absolute paths, unsafe URL-bearing response headers, and Runtime
-  development diagnostics never reach the browser.
+- Shared file references use leased context-bound opaque handles backed by bounded
+  immutable snapshots captured through confinement-safe opens; handle reads never
+  reopen mutable pathnames. Raw absolute paths, unsafe URL-bearing response headers,
+  and Runtime development diagnostics never reach the browser.
+- Compatibility rollback writes are durably marked and reconciled before serving,
+  so a private/offline change made by an old binary cannot be overwritten by stale
+  `ShowAccess` after re-upgrade.
 - Direct durable offline mutations close active private HMR within five seconds;
   share rotation alone does not revoke entitled canonical private access.
 - Authorization failure preserves fully public availability, fails limited access
