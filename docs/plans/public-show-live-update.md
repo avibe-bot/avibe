@@ -169,8 +169,11 @@ Public builds are demand-active rather than running for every private Session:
 - With no public demand, Runtime may stop building. The next public request
   catches up to the latest generation before returning the document.
 - If a previous artifact exists and a catch-up build fails, Runtime serves that
-  artifact. If no artifact has ever activated, Avibe returns the existing
-  sanitized generating/unavailable shell and retries on a later request; it
+  artifact. If no artifact has ever activated, Avibe returns a sanitized
+  recovery shell with `artifact: null`. The shell opens the same redacted
+  artifact stream, holds public demand, and reloads when the first artifact
+  activates. Its reconnect loop continues indefinitely with capped backoff, so
+  recovery does not depend on a later document request or manual refresh. It
   never falls back to development modules.
 
 This keeps private-only editing costs unchanged while ensuring a fresh public
@@ -189,8 +192,12 @@ sequence:
    maps, excludes development HMR/React Refresh clients, and emits content-hashed
    files with relative asset references.
 5. Runtime rejects the candidate if the build, link, or any required first-party
-   asset resolution fails. Output validation also rejects canonical private URL
-   references in emitted HTML, JavaScript, and CSS, including CSS `url(...)`.
+   asset resolution fails. It then validates the complete emitted byte set,
+   independent of file type, against the private-output deny set: the Session
+   identifier, canonical private route, sidecar route, current or previous share
+   identifier, and other private runtime identifiers. Any match rejects the
+   entire candidate before activation. A newly emitted URL-bearing format is
+   therefore covered without adding another MIME-specific validator.
 6. If another invalidation arrived during the build, Runtime discards the stale
    output and schedules the newest generation.
 7. Runtime moves the complete staging directory into immutable artifact storage,
@@ -198,18 +205,36 @@ sequence:
    current.
 8. Only pointer activation emits one artifact notification.
 
-The active artifact and its files are immutable. Runtime retains the active and
-immediately previous artifact; older inactive artifacts are cleaned up after no
-response or stream still references them. A process restart may rebuild the
-same source into a new opaque identifier, which causes at most one public reload.
-Artifacts are Runtime cache, not durable product history.
+The active artifact and its files are immutable. Each served document uses
+artifact-scoped file URLs. Serving the document starts a short connection grace;
+opening the stream with that document artifact promotes the grace to a document
+lease. Runtime pins the active artifact and every artifact referenced by an open
+document lease. A disconnected lease receives a bounded cleanup grace longer
+than the client's maximum reconnect delay; normal reconnection renews it. Lease
+count and retained bytes are bounded per Session at stream admission, so the
+number of simultaneously pinned inactive artifacts is also bounded. A refused
+stream does not evict an artifact serving an already admitted document. An
+inactive artifact is removed only after its last lease and grace expire. A
+process restart may rebuild the same source into a new opaque identifier, which
+causes at most one public reload. Artifacts are Runtime cache, not durable
+product history.
 
-Relative output is part of the contract. Avibe serves the same artifact beneath
-the current `/p/<share>/` path and injects a matching document `<base>` plus
-public configuration. HTML module references, JavaScript chunks, imported CSS,
-and CSS `url(...)` references therefore resolve through the gated share path and
-contain neither `/show/<session>/` nor a previous share ID. Rotating a share does
-not require rebuilding the artifact.
+Relative output is part of the contract. Avibe serves artifact files beneath
+`/p/<share>/__show/artifacts/<artifact-id>/` and injects separate public page and
+artifact base paths. Entry references are rewritten with a structured HTML
+transform to the artifact-scoped base; relative JavaScript chunks, imported CSS,
+and nested asset references remain inside that scope. The application route
+continues to use `/p/<share>/`, so asset addressing does not change SPA routing
+or relative public API requests. Neither the artifact nor its references contain
+`/show/<session>/` or a share ID. Rotating a share changes only the request-time
+gate and document configuration; it does not require rebuilding the artifact.
+
+Public navigation preserves the existing SPA fallback deliberately. Avibe first
+resolves exact artifact files and reserved `api/` and `__show/` routes. A `GET`
+or `HEAD` browser document navigation that matches none of them receives the
+active artifact's entry document, configured for the requested public route. A
+missing script, stylesheet, image, other asset, API route, or reserved Show route
+returns its real error and is never rewritten to the entry document.
 
 Public `api/` handlers remain permissioned live server code and are not bundled
 into the frontend artifact. Relative public API requests continue through the
@@ -222,13 +247,14 @@ The sidecar adds loopback-only endpoints:
 ```text
 GET /sessions/<session-id>/public-artifact?ensure=current
 GET /sessions/<session-id>/public-artifacts/<artifact-id>/<path>
-GET /sessions/<session-id>/public-artifacts?stream=1
+GET /sessions/<session-id>/public-artifacts?stream=1&document=<artifact-id>
 ```
 
 The public Avibe surface exposes:
 
 ```text
 GET /p/<share-id>/__show/artifacts
+GET /p/<share-id>/__show/artifacts/<artifact-id>/<path>
 ```
 
 The public endpoint is a terminating relay, not a byte-for-byte proxy. It parses
@@ -239,7 +265,11 @@ which its HTML was read:
 
 ```html
 <script>
-  globalThis.__AVIBE_SHOW__ = { basePath: "/p/brief/", artifact: "art_7f42" }
+  globalThis.__AVIBE_SHOW__ = {
+    basePath: "/p/brief/",
+    artifactBasePath: "/p/brief/__show/artifacts/art_7f42/",
+    artifact: "art_7f42"
+  }
 </script>
 ```
 
@@ -266,13 +296,20 @@ data: {"protocol":1,"artifact":"art_91ac"}
 Contract rules:
 
 - `protocol` is the schema version and is currently `1`.
-- `artifact` is an opaque identifier for one immutable activated build.
+- A non-null `artifact` is an opaque identifier for one immutable activated
+  build. Null is valid only in the recovery shell's `ready` event.
 - Equality is the only browser operation on `artifact`; ordering is unnecessary.
 - The payload contains no Session ID, share ID, module URL, filesystem path,
   source code, error, plugin name, or source frame.
 - Keepalives are SSE comment frames and carry no data.
 - A new subscriber receives exactly one `ready` event with the current active
-  artifact. Artifact history is not replayed.
+  artifact. The recovery shell may receive `artifact: null` until the first
+  activation. Artifact history is not replayed.
+- The browser opens the public stream with its document artifact, if any, as an
+  opaque `document` query value. Avibe validates that the artifact belongs to
+  the resolved Session before creating an internal lease; it never forwards the
+  query blindly. A null recovery-shell document holds build demand but no
+  artifact lease.
 - The document uses `Cache-Control: no-store`; hashed artifact files may use
   immutable caching while the share remains authorized.
 
@@ -291,8 +328,10 @@ The public document loads a small versioned live client. Public production
 artifacts contain no Vite HMR imports, so the client does not need to emulate
 the Vite protocol. It runs once per document:
 
-1. Read `basePath` and the document's `artifact` from the injected configuration.
-2. Open `<basePath>__show/artifacts` with `EventSource`.
+1. Read `basePath`, `artifactBasePath`, and the document's `artifact` from the
+   injected configuration.
+2. Open `<basePath>__show/artifacts`, adding the opaque document artifact as the
+   `document` query value when it is non-null.
 3. Compare both `ready` and later `artifact` events with the document artifact.
    Equal means current; different means a reload is pending.
 4. Keep only the newest pending identifier. A later event does not reset any
@@ -305,9 +344,12 @@ the Vite protocol. It runs once per document:
 7. Set an in-memory reload guard immediately before `location.reload()`. The new
    no-store document carries its own artifact and performs the same equality
    handshake, preventing a persistent reload loop.
-8. On stream failure, close the failed `EventSource` and reconnect with capped
-   exponential backoff. Stop after six consecutive failures and resume on
-   `online` or a later visibility transition.
+8. On stream failure, close the failed `EventSource` and reconnect indefinitely
+   with exponential backoff, jitter, and a maximum delay. A valid `ready` resets
+   the failure counter. `online` and visibility transitions may trigger an
+   immediate probe, but are not required for recovery. The recovery shell uses
+   the same loop, so a first-build failure heals after a later valid edit without
+   a manual refresh.
 
 The client displays no public error overlay. Build and connection diagnostics
 belong in private Runtime/Avibe logs.
@@ -363,7 +405,8 @@ Budgets and invariants:
 - one build per Session write burst, independent of viewer count
 - no public build while a private-only Session has no public demand
 - active hashed assets remain cacheable across document reloads
-- active plus previous artifact bounds steady-state artifact retention
+- active plus admitted document leases and their disconnect grace define
+  artifact retention; per-Session lease and byte budgets bound resource use
 - build work is cancellable by generation and never runs concurrently for the
   same Session
 
@@ -381,11 +424,11 @@ the final starter-page activation budget; the design does not claim a universal
 | Syntax, import/export, asset, or build-plugin failure | Keep active artifact; activate nothing | Vite build/Runtime diagnostic |
 | Arbitrary runtime exception after a successful build | Browser may fail; no stronger guarantee without a canary | Browser telemetry or manual regression |
 | New invalidation during a build | Discard stale candidate; build latest generation | Debug metric only |
-| Runtime unavailable | Keep loaded page; bounded reconnect | Runtime health/logs |
+| Runtime unavailable | Keep loaded page; indefinitely retry with capped delay | Runtime health/logs |
 | SSE interrupted | Compare reconnecting `ready` with the document artifact | Connection metric/log |
 | Share rotated/private/offline | Reject new reads; close stream immediately or within 5 seconds | Durable visibility state and relay log |
 | Runtime restarted | Reuse a valid cached artifact or rebuild; a new ID reloads once | Runtime lifecycle log |
-| Initial build fails with no active artifact | Sanitized unavailable/generating shell; no development fallback | Private build diagnostic |
+| Initial build fails with no active artifact | Sanitized recovery shell holds demand and reloads after the first valid activation; no development fallback | Private build diagnostic |
 
 ## Rejected Alternatives
 
@@ -460,7 +503,10 @@ guaranteed compatible.
 - atomically activate only complete immutable output
 - join concurrent initial requests to one build
 - hold demand while at least one public stream is subscribed
-- retain active plus previous artifact and clean only unreferenced older output
+- retain every artifact referenced by an admitted document lease and clean it
+  only after the last lease plus reconnect grace expires
+- keep artifact-scoped files available across two or more later activations
+- keep null-artifact recovery demand active after an initial build failure
 - replay only the current active artifact to a new subscriber
 
 ### Avibe unit and contract tests
@@ -473,8 +519,14 @@ guaranteed compatible.
   the 5-second bound without relying on an in-memory broker event
 - public relay drops unknown event types and extra fields
 - browser credentials are never forwarded to Runtime
-- emitted HTML, JavaScript, and CSS contain no canonical Session path or old
-  share ID; CSS `url(...)` assets resolve through the current gated share
+- every emitted file is checked for private runtime identifiers regardless of
+  format, and the complete candidate is rejected on any match
+- artifact-scoped resources remain available to their loaded document while a
+  newer artifact is active
+- browser-history document navigation receives the active entry document while
+  missing assets, API routes, and reserved Show routes keep their real errors
+- recovery-shell and ordinary clients continue reconnecting after more than six
+  consecutive failures and recover without manual interaction
 - public raw `__vite_hmr` is unavailable while private HMR remains unchanged
 - private and public traffic never changes or rebuilds the private Vite base
 
@@ -491,6 +543,11 @@ guaranteed compatible.
 | `SHOW-LIVE-007` | Revision arrives while both hidden and editing | No background deadline fires; after visibility, blur or 30 visible editable seconds causes exactly one reload |
 | `SHOW-LIVE-008` | Activation races the first SSE `ready` | Embedded and ready identifiers differ; the client reloads to the active artifact |
 | `SHOW-LIVE-009` | Page CSS references `url('./hero.png')`, then the share rotates | Asset loads on both share URLs and no canonical Session path is exposed |
+| `SHOW-LIVE-010` | Two artifacts activate while an older document defers reload during editing | The older document's lazy chunk, image, and font remain available until its lease and grace expire |
+| `SHOW-LIVE-011` | The artifact stream fails more than six times and later recovers | The client reconnects with capped delay and reloads without an online or visibility event |
+| `SHOW-LIVE-012` | The first public build fails and a later edit repairs it | The recovery shell holds demand and reloads automatically after the first valid activation |
+| `SHOW-LIVE-013` | A viewer opens a browser-history route such as `/p/<share>/reports/42` | The active entry document loads; a missing asset at the same depth returns 404 rather than HTML |
+| `SHOW-LIVE-014` | A generated SVG, manifest, or future artifact format contains a private route or identifier | Whole-output validation rejects the candidate before activation |
 
 The implementation adds these scenarios to the Show scenario catalog before its
 PR is complete. Focused unit/contract tests, Ruff, repository CI, and local Incus
@@ -508,8 +565,14 @@ The feature is complete when all of the following are true:
   on the next valid candidate.
 - The document artifact and SSE state use an exact equality handshake, including
   the activation-before-first-`ready` race.
-- Public HTML, JavaScript, CSS, and asset requests expose no canonical Session
-  path and continue to work after share rotation.
+- No emitted artifact byte contains a private runtime identifier, regardless of
+  format, and public requests continue to work after share rotation.
+- Loaded documents use artifact-scoped resources that remain available through
+  reload deferral, multiple later activations, and the reconnect grace.
+- Recovery shells and clients survive extended stream/build outages and recover
+  without manual refresh.
+- Browser-history navigations preserve SPA fallback without masking missing
+  assets, APIs, or reserved Show routes.
 - Direct cross-process visibility changes revoke reads and streams within the
   defined 5-second bound.
 - Hidden state dominates the editable-control deadline exactly as specified.
