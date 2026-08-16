@@ -35,6 +35,9 @@ type ControlMessage =
   | { type: 'avibe:annotation:control'; action: 'set-mode'; mode: AnnotationMode }
   | { type: 'avibe:annotation:query' };
 
+const PARENT_ESCAPE_CLAIM_SELECTOR =
+  'input, textarea, [contenteditable]:not([contenteditable="false"]), [data-state="open"], [role="dialog"], dialog[open]';
+
 /**
  * `src` is the current iframe URL; changing it (first open, or a private↔public
  * re-point, or a session switch that clears it) drops the derived state back to
@@ -94,6 +97,41 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     return stopListening;
   }, [startListening, stopListening]);
 
+  const onParentKeyDown = useCallback((event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest(PARENT_ESCAPE_CLAIM_SELECTOR)) return;
+
+    try {
+      const frameDocument = iframeRef.current?.contentDocument;
+      if (!frameDocument) return;
+      const FrameKeyboardEvent = frameDocument.defaultView?.KeyboardEvent ?? KeyboardEvent;
+      frameDocument.dispatchEvent(
+        new FrameKeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      );
+    } catch {
+      // The frame may be sandboxed, navigating, or already torn down.
+    }
+  }, []);
+
+  const escapeListeningRef = useRef(false);
+  const startEscapeListening = useCallback(() => {
+    if (escapeListeningRef.current) return;
+    window.addEventListener('keydown', onParentKeyDown);
+    escapeListeningRef.current = true;
+  }, [onParentKeyDown]);
+  const stopEscapeListening = useCallback(() => {
+    if (!escapeListeningRef.current) return;
+    window.removeEventListener('keydown', onParentKeyDown);
+    escapeListeningRef.current = false;
+  }, [onParentKeyDown]);
+
+  useEffect(() => {
+    if (state?.enabled === true && iframeRef.current) startEscapeListening();
+    else stopEscapeListening();
+    return stopEscapeListening;
+  }, [startEscapeListening, state?.enabled, stopEscapeListening]);
+
   const post = useCallback((message: ControlMessage) => {
     const win = iframeRef.current?.contentWindow;
     if (win) win.postMessage(message, window.location.origin);
@@ -101,10 +139,14 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
 
   const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
     (iframe) => {
+      if (iframeRef.current !== iframe) stopEscapeListening();
       iframeRef.current = iframe;
-      if (iframe) startListening();
+      if (iframe) {
+        startListening();
+        if (state?.enabled === true) startEscapeListening();
+      }
     },
-    [startListening],
+    [startEscapeListening, startListening, state?.enabled, stopEscapeListening],
   );
 
   const enable = useCallback(
