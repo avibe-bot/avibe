@@ -409,20 +409,27 @@ is rejected before allocation. A browser cannot submit a raw `/@fs/` path or min
 mapping, handles reveal no path bytes, and share rotation or Runtime replacement
 prevents new admission into the old namespace.
 
-Each transformed entry graph owns one bounded 30-minute idle namespace lease.
-Every successful document, module, or lazy-asset read refreshes its lease. The
-current namespace is pinned; superseded namespaces are reclaimed only after 30 minutes
-with no request, and reclamation removes the whole namespace rather than
-individual handles. A document that remains idle beyond the lease may fail a
-later lazy import and must reload; it never receives a handle from another graph.
-The Runtime bounds namespaces and handles globally and per Session. When every
-slot is actively leased, new admission fails closed instead of evicting a live
-namespace. Snapshot bytes count against the same global and per-Session bounds and
-are reclaimed with their namespace. Thus loaded documents retain their complete
-referenced set during the lease, while successive edits and rotations cannot
-permanently consume capacity: expiry releases snapshot bytes without a process
-restart. The same chokepoint covers every emitted URL, including an absolute path
-nested inside another Vite URL.
+Each transformed entry graph owns both a 30-minute idle namespace lease and a
+non-renewable two-hour absolute lifetime measured from admission. A successful
+document, module, or lazy-asset read may refresh only the idle deadline; anonymous
+traffic cannot extend the absolute deadline. The current namespace is protected
+from idle reclamation, but not from its absolute deadline or process-wide resource
+pressure. Reclamation removes the whole namespace rather than individual handles.
+After either deadline a later module or lazy import receives a fixed stale-document
+response and the browser must reload; it never receives a handle from another graph.
+
+The Runtime admits namespaces, handles, and snapshot bytes through the same
+process-wide weighted budget used for shared Vite contexts, with additional
+per-Session limits. Before rejecting admission it reclaims expired namespaces and
+then the oldest shared bundle that has no request in flight, even if public reads
+kept that bundle recently active. In-flight work is pinned only until its response
+finishes. When no shared bundle is reclaimable, new shared admission fails closed
+with a sanitized retryable unavailable response; it cannot consume the capacity
+reserved for private editor contexts. Snapshot bytes count against the same bounds
+and are reclaimed with their namespace. Thus a loaded document normally retains
+its complete referenced set during the lease, while recorded old public URLs cannot
+pin capacity indefinitely. The same chokepoint covers every emitted URL, including
+an absolute path nested inside another Vite URL.
 
 Runtime also labels every loopback response as `application`, `asset`, or
 `development-diagnostic` in a stripped response metadata header. Avibe forwards
@@ -507,7 +514,7 @@ The model adds authorization routing, not a production publication pipeline:
 | Authorized editor opens `/p/` | Existing session/resource decision, one redirect, canonical Vite transforms, and one private HMR socket |
 | Limited exact-email viewer opens `/p/` | One current authorization decision plus shared transforms and shims; no socket or annotation bootstrap |
 | Public unprivileged viewer opens `/p/` | Existing shared transforms and shims from an isolated context when negotiated, or the explicit legacy compatibility path; no socket |
-| Both modes are active | Up to two Vite contexts for the Session; only the private context maintains HMR clients |
+| Both modes are active | Up to two Vite contexts for the Session; only the private context maintains HMR clients, and both count against the Runtime-wide budget |
 | Agent edit | Private context pushes HMR; shared context does no work until the next allowed `/p/` request or refresh |
 | Active private HMR sockets | One coalesced durable availability read per Session on a cadence no greater than five seconds |
 
@@ -521,11 +528,20 @@ After its one redirect, an authorized `/p/` load should have the same cold and
 warm profile as `/show/`.
 The negotiated isolated shared context can increase Runtime memory when authorized and
 share-link viewers are active simultaneously, but avoids production builds,
-artifact storage, SSE fanout, and anonymous sockets. Runtime must expose context
-count and memory so local Incus regression can set a per-Session idle eviction
-budget from measurements rather than an assumed universal threshold. Opaque shared
-path mappings are process-local, share-generation-bound, leased, and admission-bounded;
-capability probes are process-cached or backoff-limited rather than added to every
+artifact storage, SSE fanout, and anonymous sockets. Runtime owns one process-wide
+weighted admission controller over private/shared Vite contexts, opaque namespaces,
+handles, and snapshot bytes. It enforces hard context-count and memory-cost limits
+plus per-Session limits. Finite conservative defaults and a nonzero private-editor
+reserve ship with the feature; configuration can tune them only to another finite
+value, with increases justified by local Incus measurements. The reserved slice
+cannot be consumed by shared traffic; private admission may reclaim any shared
+bundle with no request in flight. Shared bundles are oldest-admitted reclaimable
+between requests and have the same non-renewable two-hour maximum lifetime as their
+namespaces, so a set of active anonymous Sessions cannot pin them forever. If all
+eligible capacity is in flight, shared requests receive a bounded sanitized
+overload response rather than growing the sidecar. Runtime exposes
+admitted/reclaimed/rejected counts and measured memory for release tuning.
+Capability probes are process-cached or backoff-limited rather than added to every
 request.
 
 ## Failure And Revocation Behavior
@@ -540,6 +556,8 @@ request.
 | Transient capability negotiation failure | Send the backward-compatible explicit `shared` context, keep the current allowed request shared, and retry after bounded backoff | Redacted probe state and retry metric |
 | Private Runtime unavailable after an editor redirect | Existing private sanitized recovery behavior; never fall through to a raw shared-route socket | Private Runtime log |
 | Shared context unavailable | Existing sanitized shared unavailable/static fallback | Shared Runtime log without source detail |
+| Shared Runtime admission is saturated | Reclaim the oldest non-in-flight shared bundle; if none is reclaimable, return a sanitized retryable unavailable response without consuming the private reserve | Global weighted-budget admission/reclamation metric |
+| A shared document outlives its absolute namespace/context lifetime | Return a fixed stale-document response for later module or lazy-asset reads and require reload | Namespace hard-expiry metric without source paths |
 | Runtime emits a development diagnostic or unsafe URL header | Preserve only a safe status class/body and filtered headers | Redacted operator-only diagnostic |
 | Limited-list replacement has an ambiguous result | Keep the durable page-email gate closed across retries and restarts until read-after-write reconciliation persists the exact mutation result | Mutation ID, target digest, and redacted reconciliation state |
 | Limited email removed | Reject the viewer's next network request and invalidate its stale revision; no HMR or annotation channel exists to close | Authorization-revision log |
@@ -643,9 +661,10 @@ feature, not a prerequisite for capability-gated editor HMR.
    requiring editor capability for HMR, annotation writes, and share-link
    redirect selection.
 9. Add leased opaque shared file namespaces backed by immutable bounded snapshots,
+   the process-wide weighted Runtime admission controller with a private reserve,
    Runtime response provenance, and URL-bearing header filtering so raw `/@fs/`
-   paths, mutable-path handles, and development diagnostics cannot cross the
-   shared boundary.
+   paths, mutable-path handles, anonymous resource pinning, and development
+   diagnostics cannot cross the shared boundary.
 10. Add the coalesced durable availability monitor for private HMR sockets.
 11. Add cache, Service Worker scope, network-revocation, mixed-version,
     negotiation retry, total context propagation, concurrency, rollback-write,
@@ -674,11 +693,17 @@ The schema migration separates availability from audience and is fail-closed:
 | `visibility=offline` | `offline` | `private` | Clear; the old model did not retain a trustworthy prior audience |
 
 Until the device can read the hosted grant set, an old private page stays
-private and records migration pending; it is never guessed to be limited. An old
-public page remains public, and any independently stored email set is cleared
-after the local public state is authoritative. Organization resource policies
-are not mapped into external audience modes; they remain canonical `/show/`
-collaborator policy.
+private and records migration pending with the source `audience_revision` and
+legacy-marker generation; it is never guessed to be limited. Reconciliation may
+commit only with a compare-and-swap proving that both values are still current.
+Every authoritative audience Apply and every reconciled legacy write increments
+`audience_revision` and deletes any pending migration in the same local transaction
+before remote work begins. A stale worker discards its hosted read and any provisional
+share allocation when that compare-and-swap fails; it cannot convert a newer public
+or private choice to `limited`. An old public page remains public, and any
+independently stored email set is cleared after the local public state is
+authoritative. Organization resource policies are not mapped into external audience
+modes; they remain canonical `/show/` collaborator policy.
 
 The compatibility read API projects old `visibility` fields for one rollback
 window, and new writes maintain a safe projection: public maps to old `public`,
@@ -704,6 +729,20 @@ and only then clears the marker. A rollback therefore treats `limited` as privat
 because older code cannot enforce its `/p/` authentication gate, while a later
 private/offline write by that old binary cannot be overwritten by stale
 `ShowAccess` on re-upgrade.
+
+Binary downgrade has a fail-closed preflight before the current executable or
+compatibility schema is replaced. The updater acquires the audience coordinator's
+exclusive write lock, holds it through service quiescence and executable/schema
+replacement, and under that lock requires the hosted resolver to be reachable, no
+audience transition or migration to be pending, every ambiguous mutation result to
+be reconciled, and every non-`limited` page to have an empty hosted email set with
+the resulting authorization revision persisted locally. A `limited` page is
+rollback-compatible only while its gate is open on that exact reconciled set. If
+cleanup or revocation is pending, downgrade is refused and the current binary and
+schema remain intact; retrying cleanup is the only recovery. This is the
+rollback-compatible barrier enforced by the old `/show/` serving path: it never
+starts in a state where a non-`limited` page still has a usable `show_page_email`
+claim, even though the old binary does not understand `page_email_gate`.
 
 ## Verification Plan
 
@@ -740,6 +779,12 @@ private/offline write by that old binary cannot be overwritten by stale
   and re-upgrade round trip; the legacy-write marker must preserve the last user
   action, including an unchanged-value private assignment, and ambiguous state must
   fail closed
+- leave an upgrade migration pending, perform a newer audience Apply, then restore
+  connectivity; the source-revision compare-and-swap discards the stale migration
+  and cannot allocate or reopen a limited audience
+- attempt downgrade while a limited-to-private/public cleanup or mutation result is
+  pending; preflight preserves the current binary and schema until hosted grants are
+  empty and the authorization revision is reconciled
 - interrupt every limited-list mutation before send, after backend commit, after a
   lost response, and before local revision persistence; the durable page-email gate
   stays closed across process restart until the exact mutation result reconciles
@@ -769,8 +814,12 @@ private/offline write by that old binary cannot be overwritten by stale
   `X-SourceMap`, `Content-Location`, `Refresh`, `Location`, and `Link` values are
   stripped or safely rewritten
 - old opaque namespaces survive lazy loads while leased, expire as a whole after
-  30 idle minutes, never cross graph/share boundaries, and do not make admission
-  capacity permanently consumable across successive edits
+  30 idle minutes or the non-renewable two-hour lifetime, never cross graph/share
+  boundaries, and cannot be kept admitted by anonymous reads
+- active public traffic across more Sessions than the process-wide context and
+  memory budget remains bounded, reclaims only non-in-flight shared bundles, preserves
+  the private-editor reserve, and returns sanitized overload responses when nothing
+  is reclaimable
 - after handle allocation, replace the source or any parent with an out-of-root or
   sensitive symlink; the old handle serves only its captured immutable bytes, a new
   allocation is denied, and no handle read reopens the pathname
@@ -817,6 +866,10 @@ private/offline write by that old binary cannot be overwritten by stale
 | `SHOW-LIVE-022` | Limited changes to private while hosted cleanup is unavailable | A stale page-email cookie is rejected on both `/p/` and `/show/`; independent resource collaborators retain their canonical access |
 | `SHOW-LIVE-023` | A public page upgrades, rolls back, is set private by the old binary, then re-upgrades | The legacy marker wins and the page stays private; stale `ShowAccess` cannot reopen anonymous access |
 | `SHOW-LIVE-024` | An allowed source is replaced by a sensitive symlink after an opaque handle is issued | The issued handle returns only immutable captured bytes, and the changed path cannot receive a new handle |
+| `SHOW-LIVE-025` | A disconnected private-page migration is pending, then the owner chooses public and later private before reconnecting | The newer revision cancels migration; reconnect cannot allocate a slug, commit limited, or restore the old email audience |
+| `SHOW-LIVE-026` | Limited changes to private while hosted cleanup is unavailable, then binary downgrade is requested | Downgrade is refused without replacing executable/schema; it succeeds only after grants are empty and the new revision is reconciled |
+| `SHOW-LIVE-027` | An anonymous client reads every superseded namespace just before each idle deadline | Each namespace still reaches its non-renewable hard expiry, releases all snapshot bytes, and requires stale documents to reload |
+| `SHOW-LIVE-028` | Anonymous clients keep shared pages active across more Sessions than the Runtime-wide budget | Context and memory stay under the hard limit, reclaimable shared bundles rotate, private HMR keeps its reserve, and excess shared admission is sanitized |
 
 Focused unit/contract tests, Ruff, repository CI, and local Incus browser
 regression are required. Green unit tests do not replace simultaneous editor,
@@ -869,6 +922,12 @@ The design is implemented when all of the following are true:
 - Compatibility rollback writes are durably marked and reconciled before serving,
   so a private/offline change made by an old binary cannot be overwritten by stale
   `ShowAccess` after re-upgrade.
+- Pending legacy migration is revision-bound and cancelled by every newer audience
+  mutation; downgrade cannot begin while stale hosted email authority could be
+  accepted by the old serving path.
+- Shared Vite contexts, opaque namespaces, handles, and snapshot bytes share one
+  Runtime-wide weighted budget with a private-editor reserve and non-renewable
+  lifetimes, so anonymous traffic cannot pin admission indefinitely.
 - Direct durable offline mutations close active private HMR within five seconds;
   share rotation alone does not revoke entitled canonical private access.
 - Authorization failure preserves fully public availability, fails limited access
