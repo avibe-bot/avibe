@@ -65,7 +65,11 @@
     },
     {
       "scenario_id": "SHOW-LIVE-016",
-      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+      "anchors": [
+        "runtime-context.json#/shared_response_cases/0",
+        "runtime-context.json#/shared_response_cases/1",
+        "mirror-registry.json#C15"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-017",
@@ -93,7 +97,11 @@
     },
     {
       "scenario_id": "SHOW-LIVE-023",
-      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+      "anchors": [
+        "runtime-context.json#/shared_response_cases/2",
+        "runtime-context.json#/shared_response_cases/3",
+        "mirror-registry.json#C15"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-024",

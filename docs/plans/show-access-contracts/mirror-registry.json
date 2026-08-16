@@ -330,11 +330,12 @@
       ],
       "signature": {
         "schema": "capability-matrix.json",
-        "request": "surface + availability + access_mode + share_admission_gate + principal + keyed_context",
+        "request": "surface + availability + access_mode + share_admission_gate + request_kind + principal + keyed_context",
         "result": "read decision and ShowEditorCapability projection",
         "covered_fields": [
           "read_decision",
           "share_admission_gate",
+          "request_kind",
           "show_editor_capability",
           "runtime_context",
           "annotations",
@@ -469,16 +470,16 @@
       "signature": {
         "schema": "runtime-context.json#/release_gate",
         "request": "Codex-reviewed Runtime head implementing delivery items 6 and 9",
-        "result": "smoke-tested exact SHA eligible for the bundled Runtime manifest",
+        "result": "show-runtime-manifest.json runtime_source.ref equals the reviewed, smoke-tested, bundled Runtime SHA",
         "covered_fields": [
           "reviewed_runtime_sha",
           "reviewed_runtime_pr",
           "smoke_tested_runtime_sha",
+          "bundled_runtime_sha",
           "delivery_item_6",
           "delivery_item_9",
           "smoke_test",
-          "feature_advertisement_allowed",
-          "runtime_source.ref"
+          "feature_advertisement_allowed"
         ]
       },
       "delivery": {
@@ -517,6 +518,43 @@
         "mechanism": "hosted_http_json",
         "route_or_channel": "PUT /api/v1/instances/{instance_id}/show-pages/{page_id}/authorized-emails",
         "authentication": "device_secret",
+        "version": 1
+      }
+    },
+    {
+      "id": "C15",
+      "producer": {
+        "repository": "vibe-show-runtime",
+        "path": "packages/runtime/src/server.ts",
+        "symbol": "routeRequest"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "serve_public_show_page"
+        }
+      ],
+      "signature": {
+        "schema": "runtime-context.json#/shared_response_cases",
+        "request": "shared-context Runtime response body, URL-bearing headers, and stripped provenance metadata",
+        "result": "complete safe transformed response or fixed sanitized fail-closed response",
+        "covered_fields": [
+          "runtime_mode",
+          "input_class",
+          "outcome",
+          "body_source",
+          "url_header_policy",
+          "raw_source",
+          "host_path",
+          "private_session_path",
+          "development_diagnostic"
+        ]
+      },
+      "delivery": {
+        "mechanism": "loopback_http_response",
+        "route_or_channel": "shared-context Runtime HTTP response to the /p proxy",
+        "authentication": "loopback_only",
         "version": 1
       }
     }

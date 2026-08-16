@@ -88,6 +88,7 @@
             "signed_session_claim",
             "in_process_value",
             "loopback_http_headers",
+            "loopback_http_response",
             "migration_transaction",
             "reviewed_release_manifest"
           ]

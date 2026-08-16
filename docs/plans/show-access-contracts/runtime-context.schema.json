@@ -10,6 +10,7 @@
     "request_protocol_cases",
     "negotiation_cases",
     "app_graph_operations",
+    "shared_response_cases",
     "route_invariants",
     "release_gate"
   ],
@@ -68,6 +69,58 @@
         "show_update_prewarm"
       ]
     },
+    "shared_response_cases": {
+      "const": [
+        {
+          "id": "keyed_immutable_graph_success",
+          "runtime_mode": "keyed_context",
+          "input_class": "proven_application_or_asset",
+          "outcome": "complete_transformed_response",
+          "body_source": "immutable_snapshot_virtual_graph",
+          "url_header_policy": "strip_or_safely_rewrite",
+          "raw_source": false,
+          "host_path": false,
+          "private_session_path": false,
+          "development_diagnostic": false
+        },
+        {
+          "id": "keyed_development_diagnostic",
+          "runtime_mode": "keyed_context",
+          "input_class": "development_diagnostic",
+          "outcome": "fixed_shared_error",
+          "body_source": "fixed_sanitized_representation",
+          "url_header_policy": "strip_or_safely_rewrite",
+          "raw_source": false,
+          "host_path": false,
+          "private_session_path": false,
+          "development_diagnostic": false
+        },
+        {
+          "id": "legacy_unclassified_transform_error",
+          "runtime_mode": "legacy_singleton",
+          "input_class": "unclassified_error_or_missing_provenance",
+          "outcome": "fixed_path_free_unavailable",
+          "body_source": "fixed_sanitized_representation",
+          "url_header_policy": "remove_url_bearing_headers",
+          "raw_source": false,
+          "host_path": false,
+          "private_session_path": false,
+          "development_diagnostic": false
+        },
+        {
+          "id": "legacy_raw_or_nested_fs_graph",
+          "runtime_mode": "legacy_singleton",
+          "input_class": "raw_or_nested_fs_reference",
+          "outcome": "fixed_path_free_unavailable",
+          "body_source": "fixed_sanitized_representation",
+          "url_header_policy": "remove_url_bearing_headers",
+          "raw_source": false,
+          "host_path": false,
+          "private_session_path": false,
+          "development_diagnostic": false
+        }
+      ]
+    },
     "route_invariants": {
       "type": "object",
       "additionalProperties": false,
@@ -120,6 +173,7 @@
         "reviewed_runtime_sha",
         "reviewed_runtime_pr",
         "smoke_tested_runtime_sha",
+        "bundled_runtime_sha",
         "delivery_item_6",
         "delivery_item_9",
         "smoke_test",
@@ -143,6 +197,12 @@
             { "type": "null" }
           ]
         },
+        "bundled_runtime_sha": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            { "type": "null" }
+          ]
+        },
         "delivery_item_6": { "enum": ["not_implemented", "implemented"] },
         "delivery_item_9": { "enum": ["not_implemented", "implemented"] },
         "smoke_test": { "enum": ["not_run", "passed"] },
@@ -161,6 +221,10 @@
             "pattern": "^https://github\\.com/avibe-bot/vibe-show-runtime/pull/[1-9][0-9]*$"
           },
           "smoke_tested_runtime_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "bundled_runtime_sha": {
             "type": "string",
             "pattern": "^[0-9a-f]{40}$"
           },

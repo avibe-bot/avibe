@@ -4,6 +4,7 @@ import copy
 import itertools
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,16 @@ def _assert_runtime_release_gate(release_gate: dict[str, Any]) -> None:
     assert release_gate["delivery_item_9"] == "implemented"
     assert release_gate["smoke_test"] == "passed"
     assert release_gate["reviewed_runtime_pr"] is not None
-    assert release_gate["reviewed_runtime_sha"] == release_gate["smoke_tested_runtime_sha"]
+    assert (
+        len(
+            {
+                release_gate["reviewed_runtime_sha"],
+                release_gate["smoke_tested_runtime_sha"],
+                release_gate["bundled_runtime_sha"],
+            }
+        )
+        == 1
+    )
 
 
 def test_all_json_files_parse_and_all_schemas_are_valid() -> None:
@@ -158,6 +168,15 @@ def test_show_access_closed_vocabularies_and_state_invariants() -> None:
     with pytest.raises(ValidationError):
         validator.validate(invalid)
 
+    pending = next(
+        copy.deepcopy(fixture["show_access"])
+        for fixture in states
+        if fixture["show_access"]["coordinator"].get("kind") == "grant_change"
+    )
+    pending["coordinator"]["source_grant_revision"] = None
+    with pytest.raises(ValidationError):
+        validator.validate(pending)
+
 
 def test_apply_and_hosted_terminal_vocabularies_are_frozen() -> None:
     apply_schema = _load("apply-mutation.schema.json")
@@ -186,6 +205,31 @@ def test_apply_and_hosted_terminal_vocabularies_are_frozen() -> None:
     invalid["outcome"] = "changed"
     with pytest.raises(ValidationError):
         _validator("hosted-operation.schema.json").validate(invalid)
+
+    offline_private = next(
+        fixture
+        for fixture in _load("fixtures/apply-mutations.json")["fixtures"]
+        if fixture["id"] == "APPLY-OFFLINE-TO-PRIVATE"
+    )
+    assert offline_private["result"]["outcome"] == "pending"
+    state = offline_private["result"]["show_access"]
+    assert (state["availability"], state["access_mode"], state["share_admission_gate"]) == (
+        "offline",
+        "private",
+        "open",
+    )
+    assert state["coordinator"] == {
+        "state": "pending",
+        "kind": "grant_cleanup",
+        "phase": "cleanup_pending",
+        "mutation_id": "mut_offline_private_001",
+        "source_audience_revision": 3,
+        "source_grant_revision": 4,
+        "target_access_mode": "private",
+        "target_share_binding": None,
+        "operation_id": None,
+        "target_grant_commitment": None,
+    }
 
 
 def test_exact_emails_exist_only_in_operation_inputs_or_authenticated_hosted_results() -> None:
@@ -326,6 +370,8 @@ def test_capability_rules_form_one_closed_matrix_and_keep_page_email_out_of_show
         if point["surface"] == "/p":
             assert decision["hmr"] is False
             assert decision["runtime_context"] != "private"
+            if point["request_kind"] == "other":
+                assert decision["top_level_editor_redirect"] is False
         if point["principal"] == "page_email_viewer":
             assert decision["show_editor_capability"] is False
             assert decision["annotations"] is False
@@ -338,6 +384,7 @@ def test_capability_rules_form_one_closed_matrix_and_keep_page_email_out_of_show
                 "availability": "active",
                 "access_mode": point["access_mode"],
                 "share_admission_gate": "open",
+                "request_kind": "trusted_top_level_navigation",
                 "principal": "owner_editor",
                 "keyed_context": "supported",
             }
@@ -347,7 +394,7 @@ def test_capability_rules_form_one_closed_matrix_and_keep_page_email_out_of_show
             assert point["principal"] == "owner_editor"
             assert decision["show_editor_capability"] is True
 
-    assert expanded == 2 * 2 * 3 * 2 * 4 * 3
+    assert expanded == 2 * 2 * 3 * 2 * 2 * 4 * 3
 
 
 def test_runtime_constants_and_release_advertisement_match_the_frozen_contract() -> None:
@@ -372,9 +419,32 @@ def test_runtime_constants_and_release_advertisement_match_the_frozen_contract()
         "reject",
     ]
 
+    response_cases = {case["id"]: case for case in contract["shared_response_cases"]}
+    assert set(response_cases) == {
+        "keyed_immutable_graph_success",
+        "keyed_development_diagnostic",
+        "legacy_unclassified_transform_error",
+        "legacy_raw_or_nested_fs_graph",
+    }
+    for case in response_cases.values():
+        assert all(
+            case[field] is False
+            for field in ("raw_source", "host_path", "private_session_path", "development_diagnostic")
+        )
+    legacy_failures = [
+        response_cases["legacy_unclassified_transform_error"],
+        response_cases["legacy_raw_or_nested_fs_graph"],
+    ]
+    for case in legacy_failures:
+        assert case["runtime_mode"] == "legacy_singleton"
+        assert case["outcome"] == "fixed_path_free_unavailable"
+        assert case["body_source"] == "fixed_sanitized_representation"
+        assert case["url_header_policy"] == "remove_url_bearing_headers"
+
     release_gate = contract["release_gate"]
     assert release_gate["reviewed_runtime_sha"] == "ee3b0b490ad8b4afafb59cf37e2d57a20325208a"
     assert release_gate["smoke_tested_runtime_sha"] is None
+    assert release_gate["bundled_runtime_sha"] is None
     assert release_gate["feature_advertisement_allowed"] is False
     _assert_runtime_release_gate(release_gate)
 
@@ -390,6 +460,7 @@ def test_runtime_constants_and_release_advertisement_match_the_frozen_contract()
             "reviewed_runtime_sha": candidate_sha,
             "reviewed_runtime_pr": "https://github.com/avibe-bot/vibe-show-runtime/pull/999",
             "smoke_tested_runtime_sha": candidate_sha,
+            "bundled_runtime_sha": candidate_sha,
             "delivery_item_6": "implemented",
             "delivery_item_9": "implemented",
             "smoke_test": "passed",
@@ -399,11 +470,12 @@ def test_runtime_constants_and_release_advertisement_match_the_frozen_contract()
     _validator("runtime-context.schema.json").validate(eligible)
     _assert_runtime_release_gate(eligible["release_gate"])
 
-    mismatched = copy.deepcopy(eligible)
-    mismatched["release_gate"]["smoke_tested_runtime_sha"] = "8" * 40
-    _validator("runtime-context.schema.json").validate(mismatched)
-    with pytest.raises(AssertionError):
-        _assert_runtime_release_gate(mismatched["release_gate"])
+    for field in ("smoke_tested_runtime_sha", "bundled_runtime_sha"):
+        mismatched = copy.deepcopy(eligible)
+        mismatched["release_gate"][field] = "8" * 40
+        _validator("runtime-context.schema.json").validate(mismatched)
+        with pytest.raises(AssertionError):
+            _assert_runtime_release_gate(mismatched["release_gate"])
 
 
 def test_legacy_put_has_a_one_way_enforcement_and_retirement_boundary() -> None:
@@ -434,7 +506,7 @@ def test_mirror_registry_names_every_repository_and_security_boundary() -> None:
     repositories = {item["id"] for item in registry["repositories"]}
     assert repositories == {"avibe", "avibe-backend", "vibe-show-runtime"}
     interfaces = {item["id"]: item for item in registry["interfaces"]}
-    assert set(interfaces) == {f"C{index:02d}" for index in range(1, 15)}
+    assert set(interfaces) == {f"C{index:02d}" for index in range(1, 16)}
     assert len(interfaces) == len(registry["interfaces"])
     touched_repositories = {
         endpoint["repository"] for item in registry["interfaces"] for endpoint in [item["producer"], *item["consumers"]]
@@ -446,24 +518,36 @@ def test_mirror_registry_names_every_repository_and_security_boundary() -> None:
         "vibe_instance_access_source",
     ]
     assert interfaces["C09"]["signature"]["schema"] == "capability-matrix.json"
+    assert "request_kind" in interfaces["C09"]["signature"]["covered_fields"]
     assert interfaces["C10"]["signature"]["covered_fields"][:2] == [
         SHOW_RUNTIME_PROTOCOL_HEADER,
         SHOW_RUNTIME_CONTEXT_HEADER,
     ]
     assert interfaces["C11"]["signature"]["covered_fields"] == ["protocol", "features"]
-    assert interfaces["C13"]["signature"]["covered_fields"][:3] == [
+    assert interfaces["C13"]["signature"]["covered_fields"][:4] == [
         "reviewed_runtime_sha",
         "reviewed_runtime_pr",
         "smoke_tested_runtime_sha",
+        "bundled_runtime_sha",
     ]
+    assert "runtime_source.ref" in interfaces["C13"]["signature"]["result"]
     assert interfaces["C13"]["delivery"]["mechanism"] == "reviewed_release_manifest"
     assert interfaces["C14"]["signature"]["schema"] == "rollout.json"
+    assert interfaces["C15"]["signature"]["schema"] == "runtime-context.json#/shared_response_cases"
+    assert interfaces["C15"]["delivery"]["mechanism"] == "loopback_http_response"
 
 
 def test_every_design_scenario_is_bound_and_every_anchor_resolves() -> None:
-    design_ids = set(re.findall(r"`(SHOW-LIVE-[0-9]{3})`", DESIGN.read_text(encoding="utf-8")))
     binding_document = _load("scenario-bindings.json")
-    assert binding_document["design_sha"] == _load("mirror-registry.json")["authority"]["source_sha"]
+    design_sha = binding_document["design_sha"]
+    assert design_sha == _load("mirror-registry.json")["authority"]["source_sha"]
+    pinned_design = subprocess.run(
+        ["git", "show", f"{design_sha}:{DESIGN.as_posix()}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    design_ids = set(re.findall(r"`(SHOW-LIVE-[0-9]{3})`", pinned_design))
     bindings = binding_document["bindings"]
     binding_ids = [binding["scenario_id"] for binding in bindings]
     assert len(binding_ids) == len(set(binding_ids))

@@ -117,11 +117,12 @@ cannot write around the gate.
 ## Capability boundary
 
 `capability-matrix.json` is a compressed closed matrix. Tests expand all
-`2 surfaces x 2 availability values x 3 modes x 2 admission-gate states x 4 principals x 3 Runtime outcomes`
+`2 surfaces x 2 availability values x 3 modes x 2 admission-gate states x 2 request kinds x 4 principals x 3 Runtime outcomes`
 and require exactly one matching rule per combination.
 
 - `/p` is shared and has no HMR for every viewer. A supported Runtime may redirect an
-  authorized editor's trusted top-level navigation before returning page bytes.
+  authorized editor's trusted top-level navigation before returning page bytes. A
+  subresource, prewarm, API, or other non-top-level request never redirects.
 - `closed_pending` denies every `/p` read and editor redirect. Canonical `/show`
   remains independently governed by resource authority and never consumes the
   page-email gate.
@@ -159,12 +160,13 @@ one reviewed Runtime head:
    provenance, header filtering, and bounded admission.
 3. The bundled Runtime smoke test passes on that exact head, recorded separately as
    `smoke_tested_runtime_sha`.
-4. This contract is updated to pin that exact 40-character SHA in both
-   `reviewed_runtime_sha` and `smoke_tested_runtime_sha`, then sets the three evidence
-   fields to `implemented`, `implemented`, and `passed` before changing
+4. The Runtime manifest pins that same head as `bundled_runtime_sha`; its value is
+   the exact `show-runtime-manifest.json` `runtime_source.ref`, never a floating ref.
+5. This contract sets the three evidence fields to `implemented`, `implemented`,
+   and `passed` before changing
    `feature_advertisement_allowed` to true.
 
-Schema validation rejects the current baseline and any missing review or smoke SHA
-when advertisement is true. Contract tests additionally require the reviewed and
-smoke-tested SHAs to be identical. Avibe still accepts Runtime support only from the
-wire capability response; a package version or successful app request is not proof.
+Schema validation rejects the current baseline and any missing reviewed, smoke-tested,
+or bundled SHA when advertisement is true. Contract tests additionally require all
+three SHAs to be identical. Avibe still accepts Runtime support only from the wire
+capability response; a package version or successful app request is not proof.

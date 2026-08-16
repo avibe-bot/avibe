@@ -154,7 +154,7 @@
         "message_type": "apply_result",
         "page_id": "ses_apply_offline",
         "mutation_id": "mut_offline_private_001",
-        "outcome": "applied",
+        "outcome": "pending",
         "show_access": {
           "schema_version": 1,
           "page_id": "ses_apply_offline",
@@ -165,7 +165,18 @@
           "grant_revision": 4,
           "grant_commitment": "3333333333333333333333333333333333333333333333333333333333333333",
           "share_admission_gate": "open",
-          "coordinator": { "state": "idle" }
+          "coordinator": {
+            "state": "pending",
+            "kind": "grant_cleanup",
+            "phase": "cleanup_pending",
+            "mutation_id": "mut_offline_private_001",
+            "source_audience_revision": 3,
+            "source_grant_revision": 4,
+            "target_access_mode": "private",
+            "target_share_binding": null,
+            "operation_id": null,
+            "target_grant_commitment": null
+          }
         }
       }
     }

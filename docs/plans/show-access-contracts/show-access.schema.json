@@ -173,9 +173,7 @@
         "phase": { "enum": ["commit_pending", "commit_unknown", "reconcile_pending"] },
         "mutation_id": { "$ref": "#/$defs/mutation_id" },
         "source_audience_revision": { "$ref": "#/$defs/revision" },
-        "source_grant_revision": {
-          "oneOf": [{ "$ref": "#/$defs/revision" }, { "type": "null" }]
-        },
+        "source_grant_revision": { "$ref": "#/$defs/revision" },
         "target_access_mode": { "const": "limited" },
         "target_share_binding": { "$ref": "#/$defs/bound_share" },
         "operation_id": { "$ref": "#/$defs/operation_id" },
@@ -203,9 +201,7 @@
         "phase": { "const": "cleanup_pending" },
         "mutation_id": { "$ref": "#/$defs/mutation_id" },
         "source_audience_revision": { "$ref": "#/$defs/revision" },
-        "source_grant_revision": {
-          "oneOf": [{ "$ref": "#/$defs/revision" }, { "type": "null" }]
-        },
+        "source_grant_revision": { "$ref": "#/$defs/revision" },
         "target_access_mode": { "enum": ["private", "public"] },
         "target_share_binding": { "$ref": "#/$defs/share_binding" },
         "operation_id": {

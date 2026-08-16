@@ -5,6 +5,7 @@
     "availability": ["active", "offline"],
     "access_mode": ["private", "limited", "public"],
     "share_admission_gate": ["open", "closed_pending"],
+    "request_kind": ["trusted_top_level_navigation", "other"],
     "principal": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"],
     "keyed_context": ["supported", "unsupported", "transient-unknown"]
   },
@@ -16,6 +17,7 @@
         "availability": "offline",
         "access_mode": "*",
         "share_admission_gate": "*",
+        "request_kind": "*",
         "principal": "*",
         "keyed_context": "*"
       },
@@ -36,6 +38,7 @@
         "availability": "active",
         "access_mode": "*",
         "share_admission_gate": "*",
+        "request_kind": "*",
         "principal": ["anonymous", "page_email_viewer"],
         "keyed_context": "*"
       },
@@ -56,6 +59,7 @@
         "availability": "active",
         "access_mode": "*",
         "share_admission_gate": "*",
+        "request_kind": "*",
         "principal": "resource_viewer",
         "keyed_context": "*"
       },
@@ -76,6 +80,7 @@
         "availability": "active",
         "access_mode": "*",
         "share_admission_gate": "*",
+        "request_kind": "*",
         "principal": "owner_editor",
         "keyed_context": "*"
       },
@@ -96,6 +101,7 @@
         "availability": "active",
         "access_mode": "*",
         "share_admission_gate": "closed_pending",
+        "request_kind": "*",
         "principal": "*",
         "keyed_context": "*"
       },
@@ -116,6 +122,7 @@
         "availability": "active",
         "access_mode": "private",
         "share_admission_gate": "open",
+        "request_kind": "*",
         "principal": "*",
         "keyed_context": "*"
       },
@@ -136,6 +143,7 @@
         "availability": "active",
         "access_mode": "limited",
         "share_admission_gate": "open",
+        "request_kind": "*",
         "principal": "anonymous",
         "keyed_context": "*"
       },
@@ -156,6 +164,7 @@
         "availability": "active",
         "access_mode": "limited",
         "share_admission_gate": "open",
+        "request_kind": "*",
         "principal": "page_email_viewer",
         "keyed_context": "*"
       },
@@ -181,6 +190,7 @@
         "availability": "active",
         "access_mode": "limited",
         "share_admission_gate": "open",
+        "request_kind": "*",
         "principal": "resource_viewer",
         "keyed_context": "*"
       },
@@ -201,6 +211,7 @@
         "availability": "active",
         "access_mode": "limited",
         "share_admission_gate": "open",
+        "request_kind": "trusted_top_level_navigation",
         "principal": "owner_editor",
         "keyed_context": "supported"
       },
@@ -215,12 +226,34 @@
       "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-005"]
     },
     {
+      "id": "MATRIX-P-LIMITED-EDITOR-SUPPORTED-NONREDIRECT",
+      "selector": {
+        "surface": "/p",
+        "availability": "active",
+        "access_mode": "limited",
+        "share_admission_gate": "open",
+        "request_kind": "other",
+        "principal": "owner_editor",
+        "keyed_context": "supported"
+      },
+      "decision": {
+        "read_decision": "serve_shared",
+        "show_editor_capability": true,
+        "runtime_context": "shared",
+        "annotations": true,
+        "hmr": false,
+        "top_level_editor_redirect": false
+      },
+      "scenario_ids": ["SHOW-LIVE-011", "SHOW-LIVE-017"]
+    },
+    {
       "id": "MATRIX-P-LIMITED-EDITOR-COMPAT",
       "selector": {
         "surface": "/p",
         "availability": "active",
         "access_mode": "limited",
         "share_admission_gate": "open",
+        "request_kind": "*",
         "principal": "owner_editor",
         "keyed_context": ["unsupported", "transient-unknown"]
       },
@@ -241,6 +274,7 @@
         "availability": "active",
         "access_mode": "public",
         "share_admission_gate": "open",
+        "request_kind": "*",
         "principal": ["anonymous", "page_email_viewer", "resource_viewer"],
         "keyed_context": "*"
       },
@@ -261,6 +295,7 @@
         "availability": "active",
         "access_mode": "public",
         "share_admission_gate": "open",
+        "request_kind": "trusted_top_level_navigation",
         "principal": "owner_editor",
         "keyed_context": "supported"
       },
@@ -275,12 +310,34 @@
       "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-005", "SHOW-LIVE-013"]
     },
     {
+      "id": "MATRIX-P-PUBLIC-EDITOR-SUPPORTED-NONREDIRECT",
+      "selector": {
+        "surface": "/p",
+        "availability": "active",
+        "access_mode": "public",
+        "share_admission_gate": "open",
+        "request_kind": "other",
+        "principal": "owner_editor",
+        "keyed_context": "supported"
+      },
+      "decision": {
+        "read_decision": "serve_shared",
+        "show_editor_capability": true,
+        "runtime_context": "shared",
+        "annotations": true,
+        "hmr": false,
+        "top_level_editor_redirect": false
+      },
+      "scenario_ids": ["SHOW-LIVE-011", "SHOW-LIVE-017"]
+    },
+    {
       "id": "MATRIX-P-PUBLIC-EDITOR-COMPAT",
       "selector": {
         "surface": "/p",
         "availability": "active",
         "access_mode": "public",
         "share_admission_gate": "open",
+        "request_kind": "*",
         "principal": "owner_editor",
         "keyed_context": ["unsupported", "transient-unknown"]
       },
@@ -315,6 +372,11 @@
       "id": "INVARIANT-P-NO-PRIVATE-CONTEXT",
       "assertion": "shared_route_never_private_context",
       "scenario_ids": ["SHOW-LIVE-005", "SHOW-LIVE-011", "SHOW-LIVE-013"]
+    },
+    {
+      "id": "INVARIANT-NON-TOP-LEVEL-NO-REDIRECT",
+      "assertion": "non_top_level_never_redirects",
+      "scenario_ids": ["SHOW-LIVE-011", "SHOW-LIVE-017"]
     },
     {
       "id": "INVARIANT-OFFLINE-NO-ROUTE",
