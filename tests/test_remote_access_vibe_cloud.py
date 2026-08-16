@@ -2798,6 +2798,80 @@ def test_cloud_token_for_request_requires_editor_role(monkeypatch) -> None:
     assert called is False
 
 
+def test_cloud_token_endpoint_local_origin_without_session_degrades_to_unavailable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Issue #1491: a local-origin request has no avibe.bot session cookie by
+    design, so the endpoint must return the documented 503 ``cloud_unavailable``
+    fallback instead of the login-required signal that triggers the frontend's
+    full-page redirect to ``/auth/login`` (which the local host rejects)."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _cloud_broker_config()
+    config.save()
+
+    response = ui_server.app.test_client().get(
+        "/api/cloud/token",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "cloud_unavailable"}
+
+
+def test_cloud_token_endpoint_remote_origin_without_session_requires_login(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """On the genuine remote-access host, a missing session still means the
+    browser must log in, so the recovery signal is preserved there."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _cloud_broker_config()
+    config.save()
+
+    response = ui_server.app.test_client().get(
+        "/api/cloud/token",
+        base_url="https://alex.avibe.bot",
+    )
+
+    assert response.status_code == 401
+    assert response.get_json() == {"ok": False, "error": "remote_access_login_required"}
+
+
+def test_cloud_token_endpoint_remote_origin_with_session_mints_token(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """An authenticated remote request still reaches the mint path after the
+    local-origin degrade branch is added in front of it."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _cloud_broker_config()
+    config.save()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *a, **k: {"access_token": "ct_abc", "token_type": "Bearer", "expires_in": 43200},
+    )
+
+    client = ui_server.app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _session_cookie(config),
+        domain="alex.avibe.bot",
+    )
+    response = client.get(
+        "/api/cloud/token",
+        base_url="https://alex.avibe.bot",
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["token"] == "ct_abc"
+    assert payload["scope"] == "asr"
+    assert response.headers["Cache-Control"] == "no-store, private"
+
+
 def test_ra_tq_029_connector_environment_applies_ip_and_interface_controls() -> None:
     config = _config()
     cloud = config.remote_access.vibe_cloud
