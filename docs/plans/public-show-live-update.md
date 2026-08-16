@@ -130,22 +130,41 @@ cannot read these settings APIs, mutate the audience, load the Workbench, or
 promote itself through a broader Instance endpoint.
 
 Audience changes use one Apply action and one durable fail-closed coordinator
-rather than three independent writes. Every Apply allocates a client mutation ID
-and first commits a local transition record containing the source revision, target
-mode/set, and phase. Any transition that can add, remove, or replace page-email
-authority also sets `page_email_gate=closed_pending` in that same transaction.
-While that durable barrier exists, neither `/p/` nor the page-email branch of the
-canonical `/show/` ACL accepts a page-email claim, including a claim minted before
-the transition. Owner and organization resource ACLs remain independent.
+rather than three independent writes. Every Apply allocates a client mutation ID.
+For a change that carries exact emails, the device first sends the normalized
+in-memory target and expected authorization revision to a backend `prepare`
+operation. Preparation stores the target only inside the existing hosted grant
+trust boundary, changes no grant authority, and returns an opaque operation ID plus
+target digest. A prepared operation has a non-renewable 24-hour lifetime. If this
+step fails or its response is lost, no local transition is accepted and the
+previous audience remains authoritative; an unreferenced preparation can only
+expire, never commit itself.
 
-The backend atomically replaces the exact-email set with the mutation ID and
-expected authorization revision. It retains an idempotent mutation result that the
-device can query after a lost response or process restart. The device reopens the
-page-email gate only after a read-after-write reconciliation proves that the
-backend's committed mutation ID, exact set, and returned authorization revision all
-match the local target and the revision has been persisted locally. An unavailable,
-ambiguous, conflicting, or unpersisted result leaves the durable gate closed; a
-periodic revision poll is recovery evidence, never the security boundary.
+After preparation succeeds, one local transaction persists only the opaque
+operation ID, source revision, target mode, target digest, and phase. It never
+persists the email addresses. Any transition that can add, remove, or replace
+page-email authority also sets `page_email_gate=closed_pending` in that same
+transaction. While that durable barrier exists, neither `/p/` nor the page-email
+branch of the canonical `/show/` ACL accepts a page-email claim, including a claim
+minted before the transition. Owner and organization resource ACLs remain
+independent.
+
+The device then asks the backend to `commit` the prepared operation. Commit
+atomically replaces the exact-email set under the expected authorization revision
+and retains an idempotent mutation result. After a lost response or process restart,
+the device resumes by opaque operation ID; a committed operation returns the exact
+current set/digest and authorization revision, while an uncommitted expired
+operation cannot mutate grants. The device reopens the page-email gate only after a
+read-after-write reconciliation proves that the backend's committed operation,
+exact current set/digest, and returned authorization revision match the local
+record and the revision has been persisted locally. The backend deletes the
+prepared target copy after device acknowledgement or the 24-hour hard limit; a
+terminal result retains only non-PII metadata and the digest. If the result copy has
+expired after commit, the authoritative current grant read supplies the same digest
+and revision proof. An unavailable, ambiguous, conflicting, expired-uncommitted, or
+unpersisted result leaves the durable gate closed. Email-list edits then require the
+owner to resubmit the target; empty-set cleanup can retry automatically. A periodic
+revision poll is recovery evidence, never the security boundary.
 
 The coordinator applies that invariant to every transition:
 
@@ -325,15 +344,24 @@ Content-Type: application/json
 {"protocol":1,"features":["show-context-key-v1"]}
 ```
 
-Avibe supplies the loopback-only `X-Avibe-Show-Context: private` or
-`X-Avibe-Show-Context: shared` header on every app-graph request, including
-requests made before capability negotiation finishes. A legacy Runtime ignores
-the unknown header; a new Runtime can therefore route shared traffic safely even
-when `GET /capabilities` is temporarily unavailable. With
-`show-context-key-v1`,
-Runtime keys Vite ownership by `(session_id, context)`. Avibe strips any
-browser-supplied copy of this header. Runtime health alone, an accepted app
-request, a package version, or support for `x-vibe-show-base` is not capability
+New Avibe supplies one loopback-only protocol envelope on every app-graph request,
+including requests made before capability negotiation finishes:
+
+```http
+X-Avibe-Show-Protocol: 1
+X-Avibe-Show-Context: private | shared
+```
+
+A legacy Runtime ignores both unknown headers. A new Runtime treats protocol `1`
+as an explicit client declaration and requires a valid context before resolving a
+Session or changing Vite ownership. A request with no protocol header is from a
+released/rolled-back Avibe client: Runtime ignores any context value, selects the
+legacy singleton base-switching path from the existing `x-vibe-show-base`, and does
+not claim keyed isolation. An unknown protocol value fails closed. This preserves
+old-Avibe/new-Runtime source and rollback pairings without letting a missing header
+from a declared new client silently downgrade its contract. Avibe strips any
+browser-supplied copy of both protocol headers. Runtime health alone, an accepted
+app request, a package version, or support for `x-vibe-show-base` is not capability
 evidence.
 
 Capability negotiation has three process-scoped outcomes:
@@ -350,13 +378,14 @@ capability. Stopping or replacing Runtime, or changing its base URL/process
 identity, clears every cached outcome and retry deadline.
 
 Context selection is a total Runtime request contract, not a proxy-only header.
-After Runtime advertises support, every operation that can create, read, prewarm,
-or connect to an app graph supplies an explicit context: entry and module HTTP
-requests, the SPA fallback retry, API handler requests, private HMR proxy setup,
-startup reconciliation, and `vibe show update` prewarm. Runtime rejects a missing
-or invalid context before resolving a Session or changing Vite ownership. Shared
+Every protocol-`1` operation that can create, read, prewarm, or connect to an app
+graph supplies an explicit context: entry and module HTTP requests, the SPA fallback
+retry, API handler requests, private HMR proxy setup, startup reconciliation, and
+`vibe show update` prewarm. Runtime rejects a missing or invalid context from a
+declared protocol-`1` client before resolving a Session or changing Vite ownership;
+only a headerless legacy client receives the singleton compatibility path. Shared
 prewarm uses `shared`; canonical `/show/` prewarm and HMR use `private`. The
-implementation keeps one typed context parameter through `ShowRuntimeManager`
+implementation keeps one typed protocol envelope through `ShowRuntimeManager`
 rather than allowing individual callers to assemble headers.
 
 The shared context is a read transform surface, not a publication guarantee. It
@@ -560,6 +589,7 @@ request.
 | A shared document outlives its absolute namespace/context lifetime | Return a fixed stale-document response for later module or lazy-asset reads and require reload | Namespace hard-expiry metric without source paths |
 | Runtime emits a development diagnostic or unsafe URL header | Preserve only a safe status class/body and filtered headers | Redacted operator-only diagnostic |
 | Limited-list replacement has an ambiguous result | Keep the durable page-email gate closed across retries and restarts until read-after-write reconciliation persists the exact mutation result | Mutation ID, target digest, and redacted reconciliation state |
+| Prepared email operation expires before commit | Keep the page-email gate closed when a local transition exists, discard the opaque operation reference, and require target resubmission; a preparation with no local transition expires without changing the audience | Operation expiry and non-PII target digest |
 | Limited email removed | Reject the viewer's next network request and invalidate its stale revision; no HMR or annotation channel exists to close | Authorization-revision log |
 | Limited page becomes private/public while hosted cleanup fails | Reject page-email claims on both `/p/` and `/show/` from the local mode commit; retry cleanup without reopening authority | Durable audience state and cleanup-pending record |
 | Editor role revoked but read ACL remains | Close private HMR; retain entitled private document/module reads; next `/p/` navigation stays shared only if its audience read rule succeeds | Existing authorization-revision/resource-revocation log |
@@ -639,20 +669,22 @@ feature, not a prerequisite for capability-gated editor HMR.
 2. Replace workspace audience plus public-link switch with the three-option
    select. Render exact emails only for `limited`, and link controls only for
    `limited | public`; keep availability separate.
-3. Implement the persistent page-email barrier, idempotent backend mutation-result
-   lookup, and fail-closed access coordinator. Retire the independent visibility
-   and email mutation paths after compatibility callers migrate.
+3. Implement backend prepare/commit email operations, the non-PII persistent
+   page-email barrier, idempotent mutation-result/current-grant lookup, and the
+   fail-closed access coordinator. Retire the independent visibility and email
+   mutation paths after compatibility callers migrate.
 4. Make `/p/<share>/` resolve both `limited` and `public`. Add the limited login,
    mode-scoped exact page-entitlement check on both `/p/` and `/show/`, generic
    denial, current-revision check, and private/no-store response policy.
 5. Factor annotation authorization into the shared, resource-aware
    `ShowEditorCapability`, explicitly excluding page-email entitlement, and use
    the same result for top-level editor navigation.
-6. Add the explicit Runtime capability state machine and one typed context
-   parameter; split canonical `private` and disposable `shared` context ownership
+6. Add the explicit Runtime capability state machine and one typed protocol
+   envelope; split canonical `private` and disposable `shared` context ownership
    without changing the private URL or bootstrap protocol. Migrate every HTTP,
-   WebSocket, fallback, and prewarm caller in the same contract change, and send
-   the backward-compatible context header before negotiation completes.
+   WebSocket, fallback, and prewarm caller in the same contract change, send the
+   protocol/context headers before negotiation completes, and retain the headerless
+   singleton path only for released clients.
 7. Redirect authorized top-level `/p/` navigations to the equivalent `/show/`
    route. Never route a `/p/` subresource to the private context. Keep every
    remaining `/p/` request on the shared transform/shim path and remove the
@@ -677,9 +709,11 @@ the redirect only after `GET /capabilities` returns protocol `1` and the exact
 `show-context-key-v1` feature. A definitive legacy Runtime keeps `/p/` on the
 existing no-HMR behavior and its existing single-context limitation; it is never
 described as isolated. A transient or malformed startup response fails the current
-request closed to shared mode, carries the explicit backward-compatible context,
-and remains retryable. An accepted legacy app request is not negotiation, and the
-old anonymous shared-route socket is never a compatibility fallback.
+request closed to shared mode, carries the explicit protocol/context envelope,
+and remains retryable. A new Runtime receiving no protocol header preserves the
+released Avibe singleton behavior; that headerless request is compatibility, not
+negotiation or keyed isolation. An accepted legacy app request is not negotiation,
+and the old anonymous shared-route socket is never a compatibility fallback.
 
 ### Data migration
 
@@ -694,8 +728,9 @@ The schema migration separates availability from audience and is fail-closed:
 
 Until the device can read the hosted grant set, an old private page stays
 private and records migration pending with the source `audience_revision` and
-legacy-marker generation; it is never guessed to be limited. Reconciliation may
-commit only with a compare-and-swap proving that both values are still current.
+legacy-audience journal generation; it is never guessed to be limited.
+Reconciliation may commit only with a compare-and-swap proving that both values are
+still current.
 Every authoritative audience Apply and every reconciled legacy write increments
 `audience_revision` and deletes any pending migration in the same local transaction
 before remote work begins. A stale worker discards its hosted read and any provisional
@@ -705,30 +740,38 @@ independently stored email set is cleared after the local public state is
 authoritative. Organization resource policies are not mapped into external audience
 modes; they remain canonical `/show/` collaborator policy.
 
-The compatibility read API projects old `visibility` fields for one rollback
-window, and new writes maintain a safe projection: public maps to old `public`,
-private and limited map to old `private`, and offline maps to old `offline`.
-The migration also installs a durable legacy-write marker triggered by every
-assignment to the legacy visibility column, including an assignment whose value is
-unchanged. A new writer updates `ShowAccess`, writes its legacy projection, and
-clears the marker only after both values are committed in the same transaction.
-An old binary cannot clear it, so any old-binary write remains distinguishable from
-a projection on the next upgrade. The compatibility column, marker, and trigger
-survive application rollback and schema downgrade for the entire supported
-rollback window; cleanup is a later migration after old binaries are no longer
-supported.
+The compatibility read API projects the complete legacy audience for one rollback
+window. New writes maintain a safe projection: public maps to old `public`; private
+and limited map to old `private`; offline maps to old `offline`; and the projected
+legacy `share_id` is the current binding only for a shareable mode.
 
-On startup or re-upgrade, a set marker makes the last legacy visibility assignment
-the user intent to reconcile before serving the page. Legacy `private` becomes
-active `private`, legacy `offline` becomes offline `private`, and an explicit legacy
-`public` becomes active `public`; a missing/corrupt marker state fails to private.
-The reconciled transaction invalidates the prior share binding where the target no
-longer uses it, makes page-email claims inapplicable unless the result is later
-opened as `limited` through the connected coordinator, writes the new projection,
-and only then clears the marker. A rollback therefore treats `limited` as private
-because older code cannot enforce its `/p/` authentication gate, while a later
-private/offline write by that old binary cannot be overwritten by stale
-`ShowAccess` on re-upgrade.
+The migration installs one durable legacy-audience journal rather than a
+visibility-only marker. Database triggers cover every assignment to any projected
+legacy audience column and record a monotonic generation plus the complete
+post-write legacy snapshot. The invariant is field-based: adding another projected
+audience column automatically requires it in the journal trigger and snapshot
+contract. It therefore captures visibility changes, generated rotations, custom
+slug writes, and unchanged assignments without depending on which released
+`ShowPageStore` method performed the write. A new writer updates `ShowAccess`, writes
+the complete legacy projection, and acknowledges the resulting journal generation
+after those writes but before their single transaction commits. An old binary cannot
+acknowledge it. The compatibility columns, journal, triggers, and acknowledgement
+survive application rollback and schema downgrade for the entire supported rollback
+window; cleanup is a later migration after old binaries are no longer supported.
+
+On startup or re-upgrade, the newest unacknowledged journal snapshot is the legacy
+user intent to reconcile before serving the page. Legacy `private` becomes active
+`private` and clears the binding; legacy `offline` becomes offline `private` and
+clears it; legacy `public` becomes active `public` with the exact journaled slug
+after an atomic uniqueness/ownership check. A missing/corrupt snapshot or a slug
+conflict fails to private with no share route and requires the owner to choose a new
+link; stale `ShowAccess` never wins the conflict. The reconciled transaction makes
+page-email claims inapplicable unless the result is later opened as `limited`
+through the connected coordinator, writes the complete new projection, advances
+`audience_revision`, and only then acknowledges the journal generation. A rollback
+therefore treats `limited` as private because older code cannot enforce its `/p/`
+authentication gate, while a visibility, rotation, or custom-slug write by that old
+binary cannot be overwritten by stale `ShowAccess` on re-upgrade.
 
 Binary downgrade has a fail-closed preflight before the current executable or
 compatibility schema is replaced. The updater acquires the audience coordinator's
@@ -775,19 +818,24 @@ claim, even though the old binary does not understand `page_email_gate`.
 - prove migration maps old public, private-with-grants, private-without-grants,
   and offline rows exactly as specified, with disconnected reconciliation staying
   private
-- perform a real new-write, binary rollback, legacy public/private/offline write,
-  and re-upgrade round trip; the legacy-write marker must preserve the last user
-  action, including an unchanged-value private assignment, and ambiguous state must
-  fail closed
+- perform a real new-write, binary rollback, every legacy audience-field mutation,
+  and re-upgrade round trip; the journal must preserve the complete latest snapshot,
+  including unchanged assignments, generated rotations, and custom slugs, while a
+  corrupt snapshot or uniqueness conflict fails closed
 - leave an upgrade migration pending, perform a newer audience Apply, then restore
   connectivity; the source-revision compare-and-swap discards the stale migration
   and cannot allocate or reopen a limited audience
 - attempt downgrade while a limited-to-private/public cleanup or mutation result is
   pending; preflight preserves the current binary and schema until hosted grants are
   empty and the authorization revision is reconciled
-- interrupt every limited-list mutation before send, after backend commit, after a
-  lost response, and before local revision persistence; the durable page-email gate
-  stays closed across process restart until the exact mutation result reconciles
+- interrupt every limited-list mutation before backend prepare, after prepare but
+  before the local transaction, after the local transaction but before commit, after
+  backend commit, after a lost response, and before local revision persistence; the
+  local record never contains an email, a preparation never changes authority by
+  itself, and the page-email gate stays closed until the exact result reconciles
+- expire prepared and committed-operation result copies, then recover from opaque
+  operation ID, target digest, and the authoritative current grant revision; failed
+  list edits require resubmission without persisting removed/failed email PII
 - prove a page-email cookie is rejected by both `/p/` and `/show/` immediately after
   the local mode leaves `limited`, even while backend cleanup is unavailable
 
@@ -796,13 +844,16 @@ claim, even though the old binary does not understand `page_email_gate`.
 - Runtime capability negotiation distinguishes supported, definitive legacy, and
   transient-unknown outcomes; transient failures retry and every outcome resets
   with the Runtime process
-- Avibe strips browser context headers; negotiated private and shared contexts
-  have independent keys and lifecycles
-- every app-graph call, including SPA fallback, WebSocket setup, startup
-  reconciliation, and shared/private prewarm, carries the selected typed context;
-  Runtime rejects missing or invalid selection before touching Vite ownership
-- a transient capability probe still sends `shared`, works with the new Runtime,
-  and remains accepted by a legacy Runtime that ignores the header
+- Avibe strips browser protocol/context headers; negotiated private and shared
+  contexts have independent keys and lifecycles
+- every new-client app-graph call, including SPA fallback, WebSocket setup, startup
+  reconciliation, and shared/private prewarm, carries the selected typed protocol
+  envelope; Runtime rejects missing/invalid context only when protocol `1` is
+  declared
+- a transient capability probe still sends protocol `1` plus `shared`, works with
+  the new Runtime, and remains accepted by a legacy Runtime that ignores the headers
+- a released Avibe client sends neither header to a new Runtime and retains the
+  singleton base-switching path; it is never rejected or reported as keyed isolation
 - shared requests never change, close, or rebuild the private context
 - authorized top-level `/p/` navigations redirect before document bytes to the
   equivalent canonical `/show/` route
@@ -864,12 +915,15 @@ claim, even though the old binary does not understand `page_email_gate`.
 | `SHOW-LIVE-020` | Old private/public/offline rows and exact-email grants upgrade | Each page matches the migration table; a disconnected private-with-grants page stays private and pending |
 | `SHOW-LIVE-021` | A live limited-list replacement commits remotely, its response is lost, and Avibe restarts | All page-email reads remain closed until the mutation result and revision reconcile; removed viewers never regain access |
 | `SHOW-LIVE-022` | Limited changes to private while hosted cleanup is unavailable | A stale page-email cookie is rejected on both `/p/` and `/show/`; independent resource collaborators retain their canonical access |
-| `SHOW-LIVE-023` | A public page upgrades, rolls back, is set private by the old binary, then re-upgrades | The legacy marker wins and the page stays private; stale `ShowAccess` cannot reopen anonymous access |
+| `SHOW-LIVE-023` | A public page upgrades, rolls back, is set private by the old binary, then re-upgrades | The newest complete journal snapshot wins and the page stays private; stale `ShowAccess` cannot reopen anonymous access |
 | `SHOW-LIVE-024` | An allowed source is replaced by a sensitive symlink after an opaque handle is issued | The issued handle returns only immutable captured bytes, and the changed path cannot receive a new handle |
 | `SHOW-LIVE-025` | A disconnected private-page migration is pending, then the owner chooses public and later private before reconnecting | The newer revision cancels migration; reconnect cannot allocate a slug, commit limited, or restore the old email audience |
 | `SHOW-LIVE-026` | Limited changes to private while hosted cleanup is unavailable, then binary downgrade is requested | Downgrade is refused without replacing executable/schema; it succeeds only after grants are empty and the new revision is reconciled |
 | `SHOW-LIVE-027` | An anonymous client reads every superseded namespace just before each idle deadline | Each namespace still reaches its non-renewable hard expiry, releases all snapshot bytes, and requires stale documents to reload |
 | `SHOW-LIVE-028` | Anonymous clients keep shared pages active across more Sessions than the Runtime-wide budget | Context and memory stay under the hard limit, reclaimable shared bundles rotate, private HMR keeps its reserve, and excess shared admission is sanitized |
+| `SHOW-LIVE-029` | A public page rolls back, then the old binary rotates and assigns a custom slug before re-upgrade | The newest complete journal snapshot wins; only the final slug resolves, and a conflict fails private without resurrecting stale `ShowAccess` |
+| `SHOW-LIVE-030` | A released Avibe client starts a new Runtime and sends only `x-vibe-show-base` | Entry, module, and prewarm requests retain the legacy singleton behavior; keyed isolation remains disabled until a protocol-`1` client supplies context |
+| `SHOW-LIVE-031` | A limited-list Apply crashes at every prepare/local/commit boundary and later exceeds operation retention | No local row contains an email, prepare alone never changes grants, committed state reconciles by digest/revision, and expired uncommitted edits remain closed until resubmitted |
 
 Focused unit/contract tests, Ruff, repository CI, and local Incus browser
 regression are required. Green unit tests do not replace simultaneous editor,
@@ -889,9 +943,10 @@ The design is implemented when all of the following are true:
   `ShowEditorCapability`, settings, Workbench, Agents annotations, HMR, or another
   Show Page. It authorizes page reads only while current mode is `limited`, the
   durable mutation gate is open, and its revision is current.
-- Every grant-set mutation closes a persistent local page-email gate before remote
-  work and reopens it only after idempotent read-after-write reconciliation; an
-  ambiguous response or restart cannot leave stale grants usable.
+- Every grant-set mutation is prepared without changing authority, then closes a
+  persistent non-PII local page-email gate before commit and reopens it only after
+  idempotent read-after-write reconciliation; an ambiguous response, restart, or
+  expired operation cannot leave stale grants usable or email targets on disk.
 - Authorized share-link editor navigations redirect to the corresponding private URL
   and get the same Vite HMR and React Fast Refresh behavior as private editors.
 - Annotation writes and the share-link editor redirect consume one validated,
@@ -910,18 +965,20 @@ The design is implemented when all of the following are true:
 - Ordinary private module reads preserve resource-viewer access while HMR remains
   editor-only.
 - Runtime support is accepted only through the explicit keyed-context capability
-  handshake; definitive mixed versions retain the existing compatibility
-  limitation, while transient negotiation failures carry the backward-compatible
-  shared context and retry without permanently disabling the feature.
-- Context selection is mandatory at every Runtime app-graph call site, including
-  prewarm and fallback paths, and missing selection fails before Vite ownership.
+  handshake and per-request protocol envelope; definitive mixed versions retain the
+  existing compatibility limitation, while transient negotiation failures carry
+  protocol `1` plus `shared` and retry without permanently disabling the feature.
+- Context selection is mandatory at every protocol-`1` Runtime app-graph call site,
+  including prewarm and fallback paths, and missing selection fails before Vite
+  ownership; a headerless released client retains only the singleton legacy path.
 - Shared file references use leased context-bound opaque handles backed by bounded
   immutable snapshots captured through confinement-safe opens; handle reads never
   reopen mutable pathnames. Raw absolute paths, unsafe URL-bearing response headers,
   and Runtime development diagnostics never reach the browser.
-- Compatibility rollback writes are durably marked and reconciled before serving,
-  so a private/offline change made by an old binary cannot be overwritten by stale
-  `ShowAccess` after re-upgrade.
+- Every compatibility audience-field write is captured as one complete durable
+  legacy snapshot and reconciled before serving, so visibility and share-link
+  changes made by an old binary cannot be overwritten by stale `ShowAccess` after
+  re-upgrade.
 - Pending legacy migration is revision-bound and cancelled by every newer audience
   mutation; downgrade cannot begin while stale hosted email authority could be
   accepted by the old serving path.
