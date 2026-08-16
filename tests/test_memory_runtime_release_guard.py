@@ -77,20 +77,64 @@ def _manifest(
     return manifest, remote
 
 
-def test_guard_accepts_previous_published_runtime_provenance(tmp_path: Path) -> None:
-    previous = guard.PUBLISHED_RUNTIME_PROVENANCE["1.2.1"]
-    manifest, _ = _manifest(tmp_path, everos_version="1.2.1", lock_sha256=previous.lock_sha256)
+@pytest.mark.parametrize("everos_version", sorted(guard.PUBLISHED_RUNTIME_PROVENANCE))
+def test_guard_accepts_every_published_runtime_provenance(
+    tmp_path: Path,
+    everos_version: str,
+) -> None:
+    provenance = guard.PUBLISHED_RUNTIME_PROVENANCE[everos_version]
+    manifest, _ = _manifest(
+        tmp_path,
+        everos_version=everos_version,
+        lock_sha256=provenance.lock_sha256,
+    )
 
     spec = guard.load_release_spec(manifest)
 
     assert spec.release_tag == "v3.1.0"
 
 
+def test_guard_keeps_gh_v3_0_9rc3_runtime_in_coverage() -> None:
+    assert guard.PUBLISHED_RUNTIME_PROVENANCE["1.1.3"] == guard.RuntimeProvenance(
+        python_version="3.12.12",
+        lock_sha256="62b00f1a9ca04cc4ea4c5af51f389ba49acdea8786e5f7044d52823244502c57",
+        uv_version="0.9.18",
+    )
+
+
 def test_guard_rejects_unknown_runtime_provenance(tmp_path: Path) -> None:
     manifest, _ = _manifest(tmp_path, everos_version="1.2.2")
 
-    with pytest.raises(guard.ReleaseGuardError, match="published supported EverOS version"):
+    with pytest.raises(guard.ManifestPolicyError, match="published supported EverOS version"):
         guard.load_release_spec(manifest)
+
+
+def test_guard_cli_distinguishes_policy_rejection_from_missing_bytes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    unsupported, _ = _manifest(tmp_path, everos_version="1.2.2")
+
+    policy_status = guard.main(["--manifest", str(unsupported), "check-policy"])
+    policy_result = json.loads(capsys.readouterr().err)
+
+    assert policy_status == guard.POLICY_EXCLUSION_EXIT
+    assert policy_result["failure_kind"] == "policy"
+
+    supported, _ = _manifest(tmp_path)
+    bytes_status = guard.main(
+        [
+            "--manifest",
+            str(supported),
+            "verify",
+            "--asset-dir",
+            str(tmp_path / "missing-assets"),
+        ]
+    )
+    bytes_result = json.loads(capsys.readouterr().err)
+
+    assert bytes_status == guard.ASSET_FAILURE_EXIT
+    assert bytes_result["failure_kind"] == "bytes"
 
 
 def _fake_download(remote: dict[str, bytes]):
@@ -99,7 +143,7 @@ def _fake_download(remote: dict[str, bytes]):
         try:
             payload = remote[url]
         except KeyError as exc:
-            raise guard.ReleaseGuardError(f"missing test asset: {url}") from exc
+            raise guard.ReleaseAssetError(f"missing test asset: {url}") from exc
         assert len(payload) == expected_size
         destination.write_bytes(payload)
 
@@ -206,7 +250,8 @@ def test_guard_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> No
     )
 
     assert "schedule:" in workflow
-    assert "continue-on-error: true" in workflow
+    assert "continue-on-error: true" not in workflow
+    assert "steps.probe.outputs.result == 'bytes_failure'" in workflow
     assert "gh run download" in workflow
     assert "memory-runtime-release-backup-${{ matrix.manifest.sha256 }}" in workflow
     assert "retention-days: 90" in workflow
@@ -214,7 +259,7 @@ def test_guard_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> No
     assert "--clobber" not in workflow
 
 
-def test_guard_workflow_verifies_every_published_manifest() -> None:
+def test_guard_workflow_reports_and_verifies_supported_published_manifests() -> None:
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/memory-runtime-release-guard.yml").read_text(
         encoding="utf-8"
     )
@@ -223,5 +268,8 @@ def test_guard_workflow_verifies_every_published_manifest() -> None:
     resolution = resolution.split("  guard:", 1)[0]
     assert "manifests=" in resolution
     assert "break" not in resolution
+    assert "check-policy" in resolution
+    assert "Guarded Memory Runtime manifests" in resolution
+    assert "Excluded Memory Runtime manifests" in resolution
     assert "fromJSON(needs.resolve_manifests.outputs.manifests)" in workflow
     assert "matrix.manifest.release_tag" in workflow
