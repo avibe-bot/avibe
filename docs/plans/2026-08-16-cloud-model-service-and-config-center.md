@@ -90,13 +90,15 @@ A **ModelServiceConfig** exists per scope owner and contains up to one slot per 
 | `multimodal` | memory IM-attachment/vision capture | OpenAI `chat/completions` |
 
 Each slot: `provider_label` (display), `base_url`, `model`, `api_key` (write-only),
-`realtime_model` (asr only, optional), `enabled`.
+`realtime_model` + `realtime_url` (asr only, optional — realtime is available iff **both** are
+set; the realtime WS endpoint is a distinct URL, not derived from the HTTP `base_url`), `enabled`.
 
 **Unset multimodal**: there is no server-side fallback. The client leaves the sidecar's multimodal
 endpoint unset, so the engine itself falls back to its chat endpoint (everos's own behavior); the
 `/v1/model/mm/*` proxy path serves only a configured multimodal slot and returns
 `model_service_not_configured` otherwise; `capabilities.multimodal` in §8.2 reports the dedicated
-slot only.
+slot only. The client keys its local attachment-capture gate to *effective* multimodal
+availability (dedicated slot **or** chat fallback), so the fallback actually engages.
 
 ### 5.2 Scope resolution (the one rule)
 
@@ -150,8 +152,9 @@ scope per instance behind them.
 - `model_service_slots`: PK (`config_id`, `capability`); `provider_label`, `base_url`, `model`,
   `realtime_model` (nullable), `api_key_ciphertext`, `enabled`, timestamps, `updated_by_user_id`.
 - `model_usage_events`: `id`, `call_id` (unique index — shared with the reservation's call
-  identity; a retried insert after an ambiguous database result is idempotent), `occurred_at`,
-  `instance_id`, `organization_id` (nullable),
+  identity; a retried insert after an ambiguous database result is idempotent), `probe` (bool,
+  default false), `estimated` (bool, default false), `occurred_at`,
+  `instance_id` (nullable for probe events), `organization_id` (nullable),
   `scope_kind`, `capability`, `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`,
   `status` (`ok` | `error`). Indexes: (`organization_id`, `occurred_at`), (`instance_id`,
   `occurred_at`), (`scope_kind`, `occurred_at`). v1 dashboards aggregate on read; add rollups only
@@ -161,19 +164,23 @@ scope per instance behind them.
   (`reserved` | `settled` | `released`), `created_at`, `expires_at`, `dispatched_at` (stamped
   just before the upstream call). Settlement is idempotent on the call identity; the reaper
   **releases** expired reservations that were never dispatched (certainly-not-sent) and **retains**
-  dispatched ones as conservative charges (possibly-accepted semantics, §6.4). Reservations exist only on
+  dispatched ones as conservative charges (possibly-accepted semantics, §6.4). Realtime
+  extensions share the parent reservation's dispatch state; conservative whole-reservation
+  retention on ambiguous session death is accepted v1 imprecision (free-pool estimates, not
+  billing). Settlement always applies to the reservation's `window_bucket`, fixed at reservation
+  time, even across a month boundary. Reservations exist only on
   enforcement-on paths.
 - `model_access_keys`: `instance_id` (PK), `key_hash`, `created_at`, `rotated_at`, plus
   `previous_key_hash` + `previous_valid_until`. Opaque key (`mak_` prefix), shown once at mint,
   SHA-256 stored — same custody discipline as device secrets. **Rotation is dual-validity**: on
   rotate, the prior key stays accepted for a 24 h grace window, because the still-running sidecar
   and the probe-then-restart settings flow must never race the swap. Rotation retains as
-  `previous` the most-recently-**authenticated** key rather than the last-minted one (each key
-  hash carries `last_seen_at`, stamped on successful authentication, making that distinction
-  durable): a
-  minted-but-never-used key (e.g. a lost rotation response) is discarded by the next rotation
-  without consuming the grace slot, so retrying after a lost response can never orphan the key the
-  sidecar is still using. There is no scheduled rotation; rotation is an on-demand operation
+  `previous` in an **activation-safe** way: each key records `activated_at` on its first
+  successful authentication; `previous` advances only past a key that has authenticated at least
+  once, and a never-activated `current` (e.g. a lost rotation response) is replaced **in place**
+  by the next mint — `previous`, the key the sidecar still uses, is untouched. Concurrent
+  old-sidecar and candidate-probe authentications therefore cannot make the grace decision
+  ambiguous. There is no scheduled rotation; rotation is an on-demand operation
   (suspected leak, hygiene).
 
 ### 6.2 Key custody
@@ -195,7 +202,11 @@ scope per instance behind them.
   organization-scope usage with `probe: true` and `instance_id: null` (the caller is an admin
   session, not an instance) — totals include them, per-instance tables exclude them. Probes cover
   HTTP wire shapes only; the realtime WS protocol is not probed in v1 (recorded follow-up, §12).
-  Ships with M1 so stage → verify → flip needs no plan flip to test.
+  Ships with M1 so stage → verify → flip needs no plan flip to test. When the org already
+  resolves as enterprise (**active scope**), `PUT` runs the same bounded probes inline against the
+  changed slots and rejects on failure (`model_service_verification_failed`, 422) unless
+  `force: true` — a live org's config change is never blindly activated (mirrors the local
+  settings ladder's probe-before-apply).
 - **Platform admin (user session; email ∈ `PLATFORM_ADMIN_EMAILS`, new env following the
   `ORGANIZATION_CREATION_ALLOWED_EMAILS` pattern)**:
   `GET/PUT /api/admin/model-service` (platform slots + limits), `GET /api/admin/model-service/usage`
@@ -221,6 +232,9 @@ scope per instance behind them.
   path has **no verified in-session retry**, so that route alone accepts claimless tokens for a
   12 h transition window after deploy (attributed to platform scope as unattributed-legacy), then
   enforces; every other rewired route enforces immediately.
+  **Operational ordering constraint**: the transition window must precede any enterprise
+  activation — no org is flipped to `enterprise` within the window (M1 rollout deploy-order rule),
+  so unattributed-legacy usage can only ever be platform-scope in fact and invariant 2 holds.
   **Error mapping on legacy voice routes** (invariant 6): `model_service_not_configured` surfaces
   through the existing voice error vocabulary (`asr_not_configured` 503 family; a missing chat
   slot degrades cleanup per §6.5-5); `model_quota_exhausted` (429) and `model_service_unavailable`
@@ -246,7 +260,9 @@ failure fails closed on enforcement-on paths** (`model_service_unavailable`, 503
 made). **Settlement-write failure after a completed upstream call never voids the served
 response**: the response is delivered, the un-settled reservation is later reaped as a retained
 conservative charge, and the failure is loudly surfaced. Pure-telemetry event writes stay
-fail-open per §8.3. Cloud user tokens: TTL drops 12 h → 1 h (clients already refresh at half-life);
+fail-open per §8.3. While enforcement is **off**, `usage-absent` responses are still metered with
+the documented per-capability estimate, flagged `estimated: true` — the observation period's data,
+from which caps will be set, must not understate usage. Cloud user tokens: TTL drops 12 h → 1 h (clients already refresh at half-life);
 revocation-on-use is a recorded follow-up.
 
 ### 6.5 Consolidated enforcement architecture (adjudicated 2026-08-16, post independent security review)
@@ -301,7 +317,10 @@ shape is not extended for this.
   the unchanged current path. Mode changes route through the existing settings-change ladder.
   Cloud mode injects **fixed model aliases** into `EVEROS_*__MODEL` (the proxy selects the real
   upstream model and ignores client-sent names); the embedding alias embeds `embedding_identity`
-  so provider-call diagnostics stay distinguishable across identity changes.
+  so provider-call diagnostics stay distinguishable across identity changes. Cloud memory mode
+  requires **both** `chat` and `embedding` enabled in the bound scope — anything less counts as
+  no memory capability (the no-transition rule below applies), since the engine cannot start
+  without a complete LLM + embedding pair.
 - **Embedding identity**: the cloud config's `embedding_identity` participates in the sidecar's
   vector-space identity exactly like a local embedding config change — an org admin changing the
   embedding slot triggers the existing rebuild flow on every member instance, with the admin UI
@@ -347,7 +366,7 @@ Lanes build against these shapes; deviations route through the PM, never lane-to
 {
   "revision": 12,
   "slots": {
-    "asr":       { "provider_label": "DashScope", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen3-asr-flash", "realtime_model": "qwen3-asr-realtime", "has_api_key": true, "enabled": true },
+    "asr":       { "provider_label": "DashScope", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen3-asr-flash", "realtime_model": "qwen3-asr-realtime", "realtime_url": "wss://dashscope.aliyuncs.com/api-ws/v1/inference", "has_api_key": true, "enabled": true },
     "chat":      { "provider_label": "DeepSeek", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-v4-flash", "has_api_key": true, "enabled": true },
     "embedding": { "provider_label": "DashScope", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "text-embedding-v4", "has_api_key": true, "enabled": true },
     "multimodal": null
@@ -407,6 +426,8 @@ in a controlled way. Fail-closed metering is deliberately deferred to M3, when e
   never produces this error: the response is served and the un-settled reservation is reaped as a
   retained charge (§6.4).
 - `model_quota_exhausted` (429) — platform scope, enforcement on, cap reached. No upstream call made.
+- `model_service_verification_failed` (422) — inline probe of a changed slot failed on an
+  active-scope `PUT`; nothing was saved (override with `force: true`).
 - `model_upstream_error` (502) — upstream provider failure (message scrubbed of secrets).
 - Existing voice error codes unchanged.
 
@@ -461,7 +482,8 @@ in a controlled way. Fail-closed metering is deliberately deferred to M3, when e
   sidecar cloud wiring, settings states, embedding-identity integration, i18n; avibe-docs pages
   (Model Service concept + memory setup rewrite, en/zh 1:1); Model Hub concept-boundary note.
   Acceptance: invariants 1–5, 7, 9, 10; a fresh personal instance enables memory with zero config;
-  an enterprise member's memory hits the org upstream.
+  an enterprise member's memory hits the org upstream; mode initialization ships with
+  released-shape load fixtures per the avibe persisted-shape rule.
 - **M3 — personal quota enforcement + polish**: review observed usage; platform admin sets caps;
   flip enforcement (invariant 8); client-side friendly quota-exhausted handling in memory + voice
   (message + switch-to-custom hint in memory); release notes; org-profile README sync if
