@@ -101,6 +101,9 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     if (event.key !== 'Escape' || event.defaultPrevented) return;
     const target = event.target;
     if (target instanceof Element && target.closest(PARENT_ESCAPE_CLAIM_SELECTOR)) return;
+    // Custom menus render role=menu only while open, so its presence is an
+    // open-state fact even when focus remains on the invoking element.
+    if (document.querySelector('[role="menu"]')) return;
 
     try {
       const frameDocument = iframeRef.current?.contentDocument;

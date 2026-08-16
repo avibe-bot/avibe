@@ -147,6 +147,22 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
     expect(frameKeydown).not.toHaveBeenCalled();
   });
 
+  it('leaves Escape with an outside target while a custom menu is open', () => {
+    const { iframe } = mountBridge();
+    const frameKeydown = listenForFrameKeydown(iframe);
+    reportState(iframe, true);
+
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    document.body.append(menu);
+    const invokingButton = document.createElement('button');
+    document.body.append(invokingButton);
+
+    dispatchParentKeydown(invokingButton);
+
+    expect(frameKeydown).not.toHaveBeenCalled();
+  });
+
   it('leaves Escape with an expanded popup trigger', () => {
     const { iframe } = mountBridge();
     const frameKeydown = listenForFrameKeydown(iframe);
