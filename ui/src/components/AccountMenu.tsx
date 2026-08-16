@@ -24,7 +24,10 @@ export const AccountMenu: React.FC<{ openUpward?: boolean }> = ({ openUpward = f
       }
     };
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsOpen(false);
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setIsOpen(false);
+      }
     };
     if (isOpen) {
       document.addEventListener('mousedown', handleClickOutside);
