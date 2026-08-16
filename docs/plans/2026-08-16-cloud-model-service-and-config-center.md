@@ -87,10 +87,16 @@ A **ModelServiceConfig** exists per scope owner and contains up to one slot per 
 | `asr` | voice transcription + dictation (+ optional `realtime_model`) | DashScope-compatible `chat/completions` with `input_audio`; realtime WS |
 | `chat` | memory LLM, voice transcript cleanup | OpenAI `chat/completions` (streaming supported) |
 | `embedding` | memory embeddings | OpenAI `embeddings` |
-| `multimodal` | memory IM-attachment/vision capture | OpenAI `chat/completions`; falls back to `chat` slot when unset (mirrors everos behavior) |
+| `multimodal` | memory IM-attachment/vision capture | OpenAI `chat/completions` |
 
 Each slot: `provider_label` (display), `base_url`, `model`, `api_key` (write-only),
 `realtime_model` (asr only, optional), `enabled`.
+
+**Unset multimodal**: there is no server-side fallback. The client leaves the sidecar's multimodal
+endpoint unset, so the engine itself falls back to its chat endpoint (everos's own behavior); the
+`/v1/model/mm/*` proxy path serves only a configured multimodal slot and returns
+`model_service_not_configured` otherwise; `capabilities.multimodal` in §8.2 reports the dedicated
+slot only.
 
 ### 5.2 Scope resolution (the one rule)
 
@@ -109,7 +115,8 @@ For every model call, resolve the calling **instance**, then:
 **Provisioning order (adjudicated 2026-08-16, PR #232)**: org config is **pre-stageable** — org
 owner/admin can read/write their org's config regardless of plan; runtime resolution ignores it
 until `plan='enterprise'`. One principle: **plan gates resolution; roles gate configuration.**
-Recommended activation sequence (documented, not code-enforced): stage slots → verify → flip plan.
+Recommended activation sequence (documented, not code-enforced): stage slots → verify
+(`POST …/model-service/verify`, §6.3) → flip plan.
 
 Resolution + metering is **one middleware** shared by every model endpoint (existing voice routes
 and the new proxy routes). This is the code-level embodiment of decision #3.
@@ -124,6 +131,9 @@ and the new proxy routes). This is the code-level embodiment of decision #3.
 - `platform` (personal default): same cloud wiring, zero config, free-pool quota; settings offer
   "Use custom endpoints" which switches to
 - `custom` (personal manual): today's local direct-connection config, unchanged.
+- **Mode initialization on upgrade**: an existing installation with a complete manual configuration
+  stays `custom`; the `platform` default applies only where no complete manual config exists.
+  Upgrades never silently replace a user's own providers.
 
 Voice needs **no client change**: existing endpoints keep their contracts; the backend resolves
 scope per instance behind them.
@@ -134,8 +144,9 @@ scope per instance behind them.
 
 - `model_service_configs`: `id`, `scope_kind` (`platform` | `organization`), `organization_id`
   (null for platform; unique per org), `revision` (optimistic concurrency, matches org patterns),
-  `limits` jsonb (platform row only: `{ per_instance_monthly_tokens: { <capability>: n }, enforce: bool }`),
-  timestamps, `updated_by_user_id`. Exactly one platform row (unique partial index).
+  `limits` jsonb (platform row only: `{ per_instance_monthly_tokens: { <capability>: n }, enforce: bool }`
+  — *monthly* = **UTC calendar month**, bucket key `YYYY-MM`, shared by reservations, aggregation,
+  and enforcement), timestamps, `updated_by_user_id`. Exactly one platform row (unique partial index).
 - `model_service_slots`: PK (`config_id`, `capability`); `provider_label`, `base_url`, `model`,
   `realtime_model` (nullable), `api_key_ciphertext`, `enabled`, timestamps, `updated_by_user_id`.
 - `model_usage_events`: `id`, `occurred_at`, `instance_id`, `organization_id` (nullable),
@@ -143,6 +154,12 @@ scope per instance behind them.
   `status` (`ok` | `error`). Indexes: (`organization_id`, `occurred_at`), (`instance_id`,
   `occurred_at`), (`scope_kind`, `occurred_at`). v1 dashboards aggregate on read; add rollups only
   if measurably slow.
+- `model_quota_reservations`: `id` (caller-supplied call identity — the idempotency key),
+  `instance_id`, `capability`, `window_bucket` (`YYYY-MM`, UTC), `reserved_tokens`, `state`
+  (`reserved` | `settled` | `released`), `created_at`, `expires_at`. Settlement is idempotent on
+  the call identity; a crashed worker's expired, unsettled reservation is reaped as a retained
+  conservative charge (possibly-accepted semantics, §6.4). Reservations exist only on
+  enforcement-on paths.
 - `model_access_keys`: `instance_id` (PK), `key_hash`, `created_at`, `rotated_at`, plus
   `previous_key_hash` + `previous_valid_until`. Opaque key (`mak_` prefix), shown once at mint,
   SHA-256 stored — same custody discipline as device secrets. **Rotation is dual-validity**: on
@@ -162,7 +179,12 @@ scope per instance behind them.
   all three routes, independent of plan so config can be pre-staged before activation)**:
   `GET/PUT /api/organizations/{orgId}/model-service` (slots CRUD, revision-checked),
   `GET /api/organizations/{orgId}/model-service/usage?from&to` (per-instance rows + totals; empty
-  until the org resolves as enterprise).
+  until the org resolves as enterprise), and
+  `POST /api/organizations/{orgId}/model-service/verify` — one bounded probe per enabled staged
+  slot (1-token chat, `"OK"` embedding, minimal ASR) through the shared egress client, allowed
+  regardless of plan (the org admin exercising the org's own keys); probe calls are metered as
+  normal organization-scope usage. Ships with M1 so stage → verify → flip needs no plan flip to
+  test.
 - **Platform admin (user session; email ∈ `PLATFORM_ADMIN_EMAILS`, new env following the
   `ORGANIZATION_CREATION_ALLOWED_EMAILS` pattern)**:
   `GET/PUT /api/admin/model-service` (platform slots + limits), `GET /api/admin/model-service/usage`
@@ -181,7 +203,11 @@ scope per instance behind them.
   pass any client `model` string upstream with the platform key).
 - **Existing voice routes**: unchanged external contracts; internally rewired through resolution +
   metering. The cloud-token mint must carry the instance id claim end-to-end so browser-direct
-  voice attributes to the right instance (verify; add the claim if absent — tokens are 12 h, safe).
+  voice attributes to the right instance (verify; add the claim if absent). **Claim rollout**:
+  tokens lacking the claim are rejected (401) at the rewired routes; released clients self-heal —
+  they refresh at half-life and re-mint once on a 401 (verified client behavior,
+  `ui/src/lib/avibeFetch.ts`), and realtime re-mints on reconnect — so the worst case is one
+  silent retry, never a broken session.
 
 ### 6.4 Quota (platform scope only, v1)
 
@@ -261,6 +287,11 @@ shape is not extended for this.
   rebuild-confirmation flow governs it. In cloud modes the client's identity input is the status
   payload's `embedding_identity` (upstream base_url+model), never the proxy URL — so org upstream
   changes propagate as rebuilds, and mak rotation does not.
+- **Enterprise-attachment transition**: when an instance whose memory runs in `custom` mode becomes
+  enterprise-managed, the client pauses memory processing (capture keeps queuing in the durable
+  outbox; nothing is lost), surfaces a one-time transition notice, and performs the identity change
+  through the same rebuild-confirmation flow on the user's acknowledgment — forced management
+  changes the model source, but the rebuild is never silent.
 - **Settings UI (Memory)**: three states per §5.3. Copy through `ui/src/i18n/{en,zh}.json`; show
   state, not mechanism; the enterprise state is one sentence, not a tour.
 - **Voice**: no changes.
@@ -336,16 +367,18 @@ in a controlled way. Fail-closed metering is deliberately deferred to M3, when e
 
 ## 9. Invariants (acceptance is verified against these, not case lists)
 
-1. Every cloud-served model call resolves to exactly one scope and writes exactly one usage event
-   carrying that scope and the calling instance id; dashboard aggregates equal event sums. Failure
-   responses bearing upstream usage are metered with that usage. A metering-write failure is loudly
-   surfaced and never breaks the served call (accepted, monitored v1 gap while enforcement is off;
-   revisit fail-closed at M3).
+1. Every cloud-served model call resolves to exactly one scope and writes **at most one** usage
+   event carrying that scope and the calling instance id — exactly one, except when the metering
+   write itself fails, which is loudly surfaced and never breaks the served call (accepted,
+   monitored v1 gap while enforcement is off; enforcement-on paths are governed by fail-closed
+   reservations per §6.4). Failure responses bearing upstream usage are metered with that usage.
+   Dashboard aggregates equal the sum of recorded events.
 2. An instance in an enterprise-configured org never consumes platform credentials or platform
    quota, for any capability; a misconfigured org yields `model_service_not_configured`, never a
    silent fallback.
-3. No API response, log line, usage event, or error message ever contains a slot API key or a
-   `mak_` key; config reads expose only `has_api_key`.
+3. No API response, log line, usage event, or error message ever contains a slot API key; a `mak_`
+   key appears exactly once — in the body of its own mint/rotate response (shown once by design) —
+   and nowhere else; config reads expose only `has_api_key`.
 4. The upstream model invoked is always the configured slot's model, regardless of any
    client-supplied model string.
 5. A fresh personal instance gets working voice and (post-M2) memory with zero model configuration;
@@ -377,8 +410,8 @@ in a controlled way. Fail-closed metering is deliberately deferred to M3, when e
   mm, streaming); backend AGENTS.md content-processing amendment; avibe client mode resolution,
   sidecar cloud wiring, settings states, embedding-identity integration, i18n; avibe-docs pages
   (Model Service concept + memory setup rewrite, en/zh 1:1); Model Hub concept-boundary note.
-  Acceptance: invariants 1–5, 7; a fresh personal instance enables memory with zero config; an
-  enterprise member's memory hits the org upstream.
+  Acceptance: invariants 1–5, 7, 9, 10; a fresh personal instance enables memory with zero config;
+  an enterprise member's memory hits the org upstream.
 - **M3 — personal quota enforcement + polish**: review observed usage; platform admin sets caps;
   flip enforcement (invariant 8); client-side friendly quota-exhausted handling in memory + voice
   (message + switch-to-custom hint in memory); release notes; org-profile README sync if
