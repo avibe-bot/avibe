@@ -1,18 +1,23 @@
+/** @vitest-environment jsdom */
 import { createInstance } from 'i18next';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
 import { ShowPageShareControl } from './ShowPageShareControl';
 
+const api = {
+  ensureShowPage: vi.fn(),
+  getShowPageAccess: vi.fn(),
+  getShowPageAuthorizedEmails: vi.fn(),
+  setShowPageVisibility: vi.fn(),
+  rotateShowPageShare: vi.fn(),
+};
+
 vi.mock('../../context/ApiContext', () => ({
-  useApi: () => ({
-    ensureShowPage: vi.fn(),
-    getShowPageAccess: vi.fn(),
-    setShowPageVisibility: vi.fn(),
-    rotateShowPageShare: vi.fn(),
-  }),
+  useApi: () => api,
 }));
 
 vi.mock('../../context/DockContext', () => ({
@@ -33,6 +38,11 @@ vi.mock('../useShowPages', () => ({
     reload: vi.fn(),
   }),
 }));
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -70,5 +80,73 @@ describe('ShowPageShareControl trigger presentation', () => {
     expect(html).toContain('text-muted');
     expect(html).toContain('hover:text-foreground');
     expect(html).not.toContain('size-7');
+  });
+});
+
+describe('ShowPageShareControl payload sequencing without prior access', () => {
+  it('loads the payload after access resolves for a granted non-manager', async () => {
+    // The app-window call site: no initialAccess, no instance authority. The
+    // payload read is gated on access, so it must start only once access
+    // resolves — the first open still shows the link.
+    api.getShowPageAccess.mockResolvedValue({
+      ok: true,
+      mode: 'local',
+      can_use: true,
+      can_manage: false,
+      can_publish_public: false,
+      public_link_enabled: false,
+    });
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'private',
+      active_url: '/show/ses-1/',
+      share_id: null,
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    await waitFor(() => {
+      expect(api.ensureShowPage).toHaveBeenCalledWith('ses-1');
+    });
+    await waitFor(() => {
+      expect((screen.getByDisplayValue(/\/show\/ses-1\//) as HTMLInputElement).value).toContain('/show/ses-1/');
+    });
+  });
+
+  it('never loads the payload when access resolves without page use', async () => {
+    api.getShowPageAccess.mockResolvedValue({
+      ok: true,
+      mode: 'local',
+      can_use: false,
+      can_manage: true,
+      can_publish_public: false,
+      public_link_enabled: false,
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    await waitFor(() => {
+      expect(api.getShowPageAccess).toHaveBeenCalledWith('ses-1');
+    });
+    // Metadata-only manager: no payload read is ever issued.
+    await vi.waitFor(
+      () => {
+        expect(api.ensureShowPage).not.toHaveBeenCalled();
+      },
+      { timeout: 250 },
+    );
   });
 });

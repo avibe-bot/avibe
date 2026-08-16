@@ -181,42 +181,59 @@ export const ShowPageShareControl: React.FC<{
   // refreshing so reopening doesn't flash a spinner.
   const refresh = () => {
     const seq = ++reqSeq.current;
-    const canLoadPayload = canManageInstance || access?.can_use === true;
-    setLoading(canLoadPayload && !payload);
-    setAccessLoading(!access);
-    setAccessError(false);
-    void (async () => {
-      if (canLoadPayload) {
-        try {
-          const res: ShowPagePayload = await api.ensureShowPage(sessionId);
-          if (seq !== reqSeq.current) return;
-          applyPayload(res);
-          if (!inventoryPage) reload();
-        } catch {
-          // An archived Show Page cannot be ensured, but its applied access
-          // metadata is still useful and is loaded below.
-        } finally {
-          setLoading(false);
-        }
-      } else {
+    // Callers that already hold authority (instance managers, or a caller that
+    // passed initialAccess) read the payload and the access in parallel like
+    // before. A caller with NEITHER (the app window title bar) must sequence:
+    // the payload read is gated on access, so it starts only after access
+    // resolves — otherwise a granted can_use arrives with no payload behind it
+    // until the popover is reopened.
+    const loadPayload = async (granted: boolean) => {
+      if (!granted) {
+        setLoading(false);
+        return;
+      }
+      setLoading(!payload);
+      try {
+        const res: ShowPagePayload = await api.ensureShowPage(sessionId);
+        if (seq !== reqSeq.current) return;
+        applyPayload(res);
+        if (!inventoryPage) reload();
+      } catch {
+        // An archived Show Page cannot be ensured, but its applied access
+        // metadata is still useful and is loaded below.
+      } finally {
         setLoading(false);
       }
-
-      try {
-        const nextAccess = await api.getShowPageAccess(sessionId);
-        if (seq !== reqSeq.current) return;
-        setAccess(nextAccess);
-      } catch {
-        if (seq !== reqSeq.current) return;
-        // A failed refresh cannot leave the previous authority actionable. The
-        // payload stays cached for a later successful refresh, but is withdrawn
-        // while accessError invalidates this control's authorization state.
-        setAccess(null);
-        setAccessError(true);
-      } finally {
-        setAccessLoading(false);
-      }
-    })();
+    };
+    const readAccess = () => {
+      setAccessLoading(!access);
+      setAccessError(false);
+      void (async () => {
+        let nextAccess: ShowPageAccess | null = null;
+        try {
+          nextAccess = await api.getShowPageAccess(sessionId);
+          if (seq !== reqSeq.current) return;
+          setAccess(nextAccess);
+        } catch {
+          if (seq !== reqSeq.current) return;
+          // A failed refresh cannot leave the previous authority actionable. The
+          // payload stays cached for a later successful refresh, but is withdrawn
+          // while accessError invalidates this control's authorization state.
+          setAccess(null);
+          setAccessError(true);
+          return;
+        } finally {
+          setAccessLoading(false);
+        }
+        await loadPayload(canManageInstance || nextAccess?.can_use === true);
+      })();
+    };
+    if (canManageInstance || access?.can_use === true) {
+      void loadPayload(true);
+      readAccess();
+    } else {
+      readAccess();
+    }
   };
 
   const handleOpenChange = (next: boolean) => {

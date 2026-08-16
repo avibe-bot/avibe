@@ -304,7 +304,7 @@ export const AppWindow: React.FC<{
         onDoubleClick={() => wm.toggleMaximize(win.id)}
         className="flex h-9 shrink-0 select-none items-center gap-3 border-b border-border px-3.5"
       >
-        <div className={clsx('flex shrink-0 items-center gap-2', showpageSid ? 'w-20' : 'w-[52px]')}>
+        <div className={clsx('flex shrink-0 items-center gap-2', showpageSid ? 'w-28' : 'w-[52px]')}>
           {lights.map((l) => (
             <button
               key={l.key}
@@ -342,8 +342,9 @@ export const AppWindow: React.FC<{
         </div>
         {/* Mirror the left cluster so the title stays centered. Show Page windows
             add a compact annotation control and a Share control before chat +
-            open-in-new-tab. */}
-        <div className={clsx('flex shrink-0 items-center justify-end gap-1', showpageSid ? 'w-20' : 'w-[52px]')}>
+            open-in-new-tab — up to four size-6 controls plus gaps (108px), so both
+            clusters reserve w-28 (112px) to keep them from crowding the title. */}
+        <div className={clsx('flex shrink-0 items-center justify-end gap-1', showpageSid ? 'w-28' : 'w-[52px]')}>
           {showpageSid && annotationHost?.src && !win.minimized && exitKind === null && (
             <div
               onPointerDown={(e) => e.stopPropagation()}
