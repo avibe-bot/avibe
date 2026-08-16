@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "protocol": {
+    "version": 1,
+    "protocol_header": "X-Avibe-Show-Protocol",
+    "context_header": "X-Avibe-Show-Context",
+    "keyed_context_feature": "show-context-key-v1",
+    "contexts": ["private", "shared"]
+  },
+  "request_protocol_cases": [
+    {
+      "id": "released_headerless",
+      "protocol_header": "absent",
+      "context_header": "ignored",
+      "outcome": "legacy_singleton"
+    },
+    {
+      "id": "declared_v1",
+      "protocol_header": "1",
+      "context_header": "required_private_or_shared",
+      "outcome": "keyed_context"
+    },
+    {
+      "id": "unknown_protocol",
+      "protocol_header": "unsupported_value",
+      "context_header": "ignored",
+      "outcome": "reject"
+    }
+  ],
+  "negotiation_cases": [
+    {
+      "id": "supported",
+      "evidence": "protocol_1_with_feature",
+      "outcome": "supported",
+      "process_cache": "permanent",
+      "redirect_eligible": true,
+      "request_before_next_probe": "shared"
+    },
+    {
+      "id": "unsupported",
+      "evidence": "definitive_legacy",
+      "outcome": "unsupported",
+      "process_cache": "permanent",
+      "redirect_eligible": false,
+      "request_before_next_probe": "shared"
+    },
+    {
+      "id": "transient_unknown",
+      "evidence": "transient_or_malformed",
+      "outcome": "transient-unknown",
+      "process_cache": "retry_deadline",
+      "redirect_eligible": false,
+      "request_before_next_probe": "shared"
+    }
+  ],
+  "app_graph_operations": [
+    "entry_http",
+    "module_http",
+    "spa_fallback_http",
+    "api_handler_http",
+    "private_hmr_websocket",
+    "startup_reconciliation_prewarm",
+    "show_update_prewarm"
+  ],
+  "route_invariants": {
+    "shared_route": {
+      "path": "/p/<share_id>/",
+      "context": "shared",
+      "hmr": false,
+      "private_bytes": false
+    },
+    "private_route": {
+      "path": "/show/<session_id>/",
+      "context": "private",
+      "hmr_requires": "show_editor_capability"
+    },
+    "editor_redirect": {
+      "source": "top_level_navigation",
+      "destination": "/show/<session_id>/",
+      "requires": [
+        "active_share_binding",
+        "show_editor_capability",
+        "keyed_context_supported",
+        "trusted_fetch_metadata"
+      ]
+    }
+  },
+  "release_gate": {
+    "reviewed_runtime_sha": "ee3b0b490ad8b4afafb59cf37e2d57a20325208a",
+    "reviewed_runtime_pr": "https://github.com/avibe-bot/vibe-show-runtime/pull/59",
+    "smoke_tested_runtime_sha": null,
+    "delivery_item_6": "not_implemented",
+    "delivery_item_9": "not_implemented",
+    "smoke_test": "not_run",
+    "feature_advertisement_allowed": false
+  }
+}

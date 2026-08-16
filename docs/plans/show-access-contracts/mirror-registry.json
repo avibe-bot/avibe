@@ -1,0 +1,528 @@
+{
+  "contract_version": 1,
+  "authority": {
+    "repository": "avibe",
+    "path": "docs/plans/show-access-contracts",
+    "source_design": "docs/plans/public-show-live-update.md",
+    "source_sha": "38925dda50da6280ae63e323ba34a4ef601f5bc9"
+  },
+  "repositories": [
+    { "id": "avibe", "remote": "https://github.com/avibe-bot/avibe" },
+    { "id": "avibe-backend", "remote": "https://github.com/avibe-bot/avibe-backend" },
+    { "id": "vibe-show-runtime", "remote": "https://github.com/avibe-bot/vibe-show-runtime" }
+  ],
+  "interfaces": [
+    {
+      "id": "C01",
+      "producer": {
+        "repository": "avibe",
+        "path": "core/show_access.py",
+        "symbol": "ShowAccessCoordinator.read"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "show_page_access_get"
+        },
+        {
+          "repository": "avibe",
+          "path": "ui/src/lib/showPageAccess.ts",
+          "symbol": "ShowAccess"
+        }
+      ],
+      "signature": {
+        "schema": "show-access.schema.json",
+        "request": "page_id",
+        "result": "ShowAccess",
+        "covered_fields": [
+          "availability",
+          "access_mode",
+          "share_binding",
+          "audience_revision",
+          "grant_revision",
+          "grant_commitment",
+          "share_admission_gate",
+          "coordinator"
+        ]
+      },
+      "delivery": {
+        "mechanism": "sqlite_row",
+        "route_or_channel": "show_pages plus show_access_coordinator state",
+        "authentication": "process_shared_lease",
+        "version": 1
+      }
+    },
+    {
+      "id": "C02",
+      "producer": {
+        "repository": "avibe",
+        "path": "ui/src/lib/showPageAccess.ts",
+        "symbol": "ShowAccessApplyRequest"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "show_page_access_apply"
+        },
+        {
+          "repository": "avibe",
+          "path": "core/show_access.py",
+          "symbol": "ShowAccessCoordinator.apply"
+        }
+      ],
+      "signature": {
+        "schema": "apply-mutation.schema.json",
+        "request": "apply_request",
+        "result": "apply_result",
+        "covered_fields": [
+          "mutation_id",
+          "expected_audience_revision",
+          "expected_grant_revision",
+          "target"
+        ]
+      },
+      "delivery": {
+        "mechanism": "local_http_json",
+        "route_or_channel": "POST /api/show-pages/{page_id}/access:apply",
+        "authentication": "owner_resource_authority",
+        "version": 1
+      }
+    },
+    {
+      "id": "C03",
+      "producer": {
+        "repository": "avibe",
+        "path": "core/show_access.py",
+        "symbol": "HostedGrantClient.prepare"
+      },
+      "consumers": [
+        {
+          "repository": "avibe-backend",
+          "path": "app/api/v1/instances/[instanceId]/show-pages/[showPageId]/grant-operations/prepare/route.ts",
+          "symbol": "POST"
+        },
+        {
+          "repository": "avibe-backend",
+          "path": "lib/show-page-grants.ts",
+          "symbol": "prepareGrantOperation"
+        }
+      ],
+      "signature": {
+        "schema": "hosted-operation.schema.json",
+        "request": "prepare_request",
+        "result": "prepare_result: no_change | prepared | revision_conflict",
+        "covered_fields": [
+          "page_id",
+          "mutation_id",
+          "expected_grant_revision",
+          "emails",
+          "operation_id",
+          "target_grant_commitment",
+          "expires_at"
+        ]
+      },
+      "delivery": {
+        "mechanism": "hosted_http_json",
+        "route_or_channel": "POST /api/v1/instances/{instance_id}/show-pages/{page_id}/grant-operations/prepare",
+        "authentication": "device_secret",
+        "version": 1
+      }
+    },
+    {
+      "id": "C04",
+      "producer": {
+        "repository": "avibe",
+        "path": "core/show_access.py",
+        "symbol": "HostedGrantClient.commit"
+      },
+      "consumers": [
+        {
+          "repository": "avibe-backend",
+          "path": "app/api/v1/instances/[instanceId]/show-pages/[showPageId]/grant-operations/[operationId]/commit/route.ts",
+          "symbol": "POST"
+        },
+        {
+          "repository": "avibe-backend",
+          "path": "lib/show-page-grants.ts",
+          "symbol": "commitGrantOperation"
+        }
+      ],
+      "signature": {
+        "schema": "hosted-operation.schema.json",
+        "request": "commit_request",
+        "result": "commit_result: committed | already_committed | expired_uncommitted | revision_conflict",
+        "covered_fields": [
+          "page_id",
+          "mutation_id",
+          "operation_id",
+          "grant_revision",
+          "grant_commitment",
+          "emails"
+        ]
+      },
+      "delivery": {
+        "mechanism": "hosted_http_json",
+        "route_or_channel": "POST /api/v1/instances/{instance_id}/show-pages/{page_id}/grant-operations/{operation_id}/commit",
+        "authentication": "device_secret",
+        "version": 1
+      }
+    },
+    {
+      "id": "C05",
+      "producer": {
+        "repository": "avibe-backend",
+        "path": "app/api/v1/instances/[instanceId]/show-pages/[showPageId]/grant-operations/[operationId]/route.ts",
+        "symbol": "GET"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "core/show_access.py",
+          "symbol": "HostedGrantClient.operation_status"
+        }
+      ],
+      "signature": {
+        "schema": "hosted-operation.schema.json",
+        "request": "operation_status_request",
+        "result": "operation_status_result: prepared | committed | expired_uncommitted | result_expired",
+        "covered_fields": [
+          "operation_id",
+          "source_grant_revision",
+          "target_grant_commitment",
+          "grant_revision",
+          "grant_commitment"
+        ]
+      },
+      "delivery": {
+        "mechanism": "hosted_http_json",
+        "route_or_channel": "GET /api/v1/instances/{instance_id}/show-pages/{page_id}/grant-operations/{operation_id}",
+        "authentication": "device_secret",
+        "version": 1
+      }
+    },
+    {
+      "id": "C06",
+      "producer": {
+        "repository": "avibe-backend",
+        "path": "app/api/v1/instances/[instanceId]/show-pages/[showPageId]/current-grant/route.ts",
+        "symbol": "GET"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "core/show_access.py",
+          "symbol": "HostedGrantClient.current_grant"
+        }
+      ],
+      "signature": {
+        "schema": "hosted-operation.schema.json",
+        "request": "current_grant_request",
+        "result": "current_grant_result",
+        "covered_fields": [
+          "page_id",
+          "grant_revision",
+          "grant_commitment",
+          "emails",
+          "legacy_write_policy"
+        ]
+      },
+      "delivery": {
+        "mechanism": "hosted_http_json",
+        "route_or_channel": "GET /api/v1/instances/{instance_id}/show-pages/{page_id}/current-grant",
+        "authentication": "device_secret",
+        "version": 1
+      }
+    },
+    {
+      "id": "C07",
+      "producer": {
+        "repository": "avibe",
+        "path": "core/show_access.py",
+        "symbol": "HostedGrantClient.acknowledge"
+      },
+      "consumers": [
+        {
+          "repository": "avibe-backend",
+          "path": "app/api/v1/instances/[instanceId]/show-pages/[showPageId]/grant-operations/[operationId]/acknowledgement/route.ts",
+          "symbol": "POST"
+        }
+      ],
+      "signature": {
+        "schema": "hosted-operation.schema.json",
+        "request": "acknowledgement_request",
+        "result": "acknowledgement_result: acknowledged | already_acknowledged | operation_expired",
+        "covered_fields": [
+          "page_id",
+          "mutation_id",
+          "operation_id",
+          "grant_revision",
+          "grant_commitment"
+        ]
+      },
+      "delivery": {
+        "mechanism": "hosted_http_json",
+        "route_or_channel": "POST /api/v1/instances/{instance_id}/show-pages/{page_id}/grant-operations/{operation_id}/acknowledgement",
+        "authentication": "device_secret",
+        "version": 1
+      }
+    },
+    {
+      "id": "C08",
+      "producer": {
+        "repository": "avibe-backend",
+        "path": "lib/oidc/authorization-context.ts",
+        "symbol": "AuthorizationContext"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "_remote_authorization_context"
+        },
+        {
+          "repository": "avibe",
+          "path": "core/show_access.py",
+          "symbol": "evaluate_shared_read"
+        }
+      ],
+      "signature": {
+        "schema": "capability-matrix.json",
+        "request": "server-resolved page_id and share binding",
+        "result": "signed page-scoped read evidence",
+        "covered_fields": [
+          "vibe_show_page_id",
+          "vibe_show_page_grant_revision",
+          "vibe_instance_access_source"
+        ]
+      },
+      "delivery": {
+        "mechanism": "signed_session_claim",
+        "route_or_channel": "OIDC session payload; signature covers all listed fields together",
+        "authentication": "signed_oidc_session",
+        "version": 1
+      }
+    },
+    {
+      "id": "C09",
+      "producer": {
+        "repository": "avibe",
+        "path": "core/show_access.py",
+        "symbol": "evaluate_show_capabilities"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "serve_public_show_page"
+        },
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "show_runtime_hmr_websocket"
+        },
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "_show_annotation_capability"
+        }
+      ],
+      "signature": {
+        "schema": "capability-matrix.json",
+        "request": "surface + availability + access_mode + share_admission_gate + principal + keyed_context",
+        "result": "read decision and ShowEditorCapability projection",
+        "covered_fields": [
+          "read_decision",
+          "share_admission_gate",
+          "show_editor_capability",
+          "runtime_context",
+          "annotations",
+          "hmr",
+          "top_level_editor_redirect"
+        ]
+      },
+      "delivery": {
+        "mechanism": "in_process_value",
+        "route_or_channel": "single server-owned capability decision",
+        "authentication": "server_owned_facts",
+        "version": 1
+      }
+    },
+    {
+      "id": "C10",
+      "producer": {
+        "repository": "avibe",
+        "path": "core/show_runtime.py",
+        "symbol": "ShowRuntimeProtocolEnvelope"
+      },
+      "consumers": [
+        {
+          "repository": "vibe-show-runtime",
+          "path": "packages/runtime/src/server.ts",
+          "symbol": "readShowProtocolEnvelope"
+        },
+        {
+          "repository": "vibe-show-runtime",
+          "path": "packages/runtime/src/runtime.ts",
+          "symbol": "getOrCreateContext"
+        }
+      ],
+      "signature": {
+        "schema": "runtime-context.schema.json",
+        "request": "protocol 1 typed envelope",
+        "result": "private | shared Runtime context selection",
+        "covered_fields": [
+          "X-Avibe-Show-Protocol",
+          "X-Avibe-Show-Context",
+          "private",
+          "shared",
+          "headerless_legacy_singleton",
+          "unknown_protocol_rejected"
+        ]
+      },
+      "delivery": {
+        "mechanism": "loopback_http_headers",
+        "route_or_channel": "every protocol-1 app-graph HTTP, WebSocket, fallback, and prewarm request",
+        "authentication": "loopback_only",
+        "version": 1
+      }
+    },
+    {
+      "id": "C11",
+      "producer": {
+        "repository": "vibe-show-runtime",
+        "path": "packages/runtime/src/server.ts",
+        "symbol": "GET /capabilities"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "core/show_runtime.py",
+          "symbol": "ShowRuntimeManager.context_key_capability"
+        }
+      ],
+      "signature": {
+        "schema": "runtime-context.json",
+        "request": "GET /capabilities",
+        "result": "protocol 1 features containing show-context-key-v1",
+        "covered_fields": ["protocol", "features"]
+      },
+      "delivery": {
+        "mechanism": "local_http_json",
+        "route_or_channel": "loopback GET /capabilities",
+        "authentication": "loopback_only",
+        "version": 1
+      }
+    },
+    {
+      "id": "C12",
+      "producer": {
+        "repository": "avibe",
+        "path": "storage/show_access_migration.py",
+        "symbol": "migrate_show_access_v1"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "core/show_access.py",
+          "symbol": "ShowAccessCoordinator.reconcile_migration"
+        }
+      ],
+      "signature": {
+        "schema": "migration-fixture.schema.json",
+        "request": "legacy visibility/share state plus authenticated hosted grant observation",
+        "result": "ShowAccess plus revision-bound migration state",
+        "covered_fields": [
+          "source_audience_revision",
+          "provisional_share_binding",
+          "expected_show_access",
+          "expected_reconciliation_outcome"
+        ]
+      },
+      "delivery": {
+        "mechanism": "migration_transaction",
+        "route_or_channel": "one-way access-schema migration under the stable writer lease",
+        "authentication": "process_shared_lease",
+        "version": 1
+      }
+    },
+    {
+      "id": "C13",
+      "producer": {
+        "repository": "vibe-show-runtime",
+        "path": ".github/workflows/ci.yml",
+        "symbol": "release-gate"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": ".github/workflows/publish.yml",
+          "symbol": "resolve-show-runtime-ref"
+        },
+        {
+          "repository": "avibe",
+          "path": "scripts/generate_show_runtime_manifest.py",
+          "symbol": "build_manifest"
+        }
+      ],
+      "signature": {
+        "schema": "runtime-context.json#/release_gate",
+        "request": "Codex-reviewed Runtime head implementing delivery items 6 and 9",
+        "result": "smoke-tested exact SHA eligible for the bundled Runtime manifest",
+        "covered_fields": [
+          "reviewed_runtime_sha",
+          "reviewed_runtime_pr",
+          "smoke_tested_runtime_sha",
+          "delivery_item_6",
+          "delivery_item_9",
+          "smoke_test",
+          "feature_advertisement_allowed",
+          "runtime_source.ref"
+        ]
+      },
+      "delivery": {
+        "mechanism": "reviewed_release_manifest",
+        "route_or_channel": "exact Runtime head -> smoke -> show-runtime-manifest.json runtime_source.ref",
+        "authentication": "reviewed_ci_head",
+        "version": 1
+      }
+    },
+    {
+      "id": "C14",
+      "producer": {
+        "repository": "avibe-backend",
+        "path": "app/api/v1/instances/[instanceId]/show-pages/[showPageId]/authorized-emails/route.ts",
+        "symbol": "PUT"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/remote_access.py",
+          "symbol": "replace_show_page_authorized_emails"
+        }
+      ],
+      "signature": {
+        "schema": "rollout.json",
+        "request": "legacy direct authorized-email replacement",
+        "result": "phase-specific acceptance, protocol-required conflict, or gone",
+        "covered_fields": [
+          "phase",
+          "current_grant_legacy_write_policy",
+          "legacy_put_result",
+          "new_access_schema_may_activate"
+        ]
+      },
+      "delivery": {
+        "mechanism": "hosted_http_json",
+        "route_or_channel": "PUT /api/v1/instances/{instance_id}/show-pages/{page_id}/authorized-emails",
+        "authentication": "device_secret",
+        "version": 1
+      }
+    }
+  ],
+  "release_gates": {
+    "hosted_grant_rollout": "rollout.json",
+    "runtime_feature_advertisement": "runtime-context.json#/release_gate"
+  }
+}

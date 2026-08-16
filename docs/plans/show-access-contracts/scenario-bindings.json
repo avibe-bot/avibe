@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "design_source": "docs/plans/public-show-live-update.md",
+  "design_sha": "38925dda50da6280ae63e323ba34a4ef601f5bc9",
+  "bindings": [
+    {
+      "scenario_id": "SHOW-LIVE-001",
+      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-EDITOR-SUPPORTED", "runtime-context.json#/route_invariants/editor_redirect"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-002",
+      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL", "capability-matrix.json#INVARIANT-P-NO-HMR"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-003",
+      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-ANONYMOUS", "mirror-registry.json#C08"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-004",
+      "anchors": ["fixtures/apply-mutations.json#APPLY-LIMITED-TO-PUBLIC-CLEANUP", "capability-matrix.json#MATRIX-P-PUBLIC-VIEWER"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-005",
+      "anchors": ["capability-matrix.json#MATRIX-SHOW-OWNER-EDITOR", "runtime-context.json#/route_invariants"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-006",
+      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-ANONYMOUS", "capability-matrix.json#MATRIX-P-PUBLIC-VIEWER"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-007",
+      "anchors": ["capability-matrix.json#MATRIX-SHOW-RESOURCE-VIEWER", "capability-matrix.json#INVARIANT-SHOW-HMR-EDITOR"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-008",
+      "anchors": ["fixtures/show-access.json#STATE-ACTIVE-LIMITED-OPEN", "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-009",
+      "anchors": ["capability-matrix.json#INVARIANT-P-NO-HMR", "runtime-context.json#/route_invariants/shared_route"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-010",
+      "anchors": ["runtime-context.json#/route_invariants", "runtime-context.json#/release_gate"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-011",
+      "anchors": ["capability-matrix.json#MATRIX-P-PUBLIC-VIEWER", "runtime-context.json#/route_invariants/shared_route"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-012",
+      "anchors": ["capability-matrix.json#MATRIX-SHOW-RESOURCE-VIEWER", "capability-matrix.json#INVARIANT-SHOW-HMR-EDITOR"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-013",
+      "anchors": ["capability-matrix.json#INVARIANT-P-NO-PRIVATE-CONTEXT", "runtime-context.json#/route_invariants/editor_redirect"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-014",
+      "anchors": ["runtime-context.json#/negotiation_cases/1", "capability-matrix.json#MATRIX-P-LIMITED-EDITOR-COMPAT"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-015",
+      "anchors": ["runtime-context.json#/negotiation_cases/2", "capability-matrix.json#MATRIX-P-PUBLIC-EDITOR-COMPAT"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-016",
+      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-017",
+      "anchors": ["runtime-context.json#/app_graph_operations", "mirror-registry.json#C10"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-018",
+      "anchors": ["capability-matrix.json#MATRIX-OFFLINE-DENY", "fixtures/show-access.json#STATE-OFFLINE-FUTURE-PUBLIC"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-019",
+      "anchors": ["fixtures/apply-mutations.json#APPLY-PUBLIC-TO-LIMITED-PENDING", "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-020",
+      "anchors": ["fixtures/migrations.json#MIG-LEGACY-PUBLIC", "fixtures/migrations.json#MIG-PRIVATE-GRANTS-DISCONNECTED"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-021",
+      "anchors": ["fixtures/hosted-operations.json#HOSTED-LOST-COMMIT-RESPONSE", "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-022",
+      "anchors": ["capability-matrix.json#INVARIANT-PAGE-EMAIL-NOT-SHOW", "capability-matrix.json#MATRIX-SHOW-NO-RESOURCE"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-023",
+      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-024",
+      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-025",
+      "anchors": ["fixtures/migrations.json#MIG-NEWER-REVISION-CANCELS", "capability-matrix.json#MATRIX-P-PRIVATE-DISABLED"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-026",
+      "anchors": ["fixtures/apply-mutations.json#APPLY-SAME-SET-NO-CHANGE", "fixtures/hosted-operations.json#HOSTED-SAME-SET-NO-CHANGE"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-027",
+      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-028",
+      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-029",
+      "anchors": ["fixtures/apply-mutations.json#APPLY-LIMITED-TO-PUBLIC-CLEANUP", "fixtures/show-access.json#STATE-PUBLIC-CLEANUP-PENDING"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-030",
+      "anchors": ["runtime-context.json#/protocol", "runtime-context.json#/negotiation_cases/1"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-031",
+      "anchors": ["fixtures/hosted-operations.json#HOSTED-EXPIRED-UNCOMMITTED", "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-032",
+      "anchors": ["fixtures/apply-mutations.json#APPLY-OFFLINE-TO-PRIVATE", "capability-matrix.json#MATRIX-OFFLINE-DENY"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-033",
+      "anchors": ["fixtures/show-access.json#STATE-ACTIVE-LIMITED-OPEN", "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-034",
+      "anchors": ["fixtures/apply-mutations.json#APPLY-PUBLIC-TO-LIMITED-PENDING", "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-035",
+      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-EDITOR-COMPAT", "runtime-context.json#/negotiation_cases/1"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-036",
+      "anchors": ["show-access.schema.json#/$defs/grant_commitment", "fixtures/hosted-operations.json#HOSTED-LOST-COMMIT-RESPONSE"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-037",
+      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL", "mirror-registry.json#C08"]
+    },
+    {
+      "scenario_id": "SHOW-LIVE-038",
+      "anchors": ["capability-matrix.json#INVARIANT-PAGE-EMAIL-NOT-SHOW", "capability-matrix.json#MATRIX-SHOW-NO-RESOURCE"]
+    }
+  ]
+}

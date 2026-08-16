@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v1/mirror-registry.schema.json",
+  "title": "Show access producer/consumer mirror registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "authority", "repositories", "interfaces", "release_gates"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "path", "source_design", "source_sha"],
+      "properties": {
+        "repository": { "const": "avibe" },
+        "path": { "const": "docs/plans/show-access-contracts" },
+        "source_design": { "const": "docs/plans/public-show-live-update.md" },
+        "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      }
+    },
+    "repositories": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "remote"],
+        "properties": {
+          "id": { "$ref": "#/$defs/repository" },
+          "remote": { "type": "string", "format": "uri" }
+        }
+      }
+    },
+    "interfaces": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/interface" }
+    },
+    "release_gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hosted_grant_rollout", "runtime_feature_advertisement"],
+      "properties": {
+        "hosted_grant_rollout": { "const": "rollout.json" },
+        "runtime_feature_advertisement": { "const": "runtime-context.json#/release_gate" }
+      }
+    }
+  },
+  "$defs": {
+    "repository": { "enum": ["avibe", "avibe-backend", "vibe-show-runtime"] },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "path", "symbol"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/repository" },
+        "path": { "type": "string", "minLength": 1 },
+        "symbol": { "type": "string", "minLength": 1 }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "request", "result", "covered_fields"],
+      "properties": {
+        "schema": { "type": "string", "minLength": 1 },
+        "request": { "type": "string", "minLength": 1 },
+        "result": { "type": "string", "minLength": 1 },
+        "covered_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "route_or_channel", "authentication", "version"],
+      "properties": {
+        "mechanism": {
+          "enum": [
+            "sqlite_row",
+            "local_http_json",
+            "hosted_http_json",
+            "signed_session_claim",
+            "in_process_value",
+            "loopback_http_headers",
+            "migration_transaction",
+            "reviewed_release_manifest"
+          ]
+        },
+        "route_or_channel": { "type": "string", "minLength": 1 },
+        "authentication": {
+          "enum": [
+            "owner_resource_authority",
+            "device_secret",
+            "signed_oidc_session",
+            "server_owned_facts",
+            "loopback_only",
+            "process_shared_lease",
+            "reviewed_ci_head"
+          ]
+        },
+        "version": { "const": 1 }
+      }
+    },
+    "interface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "producer", "consumers", "signature", "delivery"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^C[0-9]{2}$" },
+        "producer": { "$ref": "#/$defs/endpoint" },
+        "consumers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/endpoint" }
+        },
+        "signature": { "$ref": "#/$defs/signature" },
+        "delivery": { "$ref": "#/$defs/delivery" }
+      }
+    }
+  }
+}

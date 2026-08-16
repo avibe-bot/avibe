@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v1/runtime-context.schema.json",
+  "title": "Show Runtime context negotiation contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "protocol",
+    "request_protocol_cases",
+    "negotiation_cases",
+    "app_graph_operations",
+    "route_invariants",
+    "release_gate"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "protocol_header", "context_header", "keyed_context_feature", "contexts"],
+      "properties": {
+        "version": { "const": 1 },
+        "protocol_header": { "const": "X-Avibe-Show-Protocol" },
+        "context_header": { "const": "X-Avibe-Show-Context" },
+        "keyed_context_feature": { "const": "show-context-key-v1" },
+        "contexts": {
+          "const": ["private", "shared"]
+        }
+      }
+    },
+    "request_protocol_cases": {
+      "const": [
+        {
+          "id": "released_headerless",
+          "protocol_header": "absent",
+          "context_header": "ignored",
+          "outcome": "legacy_singleton"
+        },
+        {
+          "id": "declared_v1",
+          "protocol_header": "1",
+          "context_header": "required_private_or_shared",
+          "outcome": "keyed_context"
+        },
+        {
+          "id": "unknown_protocol",
+          "protocol_header": "unsupported_value",
+          "context_header": "ignored",
+          "outcome": "reject"
+        }
+      ]
+    },
+    "negotiation_cases": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/negotiation_case" }
+    },
+    "app_graph_operations": {
+      "const": [
+        "entry_http",
+        "module_http",
+        "spa_fallback_http",
+        "api_handler_http",
+        "private_hmr_websocket",
+        "startup_reconciliation_prewarm",
+        "show_update_prewarm"
+      ]
+    },
+    "route_invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shared_route", "private_route", "editor_redirect"],
+      "properties": {
+        "shared_route": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "context", "hmr", "private_bytes"],
+          "properties": {
+            "path": { "const": "/p/<share_id>/" },
+            "context": { "const": "shared" },
+            "hmr": { "const": false },
+            "private_bytes": { "const": false }
+          }
+        },
+        "private_route": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "context", "hmr_requires"],
+          "properties": {
+            "path": { "const": "/show/<session_id>/" },
+            "context": { "const": "private" },
+            "hmr_requires": { "const": "show_editor_capability" }
+          }
+        },
+        "editor_redirect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "destination", "requires"],
+          "properties": {
+            "source": { "const": "top_level_navigation" },
+            "destination": { "const": "/show/<session_id>/" },
+            "requires": {
+              "const": [
+                "active_share_binding",
+                "show_editor_capability",
+                "keyed_context_supported",
+                "trusted_fetch_metadata"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "release_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewed_runtime_sha",
+        "reviewed_runtime_pr",
+        "smoke_tested_runtime_sha",
+        "delivery_item_6",
+        "delivery_item_9",
+        "smoke_test",
+        "feature_advertisement_allowed"
+      ],
+      "properties": {
+        "reviewed_runtime_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "reviewed_runtime_pr": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://github\\.com/avibe-bot/vibe-show-runtime/pull/[1-9][0-9]*$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "smoke_tested_runtime_sha": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            { "type": "null" }
+          ]
+        },
+        "delivery_item_6": { "enum": ["not_implemented", "implemented"] },
+        "delivery_item_9": { "enum": ["not_implemented", "implemented"] },
+        "smoke_test": { "enum": ["not_run", "passed"] },
+        "feature_advertisement_allowed": { "type": "boolean" }
+      },
+      "if": { "properties": { "feature_advertisement_allowed": { "const": true } } },
+      "then": {
+        "required": ["reviewed_runtime_pr"],
+        "properties": {
+          "reviewed_runtime_sha": {
+            "not": { "const": "ee3b0b490ad8b4afafb59cf37e2d57a20325208a" }
+          },
+          "reviewed_runtime_pr": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://github\\.com/avibe-bot/vibe-show-runtime/pull/[1-9][0-9]*$"
+          },
+          "smoke_tested_runtime_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "delivery_item_6": { "const": "implemented" },
+          "delivery_item_9": { "const": "implemented" },
+          "smoke_test": { "const": "passed" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "negotiation_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "evidence",
+        "outcome",
+        "process_cache",
+        "redirect_eligible",
+        "request_before_next_probe"
+      ],
+      "properties": {
+        "id": { "enum": ["supported", "unsupported", "transient_unknown"] },
+        "evidence": {
+          "enum": ["protocol_1_with_feature", "definitive_legacy", "transient_or_malformed"]
+        },
+        "outcome": { "enum": ["supported", "unsupported", "transient-unknown"] },
+        "process_cache": { "enum": ["permanent", "retry_deadline"] },
+        "redirect_eligible": { "type": "boolean" },
+        "request_before_next_probe": { "const": "shared" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "id": { "const": "supported" } } },
+          "then": {
+            "properties": {
+              "evidence": { "const": "protocol_1_with_feature" },
+              "outcome": { "const": "supported" },
+              "process_cache": { "const": "permanent" },
+              "redirect_eligible": { "const": true }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "id": { "const": "unsupported" } } },
+          "then": {
+            "properties": {
+              "evidence": { "const": "definitive_legacy" },
+              "outcome": { "const": "unsupported" },
+              "process_cache": { "const": "permanent" },
+              "redirect_eligible": { "const": false }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "id": { "const": "transient_unknown" } } },
+          "then": {
+            "properties": {
+              "evidence": { "const": "transient_or_malformed" },
+              "outcome": { "const": "transient-unknown" },
+              "process_cache": { "const": "retry_deadline" },
+              "redirect_eligible": { "const": false }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

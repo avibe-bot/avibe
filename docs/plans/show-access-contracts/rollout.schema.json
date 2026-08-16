@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v1/rollout.schema.json",
+  "title": "Show grant protocol rollout and legacy retirement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "legacy_route", "enforcement_marker", "phases"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "legacy_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": { "const": "PUT" },
+        "path": {
+          "const": "/api/v1/instances/{instance_id}/show-pages/{page_id}/authorized-emails"
+        }
+      }
+    },
+    "enforcement_marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["producer", "field", "enforced_value"],
+      "properties": {
+        "producer": { "const": "authenticated_current_grant_result" },
+        "field": { "const": "legacy_write_policy" },
+        "enforced_value": { "const": "disabled" }
+      }
+    },
+    "phases": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "$ref": "#/$defs/additive" },
+        { "$ref": "#/$defs/enforced" },
+        { "$ref": "#/$defs/retired" }
+      ]
+    }
+  },
+  "$defs": {
+    "base_phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "new_protocol_available",
+        "current_grant_legacy_write_policy",
+        "legacy_put_result",
+        "new_access_schema_may_activate"
+      ],
+      "properties": {
+        "phase": { "enum": ["additive", "enforced", "retired"] },
+        "new_protocol_available": { "type": "boolean" },
+        "current_grant_legacy_write_policy": {
+          "enum": ["temporarily_allowed", "disabled"]
+        },
+        "legacy_put_result": {
+          "enum": ["accepted_for_released_clients", "409_show_grant_protocol_required", "410_gone"]
+        },
+        "new_access_schema_may_activate": { "type": "boolean" }
+      }
+    },
+    "additive": {
+      "allOf": [
+        { "$ref": "#/$defs/base_phase" },
+        {
+          "properties": {
+            "phase": { "const": "additive" },
+            "new_protocol_available": { "const": true },
+            "current_grant_legacy_write_policy": { "const": "temporarily_allowed" },
+            "legacy_put_result": { "const": "accepted_for_released_clients" },
+            "new_access_schema_may_activate": { "const": false }
+          }
+        }
+      ]
+    },
+    "enforced": {
+      "allOf": [
+        { "$ref": "#/$defs/base_phase" },
+        {
+          "properties": {
+            "phase": { "const": "enforced" },
+            "new_protocol_available": { "const": true },
+            "current_grant_legacy_write_policy": { "const": "disabled" },
+            "legacy_put_result": { "const": "409_show_grant_protocol_required" },
+            "new_access_schema_may_activate": { "const": true }
+          }
+        }
+      ]
+    },
+    "retired": {
+      "allOf": [
+        { "$ref": "#/$defs/base_phase" },
+        {
+          "properties": {
+            "phase": { "const": "retired" },
+            "new_protocol_available": { "const": true },
+            "current_grant_legacy_write_policy": { "const": "disabled" },
+            "legacy_put_result": { "const": "410_gone" },
+            "new_access_schema_may_activate": { "const": true }
+          }
+        }
+      ]
+    }
+  }
+}

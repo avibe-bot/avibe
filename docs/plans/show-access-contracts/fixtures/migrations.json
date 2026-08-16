@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "MIG-LEGACY-PUBLIC",
+      "scenario_ids": ["SHOW-LIVE-020"],
+      "legacy": {
+        "visibility": "public",
+        "share_id": "legacy-public",
+        "has_exact_email_grants": "unknown",
+        "audience_revision": 4
+      },
+      "events": ["upgrade_started"],
+      "hosted_observation": { "status": "unavailable" },
+      "expected_show_access": {
+        "schema_version": 1,
+        "page_id": "ses_mig_public",
+        "availability": "active",
+        "access_mode": "public",
+        "share_binding": { "share_id": "legacy-public" },
+        "audience_revision": 4,
+        "grant_revision": null,
+        "grant_commitment": null,
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "expected_migration": { "state": "none" },
+      "expected_reconciliation_outcome": "completed",
+      "shared_route_admitted": true
+    },
+    {
+      "id": "MIG-LEGACY-PRIVATE-EMPTY",
+      "scenario_ids": ["SHOW-LIVE-020"],
+      "legacy": {
+        "visibility": "private",
+        "share_id": "dormant-private",
+        "has_exact_email_grants": "no",
+        "audience_revision": 5
+      },
+      "events": ["upgrade_started", "hosted_read_succeeded"],
+      "hosted_observation": {
+        "status": "available",
+        "authenticated_result": true,
+        "grant_revision": 8,
+        "grant_commitment": "6666666666666666666666666666666666666666666666666666666666666666",
+        "emails": []
+      },
+      "expected_show_access": {
+        "schema_version": 1,
+        "page_id": "ses_mig_private_empty",
+        "availability": "active",
+        "access_mode": "private",
+        "share_binding": null,
+        "audience_revision": 5,
+        "grant_revision": 8,
+        "grant_commitment": "6666666666666666666666666666666666666666666666666666666666666666",
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "expected_migration": { "state": "none" },
+      "expected_reconciliation_outcome": "completed",
+      "shared_route_admitted": false
+    },
+    {
+      "id": "MIG-LEGACY-OFFLINE",
+      "scenario_ids": ["SHOW-LIVE-020"],
+      "legacy": {
+        "visibility": "offline",
+        "share_id": "untrusted-offline",
+        "has_exact_email_grants": "unknown",
+        "audience_revision": 6
+      },
+      "events": ["upgrade_started"],
+      "hosted_observation": { "status": "unavailable" },
+      "expected_show_access": {
+        "schema_version": 1,
+        "page_id": "ses_mig_offline",
+        "availability": "offline",
+        "access_mode": "private",
+        "share_binding": null,
+        "audience_revision": 6,
+        "grant_revision": null,
+        "grant_commitment": null,
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "expected_migration": { "state": "none" },
+      "expected_reconciliation_outcome": "completed",
+      "shared_route_admitted": false
+    },
+    {
+      "id": "MIG-PRIVATE-GRANTS-CONNECTED",
+      "scenario_ids": ["SHOW-LIVE-020"],
+      "legacy": {
+        "visibility": "private",
+        "share_id": "dormant-limited",
+        "has_exact_email_grants": "yes",
+        "audience_revision": 7
+      },
+      "events": ["upgrade_started", "hosted_read_succeeded"],
+      "hosted_observation": {
+        "status": "available",
+        "authenticated_result": true,
+        "grant_revision": 9,
+        "grant_commitment": "7777777777777777777777777777777777777777777777777777777777777777",
+        "emails": ["legacy@example.com"]
+      },
+      "expected_show_access": {
+        "schema_version": 1,
+        "page_id": "ses_mig_connected",
+        "availability": "active",
+        "access_mode": "limited",
+        "share_binding": { "share_id": "dormant-limited" },
+        "audience_revision": 7,
+        "grant_revision": 9,
+        "grant_commitment": "7777777777777777777777777777777777777777777777777777777777777777",
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "expected_migration": { "state": "none" },
+      "expected_reconciliation_outcome": "completed",
+      "shared_route_admitted": true
+    },
+    {
+      "id": "MIG-PRIVATE-GRANTS-DISCONNECTED",
+      "scenario_ids": ["SHOW-LIVE-020", "SHOW-LIVE-031"],
+      "legacy": {
+        "visibility": "private",
+        "share_id": "dormant-pending",
+        "has_exact_email_grants": "yes",
+        "audience_revision": 8
+      },
+      "events": ["upgrade_started", "hosted_read_unavailable"],
+      "hosted_observation": { "status": "unavailable" },
+      "expected_show_access": {
+        "schema_version": 1,
+        "page_id": "ses_mig_disconnected",
+        "availability": "active",
+        "access_mode": "private",
+        "share_binding": null,
+        "audience_revision": 8,
+        "grant_revision": null,
+        "grant_commitment": null,
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "expected_migration": {
+        "state": "pending",
+        "source_audience_revision": 8,
+        "provisional_share_binding": { "share_id": "dormant-pending" }
+      },
+      "expected_reconciliation_outcome": "pending_fail_closed",
+      "shared_route_admitted": false
+    },
+    {
+      "id": "MIG-NEWER-REVISION-CANCELS",
+      "scenario_ids": ["SHOW-LIVE-025"],
+      "legacy": {
+        "visibility": "private",
+        "share_id": "stale-dormant",
+        "has_exact_email_grants": "yes",
+        "audience_revision": 10
+      },
+      "events": [
+        "upgrade_started",
+        "hosted_read_unavailable",
+        "owner_apply_public",
+        "owner_apply_private",
+        "reconciliation_resumed",
+        "hosted_read_succeeded"
+      ],
+      "hosted_observation": {
+        "status": "available",
+        "authenticated_result": true,
+        "grant_revision": 14,
+        "grant_commitment": "8888888888888888888888888888888888888888888888888888888888888888",
+        "emails": ["stale@example.com"]
+      },
+      "expected_show_access": {
+        "schema_version": 1,
+        "page_id": "ses_mig_cancelled",
+        "availability": "active",
+        "access_mode": "private",
+        "share_binding": null,
+        "audience_revision": 12,
+        "grant_revision": null,
+        "grant_commitment": null,
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "expected_migration": { "state": "none" },
+      "expected_reconciliation_outcome": "discarded_newer_revision",
+      "shared_route_admitted": false
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v1/scenario-bindings.schema.json",
+  "title": "SHOW-LIVE scenario bindings v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "design_source", "design_sha", "bindings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "design_source": { "const": "docs/plans/public-show-live-update.md" },
+    "design_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scenario_id", "anchors"],
+        "properties": {
+          "scenario_id": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" },
+          "anchors": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

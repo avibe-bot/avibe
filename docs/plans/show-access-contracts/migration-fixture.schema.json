@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v1/migration-fixture.schema.json",
+  "title": "Legacy Show access migration fixtures v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fixtures"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/fixture" }
+    }
+  },
+  "$defs": {
+    "scenario_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
+    },
+    "legacy_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visibility", "share_id", "has_exact_email_grants", "audience_revision"],
+      "properties": {
+        "visibility": { "enum": ["private", "public", "offline"] },
+        "share_id": {
+          "oneOf": [
+            {
+              "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/share_id"
+            },
+            { "type": "null" }
+          ]
+        },
+        "has_exact_email_grants": { "enum": ["yes", "no", "unknown"] },
+        "audience_revision": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/revision"
+        }
+      }
+    },
+    "hosted_observation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": { "status": { "const": "unavailable" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "authenticated_result",
+            "grant_revision",
+            "grant_commitment",
+            "emails"
+          ],
+          "properties": {
+            "status": { "const": "available" },
+            "authenticated_result": { "const": true },
+            "grant_revision": {
+              "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/revision"
+            },
+            "grant_commitment": {
+              "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/grant_commitment"
+            },
+            "emails": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "format": "email",
+                "pattern": "^[^A-Z\\s]+$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "migration_state": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": { "state": { "const": "none" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "source_audience_revision", "provisional_share_binding"],
+          "properties": {
+            "state": { "const": "pending" },
+            "source_audience_revision": {
+              "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/revision"
+            },
+            "provisional_share_binding": {
+              "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/share_binding"
+            }
+          }
+        }
+      ]
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scenario_ids",
+        "legacy",
+        "events",
+        "hosted_observation",
+        "expected_show_access",
+        "expected_migration",
+        "expected_reconciliation_outcome",
+        "shared_route_admitted"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^MIG-[A-Z0-9-]+$" },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
+        "legacy": { "$ref": "#/$defs/legacy_state" },
+        "events": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "upgrade_started",
+              "hosted_read_succeeded",
+              "hosted_read_unavailable",
+              "owner_apply_public",
+              "owner_apply_private",
+              "reconciliation_resumed"
+            ]
+          }
+        },
+        "hosted_observation": { "$ref": "#/$defs/hosted_observation" },
+        "expected_show_access": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json"
+        },
+        "expected_migration": { "$ref": "#/$defs/migration_state" },
+        "expected_reconciliation_outcome": {
+          "enum": ["completed", "pending_fail_closed", "discarded_newer_revision"]
+        },
+        "shared_route_admitted": { "type": "boolean" }
+      }
+    }
+  }
+}

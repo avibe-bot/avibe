@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json",
+  "title": "ShowAccess v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "page_id",
+    "availability",
+    "access_mode",
+    "share_binding",
+    "audience_revision",
+    "grant_revision",
+    "grant_commitment",
+    "share_admission_gate",
+    "coordinator"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "page_id": { "$ref": "#/$defs/page_id" },
+    "availability": { "$ref": "#/$defs/availability" },
+    "access_mode": { "$ref": "#/$defs/access_mode" },
+    "share_binding": { "$ref": "#/$defs/share_binding" },
+    "audience_revision": { "$ref": "#/$defs/revision" },
+    "grant_revision": {
+      "oneOf": [{ "$ref": "#/$defs/revision" }, { "type": "null" }]
+    },
+    "grant_commitment": {
+      "oneOf": [{ "$ref": "#/$defs/grant_commitment" }, { "type": "null" }]
+    },
+    "share_admission_gate": { "$ref": "#/$defs/share_admission_gate" },
+    "coordinator": { "$ref": "#/$defs/coordinator" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "access_mode": { "const": "private" } } },
+      "then": { "properties": { "share_binding": { "type": "null" } } }
+    },
+    {
+      "if": {
+        "properties": { "access_mode": { "enum": ["limited", "public"] } }
+      },
+      "then": { "properties": { "share_binding": { "$ref": "#/$defs/bound_share" } } }
+    },
+    {
+      "if": { "properties": { "grant_revision": { "type": "null" } } },
+      "then": { "properties": { "grant_commitment": { "type": "null" } } },
+      "else": { "properties": { "grant_commitment": { "$ref": "#/$defs/grant_commitment" } } }
+    },
+    {
+      "if": { "properties": { "grant_commitment": { "type": "null" } } },
+      "then": { "properties": { "grant_revision": { "type": "null" } } },
+      "else": { "properties": { "grant_revision": { "$ref": "#/$defs/revision" } } }
+    },
+    {
+      "if": { "properties": { "share_admission_gate": { "const": "closed_pending" } } },
+      "then": {
+        "properties": {
+          "access_mode": { "const": "limited" },
+          "coordinator": { "$ref": "#/$defs/grant_change_coordinator" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "access_mode": { "const": "limited" },
+          "share_admission_gate": { "const": "open" }
+        },
+        "required": ["access_mode", "share_admission_gate"]
+      },
+      "then": {
+        "properties": {
+          "grant_revision": { "$ref": "#/$defs/revision" },
+          "grant_commitment": { "$ref": "#/$defs/grant_commitment" },
+          "coordinator": { "$ref": "#/$defs/idle_coordinator" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "coordinator": { "$ref": "#/$defs/idle_coordinator" } } },
+      "then": { "properties": { "share_admission_gate": { "const": "open" } } }
+    },
+    {
+      "if": {
+        "properties": { "coordinator": { "$ref": "#/$defs/grant_change_coordinator" } }
+      },
+      "then": {
+        "properties": {
+          "access_mode": { "const": "limited" },
+          "share_admission_gate": { "const": "closed_pending" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "coordinator": { "$ref": "#/$defs/grant_cleanup_coordinator" } }
+      },
+      "then": {
+        "properties": {
+          "access_mode": { "enum": ["private", "public"] },
+          "share_admission_gate": { "const": "open" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "page_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+    },
+    "share_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,62}[A-Za-z0-9]$"
+    },
+    "mutation_id": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 132,
+      "pattern": "^mut_[A-Za-z0-9_-]{16,128}$"
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 19,
+      "maxLength": 131,
+      "pattern": "^op_[A-Za-z0-9_-]{16,128}$"
+    },
+    "revision": { "type": "integer", "minimum": 0 },
+    "grant_commitment": {
+      "type": "string",
+      "description": "Opaque lowercase hexadecimal encoding of 32 random bytes.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "availability": { "enum": ["active", "offline"] },
+    "access_mode": { "enum": ["private", "limited", "public"] },
+    "share_admission_gate": { "enum": ["open", "closed_pending"] },
+    "bound_share": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["share_id"],
+      "properties": { "share_id": { "$ref": "#/$defs/share_id" } }
+    },
+    "share_binding": {
+      "oneOf": [{ "$ref": "#/$defs/bound_share" }, { "type": "null" }]
+    },
+    "idle_coordinator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": { "state": { "const": "idle" } }
+    },
+    "grant_change_coordinator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "kind",
+        "phase",
+        "mutation_id",
+        "source_audience_revision",
+        "source_grant_revision",
+        "target_access_mode",
+        "target_share_binding",
+        "operation_id",
+        "target_grant_commitment"
+      ],
+      "properties": {
+        "state": { "const": "pending" },
+        "kind": { "const": "grant_change" },
+        "phase": { "enum": ["commit_pending", "commit_unknown", "reconcile_pending"] },
+        "mutation_id": { "$ref": "#/$defs/mutation_id" },
+        "source_audience_revision": { "$ref": "#/$defs/revision" },
+        "source_grant_revision": {
+          "oneOf": [{ "$ref": "#/$defs/revision" }, { "type": "null" }]
+        },
+        "target_access_mode": { "const": "limited" },
+        "target_share_binding": { "$ref": "#/$defs/bound_share" },
+        "operation_id": { "$ref": "#/$defs/operation_id" },
+        "target_grant_commitment": { "$ref": "#/$defs/grant_commitment" }
+      }
+    },
+    "grant_cleanup_coordinator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "kind",
+        "phase",
+        "mutation_id",
+        "source_audience_revision",
+        "source_grant_revision",
+        "target_access_mode",
+        "target_share_binding",
+        "operation_id",
+        "target_grant_commitment"
+      ],
+      "properties": {
+        "state": { "const": "pending" },
+        "kind": { "const": "grant_cleanup" },
+        "phase": { "const": "cleanup_pending" },
+        "mutation_id": { "$ref": "#/$defs/mutation_id" },
+        "source_audience_revision": { "$ref": "#/$defs/revision" },
+        "source_grant_revision": {
+          "oneOf": [{ "$ref": "#/$defs/revision" }, { "type": "null" }]
+        },
+        "target_access_mode": { "enum": ["private", "public"] },
+        "target_share_binding": { "$ref": "#/$defs/share_binding" },
+        "operation_id": {
+          "oneOf": [{ "$ref": "#/$defs/operation_id" }, { "type": "null" }]
+        },
+        "target_grant_commitment": {
+          "oneOf": [{ "$ref": "#/$defs/grant_commitment" }, { "type": "null" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "target_access_mode": { "const": "private" } } },
+          "then": { "properties": { "target_share_binding": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "target_access_mode": { "const": "public" } } },
+          "then": { "properties": { "target_share_binding": { "$ref": "#/$defs/bound_share" } } }
+        }
+      ]
+    },
+    "coordinator": {
+      "oneOf": [
+        { "$ref": "#/$defs/idle_coordinator" },
+        { "$ref": "#/$defs/grant_change_coordinator" },
+        { "$ref": "#/$defs/grant_cleanup_coordinator" }
+      ]
+    }
+  }
+}

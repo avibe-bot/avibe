@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v1/capability-matrix.schema.json",
+  "title": "Closed Show read/editor capability matrix v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "axes", "rules", "global_invariants"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "axes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "availability",
+        "access_mode",
+        "share_admission_gate",
+        "principal",
+        "keyed_context"
+      ],
+      "properties": {
+        "surface": { "const": ["/p", "/show"] },
+        "availability": { "const": ["active", "offline"] },
+        "access_mode": { "const": ["private", "limited", "public"] },
+        "share_admission_gate": { "const": ["open", "closed_pending"] },
+        "principal": {
+          "const": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"]
+        },
+        "keyed_context": { "const": ["supported", "unsupported", "transient-unknown"] }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "global_invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/invariant" }
+    }
+  },
+  "$defs": {
+    "scenario_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
+    },
+    "surface_selector": {
+      "oneOf": [
+        { "const": "*" },
+        { "enum": ["/p", "/show"] },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["/p", "/show"] }
+        }
+      ]
+    },
+    "availability_selector": {
+      "oneOf": [
+        { "const": "*" },
+        { "enum": ["active", "offline"] },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["active", "offline"] }
+        }
+      ]
+    },
+    "mode_selector": {
+      "oneOf": [
+        { "const": "*" },
+        { "enum": ["private", "limited", "public"] },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["private", "limited", "public"] }
+        }
+      ]
+    },
+    "principal_selector": {
+      "oneOf": [
+        { "const": "*" },
+        { "enum": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"] },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"]
+          }
+        }
+      ]
+    },
+    "gate_selector": {
+      "oneOf": [
+        { "const": "*" },
+        { "enum": ["open", "closed_pending"] },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["open", "closed_pending"] }
+        }
+      ]
+    },
+    "keyed_selector": {
+      "oneOf": [
+        { "const": "*" },
+        { "enum": ["supported", "unsupported", "transient-unknown"] },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["supported", "unsupported", "transient-unknown"] }
+        }
+      ]
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "availability",
+        "access_mode",
+        "share_admission_gate",
+        "principal",
+        "keyed_context"
+      ],
+      "properties": {
+        "surface": { "$ref": "#/$defs/surface_selector" },
+        "availability": { "$ref": "#/$defs/availability_selector" },
+        "access_mode": { "$ref": "#/$defs/mode_selector" },
+        "share_admission_gate": { "$ref": "#/$defs/gate_selector" },
+        "principal": { "$ref": "#/$defs/principal_selector" },
+        "keyed_context": { "$ref": "#/$defs/keyed_selector" }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_decision",
+        "show_editor_capability",
+        "runtime_context",
+        "annotations",
+        "hmr",
+        "top_level_editor_redirect"
+      ],
+      "properties": {
+        "read_decision": {
+          "enum": ["deny", "login_required", "serve_shared", "serve_private", "redirect_private"]
+        },
+        "show_editor_capability": { "type": "boolean" },
+        "runtime_context": {
+          "oneOf": [{ "enum": ["private", "shared"] }, { "type": "null" }]
+        },
+        "annotations": { "type": "boolean" },
+        "hmr": { "type": "boolean" },
+        "top_level_editor_redirect": { "type": "boolean" }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "selector", "decision", "scenario_ids"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^MATRIX-[A-Z0-9-]+$" },
+        "selector": { "$ref": "#/$defs/selector" },
+        "decision": { "$ref": "#/$defs/decision" },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" }
+      }
+    },
+    "invariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "assertion", "scenario_ids"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^INVARIANT-[A-Z0-9-]+$" },
+        "assertion": {
+          "enum": [
+            "page_email_never_editor",
+            "page_email_never_canonical_show",
+            "shared_route_never_hmr",
+            "shared_route_never_private_context",
+            "offline_never_serves",
+            "closed_pending_shared_route_never_serves",
+            "show_hmr_requires_editor"
+          ]
+        },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" }
+      }
+    }
+  }
+}

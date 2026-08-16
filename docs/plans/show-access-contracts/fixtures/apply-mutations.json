@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "APPLY-SAME-SET-NO-CHANGE",
+      "scenario_ids": ["SHOW-LIVE-026"],
+      "request": {
+        "schema_version": 1,
+        "message_type": "apply_request",
+        "page_id": "ses_apply_same_set",
+        "mutation_id": "mut_apply_same_set_0001",
+        "expected_audience_revision": 7,
+        "expected_grant_revision": 12,
+        "target": {
+          "availability": "active",
+          "access_mode": "limited",
+          "share_binding": { "mode": "preserve_or_allocate" },
+          "emails": ["alice@example.com", "bob@example.com"]
+        }
+      },
+      "result": {
+        "schema_version": 1,
+        "message_type": "apply_result",
+        "page_id": "ses_apply_same_set",
+        "mutation_id": "mut_apply_same_set_0001",
+        "outcome": "no_change",
+        "show_access": {
+          "schema_version": 1,
+          "page_id": "ses_apply_same_set",
+          "availability": "active",
+          "access_mode": "limited",
+          "share_binding": { "share_id": "same-set-link" },
+          "audience_revision": 7,
+          "grant_revision": 12,
+          "grant_commitment": "1111111111111111111111111111111111111111111111111111111111111111",
+          "share_admission_gate": "open",
+          "coordinator": { "state": "idle" }
+        }
+      }
+    },
+    {
+      "id": "APPLY-PUBLIC-TO-LIMITED-PENDING",
+      "scenario_ids": ["SHOW-LIVE-019", "SHOW-LIVE-034"],
+      "request": {
+        "schema_version": 1,
+        "message_type": "apply_request",
+        "page_id": "ses_apply_public",
+        "mutation_id": "mut_public_limited_0001",
+        "expected_audience_revision": 8,
+        "expected_grant_revision": 12,
+        "target": {
+          "availability": "active",
+          "access_mode": "limited",
+          "share_binding": { "mode": "preserve_or_allocate" },
+          "emails": ["listed@example.com"]
+        }
+      },
+      "result": {
+        "schema_version": 1,
+        "message_type": "apply_result",
+        "page_id": "ses_apply_public",
+        "mutation_id": "mut_public_limited_0001",
+        "outcome": "pending",
+        "show_access": {
+          "schema_version": 1,
+          "page_id": "ses_apply_public",
+          "availability": "active",
+          "access_mode": "limited",
+          "share_binding": { "share_id": "exact-custom-link" },
+          "audience_revision": 9,
+          "grant_revision": 12,
+          "grant_commitment": "1111111111111111111111111111111111111111111111111111111111111111",
+          "share_admission_gate": "closed_pending",
+          "coordinator": {
+            "state": "pending",
+            "kind": "grant_change",
+            "phase": "commit_unknown",
+            "mutation_id": "mut_public_limited_0001",
+            "source_audience_revision": 8,
+            "source_grant_revision": 12,
+            "target_access_mode": "limited",
+            "target_share_binding": { "share_id": "exact-custom-link" },
+            "operation_id": "op_public_limited_0001",
+            "target_grant_commitment": "2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        }
+      }
+    },
+    {
+      "id": "APPLY-LIMITED-TO-PUBLIC-CLEANUP",
+      "scenario_ids": ["SHOW-LIVE-004", "SHOW-LIVE-029"],
+      "request": {
+        "schema_version": 1,
+        "message_type": "apply_request",
+        "page_id": "ses_apply_cleanup",
+        "mutation_id": "mut_limited_public_001",
+        "expected_audience_revision": 9,
+        "expected_grant_revision": 13,
+        "target": {
+          "availability": "active",
+          "access_mode": "public",
+          "share_binding": { "mode": "preserve_or_allocate" }
+        }
+      },
+      "result": {
+        "schema_version": 1,
+        "message_type": "apply_result",
+        "page_id": "ses_apply_cleanup",
+        "mutation_id": "mut_limited_public_001",
+        "outcome": "pending",
+        "show_access": {
+          "schema_version": 1,
+          "page_id": "ses_apply_cleanup",
+          "availability": "active",
+          "access_mode": "public",
+          "share_binding": { "share_id": "stable-public-link" },
+          "audience_revision": 10,
+          "grant_revision": 13,
+          "grant_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+          "share_admission_gate": "open",
+          "coordinator": {
+            "state": "pending",
+            "kind": "grant_cleanup",
+            "phase": "cleanup_pending",
+            "mutation_id": "mut_limited_public_001",
+            "source_audience_revision": 9,
+            "source_grant_revision": 13,
+            "target_access_mode": "public",
+            "target_share_binding": { "share_id": "stable-public-link" },
+            "operation_id": null,
+            "target_grant_commitment": null
+          }
+        }
+      }
+    },
+    {
+      "id": "APPLY-OFFLINE-TO-PRIVATE",
+      "scenario_ids": ["SHOW-LIVE-032"],
+      "request": {
+        "schema_version": 1,
+        "message_type": "apply_request",
+        "page_id": "ses_apply_offline",
+        "mutation_id": "mut_offline_private_001",
+        "expected_audience_revision": 3,
+        "expected_grant_revision": 4,
+        "target": {
+          "availability": "offline",
+          "access_mode": "private",
+          "share_binding": { "mode": "clear" }
+        }
+      },
+      "result": {
+        "schema_version": 1,
+        "message_type": "apply_result",
+        "page_id": "ses_apply_offline",
+        "mutation_id": "mut_offline_private_001",
+        "outcome": "applied",
+        "show_access": {
+          "schema_version": 1,
+          "page_id": "ses_apply_offline",
+          "availability": "offline",
+          "access_mode": "private",
+          "share_binding": null,
+          "audience_revision": 4,
+          "grant_revision": 4,
+          "grant_commitment": "3333333333333333333333333333333333333333333333333333333333333333",
+          "share_admission_gate": "open",
+          "coordinator": { "state": "idle" }
+        }
+      }
+    }
+  ]
+}

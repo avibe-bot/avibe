@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "STATE-ACTIVE-PRIVATE",
+      "scenario_ids": ["SHOW-LIVE-022"],
+      "show_access": {
+        "schema_version": 1,
+        "page_id": "ses_contract_private",
+        "availability": "active",
+        "access_mode": "private",
+        "share_binding": null,
+        "audience_revision": 3,
+        "grant_revision": null,
+        "grant_commitment": null,
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "shared_route_admitted": false
+    },
+    {
+      "id": "STATE-ACTIVE-LIMITED-OPEN",
+      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-008", "SHOW-LIVE-033"],
+      "show_access": {
+        "schema_version": 1,
+        "page_id": "ses_contract_limited",
+        "availability": "active",
+        "access_mode": "limited",
+        "share_binding": { "share_id": "contract-limited" },
+        "audience_revision": 8,
+        "grant_revision": 12,
+        "grant_commitment": "1111111111111111111111111111111111111111111111111111111111111111",
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "shared_route_admitted": true
+    },
+    {
+      "id": "STATE-ACTIVE-LIMITED-CLOSED",
+      "scenario_ids": ["SHOW-LIVE-019", "SHOW-LIVE-021", "SHOW-LIVE-031", "SHOW-LIVE-034"],
+      "show_access": {
+        "schema_version": 1,
+        "page_id": "ses_contract_pending",
+        "availability": "active",
+        "access_mode": "limited",
+        "share_binding": { "share_id": "preserved-custom" },
+        "audience_revision": 9,
+        "grant_revision": 12,
+        "grant_commitment": "1111111111111111111111111111111111111111111111111111111111111111",
+        "share_admission_gate": "closed_pending",
+        "coordinator": {
+          "state": "pending",
+          "kind": "grant_change",
+          "phase": "commit_unknown",
+          "mutation_id": "mut_contract_pending_0001",
+          "source_audience_revision": 8,
+          "source_grant_revision": 12,
+          "target_access_mode": "limited",
+          "target_share_binding": { "share_id": "preserved-custom" },
+          "operation_id": "op_contract_pending_0001",
+          "target_grant_commitment": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      },
+      "shared_route_admitted": false
+    },
+    {
+      "id": "STATE-PUBLIC-CLEANUP-PENDING",
+      "scenario_ids": ["SHOW-LIVE-029"],
+      "show_access": {
+        "schema_version": 1,
+        "page_id": "ses_contract_public",
+        "availability": "active",
+        "access_mode": "public",
+        "share_binding": { "share_id": "public-custom" },
+        "audience_revision": 10,
+        "grant_revision": 13,
+        "grant_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+        "share_admission_gate": "open",
+        "coordinator": {
+          "state": "pending",
+          "kind": "grant_cleanup",
+          "phase": "cleanup_pending",
+          "mutation_id": "mut_contract_cleanup_001",
+          "source_audience_revision": 9,
+          "source_grant_revision": 13,
+          "target_access_mode": "public",
+          "target_share_binding": { "share_id": "public-custom" },
+          "operation_id": null,
+          "target_grant_commitment": null
+        }
+      },
+      "shared_route_admitted": true
+    },
+    {
+      "id": "STATE-OFFLINE-FUTURE-PUBLIC",
+      "scenario_ids": ["SHOW-LIVE-032"],
+      "show_access": {
+        "schema_version": 1,
+        "page_id": "ses_contract_offline",
+        "availability": "offline",
+        "access_mode": "public",
+        "share_binding": { "share_id": "future-public" },
+        "audience_revision": 11,
+        "grant_revision": 14,
+        "grant_commitment": "3333333333333333333333333333333333333333333333333333333333333333",
+        "share_admission_gate": "open",
+        "coordinator": { "state": "idle" }
+      },
+      "shared_route_admitted": false
+    }
+  ]
+}
