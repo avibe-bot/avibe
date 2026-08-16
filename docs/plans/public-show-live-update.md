@@ -1,31 +1,36 @@
-# Capability-Gated HMR for Public Show Links
+# Unified Show Access and Capability-Gated HMR
 
 Status: Proposed
 
 Date: 2026-08-16
 
-Scope: `avibe` public Show authorization/proxy and `vibe-show-runtime`
+Scope: `avibe` Show access UI, authorization/proxy, `avibe-backend` exact-email
+grants, and `vibe-show-runtime`
 
 ## Decision
 
-A public Show link selects its update behavior from the viewer's effective
-server-side capability:
+A Show Page has one audience setting and a separate development capability.
+Audience decides who may read. `ShowEditorCapability` decides who may use HMR
+and Agents annotations. The route and effective server-side capability select
+the resulting representation:
 
 | Surface and viewer | Runtime representation | Update behavior |
 | --- | --- | --- |
 | Private `/show/<session>/`, authorized editor | Canonical private Vite context | Vite HMR and React Fast Refresh |
-| Public `/p/<share>/`, authorized editor navigation | Redirect to canonical `/show/<session>/` | Vite HMR and React Fast Refresh after the redirect |
-| Public `/p/<share>/`, anonymous, read-only, expired, resource-forbidden, or unverifiable | Negotiated isolated public context; legacy compatibility context otherwise | No Hot Reload; refresh reads current content |
+| Limited or public `/p/<share>/`, authorized editor navigation | Redirect to canonical `/show/<session>/` | Vite HMR and React Fast Refresh after the redirect |
+| Limited `/p/<share>/`, signed-in exact-email viewer | Negotiated isolated shared context; legacy compatibility context otherwise | No Hot Reload or annotations; refresh reads current content |
+| Limited `/p/<share>/`, anonymous or unauthorized viewer | None | Login challenge or access denied; no page bytes |
+| Public `/p/<share>/`, anonymous, read-only, expired, resource-forbidden, or unverifiable | Negotiated isolated shared context; legacy compatibility context otherwise | No Hot Reload or annotations; refresh reads current content |
 | Offline | None | None |
 
-Public visibility is an anonymous read grant, not development authorization.
-Making a page public therefore does not downgrade its editor's experience, and
-being able to read a public link does not grant access to Vite's bidirectional
-development protocol.
+Limited and public access are read grants, not development authorization. Making
+a page shareable therefore does not downgrade its editor's experience, and being
+able to read a share link does not grant access to Vite's bidirectional
+development protocol or annotation dispatch.
 
-For a concrete example, Alice is an authorized editor and Bob is an anonymous
-viewer on the current bundled Runtime. They open the same `/p/brief/` URL while
-an Agent edits the page:
+For a concrete example, Alice is an authorized editor, Bob is on the exact-email
+list, and Carol is anonymous. They open the same limited `/p/brief/` URL while an
+Agent edits the page:
 
 1. Avibe resolves Alice's existing Workbench session and the same editor
    capability used to enable annotations.
@@ -33,11 +38,16 @@ an Agent edits the page:
    `/show/<session>/` path. That document, every module, and
    `/show/<session>/__vite_hmr` use one private representation; React Fast Refresh
    updates her page and preserves component state.
-3. Bob's document uses the isolated public transform context. It contains the
-   inert Vite/React Refresh shims and never opens an HMR socket.
-4. Bob's loaded page stays on the public representation even if identity state
-   changes while its subresources load. A later manual navigation or refresh reads
-   the current public content and may then take the editor redirect.
+3. Bob signs in, remains on `/p/brief/`, and receives the isolated shared
+   transform context. It contains inert Vite/React Refresh shims, exposes no
+   annotation capability, and never opens an HMR socket.
+4. Carol is asked to sign in and is denied after authentication because she has
+   neither the page-bound email grant nor editor capability.
+5. If Alice changes the audience to fully public, Carol can read the same shared
+   representation without login. Bob still receives no development capability.
+6. A loaded `/p/` document stays on the shared representation even if identity
+   state changes while its subresources load. A later network navigation may
+   take the editor redirect or re-evaluate limited access.
 
 This design intentionally does not add anonymous Live Reload. That requirement
 would need an independently published revision model with artifact retention,
@@ -47,13 +57,20 @@ HMR behavior.
 
 ## Why The Current Page Does Not Update
 
-The current public proxy rewrites `@vite/client` and `@react-refresh` to inert,
-immutable shims. This prevents an anonymous browser from opening the existing
-public Vite socket, but it applies the same behavior to an authenticated editor.
+The current shared proxy rewrites `@vite/client` and `@react-refresh` to inert,
+immutable shims. This prevents a share-link viewer from opening the existing
+Vite socket, but it applies the same behavior to an authenticated editor.
 The authorization information already used by the annotation surface is not
 used to select the Runtime representation.
 
-There is a second ownership problem. Runtime currently lets a Session's Vite
+There is also a product-model problem. The UI currently exposes workspace ACL,
+exact-email grants, and a separate public-link switch as independent controls.
+That permits states users cannot explain: a page can have an email list while no
+`/p/` route exists, and the public switch can anonymously bypass the list. These
+are not independent product concepts; they are three mutually exclusive audience
+modes.
+
+There is a third ownership problem. Runtime currently lets a Session's Vite
 context depend on the requested external base. Alternating `/show/<session>/`
 and `/p/<share>/` requests can therefore rebuild or replace one context as the
 base changes. Simply making the public socket conditional would still let an
@@ -64,45 +81,132 @@ ownership, not a weaker client-side HMR switch or two representations at one URL
 
 ## Product Contract
 
+### One audience setting
+
+The share control exposes one mutually exclusive select:
+
+| `access_mode` | UI label | Share route | Read rule | Conditional UI |
+| --- | --- | --- | --- | --- |
+| `private` | Private | Disabled | Existing canonical `/show/` resource access only | No email editor or share-link controls |
+| `limited` | Limited access | `/p/<share>/` | Current, page-bound exact-email grant, or `ShowEditorCapability` | Exact-email editor and share-link controls |
+| `public` | Fully public | `/p/<share>/` | Anyone; editors may redirect to `/show/` | Share-link controls only |
+
+The separate public-link switch is removed. The exact-email editor exists only
+while `limited` is selected, requires at least one valid address, and says
+explicitly that these users receive view-only access to this Show Page. The copy,
+custom-slug, and rotate-link controls appear for both `limited` and `public`.
+
+`offline` is not a fourth audience. Availability is an orthogonal lifecycle
+state (`active | offline`) controlled by archive/offline operations. An offline
+page serves no route and its audience control is read-only until reactivated.
+Separating availability from audience also stops an offline transition from
+silently destroying the page's intended audience.
+
+The persisted model is therefore:
+
+```text
+ShowAccess {
+  availability: active | offline
+  access_mode: private | limited | public
+  share_id: opaque slug | null
+  audience_revision: monotonic integer
+}
+```
+
+Exact emails remain normalized, unique page-bound grants in `avibe-backend`;
+they are not copied into local storage or encoded into the slug. `share_id` is a
+locator, never a bearer credential. It exists only for `limited` and `public`;
+rotating it invalidates the old route but does not change the page audience.
+
+Existing organization/resource ACLs continue to govern canonical `/show/`
+collaborator access and who can edit or manage the page. They are not a second
+share-audience control and cannot satisfy the exact-email gate for a limited
+`/p/` request. Only a resource-aware editor may bypass that viewer gate by taking
+the canonical redirect.
+
+Only the page owner or existing sharing-control authority may change
+`access_mode`, the email set, or the slug. A page-bound `show_page_email` viewer
+cannot read these settings APIs, mutate the audience, load the Workbench, or
+promote itself through a broader Instance endpoint.
+
+Audience changes use one Apply action and a fail-closed coordinator rather than
+three independent writes:
+
+1. Entering `limited` from `public` first closes the local share gate to
+   `private`, then atomically replaces the cloud email set, then commits
+   `limited` with the existing or newly allocated slug. Failure leaves the page
+   private, never anonymously readable.
+2. Entering `limited` from `private` writes the email set before opening the
+   route. At least one address is required.
+3. Editing a live limited list uses the backend's atomic replace and authorization
+   revision. Removed viewers fail subsequent requests immediately and their
+   existing session is rejected when its revision is revalidated.
+4. Leaving `limited` commits `private` or `public` locally first, which makes all
+   page-email claims inapplicable. The backend list is then cleared. Failed
+   cleanup is retried and surfaced as pending but cannot reopen the route.
+5. Switching `private` and `public` is one local transaction. Link allocation,
+   mode, revision, and old-route invalidation commit together.
+
+The UI does not optimistically display a new mode until the coordinator reaches
+its authoritative terminal state. A retry carries an idempotency key and expected
+`audience_revision`, so reconnects and double clicks cannot resurrect an older
+audience.
+
 ### One editor capability
 
 Avibe computes one `ShowEditorCapability` from server-owned facts:
 
 - a validated Workbench identity
 - an editor role
-- access to the Show Page resource
-- a current public share-to-Session binding when the request uses `/p/`
-- non-offline visibility
+- independent editor/resource access to the Show Page, evaluated without any
+  page-email entitlement
+- a current limited/public share-to-Session binding when the request uses `/p/`
+- active availability
 
-The public annotation decision and public-link HMR decision consume the same
-result. The implementation should factor the existing annotation inputs into
-one helper rather than make two similar authorization checks.
+The annotation decision and share-link HMR decision consume the same result. The
+implementation should factor the existing annotation inputs into one helper
+rather than make two similar authorization checks. Exact-email entitlement is
+intentionally excluded from this capability even though it can satisfy limited
+read access.
 
-A cookie's presence, a browser-provided flag, the public share ID, or a
+This exclusion is evidence-based, not only a role check. The hosted resolver may
+preserve a person's broader Instance role when the same identity also has an
+exact-email grant. `ShowEditorCapability` must therefore prove page access through
+the owner/organization resource policy while ignoring `show_page_id`; it cannot
+let the page-bound entitlement satisfy that proof. A real page editor still gets
+HMR even when their email also appears in the list, because their independent
+editor authority succeeds. A person whose only page authority is the list remains
+view-only regardless of the role text in another unrelated grant.
+
+A cookie's presence, a browser-provided flag, the share ID, or a
 share-scoped annotation write token is insufficient. The annotation token proves
 only one permitted public event write after capability selection; it is never
 accepted for module or HMR access.
 
 Missing, expired, read-only, resource-forbidden, ambiguous, or temporarily
-unverifiable authorization fails closed to the public no-HMR representation. A
-remote identity outage must not make an otherwise public page unavailable.
+unverifiable authorization never selects the private representation. A fully
+public page falls back to the shared no-HMR representation. A limited page fails
+closed to login/denial and returns no page bytes; an identity outage must never
+turn it public. A remote identity outage must not make an otherwise fully public
+page unavailable.
 
 ### URL-selected representation
 
 One browser document uses one representation for its complete lifetime:
 
-- `/p/<share>/...` always serves the public no-HMR representation.
+- `/p/<share>/...` always serves the shared no-HMR representation after the
+  current audience read gate succeeds.
 - `/show/<session>/...` always serves the canonical private representation.
 - Avibe never returns a private entry document, module, API response, or HMR
   client with a `/p/` document URL.
 
-For a `GET` top-level browser navigation to a current public share, Avibe first
+For a `GET` top-level browser navigation to a current limited/public share, Avibe first
 computes `ShowEditorCapability`. When it succeeds and Runtime has explicitly
 advertised keyed-context support, Avibe returns a private, no-store redirect to
 the equivalent `/show/<session>/<route>` URL, preserving the route suffix and
 query. `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document` are the trusted
 navigation evidence. Missing or contradictory Fetch Metadata fails closed to the
-ordinary public document; it never upgrades a subresource, `fetch()`, worker, or
+ordinary shared document; it never upgrades a subresource, `fetch()`, worker, or
 API request.
 
 No update-mode discriminator replaces the existing `globalThis.__AVIBE_SHOW__`
@@ -112,46 +216,55 @@ payload. Public and private documents retain the shipped additive bootstrap keys
 scaffolds, history routing, annotations, and event streams keep their current
 bootstrap contract.
 
-Login or permission changes take effect on the next network navigation. A loaded
-public document and all relative `/p/` requests remain public even if identity
-resolution later recovers. Losing editor authorization closes an existing private
-HMR connection; ordinary private module reads then continue or fail according to
-the caller's current Show Page read ACL.
+Login or permission changes take effect on the next network request. A loaded
+shared document and all relative `/p/` requests remain on the shared Runtime
+representation even if identity resolution later recovers. Limited subresources
+still revalidate the page-bound read grant; revocation prevents future reads but
+never upgrades or mixes the document graph. Losing editor authorization closes
+an existing private HMR connection; ordinary private module reads then continue
+or fail according to the caller's current Show Page read ACL.
 
 ### User-visible requirements
 
 1. An authorized editor opening `/p/` is redirected to the equivalent `/show/`
    route and gets full Vite HMR and React Fast Refresh from the canonical
    development context.
-2. An anonymous or unauthorized `/p/` viewer never receives a Vite client,
+2. An anonymous, limited-email, or otherwise read-only `/p/` viewer never
+   receives a Vite client,
    React Refresh runtime, HMR socket, private module URL, Session identifier,
    source frame, or development diagnostic.
-3. The public link and page content remain readable without login.
-4. An unauthorized loaded page does not update automatically. Refreshing it
-   reads the current public workspace content.
-5. A failed or unavailable identity lookup selects the public representation
-   rather than delaying or failing the public page.
-6. With a negotiated keyed-context Runtime, private HMR traffic cannot be
-   restarted or rebased by an unauthorized public request.
-7. Existing public path confinement, sensitive-path denial, and symlink escape
-   protections remain in force for every public request.
+3. A limited link requires login and an exact current page-email grant. Its viewer
+   gets only page read access: no Workbench, Agents annotation, HMR, settings, or
+   unrelated Show Page access.
+4. A fully public link and page content remain readable without login.
+5. A shared loaded page does not update automatically. Refreshing it reads the
+   current content after re-evaluating audience access.
+6. A failed or unavailable identity lookup selects the shared representation for
+   a fully public page but denies a limited page.
+7. With a negotiated keyed-context Runtime, private HMR traffic cannot be
+   restarted or rebased by an unauthorized shared request.
+8. Existing shared-route path confinement, sensitive-path denial, and symlink
+   escape protections remain in force for every `/p/` request.
 
 An older Runtime does not gain isolation it cannot represent. Avibe does not
-enable the editor redirect for it, and its anonymous `/p/` traffic retains the
+enable the editor redirect for it, and its `/p/` traffic retains the
 existing single-context base-switching limitation until the bundled Runtime is
 upgraded. Compatibility mode is therefore availability-preserving, not evidence
-that requirement 6 has been met.
+that requirement 7 has been met.
 
 ## Architecture
 
 ```text
 GET /p/<share>/...
-  -> resolve current public share
+  -> resolve current limited/public share and availability
+  -> access_mode == limited?
+     -> yes: require current page-bound email grant or ShowEditorCapability
+     -> no: public read is allowed
   -> top-level navigation + Runtime keyed-context capability?
      -> yes: compute ShowEditorCapability
         -> authorized editor: redirect to /show/<session>/...
-        -> everyone else: public representation
-     -> no: public representation
+        -> every allowed viewer: shared representation
+     -> no: shared compatibility representation
 
 GET /show/<session>/...
   -> existing private Show read ACL
@@ -161,21 +274,21 @@ GET /show/<session>/...
 
 ### Runtime context ownership
 
-A negotiated Runtime owns at most two contexts for a public Session:
+A negotiated Runtime owns at most two contexts for a shareable Session:
 
 | Context key | Base | Consumers | Lifetime |
 | --- | --- | --- | --- |
 | `(session_id, private)` | `/show/<session>/` | Private `/show/` only | Existing private demand/lifecycle |
-| `(session_id, public)` | Current `/p/<share>/` | Every `/p/` document and subresource | Demand-created; disposable without affecting private HMR |
+| `(session_id, shared)` | Current `/p/<share>/` | Every allowed limited/public `/p/` document and subresource | Demand-created; disposable without affecting private HMR |
 
-The private context is canonical. An authorized public-link navigation redirects
+The private context is canonical. An authorized share-link navigation redirects
 before Runtime returns document bytes, so the resulting request is an ordinary
 `/show/` request. It does not send a share-specific `x-vibe-show-base`, rewrite
 private modules into the share path, or create a second private HMR protocol.
 
-The public transform context preserves today's no-HMR representation but no
+The shared transform context preserves today's no-HMR representation but no
 longer owns or replaces the private context. A share rotation may recreate only
-the disposable public context. Public context startup, failure, or traffic
+the disposable shared context. Shared context startup, failure, or traffic
 cannot close the private socket.
 
 Avibe negotiates that ownership once per Runtime process before enabling the
@@ -190,8 +303,12 @@ Content-Type: application/json
 {"protocol":1,"features":["show-context-key-v1"]}
 ```
 
-With `show-context-key-v1`, Avibe supplies the loopback-only
-`X-Avibe-Show-Context: private` or `X-Avibe-Show-Context: public` header and
+Avibe supplies the loopback-only `X-Avibe-Show-Context: private` or
+`X-Avibe-Show-Context: shared` header on every app-graph request, including
+requests made before capability negotiation finishes. A legacy Runtime ignores
+the unknown header; a new Runtime can therefore route shared traffic safely even
+when `GET /capabilities` is temporarily unavailable. With
+`show-context-key-v1`,
 Runtime keys Vite ownership by `(session_id, context)`. Avibe strips any
 browser-supplied copy of this header. Runtime health alone, an accepted app
 request, a package version, or support for `x-vibe-show-base` is not capability
@@ -203,7 +320,7 @@ Capability negotiation has three process-scoped outcomes:
 | --- | --- | --- |
 | `supported` | Well-formed protocol `1` response containing `show-context-key-v1` | Cache for this Runtime process; keyed routing and the editor redirect may run |
 | `unsupported` | A definitive legacy response such as `404`, or a well-formed response without the protocol/feature | Cache for this Runtime process; no redirect and `/p/` retains compatibility behavior |
-| `transient-unknown` | Connect/timeout failure, `408`, `429`, `5xx`, truncated JSON, or another malformed startup response | Current request stays public; retry on later requests with jittered exponential backoff capped at 5 seconds |
+| `transient-unknown` | Connect/timeout failure, `408`, `429`, `5xx`, truncated JSON, or another malformed startup response | Current request stays shared and carries the backward-compatible `shared` context; retry on later requests with jittered exponential backoff capped at 5 seconds |
 
 Only `supported` and definitive `unsupported` are permanent for one Runtime
 process. A transient failure records a next-probe time rather than a negative
@@ -215,12 +332,12 @@ After Runtime advertises support, every operation that can create, read, prewarm
 or connect to an app graph supplies an explicit context: entry and module HTTP
 requests, the SPA fallback retry, API handler requests, private HMR proxy setup,
 startup reconciliation, and `vibe show update` prewarm. Runtime rejects a missing
-or invalid context before resolving a Session or changing Vite ownership. Public
-prewarm uses `public`; canonical `/show/` prewarm and HMR use `private`. The
+or invalid context before resolving a Session or changing Vite ownership. Shared
+prewarm uses `shared`; canonical `/show/` prewarm and HMR use `private`. The
 implementation keeps one typed context parameter through `ShowRuntimeManager`
 rather than allowing individual callers to assemble headers.
 
-The public context is a read transform surface, not a publication guarantee. It
+The shared context is a read transform surface, not a publication guarantee. It
 may read the latest workspace state on navigation, so a fresh request during an
 invalid edit can receive the existing sanitized unavailable behavior. This
 change does not promise last-known-good artifacts or frontend/API revision
@@ -228,47 +345,67 @@ atomicity.
 
 ### HTTP routing
 
-For an authorized top-level public entry or SPA navigation, Avibe redirects the
-same route suffix and query to `/show/<session>/`. The private route then serves
+For an authorized top-level limited/public entry or SPA navigation, Avibe
+redirects the same route suffix and query to `/show/<session>/`. The private route then serves
 the existing private bootstrap and canonical private Runtime representation.
-There is no public document whose subresources can switch to private mode.
+There is no shared document whose subresources can switch to private mode.
 
-On a negotiated Runtime, every non-redirected `/p/` request uses only the public
-context and existing public-safe response transforms, regardless of current
-identity. A legacy Runtime uses the explicitly limited compatibility path instead.
+After the audience gate, every non-redirected `/p/` request uses only the shared
+context and existing shared-safe response transforms, regardless of the viewer's
+identity class. A legacy Runtime uses the explicitly limited compatibility path
+instead.
 Exact files and API handlers retain first refusal; route-shaped document misses
 retain the current SPA fallback. The implementation must preserve the existing
-path policy as an invariant over the whole public request surface:
+path policy as an invariant over the whole shared request surface:
 
 - no sensitive segment is readable
 - no symlink or `@fs` path escapes the allowed workspace/dependency roots
-- no private Session path survives a public response
-- no public request is forwarded to an arbitrary host file or plugin endpoint
+- no private Session path survives a shared response
+- no shared request is forwarded to an arbitrary host file or plugin endpoint
 
-The public context continues to use inert, versioned `@vite/client` and React
+The shared context continues to use inert, versioned `@vite/client` and React
 Refresh shims. It exposes neither Runtime diagnostics nor a message channel.
 
-Vite's native `/@fs/<absolute-path>` form cannot cross that public boundary.
-When a public transform references an allowed absolute file, Runtime first checks
+Vite's native `/@fs/<absolute-path>` form cannot cross that shared boundary.
+When a shared transform references an allowed absolute file, Runtime first checks
 the canonical path against the existing allowed-root, sensitive-segment, and
 symlink policy, then allocates a stable opaque handle from a Runtime-process secret,
 the Session, the current share generation, and the canonical path. The browser
-receives only `/p/<share>/__avibe_asset/<handle>`; Runtime's process-local registry
-resolves that handle only inside the matching public namespace. A browser cannot
-submit a raw `/@fs/` path or mint a mapping, handles reveal no path bytes, and share
-rotation or Runtime replacement invalidates them. Idle Vite-context disposal does
-not evict admitted handles, so an already-loaded page can still fetch a lazy module;
-new-handle admission fails closed instead of evicting a handle in use. The same
-chokepoint covers every emitted URL, including an absolute path nested inside
-another Vite URL.
+receives only `/p/<share>/__avibe_asset/<namespace>/<handle>`; Runtime's
+process-local registry resolves that handle only inside the matching shared
+namespace. A browser cannot submit a raw `/@fs/` path or mint a mapping, handles
+reveal no path bytes, and share rotation or Runtime replacement prevents new
+admission into the old namespace.
+
+Each transformed entry graph owns one bounded 30-minute idle namespace lease.
+Every successful document, module, or lazy-asset read refreshes its lease. The
+current namespace is pinned; superseded namespaces are reclaimed only after 30 minutes
+with no request, and reclamation removes the whole namespace rather than
+individual handles. A document that remains idle beyond the lease may fail a
+later lazy import and must reload; it never receives a handle from another graph.
+The Runtime bounds namespaces and handles globally and per Session. When every
+slot is actively leased, new admission fails closed instead of evicting a live
+namespace. Thus loaded documents retain their complete referenced set during the
+lease, while successive edits and rotations cannot consume capacity until
+process restart. The same chokepoint covers every emitted URL, including an
+absolute path nested inside another Vite URL.
 
 Runtime also labels every loopback response as `application`, `asset`, or
 `development-diagnostic` in a stripped response metadata header. Avibe forwards
 authored application/API bodies and successful assets, but replaces every
-`development-diagnostic` body with a fixed public error representation while
+`development-diagnostic` body with a fixed shared error representation while
 preserving only the safe status class. Source frames, plugin errors, stack traces,
 and local paths remain in a redacted operator log. HTTP error status alone is not
 trusted to distinguish an authored API error from a Vite transform failure.
+
+The shared proxy also treats response headers as URL output. It always removes
+`SourceMap`, `X-SourceMap`, `Content-Location`, and `Refresh`. It parses `Location`
+and `Link` only for Runtime-classified application responses, rewrites safe
+same-Show targets into the current `/p/` namespace, preserves explicitly external
+HTTP(S) application targets, and rejects local-file, private-Session, `@fs`, or
+malformed targets. No Runtime URL-bearing header is forwarded by a generic
+allowlist. Source-map comments in bodies pass through the same opaque-URL
+rewriter or are stripped.
 
 ### WebSocket routing
 
@@ -279,12 +416,12 @@ broker tasks close it when those facts stop holding. In-memory broker events are
 an optimization, not the durable visibility boundary: while any HMR socket is
 open, one coalesced monitor per Session rereads `ShowPageStore` on a cadence no
 greater than five seconds and closes every socket if the page becomes `offline`.
-A direct CLI mutation therefore takes effect without an IPC event. Making a public
-page private or rotating its share does not close the canonical private socket when
-editor and read access remain valid; the share binding is needed only for the
+A direct CLI mutation therefore takes effect without an IPC event. Changing a
+limited/public page to private or rotating its share does not close the canonical
+private socket when editor and read access remain valid; the share binding is needed only for the
 redirect that selected `/show/`.
 
-That editor requirement applies to HMR, annotation writes, and the public-link
+That editor requirement applies to HMR, annotation writes, and the share-link
 redirect, not to ordinary private document and module reads. `/show/` keeps the
 existing resource-reader ACL so a read-only user can load the complete private
 module graph without receiving an HMR channel. A downgrade from editor to viewer
@@ -297,20 +434,31 @@ live client.
 
 ### Cache boundary
 
-The redirect decision varies by capability, so redirect and public entry
-responses use `Cache-Control: private, no-store` and `Vary: Cookie`. Successful
+The redirect and limited-access decisions vary by capability, so redirects and
+all entry responses use `Cache-Control: private, no-store` and `Vary: Cookie`.
+Every limited response, including modules and API handlers, is private/no-store.
+Successful
 content-hashed vendor assets at capability-independent global URLs may retain
 immutable caching. Avibe never forwards browser cookies, authorization headers,
 CSRF headers, annotation tokens, or context-selection headers to Runtime.
 
 `/p/` never carries private document bytes, which also makes Service Worker
 interception representation-safe. A Show-owned worker under `/p/<share>/` may
-continue serving that public representation and can therefore delay the editor
+continue serving that shared representation and can therefore delay the editor
 redirect until a navigation reaches Avibe, but it cannot cache a private document
 at the shared URL or control the disjoint `/show/<session>/` scope. Avibe strips
-`Service-Worker-Allowed` from public Runtime responses so authored content cannot
-expand a public worker beyond the default `/p/<share>/` scope. Client-side mode
+`Service-Worker-Allowed` from shared Runtime responses so authored content cannot
+expand a worker beyond the default `/p/<share>/` scope. Client-side mode
 replacement is never a security boundary.
+
+A Service Worker or Cache Storage entry already installed in a browser is content
+that browser has downloaded; the server cannot erase it. Access-mode changes and
+share rotation therefore revoke every request that reaches Avibe immediately,
+but cannot promise that an old worker will stop rendering cached shared bytes in
+that browser. No private representation is ever cacheable at `/p/`, so this
+limitation cannot expose HMR, annotations, Session identifiers, or newer content.
+Verification distinguishes network-reached revocation from unavoidable local
+cache retention instead of claiming that `ShowPageStore` can control the latter.
 
 ## Performance Model
 
@@ -319,24 +467,26 @@ The model adds authorization routing, not a production publication pipeline:
 | Case | Cost |
 | --- | --- |
 | Authorized editor opens `/p/` | Existing session/resource decision, one redirect, canonical Vite transforms, and one private HMR socket |
-| Unprivileged viewer opens `/p/` | Existing public transforms and shims from an isolated context when negotiated, or the explicit legacy compatibility path; no socket |
+| Limited exact-email viewer opens `/p/` | One current authorization decision plus shared transforms and shims; no socket or annotation bootstrap |
+| Public unprivileged viewer opens `/p/` | Existing shared transforms and shims from an isolated context when negotiated, or the explicit legacy compatibility path; no socket |
 | Both modes are active | Up to two Vite contexts for the Session; only the private context maintains HMR clients |
-| Agent edit | Private context pushes HMR; public context does no work until the next public request or refresh |
-| Active private HMR sockets | One coalesced durable visibility read per Session on a cadence no greater than five seconds |
+| Agent edit | Private context pushes HMR; shared context does no work until the next allowed `/p/` request or refresh |
+| Active private HMR sockets | One coalesced durable availability read per Session on a cadence no greater than five seconds |
 
-The capability decision adds one redirect round trip for an authorized public-link
-navigation. A request without a Workbench cookie immediately stays public; a
-request with a cookie uses the existing bounded/cached identity resolution already
-needed by annotations.
+The capability decision adds one redirect round trip for an authorized share-link
+navigation. A public request without a Workbench cookie immediately stays shared.
+A limited request without a session enters the existing login flow; an authenticated
+request uses the current bounded/cached identity resolution and authorization
+revision already used by resource access.
 
 After its one redirect, an authorized `/p/` load should have the same cold and
 warm profile as `/show/`.
-The negotiated isolated public context can increase Runtime memory when authorized and
-anonymous viewers are active simultaneously, but avoids production builds,
+The negotiated isolated shared context can increase Runtime memory when authorized and
+share-link viewers are active simultaneously, but avoids production builds,
 artifact storage, SSE fanout, and anonymous sockets. Runtime must expose context
 count and memory so local Incus regression can set a per-Session idle eviction
-budget from measurements rather than an assumed universal threshold. Opaque public
-path mappings are process-local, share-generation-bound, and admission-bounded;
+budget from measurements rather than an assumed universal threshold. Opaque shared
+path mappings are process-local, share-generation-bound, leased, and admission-bounded;
 capability probes are process-cached or backoff-limited rather than added to every
 request.
 
@@ -344,16 +494,19 @@ request.
 
 | Failure | Browser behavior | Operator evidence |
 | --- | --- | --- |
-| Missing/expired/read-only identity | Serve the public no-HMR representation | Redacted authorization reason |
-| Identity service unavailable | Serve the public representation; public availability does not depend on identity recovery | Authorization availability metric/log |
+| Missing/expired/read-only identity on fully public page | Serve the shared no-HMR representation | Redacted authorization reason |
+| Missing/expired identity on limited page | Redirect to login for a top-level navigation; otherwise deny without page bytes | Redacted authorization reason |
+| Signed-in user lacks exact limited grant | Return one generic access-denied response; do not reveal whether the address or page exists | Redacted page-bound denial |
+| Identity service unavailable | Fully public stays readable; limited fails closed and remains retryable | Authorization availability metric/log |
 | Definitive keyed-context capability absence | Do not redirect; serve `/p/` through the legacy no-HMR path with its existing single-context limitation recorded | Runtime capability metric/log |
-| Transient capability negotiation failure | Keep the current request public and retry after bounded backoff; do not cache a permanent negative | Redacted probe state and retry metric |
-| Private Runtime unavailable after an editor redirect | Existing private sanitized recovery behavior; never fall through to a raw public socket | Private Runtime log |
-| Public context unavailable | Existing sanitized public unavailable/static fallback | Public Runtime log without source detail |
-| Runtime emits a development diagnostic | Preserve only a safe status class and fixed public body | Redacted operator-only diagnostic |
-| Editor role revoked but read ACL remains | Close private HMR; retain entitled private document/module reads; next `/p/` navigation stays public | Existing authorization-revision/resource-revocation log |
-| Show Page read access revoked | Close private HMR and reject later private document/module reads; next `/p/` navigation stays public if the share remains valid | Existing resource-revocation log |
-| Share rotates or becomes private | Old public reads fail immediately; an entitled canonical private socket remains independent | Durable Show Page state |
+| Transient capability negotiation failure | Send the backward-compatible explicit `shared` context, keep the current allowed request shared, and retry after bounded backoff | Redacted probe state and retry metric |
+| Private Runtime unavailable after an editor redirect | Existing private sanitized recovery behavior; never fall through to a raw shared-route socket | Private Runtime log |
+| Shared context unavailable | Existing sanitized shared unavailable/static fallback | Shared Runtime log without source detail |
+| Runtime emits a development diagnostic or unsafe URL header | Preserve only a safe status class/body and filtered headers | Redacted operator-only diagnostic |
+| Limited email removed | Reject the viewer's next network request and invalidate its stale revision; no HMR or annotation channel exists to close | Authorization-revision log |
+| Editor role revoked but read ACL remains | Close private HMR; retain entitled private document/module reads; next `/p/` navigation stays shared only if its audience read rule succeeds | Existing authorization-revision/resource-revocation log |
+| Show Page read access revoked | Close private HMR and reject later private document/module reads; `/p/` is re-evaluated independently | Existing resource-revocation log |
+| Share rotates or becomes private | Old network-reached `/p/` reads fail immediately; an entitled canonical private socket remains independent; previously cached bytes remain a client-cache limitation | Durable Show Page state |
 | Show Page becomes offline through any process | The coalesced durable-state monitor closes private HMR within five seconds and later reads return offline | Durable Show Page state |
 
 Revocation cannot erase module bytes already downloaded by a previously
@@ -363,9 +516,9 @@ unavoidable boundaries as the private `/show/` surface.
 
 ## Rejected Alternatives
 
-### Enable `/p/` HMR for every public viewer
+### Enable `/p/` HMR for every share-link viewer
 
-Public visibility grants content read access, not access to Vite custom messages,
+Limited/public audience grants content read access, not access to Vite custom messages,
 plugin listeners, local paths, source frames, or Runtime diagnostics. This would
 turn a share link into a development-server capability.
 
@@ -375,10 +528,10 @@ An anonymous viewer can remove a client-side condition or connect directly.
 Authorization must select the document representation and independently guard
 every private module and socket request on the server.
 
-### Serve the private representation at the public URL
+### Serve the private representation at the share URL
 
 This makes document and subresource capability checks race with one another and
-lets HTTP caches or a public-scope Service Worker retain private bytes at `/p/`.
+lets HTTP caches or a share-scoped Service Worker retain private bytes at `/p/`.
 Redirecting the editor to `/show/` makes representation identity part of the URL
 and lets the existing private route own the complete document graph.
 
@@ -396,8 +549,21 @@ the existing boundary and avoids protocol drift.
 ### Share one base-switching Vite context
 
 Alternating authorized and anonymous requests would continue to rebase or
-restart the editor's development context. Separate private/public ownership is
+restart the editor's development context. Separate private/shared ownership is
 the minimum isolation needed for reliable HMR.
+
+### Keep email grants beside a separate public switch
+
+This reproduces the current invalid combinations: grants can exist without a
+share route, and anonymous publication can bypass the list. Email grants and
+anonymous publication are mutually exclusive audience modes, not independent
+features.
+
+### Grant limited viewers ordinary Instance viewer access
+
+That would expose Workbench and every resource permitted to an Instance viewer.
+The existing `show_page_email` claim is deliberately frozen to one Show Page and
+must remain view-only even when the same person has other unrelated access.
 
 ### Add anonymous artifact Live Reload
 
@@ -409,82 +575,146 @@ feature, not a prerequisite for capability-gated editor HMR.
 
 ## Delivery Sequence
 
-1. Freeze `ShowEditorCapability`, top-level navigation detection, and the
-   capability-gated `/p/` to `/show/` redirect as contract fixtures; pin the
-   existing Show bootstrap payload as unchanged.
-2. Factor public annotation authorization into the shared, resource-aware editor
-   capability and use the same result for editor navigation.
-3. Add the explicit Runtime capability state machine and one typed context
-   parameter; split canonical private and disposable public context ownership
+1. Freeze `ShowAccess`, the unified access mutation payload, migration fixtures,
+   and the read/editor capability matrix as contract files shared by the UI,
+   local server, and hosted backend.
+2. Replace workspace audience plus public-link switch with the three-option
+   select. Render exact emails only for `limited`, and link controls only for
+   `limited | public`; keep availability separate.
+3. Implement the fail-closed access coordinator and idempotent revision contract.
+   Retire the independent visibility and email mutation paths after compatibility
+   callers migrate.
+4. Make `/p/<share>/` resolve both `limited` and `public`. Add the limited login,
+   exact page-entitlement check, generic denial, current-revision check, and
+   private/no-store response policy.
+5. Factor annotation authorization into the shared, resource-aware
+   `ShowEditorCapability`, explicitly excluding page-email entitlement, and use
+   the same result for top-level editor navigation.
+6. Add the explicit Runtime capability state machine and one typed context
+   parameter; split canonical `private` and disposable `shared` context ownership
    without changing the private URL or bootstrap protocol. Migrate every HTTP,
-   WebSocket, fallback, and prewarm caller in the same contract change.
-4. Redirect authorized top-level `/p/` navigations to the equivalent `/show/`
-   route. Never route a `/p/` subresource to the private context.
-5. Keep every non-redirected `/p/` request on the public transform/shim path and
-   remove the public HMR websocket.
-6. Preserve resource-viewer authorization for ordinary private modules while
-   requiring editor capability for HMR, annotation writes, and public-link
+   WebSocket, fallback, and prewarm caller in the same contract change, and send
+   the backward-compatible context header before negotiation completes.
+7. Redirect authorized top-level `/p/` navigations to the equivalent `/show/`
+   route. Never route a `/p/` subresource to the private context. Keep every
+   remaining `/p/` request on the shared transform/shim path and remove the
+   shared-route HMR websocket.
+8. Preserve resource-viewer authorization for ordinary private modules while
+   requiring editor capability for HMR, annotation writes, and share-link
    redirect selection.
-7. Add opaque public file handles plus Runtime response provenance so raw
-   `/@fs/` paths and development diagnostics cannot cross the public boundary.
-8. Add the coalesced durable visibility monitor for private HMR sockets.
-9. Add cache, Service Worker scope, revocation, mixed-version, negotiation retry,
-   total context propagation, concurrency, and path-confinement contract tests.
-10. Run local Incus regression with authorized, read-only, anonymous, and revoked
-    viewers open concurrently.
+9. Add leased opaque shared file namespaces, Runtime response provenance, and
+   URL-bearing header filtering so raw `/@fs/` paths, stale unbounded handles,
+   and development diagnostics cannot cross the shared boundary.
+10. Add the coalesced durable availability monitor for private HMR sockets.
+11. Add cache, Service Worker scope, network-revocation, mixed-version,
+    negotiation retry, total context propagation, concurrency, path-confinement,
+    and audience-transition contract tests.
+12. Run local Incus regression with editor, exact-email, anonymous, denied, and
+    revoked viewers open concurrently.
 
 The capability branch rolls out with the bundled Runtime change. Avibe enables
 the redirect only after `GET /capabilities` returns protocol `1` and the exact
 `show-context-key-v1` feature. A definitive legacy Runtime keeps `/p/` on the
 existing no-HMR behavior and its existing single-context limitation; it is never
 described as isolated. A transient or malformed startup response fails the current
-request closed to public mode but remains retryable. An accepted legacy app request
-is not negotiation, and the old anonymous public socket is never a compatibility
-fallback.
+request closed to shared mode, carries the explicit backward-compatible context,
+and remains retryable. An accepted legacy app request is not negotiation, and the
+old anonymous shared-route socket is never a compatibility fallback.
+
+### Data migration
+
+The schema migration separates availability from audience and is fail-closed:
+
+| Existing state | Migrated availability | Migrated access mode | Share ID |
+| --- | --- | --- | --- |
+| `visibility=public` | `active` | `public` | Preserve current ID |
+| `visibility=private` with no email grants | `active` | `private` | Clear any dormant ID |
+| `visibility=private` with a non-empty exact-email set | `active` after connected reconciliation | `limited` | Reuse a valid dormant ID or allocate one |
+| `visibility=offline` | `offline` | `private` | Clear; the old model did not retain a trustworthy prior audience |
+
+Until the device can read the hosted grant set, an old private page stays
+private and records migration pending; it is never guessed to be limited. An old
+public page remains public, and any independently stored email set is cleared
+after the local public state is authoritative. Organization resource policies
+are not mapped into external audience modes; they remain canonical `/show/`
+collaborator policy.
+
+The compatibility read API may project old `visibility` fields for one release,
+and new writes maintain a rollback-safe projection: public maps to old `public`,
+private and limited map to old `private`, and offline maps to old `offline`.
+Authoritative writes still go only through `ShowAccess`. A rollback therefore
+treats `limited` as private because older code cannot enforce its `/p/`
+authentication gate.
 
 ## Verification Plan
 
 ### Authorization and document contract tests
 
+- prove the settings API and UI expose exactly `private | limited | public`, the
+  old public switch is absent, emails render only for `limited`, and `/p/` link
+  controls render for `limited | public`
+- exercise every audience transition, coordinator failure point, stale revision,
+  retry, and double submission; no intermediate state may grant more read access
+  than the last committed or requested target
 - seed every supported identity/resource shape and assert that `canAnnotate` and
-  the public-link redirect are produced by the same editor capability
-- prove anonymous, read-only, expired, resource-forbidden, and unverifiable
-  top-level navigations receive only the public representation
+  the share-link redirect are produced by the same editor capability
+- prove page-email entitlement can satisfy only limited read, cannot satisfy the
+  editor's resource proof, and cannot access settings, Workbench, Agents,
+  annotations, HMR, or any other Show Page
+- prove a real independent page editor still redirects when the same email is
+  also listed
+- prove anonymous, expired, resource-forbidden, and unverifiable public
+  navigations receive only the shared representation, while equivalent limited
+  requests enter login or receive a generic denial with no page bytes
 - prove query parameters, headers outside the trusted identity boundary,
   annotation write tokens, subresource requests, and missing Fetch Metadata
   cannot trigger the redirect
 - prove the redirect preserves the route suffix and query while both redirect and
-  public entry responses are private/no-store and vary on cookies
-- prove public and private documents retain every existing Show bootstrap key and
-  that public configuration contains no Session identifier or private path
+  shared entry responses are private/no-store and vary on cookies
+- prove shared and private documents retain every existing Show bootstrap key,
+  shared configuration exposes `canAnnotate=false`, and it contains no Session
+  identifier or private path
+- prove migration maps old public, private-with-grants, private-without-grants,
+  and offline rows exactly as specified, with disconnected reconciliation staying
+  private
 
 ### Runtime and proxy tests
 
 - Runtime capability negotiation distinguishes supported, definitive legacy, and
   transient-unknown outcomes; transient failures retry and every outcome resets
   with the Runtime process
-- Avibe strips browser context headers; negotiated private and public contexts
+- Avibe strips browser context headers; negotiated private and shared contexts
   have independent keys and lifecycles
 - every app-graph call, including SPA fallback, WebSocket setup, startup
-  reconciliation, and public/private prewarm, carries the selected typed context;
+  reconciliation, and shared/private prewarm, carries the selected typed context;
   Runtime rejects missing or invalid selection before touching Vite ownership
-- public requests never change, close, or rebuild the private context
+- a transient capability probe still sends `shared`, works with the new Runtime,
+  and remains accepted by a legacy Runtime that ignores the header
+- shared requests never change, close, or rebuild the private context
 - authorized top-level `/p/` navigations redirect before document bytes to the
   equivalent canonical `/show/` route
-- unprivileged documents reference only public paths, opaque allowed-file handles,
+- unprivileged documents reference only shared paths, opaque allowed-file handles,
   and immutable shims; raw `/@fs/`, host paths, and Session paths are denied
 - Runtime response provenance preserves authored application errors while every
-  development diagnostic receives a fixed public body
+  development diagnostic receives a fixed shared body; unsafe `SourceMap`,
+  `X-SourceMap`, `Content-Location`, `Refresh`, `Location`, and `Link` values are
+  stripped or safely rewritten
+- old opaque namespaces survive lazy loads while leased, expire as a whole after
+  30 idle minutes, never cross graph/share boundaries, and do not make admission
+  capacity permanently consumable across successive edits
 - `/p/<share>/__vite_hmr` rejects every connection
 - private document/module requests retain resource-reader ACL; private HMR repeats
   editor/resource/origin checks, closes on authorization-revision or resource
-  revocation, and polls durable visibility once per active Session so direct CLI
+  revocation, and polls durable availability once per active Session so direct CLI
   offline changes close sockets within five seconds
-- public Runtime responses cannot expand a Service Worker beyond the public share
-  scope, and a public worker cannot control or cache the `/show/` representation
-- every existing public path-confinement fixture remains denied by the new
+- shared Runtime responses cannot expand a Service Worker beyond the share scope,
+  and a shared worker cannot control or cache the `/show/` representation
+- network-reached access-mode changes and rotations revoke the old route; a
+  separately asserted client-cache case documents that an already installed
+  worker may render only previously downloaded shared bytes
+- every existing shared-route path-confinement fixture remains denied by the new
   routing branch, including sensitive segments and workspace escapes
-- direct CLI share rotation or visibility mutation invalidates the old public
+- direct CLI share rotation or access mutation invalidates the old shared
   route without touching independently authorized private access
 
 ### Browser and regression scenarios
@@ -492,60 +722,74 @@ fallback.
 | ID | Scenario | Expected evidence |
 | --- | --- | --- |
 | `SHOW-LIVE-001` | Authorized editor opens `/p/<share>/` and the Agent edits a component | The navigation redirects to `/show/`; React Fast Refresh preserves component state |
-| `SHOW-LIVE-002` | Anonymous viewer opens the same link during the edit | No HMR socket exists and the loaded page stays unchanged until refresh |
-| `SHOW-LIVE-003` | Signed-in read-only or resource-forbidden viewer opens the link | Behavior and bytes match anonymous public mode; no private identifier appears |
-| `SHOW-LIVE-004` | Direct `/show/`, redirected editor `/show/`, and anonymous `/p/` are open together | Both private documents keep HMR while public traffic uses an independent context |
-| `SHOW-LIVE-005` | Identity resolution fails for a request carrying an unverifiable cookie | The public page remains readable with no HMR or diagnostic leak |
-| `SHOW-LIVE-006` | Editor role is revoked while redirected HMR is open but read ACL remains | The socket closes, private modules remain readable, and the next `/p/` navigation stays public |
-| `SHOW-LIVE-007` | Share rotates or direct CLI changes visibility | The old public URL stops serving; share rotation leaves entitled private HMR independent, while offline closes it within five seconds |
-| `SHOW-LIVE-008` | Public requests target every existing denied path shape | All remain denied before Runtime access; no sensitive or escaped file is returned |
+| `SHOW-LIVE-002` | Exact-email viewer opens a limited link and the Agent edits | The viewer stays on `/p/`, has no annotation UI or HMR socket, and sees new content only after refresh |
+| `SHOW-LIVE-003` | Anonymous viewer opens the limited link, signs in with an unlisted email, then retries | Login returns to the same `/p/` route, which gives a generic denial and no page bytes |
+| `SHOW-LIVE-004` | The same link changes from limited to fully public | Anonymous refresh becomes readable; listed viewers still receive no HMR or annotations |
+| `SHOW-LIVE-005` | Direct `/show/`, redirected editor `/show/`, exact-email `/p/`, and anonymous public `/p/` are open together | Both private documents keep HMR while all `/p/` traffic uses an independent shared context |
+| `SHOW-LIVE-006` | Identity resolution fails for public and limited requests | Public remains readable with no HMR; limited fails closed without leaking its audience |
+| `SHOW-LIVE-007` | Editor role is revoked while redirected HMR is open but read ACL remains | The socket closes, private modules remain readable, and `/p/` follows only the current audience read rule |
+| `SHOW-LIVE-008` | An email is removed while its limited page is open | The next network read is denied through authorization revision; no development channel ever existed |
 | `SHOW-LIVE-009` | A viewer connects directly to `/p/<share>/__vite_hmr` | The connection is rejected regardless of cookies or visibility |
-| `SHOW-LIVE-010` | Authorized and anonymous viewers remain open through repeated edits | Context count stays bounded, private HMR remains stable, and no public background build occurs |
-| `SHOW-LIVE-011` | A public document starts while identity is unavailable and identity recovers during module loading | Every module stays on `/p/`; no Vite client or mixed transform graph appears |
+| `SHOW-LIVE-010` | Editor and shared viewers remain open through repeated edits | Context and leased-namespace counts stay bounded, private HMR remains stable, and no shared background build occurs |
+| `SHOW-LIVE-011` | A shared document starts while identity is unavailable and identity recovers during module loading | Every module stays on `/p/`; no Vite client or mixed transform graph appears |
 | `SHOW-LIVE-012` | A read-only user opens `/show/<session>/` | The complete private module graph loads, while the HMR socket is denied |
-| `SHOW-LIVE-013` | Public content registers a share-scoped Service Worker, then the editor opens the link | No private bytes are served at `/p/`; any network-reached redirect lands outside the worker scope at `/show/` |
+| `SHOW-LIVE-013` | Shared content registers a share-scoped Service Worker, then the editor opens the link | No private bytes are served at `/p/`; any network-reached redirect lands outside the worker scope at `/show/`, and cached old bytes are recorded as a client-cache limitation |
 | `SHOW-LIVE-014` | Avibe runs against a Runtime without `show-context-key-v1` | Every `/p/` viewer stays on the compatibility no-HMR path; the existing single-context limitation is explicit and cannot be mistaken for negotiated isolation |
-| `SHOW-LIVE-015` | The first capability probe times out or returns truncated JSON while new Runtime starts | The request stays public, a later bounded retry detects support, and the next eligible navigation redirects without restarting Runtime |
-| `SHOW-LIVE-016` | Public transforms emit nested `/@fs/` imports and Vite transform errors | Only current context-bound opaque handles reach the browser and every development error body is fixed and path-free |
-| `SHOW-LIVE-017` | Startup reconciliation and `vibe show update` prewarm public and private graphs | Each request carries its typed context; a missing/invalid context fails before creating or rebasing either graph |
+| `SHOW-LIVE-015` | The first capability probe times out while the new Runtime app endpoint is ready | The request carries `shared` and succeeds, a later bounded retry detects support, and the next eligible navigation redirects without restart |
+| `SHOW-LIVE-016` | Shared transforms emit nested `/@fs/` imports, URL-bearing headers, and Vite errors | Only leased context-bound handles and safe rewritten headers reach the browser; every development error is fixed and path-free |
+| `SHOW-LIVE-017` | Startup reconciliation and `vibe show update` prewarm shared and private graphs | Each request carries its typed context; a missing/invalid context fails before creating or rebasing either graph |
 | `SHOW-LIVE-018` | Direct CLI changes an active page to offline with private HMR connected | The coalesced durable monitor closes every socket for the Session within five seconds without relying on an in-process event |
+| `SHOW-LIVE-019` | Public changes to limited and the cloud write fails | The local gate remains private; neither anonymous nor stale listed viewers can read until a complete retry succeeds |
+| `SHOW-LIVE-020` | Old private/public/offline rows and exact-email grants upgrade | Each page matches the migration table; a disconnected private-with-grants page stays private and pending |
 
 Focused unit/contract tests, Ruff, repository CI, and local Incus browser
-regression are required. Green unit tests do not replace simultaneous
-authorized/anonymous browser verification.
+regression are required. Green unit tests do not replace simultaneous editor,
+exact-email, denied, anonymous, and revoked browser verification.
 
 ## Acceptance Gate
 
 The design is implemented when all of the following are true:
 
-- Authorized public-link navigations redirect to the corresponding private URL
+- The settings surface has one three-option audience select, no public-link
+  switch, conditional email/link controls, and one authoritative Apply action.
+- `private`, `limited`, `public`, and orthogonal offline availability persist and
+  migrate according to one documented model.
+- Both limited and public sharing use `/p/<share>/`; limited requires a current
+  exact page grant and fully public remains anonymously readable.
+- Page-email authority is view-only and cannot contribute evidence to
+  `ShowEditorCapability`, settings, Workbench, Agents annotations, HMR, or another
+  Show Page.
+- Authorized share-link editor navigations redirect to the corresponding private URL
   and get the same Vite HMR and React Fast Refresh behavior as private editors.
-- Annotation writes and the public-link editor redirect consume one validated,
+- Annotation writes and the share-link editor redirect consume one validated,
   resource-aware editor capability.
-- Every other public viewer receives a readable no-HMR representation with no
-  private identifier, diagnostics, or bidirectional Runtime channel.
+- Every allowed non-editor `/p/` viewer receives the shared no-HMR representation
+  with no annotations, private identifier, diagnostics, or bidirectional channel;
+  disallowed limited viewers receive no page bytes.
 - `/show/<session>/__vite_hmr` is the only HMR endpoint and independently
   revalidates authorization; `/p/<share>/__vite_hmr` does not exist.
 - A loaded `/p/` document cannot switch representation as identity changes, and
-  on a negotiated Runtime anonymous traffic cannot restart, rebase, or close the
+  on a negotiated Runtime shared traffic cannot restart, rebase, or close the
   private Vite context.
 - Capability-varying responses cannot be shared across viewers by a cache.
-- Public Service Workers cannot cache private bytes at `/p/` or control `/show/`.
+- Shared Service Workers cannot cache private bytes at `/p/` or control `/show/`;
+  server-side revocation claims are limited to requests that reach Avibe.
 - Ordinary private module reads preserve resource-viewer access while HMR remains
   editor-only.
 - Runtime support is accepted only through the explicit keyed-context capability
   handshake; definitive mixed versions retain the existing compatibility
-  limitation, while transient negotiation failures retry without denying public
-  reads or permanently disabling the feature.
+  limitation, while transient negotiation failures carry the backward-compatible
+  shared context and retry without permanently disabling the feature.
 - Context selection is mandatory at every Runtime app-graph call site, including
   prewarm and fallback paths, and missing selection fails before Vite ownership.
-- Public file references use context-bound opaque handles after path validation;
-  raw absolute paths and Runtime development diagnostics never reach the browser.
+- Shared file references use leased context-bound opaque handles after path
+  validation; raw absolute paths, unsafe URL-bearing response headers, and Runtime
+  development diagnostics never reach the browser.
 - Direct durable offline mutations close active private HMR within five seconds;
   share rotation alone does not revoke entitled canonical private access.
-- Authorization failure preserves public availability and fails closed to
-  no-HMR mode.
-- Existing public source-confinement and sensitive-path protections hold for the
+- Authorization failure preserves fully public availability, fails limited access
+  closed, and never selects HMR.
+- Existing shared-route source-confinement and sensitive-path protections hold for the
   complete request surface.
 - Local Incus measurements show bounded context memory and no material page-load
-  regression beyond existing private/public transform costs.
+  regression beyond existing private/shared transform and limited-auth costs.
