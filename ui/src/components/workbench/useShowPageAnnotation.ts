@@ -36,7 +36,7 @@ type ControlMessage =
   | { type: 'avibe:annotation:query' };
 
 const PARENT_ESCAPE_CLAIM_SELECTOR =
-  'input, textarea, [contenteditable]:not([contenteditable="false"]), [data-state="open"], [role="dialog"], dialog[open]';
+  'input, textarea, [contenteditable]:not([contenteditable="false"]), [data-state="open"], [role="dialog"]:not([data-window-id]), dialog[open]';
 
 /**
  * `src` is the current iframe URL; changing it (first open, or a private↔public

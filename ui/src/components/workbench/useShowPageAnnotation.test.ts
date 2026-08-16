@@ -131,6 +131,23 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
     expect(frameKeydown).not.toHaveBeenCalled();
   });
 
+  it('forwards Escape from the non-modal pinned Show Page window container', () => {
+    const { iframe } = mountBridge();
+    const frameKeydown = listenForFrameKeydown(iframe);
+    reportState(iframe, true);
+
+    const appWindow = document.createElement('div');
+    appWindow.setAttribute('role', 'dialog');
+    appWindow.dataset.windowId = 'show-window';
+    const titleBarButton = document.createElement('button');
+    appWindow.append(titleBarButton);
+    document.body.append(appWindow);
+
+    dispatchParentKeydown(titleBarButton);
+
+    expect(frameKeydown).toHaveBeenCalledTimes(1);
+  });
+
   it('does not forward an already-prevented parent Escape', () => {
     const { iframe } = mountBridge();
     const frameKeydown = listenForFrameKeydown(iframe);
