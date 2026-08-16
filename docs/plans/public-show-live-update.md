@@ -112,7 +112,7 @@ ShowAccess {
   audience_revision: device-local monotonic integer
   share_admission_gate: open | closed_pending
   grant_revision: backend-issued page-scoped integer
-  grant_digest: non-PII hash
+  grant_commitment: backend-issued opaque random value
 }
 ```
 
@@ -138,20 +138,37 @@ cannot read these settings APIs, mutate the audience, load the Workbench, or
 promote itself through a broader Instance endpoint.
 
 Audience changes use one Apply action and one durable fail-closed coordinator
-rather than three independent writes. Every Apply allocates a client mutation ID.
-For a change that carries exact emails, the device first sends the normalized
-in-memory target and expected page-scoped `grant_revision` to a backend `prepare`
-operation. Preparation stores the target only inside the existing hosted grant
-trust boundary, changes no grant authority, and returns an opaque operation ID plus
-target digest. A prepared operation has a non-renewable 24-hour lifetime. If this
-step fails or its response is lost, no local transition is accepted and the
-previous audience remains authoritative; an unreferenced preparation can only
-expire, never commit itself.
+rather than three independent writes. The coordinator is a cross-process write
+boundary, not an in-memory mutex. Every current-version entry point that can mutate
+`ShowAccess`, its legacy projection, or coordinator recovery state -- including the
+CLI, Web API, startup/migration reconciliation, and updater -- must acquire the same
+exclusive advisory lock at a stable file in Avibe's state directory before reading
+mutation preconditions. The lock file is never replaced or deleted during the
+compatibility window, so every process locks the same inode. Store mutation methods
+require a held lock lease; callers cannot bypass the coordinator with a direct
+`ShowPageStore` write. The lock is acquired before any database transaction, and no
+code may wait for it while holding a database or hosted-operation lock.
+
+Every Apply allocates a client mutation ID and holds the process-shared lease from
+its first authoritative precondition read through either its terminal local commit
+or the durable recording of a fail-closed pending phase. A process crash releases
+the OS lock, but it can leave only a prepared non-authoritative hosted operation or
+a locally recorded pending phase that downgrade preflight rejects. For a change that
+carries exact emails, the device first sends the normalized in-memory target and
+expected page-scoped `grant_revision` to a backend `prepare` operation. Preparation
+stores the target only inside the existing hosted grant trust boundary, changes no
+grant authority, and returns an opaque operation ID plus an opaque target
+`grant_commitment`. The backend generates a fresh cryptographically random 256-bit
+commitment after canonicalizing the page-bound email set and binds it to that
+prepared operation; it is never derived from an email or a client-held key. A
+prepared operation has a non-renewable 24-hour lifetime. If this step fails or its
+response is lost, no local transition is accepted and the previous audience remains
+authoritative; an unreferenced preparation can only expire, never commit itself.
 
 After preparation succeeds, one local transaction persists only the opaque
 operation ID, source audience revision, source page grant revision, target mode,
-target or preserved share binding, target digest, and phase. It never persists the
-email addresses. Any transition that can add, remove, or replace page-email
+target or preserved share binding, target commitment, and phase. It never persists
+the email addresses. Any transition that can add, remove, or replace page-email
 authority also sets `share_admission_gate=closed_pending` in that same transaction.
 This gate is orthogonal to `access_mode`: while it is closed, every `/p/` read and
 editor redirect is denied and the page-email branch of the canonical `/show/` ACL
@@ -160,21 +177,26 @@ Owner and organization resource ACLs on canonical `/show/` remain independent.
 
 The device then asks the backend to `commit` the prepared operation. Commit
 atomically replaces the exact-email set under the expected page `grant_revision`,
-advances that revision once when the digest changes, and retains an idempotent
+advances that revision once when the canonical set changes, promotes the prepared
+commitment for a changed set, and retains an idempotent
 mutation result. After a lost response or process restart, the device resumes by
-opaque operation ID; a committed operation returns the exact current set/digest and
-page grant revision, while an uncommitted expired operation cannot mutate grants.
+opaque operation ID; a committed operation returns the exact current set/commitment
+and page grant revision, while an uncommitted expired operation cannot mutate grants.
 The device reopens the share admission gate only after a read-after-write
 reconciliation proves that the
-backend's committed operation, exact current set/digest, and returned page grant
+backend's committed operation, exact current set/commitment, and returned page grant
 revision match the local record and that revision has been persisted locally. The
 backend deletes the prepared target copy after device acknowledgement or the
-24-hour hard limit; a terminal result retains only non-PII metadata and the digest.
+24-hour hard limit; a terminal result retains only non-PII metadata and the opaque
+commitment. A same-set no-op returns the existing commitment and revision; a later
+change back to a previously used set receives a new random commitment. Consequently,
+a copied SQLite database or backup exposes no deterministic verifier for guessed
+email addresses.
 If the result copy has expired after commit, the authoritative current page-grant
-read supplies the same digest and revision proof. An unavailable, ambiguous,
+read supplies the same commitment and revision proof. An unavailable, ambiguous,
 conflicting, or unpersisted result leaves the durable gate closed. A proven expired
 and uncommitted preparation may restore the prior gate only when the authoritative
-page digest/revision still equal the recorded source; otherwise the owner must
+page commitment/revision still equal the recorded source; otherwise the owner must
 resubmit the target. Empty-set cleanup can retry automatically. A periodic
 page-grant revision poll is recovery evidence, never the security boundary.
 
@@ -615,8 +637,8 @@ request.
 | Shared Runtime admission is saturated | Reclaim the oldest non-in-flight shared bundle; if none is reclaimable, return a sanitized retryable unavailable response without consuming the private reserve | Global weighted-budget admission/reclamation metric |
 | A shared document outlives its absolute namespace/context lifetime | Return a fixed stale-document response for later module or lazy-asset reads and require reload | Namespace hard-expiry metric without source paths |
 | Runtime emits a development diagnostic or unsafe URL header | Preserve only a safe status class/body and filtered headers | Redacted operator-only diagnostic |
-| Limited-list replacement has an ambiguous result | Keep the durable share admission gate closed across retries and restarts until read-after-write reconciliation persists the exact mutation result | Mutation ID, target digest, and redacted reconciliation state |
-| Prepared email operation expires before commit | Reopen the prior share audience only after authoritative digest/revision proof that no commit occurred; otherwise remain closed and require target resubmission | Operation expiry and non-PII target digest |
+| Limited-list replacement has an ambiguous result | Keep the durable share admission gate closed across retries and restarts until read-after-write reconciliation persists the exact mutation result | Mutation ID, opaque target commitment, and redacted reconciliation state |
+| Prepared email operation expires before commit | Reopen the prior share audience only after authoritative commitment/revision proof that no commit occurred; otherwise remain closed and require target resubmission | Operation expiry and opaque target commitment |
 | Limited email removed | Reject the viewer's next network request by page grant revision; no HMR or annotation channel exists to close | Page-grant revision log |
 | Unrelated Instance authorization changes | Refresh generic session freshness without changing any page grant revision or denying an unchanged limited viewer | Instance and page revision metrics kept distinct |
 | Limited page becomes private/public while hosted cleanup fails | Reject page-email claims on both `/p/` and `/show/` from the local mode commit; retry cleanup without reopening authority | Durable audience state and cleanup-pending record |
@@ -699,7 +721,8 @@ feature, not a prerequisite for capability-gated editor HMR.
    select. Render exact emails only for `limited`, and link controls only for
    `limited | public`; keep availability separate.
 3. Implement backend prepare/commit email operations, page-scoped grant revisions,
-   the non-PII persistent share admission barrier, idempotent
+   opaque grant commitments, the non-PII persistent share admission barrier, the
+   process-shared audience write lease, idempotent
    mutation-result/current-grant lookup, the downgrade legacy-write fence, and the
    fail-closed access coordinator. Retire the independent visibility and email
    mutation paths after compatibility callers migrate.
@@ -759,8 +782,8 @@ The schema migration separates availability from audience and is fail-closed:
 Until the device can read the hosted grant set, an old private page stays
 private and records migration pending with the source `audience_revision` and
 legacy-audience journal generation; it is never guessed to be limited. The hosted
-read returns the page-scoped grant revision and digest, and reconciliation may commit
-only with a compare-and-swap proving that all three inputs are still current. The
+read returns the page-scoped grant revision and commitment, and reconciliation may
+commit only with a compare-and-swap proving that all three inputs are still current. The
 Instance-wide authorization revision is deliberately absent from this page-state
 comparison.
 Every authoritative audience Apply and every reconciled legacy write increments
@@ -808,14 +831,16 @@ custom-slug writes made during an allowed rollback still cannot be overwritten b
 stale `ShowAccess` on re-upgrade.
 
 Binary downgrade has a fail-closed preflight before the current executable or
-compatibility schema is replaced. The updater acquires the audience coordinator's
-exclusive write lock, holds it through service quiescence and executable/schema
-replacement, and under that lock requires the hosted resolver to be reachable, no
-audience transition or migration to be pending, every share admission gate to be
-open, no page to be `limited`, and every hosted page-email set to be empty with its
-page grant revision/digest reconciled locally and the resulting Instance-wide
-authorization watermark persisted for the released binary's session-freshness
-check. Owners must first move every limited page
+compatibility schema is replaced. Before preflight, the updater acquires the same
+stable process-shared audience write lock used by CLI, Web, migration, and recovery
+writers. It waits for any writer that already owns the lease, prevents a new writer
+from starting after preflight, and holds the lease through service quiescence and
+executable/schema replacement. Under that lock it requires the hosted resolver to
+be reachable, no audience transition or migration to be pending, every share
+admission gate to be open, no page to be `limited`, and every hosted page-email set
+to be empty with its page grant revision/commitment reconciled locally and the
+resulting Instance-wide authorization watermark persisted for the released binary's
+session-freshness check. Owners must first move every limited page
 to private or public and complete the empty-set cleanup; an open limited gate is
 never rollback-compatible because the released `/show/` HMR handler accepts
 page-email viewers.
@@ -847,6 +872,14 @@ asking an old HMR handler to enforce a capability it does not understand.
   retry, and double submission; the share admission gate is the only transient
   route barrier, and no intermediate state may grant more read access than the last
   committed or requested target
+- enumerate every current-version CLI, Web, migration, recovery, and updater audience
+  mutation entry point and prove its store write requires the same process-shared
+  lease; race real CLI and Web writer processes against downgrade in both acquisition
+  orders, and prove no mutation can begin between preflight and executable replacement
+- copy local state containing one-address and few-address limited sets and prove the
+  opaque grant commitments cannot validate guessed emails offline; same-set retry
+  keeps its revision/commitment while every real set change receives a fresh random
+  commitment
 - seed every supported identity/resource shape and assert that `canAnnotate` and
   the share-link redirect are produced by the same editor capability
 - prove page-email entitlement can satisfy only limited read, cannot satisfy the
@@ -889,7 +922,7 @@ asking an old HMR handler to enforce a capability it does not understand.
   local record never contains an email, a preparation never changes authority by
   itself, and the share admission gate stays closed until the exact result reconciles
 - expire prepared and committed-operation result copies, then recover from opaque
-  operation ID, target digest, and the authoritative page grant revision; reopen the
+  operation ID, target commitment, and the authoritative page grant revision; reopen the
   prior audience only after proof that an expired operation did not commit, and
   require resubmission without persisting removed/failed email PII otherwise
 - advance the Instance-wide authorization revision for every unrelated ACL shape and
@@ -985,10 +1018,12 @@ asking an old HMR handler to enforce a capability it does not understand.
 | `SHOW-LIVE-028` | Anonymous clients keep shared pages active across more Sessions than the Runtime-wide budget | Context and memory stay under the hard limit, reclaimable shared bundles rotate, private HMR keeps its reserve, and excess shared admission is sanitized |
 | `SHOW-LIVE-029` | A public page rolls back, then the old binary rotates and assigns a custom slug before re-upgrade | The newest complete journal snapshot wins; only the final slug resolves, and a conflict fails private without resurrecting stale `ShowAccess` |
 | `SHOW-LIVE-030` | A released Avibe client starts a new Runtime and sends only `x-vibe-show-base` | Entry, module, and prewarm requests retain the legacy singleton behavior; keyed isolation remains disabled until a protocol-`1` client supplies context |
-| `SHOW-LIVE-031` | A limited-list Apply crashes at every prepare/local/commit boundary and later exceeds operation retention | No local row contains an email, prepare alone never changes grants, committed state reconciles by page digest/revision, and the prior audience reopens only after proof that an expired operation did not commit |
+| `SHOW-LIVE-031` | A limited-list Apply crashes at every prepare/local/commit boundary and later exceeds operation retention | No local row contains an email, prepare alone never changes grants, committed state reconciles by page commitment/revision, and the prior audience reopens only after proof that an expired operation did not commit |
 | `SHOW-LIVE-032` | Downgrade is attempted with a limited page, then retried after conversion and empty cleanup | The first attempt is refused; the second invalidates old claims and activates an attested legacy-email-write fence, so the old binary cannot add listed viewers or expose its viewer-authorized HMR socket |
 | `SHOW-LIVE-033` | An unrelated Instance ACL change advances the global authorization revision while a limited list is unchanged | Refreshed listed viewers remain readable at the same page grant revision; changing that page's list advances only its grant revision and rejects older claims |
 | `SHOW-LIVE-034` | A custom-slug public page crashes at every boundary while changing to limited | Every ambiguous `/p/` read is denied, and successful recovery preserves the exact slug without rotating or losing the route |
+| `SHOW-LIVE-035` | A direct CLI or Web audience mutation races binary downgrade from another process | Both entry points contend on one stable process-shared lease; a writer completes before preflight or remains blocked until replacement, so no limited or pending state can appear inside the downgrade window |
+| `SHOW-LIVE-036` | An attacker obtains local state for a limited page with a small email set | The stored random commitment provides no offline email-guess verifier; only the hosted trust boundary can bind it to the canonical set |
 
 Focused unit/contract tests, Ruff, repository CI, and local Incus browser
 regression are required. Green unit tests do not replace simultaneous editor,
@@ -1014,6 +1049,10 @@ The design is implemented when all of the following are true:
   after idempotent read-after-write reconciliation; an ambiguous response, restart,
   or expired operation cannot leave stale grants usable, email targets on disk, or
   a share binding lost.
+- Every current-version local audience writer and binary downgrade uses one stable
+  process-shared write lease from its authoritative precondition read through a
+  terminal or durably pending state; store writes cannot bypass the lease, and local
+  grant commitments are opaque random backend values rather than email-derived hashes.
 - Authorized share-link editor navigations redirect to the corresponding private URL
   and get the same Vite HMR and React Fast Refresh behavior as private editors.
 - Annotation writes and the share-link editor redirect consume one validated,
