@@ -6,7 +6,7 @@
   "required": ["schema_version", "owner", "backend_assertion", "local_handshake", "closed_loop_scenario", "cases"],
   "properties": {
     "schema_version": { "const": 2 },
-    "owner": { "const": "LimitedPageIdentityOnlyAuthorization" },
+    "owner": { "const": "ExecutableIdentityHandshake" },
     "backend_assertion": {
       "type": "object",
       "additionalProperties": false,
@@ -52,6 +52,9 @@
             "response_mode": "form_post",
             "fixed_callback_path": "/auth/show-identity/callback",
             "assertion_parameter": "assertion",
+            "state_parameter": "state",
+            "form_fields": ["state", "assertion"],
+            "additional_form_fields_allowed": false,
             "forbidden_assertion_locations": ["url_query", "url_fragment", "browser_history", "referrer"]
           }
         },
@@ -115,11 +118,13 @@
         "producer",
         "server_resolved_before_start",
         "signed_state_fields",
+        "correlation_cookie",
         "callback_checks",
         "membership_lookup",
         "identity_session_is_authorization",
         "unlisted_outcome",
-        "removed_member_active_tab_policy"
+        "removed_member_active_tab_policy",
+        "reference_harness"
       ],
       "properties": {
         "producer": { "const": "avibe" },
@@ -127,13 +132,35 @@
           "const": ["instance_id", "page_id", "share_id", "safe_public_return_target"]
         },
         "signed_state_fields": {
-          "const": ["instance_id", "share_id", "safe_public_return_target", "nonce", "issued_at", "expires_at"]
+          "const": ["instance_id", "share_id", "safe_public_return_target", "callback_hostname", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"]
+        },
+        "correlation_cookie": {
+          "const": {
+            "name": "avibe_show_identity_correlation",
+            "same_site": "None",
+            "secure": true,
+            "http_only": true,
+            "path": "/auth/show-identity/callback",
+            "domain_attribute_allowed": false,
+            "single_use": true,
+            "expires_no_later_than": "signed_state.expires_at"
+          }
         },
         "callback_checks": { "type": "array", "minItems": 5, "uniqueItems": true, "items": { "type": "string" } },
         "membership_lookup": { "const": "fresh_local_page_email_lookup_on_every_limited_request" },
         "identity_session_is_authorization": { "const": false },
         "unlisted_outcome": { "const": "generic_deny_without_page_bytes_or_login_loop" },
-        "removed_member_active_tab_policy": { "const": "no_active_closure_future_requests_only" }
+        "removed_member_active_tab_policy": { "const": "no_active_closure_future_requests_only" },
+        "reference_harness": {
+          "const": {
+            "scenario_id": "AUTH-SETUP-404",
+            "actual_http_boundary": "POST /auth/show-identity/callback",
+            "content_type": "application/x-www-form-urlencoded",
+            "cross_site_source": "https://avibe.bot",
+            "active_custom_callback_origin": "https://show.example.test",
+            "production_conformance": "future_avibe_and_backend_implementation_lanes"
+          }
+        }
       }
     },
     "closed_loop_scenario": {
@@ -151,27 +178,33 @@
         "start": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["instance_id", "page_id", "share_id", "safe_public_return_target", "allowed_callback_hostnames", "nonce", "signed_state_valid", "correlation_cookie"],
+          "required": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_hostname", "allowed_callback_hostnames", "nonce", "signed_state_valid", "correlation_cookie", "correlation_cookie_sha256", "signed_state_expires_at", "correlation_cookie_expires_at"],
           "properties": {
             "instance_id": { "type": "string", "minLength": 3 },
             "page_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id" },
             "share_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/share_id" },
             "safe_public_return_target": { "type": "string", "pattern": "^/p/[A-Za-z0-9_-]+/$" },
+            "callback_hostname": { "const": "show.example.test" },
             "allowed_callback_hostnames": { "const": ["alice.example.test", "show.example.test"] },
             "nonce": { "type": "string", "minLength": 20 },
             "signed_state_valid": { "const": true },
-            "correlation_cookie": { "type": "string", "minLength": 20 }
+            "correlation_cookie": { "type": "string", "minLength": 20 },
+            "correlation_cookie_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "signed_state_expires_at": { "type": "integer", "minimum": 1 },
+            "correlation_cookie_expires_at": { "type": "integer", "minimum": 1 }
           }
         },
         "callback": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["http_method", "delivery", "assertion_location", "callback_url", "assertion_format", "assertion_valid", "instance_id", "nonce", "jti", "correlation_cookie", "verified_email", "resolved_page_id", "resolved_share_id", "resolved_audience_revision", "current_local_emails", "outcome"],
+          "required": ["http_method", "delivery", "assertion_location", "callback_url", "content_type", "cross_site_source", "assertion_format", "assertion_valid", "instance_id", "nonce", "jti", "correlation_cookie", "verified_email", "resolved_page_id", "resolved_share_id", "resolved_audience_revision", "current_local_emails", "outcome"],
           "properties": {
             "http_method": { "const": "POST" },
             "delivery": { "const": "form_post" },
             "assertion_location": { "const": "form_body" },
-            "callback_url": { "const": "https://alice.example.test/auth/show-identity/callback" },
+            "callback_url": { "const": "https://show.example.test/auth/show-identity/callback" },
+            "content_type": { "const": "application/x-www-form-urlencoded" },
+            "cross_site_source": { "const": "https://avibe.bot" },
             "assertion_format": { "const": "short_lived_signed_identity_assertion" },
             "assertion_valid": { "const": true },
             "instance_id": { "type": "string", "minLength": 3 },

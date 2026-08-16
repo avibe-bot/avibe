@@ -3,7 +3,7 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/shared-browser-containment.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "owner", "canonical_public_url", "trusted_shell", "runtime_capture_admission", "share_browsing_credential", "browser_request_shapes", "credentialless_cors", "vendor_assets", "cross_share_isolation", "expiry_reclamation", "failure_responses", "dependency_cases", "residual_evidence", "cases"],
+  "required": ["schema_version", "owner", "canonical_public_url", "trusted_shell", "admission_rule", "runtime_capture_admission", "share_browsing_credential", "browser_request_shapes", "credentialless_cors", "api_mutation_cases", "vendor_assets", "cross_share_isolation", "expiry_reclamation", "failure_responses", "dependency_cases", "residual_evidence", "cases"],
   "properties": {
     "schema_version": { "const": 2 },
     "owner": { "const": "SharedViewerBrowserContainment" },
@@ -26,6 +26,18 @@
         }
       }
     },
+    "admission_rule": {
+      "const": {
+        "owner": "avibe.SharedViewerBrowserContainment",
+        "inputs": ["availability", "access_mode", "verified_identity", "current_local_membership"],
+        "capability_issued_when": [
+          { "availability": "active", "access_mode": "public", "verified_identity": "not_required", "current_local_membership": "not_required" },
+          { "availability": "active", "access_mode": "limited", "verified_identity": "required", "current_local_membership": "required" }
+        ],
+        "default_outcome": "generic_deny_without_capability_or_page_bytes",
+        "authorization_precedes_capture": true
+      }
+    },
     "runtime_capture_admission": {
       "const": {
         "request_trust": "internal_avibe_server_only",
@@ -39,18 +51,27 @@
     },
     "share_browsing_credential": {
       "const": {
-        "issuer": "local_avibe_after_current_membership_check",
+        "issuer": "local_avibe_after_admission_rule",
         "binding_fields": ["instance_id", "page_id", "share_id", "audience_revision", "namespace_handle", "document_handle"],
         "entropy_bits": 256,
         "derived_from_binding_or_path": false,
         "lifetime": "short_lived_nonrenewable",
-        "storage": "ephemeral_trusted_shell_only",
+        "storage": "ephemeral_trusted_shell_bootstrap_only",
         "browser_cookie": false,
         "backend_identity_assertion": false,
         "instance_access_context": false,
         "instance_role": false,
         "editor_capability": false,
-        "required_surfaces": ["document", "module", "spa_fallback", "api_handler"],
+        "transport": {
+          "location": "opaque_protected_route_namespace_segment",
+          "header_allowed": false,
+          "query_allowed": false,
+          "fragment_allowed": false,
+          "ambient_cookie_allowed": false,
+          "request_credentials": "omit",
+          "referrer_policy": "no-referrer"
+        },
+        "required_surfaces": ["document", "module", "css", "raw", "worker", "spa_fallback", "api_handler"],
         "revision_mismatch_outcome": "reresolve_share_and_membership_before_new_credential"
       }
     },
@@ -64,31 +85,61 @@
         },
         {
           "id": "SHARED-BROWSER-DOCUMENT",
-          "route": "/p/<share_id>/__shared/document/<namespace_handle>/<document_handle>",
+          "route": "/p/<share_id>/__shared/<capability>/document/<namespace_handle>/<document_handle>",
           "required_inputs": ["share_id", "namespace_handle", "document_handle", "capability"],
           "forbidden_inputs": ["session_id", "workspace_path", "source_path", "runtime_context"]
         },
         {
           "id": "SHARED-BROWSER-RESOURCE",
-          "route": "/p/<share_id>/__shared/resource/<namespace_handle>/<document_handle>",
-          "required_inputs": ["share_id", "namespace_handle", "document_handle", "capability"],
+          "route": "/p/<share_id>/__shared/<capability>/resource/<namespace_handle>/<document_handle>/<resource_key>",
+          "required_inputs": ["share_id", "namespace_handle", "document_handle", "resource_key", "capability"],
           "forbidden_inputs": ["session_id", "workspace_path", "source_path", "runtime_context"]
         },
         {
           "id": "SHARED-BROWSER-API",
-          "route": "/p/<share_id>/__shared/api/<namespace_handle>/<document_handle>",
-          "required_inputs": ["share_id", "namespace_handle", "document_handle", "capability"],
+          "route": "/p/<share_id>/__shared/<capability>/api/<namespace_handle>/<document_handle>/<api_route>",
+          "required_inputs": ["share_id", "namespace_handle", "document_handle", "api_route", "capability"],
           "forbidden_inputs": ["session_id", "workspace_path", "source_path", "runtime_context"]
         }
       ]
     },
     "credentialless_cors": {
       "const": {
-        "surfaces": ["document", "module", "spa_fallback", "api_handler"],
+        "surfaces": ["document", "module", "css", "raw", "worker", "spa_fallback", "api_handler"],
+        "request_credentials": "omit",
         "access_control_allow_origin": "*",
         "access_control_allow_credentials": false,
-        "set_cookie_allowed": false
+        "set_cookie_allowed": false,
+        "referrer_policy": "no-referrer",
+        "options": {
+          "allowed_methods": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+          "allowed_headers": ["Content-Type"],
+          "access_control_allow_origin": "*",
+          "access_control_allow_credentials": false,
+          "set_cookie_allowed": false,
+          "cache_control": "private, no-store",
+          "capability_source": "opaque_route_namespace_segment",
+          "valid_capability_requires": [
+            "capability_integrity_and_entropy",
+            "current_instance_page_share_binding",
+            "current_audience_revision",
+            "live_namespace_and_document_handle"
+          ],
+          "admission_proof": "capability_minted_only_after_admission_rule",
+          "ambient_identity_or_cookie_recheck": false,
+          "valid_capability_outcome": "credentialless_preflight_allowed",
+          "invalid_capability_outcome": "fixed_sanitized_not_found"
+        }
       }
+    },
+    "api_mutation_cases": {
+      "const": [
+        { "method": "POST", "content_type": "application/json", "capability": "valid_matching_binding", "actor": "admitted_shared_document", "outcome": "serve_shared_api" },
+        { "method": "PUT", "content_type": "application/json", "capability": "valid_matching_binding", "actor": "admitted_shared_document", "outcome": "serve_shared_api" },
+        { "method": "PATCH", "content_type": "application/json", "capability": "valid_matching_binding", "actor": "admitted_shared_document", "outcome": "serve_shared_api" },
+        { "method": "DELETE", "content_type": "application/json", "capability": "valid_matching_binding", "actor": "admitted_shared_document", "outcome": "serve_shared_api" },
+        { "method": "DELETE", "content_type": "application/json", "capability": "unavailable", "actor": "public_sibling_page_code", "outcome": "fixed_sanitized_not_found" }
+      ]
     },
     "vendor_assets": {
       "const": {
@@ -109,7 +160,8 @@
         "public_sibling_can_expand_service_worker_scope": false,
         "public_sibling_can_retain_readable_opener": false,
         "public_sibling_can_read_protected_bytes": false,
-        "trusted_shell_current_member_can_load": true
+        "trusted_shell_current_member_can_load": true,
+        "trusted_shell_public_anonymous_can_load": true
       }
     },
     "expiry_reclamation": {
@@ -123,6 +175,7 @@
     "failure_responses": {
       "const": [
         { "condition": "not_found", "outcome": "fixed_sanitized_not_found", "page_bytes": false, "path_bytes": false },
+        { "condition": "invalid_capability", "outcome": "fixed_sanitized_not_found", "page_bytes": false, "path_bytes": false },
         { "condition": "overload", "outcome": "bounded_sanitized_retryable_unavailable", "page_bytes": false, "path_bytes": false },
         { "condition": "expired", "outcome": "fixed_sanitized_expired", "page_bytes": false, "path_bytes": false }
       ]
@@ -144,11 +197,11 @@
     },
     "cases": {
       "type": "array",
-      "minItems": 5,
+      "minItems": 6,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "scenario_ids", "actor", "attempt", "credential", "membership", "outcome"],
+          "required": ["id", "scenario_ids", "actor", "attempt", "access_mode", "identity", "credential", "membership", "outcome"],
         "properties": {
           "id": { "type": "string", "pattern": "^CONTAINMENT-[A-Z0-9-]+$" },
           "scenario_ids": {
@@ -159,8 +212,10 @@
           },
           "actor": { "enum": ["trusted_platform_shell", "public_sibling_page_code"] },
           "attempt": { "enum": ["load_protected_shared_document", "fetch_limited_share", "frame_limited_share", "open_and_read_limited_share"] },
+          "access_mode": { "enum": ["limited", "public"] },
+          "identity": { "enum": ["anonymous", "verified"] },
           "credential": { "enum": ["valid_matching_binding", "unavailable", "stale_audience_revision"] },
-          "membership": { "enum": ["current", "removed", "not_evaluated"] },
+          "membership": { "enum": ["current", "removed", "not_required", "not_evaluated"] },
           "outcome": { "enum": ["serve_shared", "generic_deny_without_page_bytes"] }
         }
       }

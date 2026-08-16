@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "owner": "LimitedPageIdentityOnlyAuthorization",
+  "owner": "ExecutableIdentityHandshake",
   "backend_assertion": {
     "format": "short_lived_signed_identity_assertion",
     "authorize_endpoint": {
@@ -16,6 +16,9 @@
       "response_mode": "form_post",
       "fixed_callback_path": "/auth/show-identity/callback",
       "assertion_parameter": "assertion",
+      "state_parameter": "state",
+      "form_fields": ["state", "assertion"],
+      "additional_form_fields_allowed": false,
       "forbidden_assertion_locations": ["url_query", "url_fragment", "browser_history", "referrer"]
     },
     "callback_uri_policy": {
@@ -68,19 +71,38 @@
   "local_handshake": {
     "producer": "avibe",
     "server_resolved_before_start": ["instance_id", "page_id", "share_id", "safe_public_return_target"],
-    "signed_state_fields": ["instance_id", "share_id", "safe_public_return_target", "nonce", "issued_at", "expires_at"],
+    "signed_state_fields": ["instance_id", "share_id", "safe_public_return_target", "callback_hostname", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"],
+    "correlation_cookie": {
+      "name": "avibe_show_identity_correlation",
+      "same_site": "None",
+      "secure": true,
+      "http_only": true,
+      "path": "/auth/show-identity/callback",
+      "domain_attribute_allowed": false,
+      "single_use": true,
+      "expires_no_later_than": "signed_state.expires_at"
+    },
     "callback_checks": [
       "assertion_signature_issuer_audience_and_expiry",
       "nonce_and_jti_match_and_are_single_use",
       "assertion_instance_matches_paired_instance",
       "form_post_targets_fixed_https_callback_without_query_or_fragment",
+      "correlation_cookie_hash_matches_signed_state_and_cookie_is_consumed_once",
       "return_target_matches_signed_same_share_target",
       "share_reresolves_before_membership_check"
     ],
     "membership_lookup": "fresh_local_page_email_lookup_on_every_limited_request",
     "identity_session_is_authorization": false,
     "unlisted_outcome": "generic_deny_without_page_bytes_or_login_loop",
-    "removed_member_active_tab_policy": "no_active_closure_future_requests_only"
+    "removed_member_active_tab_policy": "no_active_closure_future_requests_only",
+    "reference_harness": {
+      "scenario_id": "AUTH-SETUP-404",
+      "actual_http_boundary": "POST /auth/show-identity/callback",
+      "content_type": "application/x-www-form-urlencoded",
+      "cross_site_source": "https://avibe.bot",
+      "active_custom_callback_origin": "https://show.example.test",
+      "production_conformance": "future_avibe_and_backend_implementation_lanes"
+    }
   },
   "closed_loop_scenario": {
     "id": "IDENTITY-CLOSED-LOOP-LISTED",
@@ -90,16 +112,22 @@
       "page_id": "ses_identity_contract",
       "share_id": "identity-contract-share",
       "safe_public_return_target": "/p/identity-contract-share/",
+      "callback_hostname": "show.example.test",
       "allowed_callback_hostnames": ["alice.example.test", "show.example.test"],
       "nonce": "nonce_identity_contract_0001",
       "signed_state_valid": true,
-      "correlation_cookie": "cookie_identity_contract_0001"
+      "correlation_cookie": "cookie_identity_contract_0001",
+      "correlation_cookie_sha256": "26b27df81b729e14db0da3ad5169d6cfe30b40c655136f441e03be31ff2760ba",
+      "signed_state_expires_at": 1800000300,
+      "correlation_cookie_expires_at": 1800000300
     },
     "callback": {
       "http_method": "POST",
       "delivery": "form_post",
       "assertion_location": "form_body",
-      "callback_url": "https://alice.example.test/auth/show-identity/callback",
+      "callback_url": "https://show.example.test/auth/show-identity/callback",
+      "content_type": "application/x-www-form-urlencoded",
+      "cross_site_source": "https://avibe.bot",
       "assertion_format": "short_lived_signed_identity_assertion",
       "assertion_valid": true,
       "instance_id": "ins_identity_contract",

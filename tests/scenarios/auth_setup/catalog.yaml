@@ -4,11 +4,13 @@ capability:
   name: IM-driven backend auth recovery
   canonical_tests:
     - tests/scenarios/auth_setup/test_auth_setup_scenarios.py
+    - tests/scenarios/auth_setup/test_show_identity_scenario.py
     - tests/test_claude_agent_sessions.py
   shared_harness:
     - tests/scenario_harness/core.py
     - tests/scenario_harness/auth_setup.py
     - tests/scenario_harness/model_hub_native_oauth.py
+    - tests/scenario_harness/show_identity.py
 status_legend:
   covered: scenario coverage exists
   partial: unit or contract coverage exists but the closed loop is incomplete
@@ -252,7 +254,7 @@ scenarios:
     kind: happy_path_and_security_boundary
     layer: scenario
     backend: avibe-backend
-    test: tests/scenarios/auth_setup/test_show_identity_contract.py::test_limited_show_identity_contract_closes_signed_state_callback_and_membership_loop
+    test: tests/scenarios/auth_setup/test_show_identity_scenario.py::test_form_post_closes_custom_host_identity_and_membership_loop
   - id: AUTH-SETUP-402
     name: Personal remote activity slides past the original identity deadline without another authorization prompt
     status: covered

@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "design_source": "docs/plans/public-show-live-update.md",
-  "design_sha": "d4a0e597ef9c0ad32bc6d92c9bd136cb0358f445",
-  "design_blob_sha": "d4a0e597ef9c0ad32bc6d92c9bd136cb0358f445",
+  "design_sha": "d34970d739d3ab6d84ac9d0fb667b124fe8649e7",
+  "design_blob_sha": "d34970d739d3ab6d84ac9d0fb667b124fe8649e7",
   "evidence_boundaries": {
     "contract": "machine_contract_proof",
     "residual_browser": "future_browser_conformance",
@@ -59,7 +59,7 @@
     { "id": "CLAIM-PROTOCOL-PRECEDES-MUTATION", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/protocol1_validation/validation_precedes", "value": "graph_ownership_mutation" }, "expected": true },
     { "id": "CLAIM-IMPLICIT-PREWARM-FALSE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/implicit_shared_work_from_private_edit" }, "expected": false },
     { "id": "CLAIM-HMR-MONITOR-COALESCED", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/monitor_scope" }, "expected": "one_coalesced_monitor_per_active_session" },
-    { "id": "CLAIM-HMR-OFFLINE-DEADLINE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/durable_offline_close_all_deadline_seconds" }, "expected": 5 },
+    { "id": "CLAIM-HMR-OFFLINE-DEADLINE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/durable_offline_deadline/total_close_deadline_seconds" }, "expected": 5 },
     { "id": "CLAIM-P2L-STABLE-BINDING", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-PRIVATE-TO-LIMITED", "pointer": "/result/show_access/share_binding/share_id" }, "expected": "stable-custom" },
     { "id": "CLAIM-P2L-LOCAL-MEMBER", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/fixtures/0/result/show_access/emails", "value": "bob@example.com" }, "expected": true },
     { "id": "CLAIM-P2L-NO-EXTERNAL", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-PRIVATE-TO-LIMITED", "pointer": "/external_service_calls" }, "expected": 0 },
@@ -144,11 +144,16 @@
     { "id": "CLAIM-IDENTITY-SIGNED-ONLY", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/format" }, "expected": "short_lived_signed_identity_assertion" },
     { "id": "CLAIM-IDENTITY-FORM-POST", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/delivery/response_mode" }, "expected": "form_post" },
     { "id": "CLAIM-IDENTITY-CLOSED-LOOP", "source": { "kind": "semantic", "document": "identity-auth.json", "check": "identity_closed_loop" }, "expected": true },
+    { "id": "CLAIM-PUBLIC-AND-LIMITED-ADMISSION", "source": { "kind": "semantic", "document": "shared-browser-containment.json", "check": "public_and_limited_admission" }, "expected": true },
+    { "id": "CLAIM-CREDENTIALLESS-API-PREFLIGHT", "source": { "kind": "semantic", "document": "shared-browser-containment.json", "check": "credentialless_api_preflight" }, "expected": true },
     { "id": "CLAIM-SHARED-RESPONSE-MATRIX", "source": { "kind": "semantic", "document": "runtime-context.json", "check": "shared_response_matrix" }, "expected": true },
     { "id": "CLAIM-CANONICAL-EMAIL-STORAGE", "source": { "kind": "semantic", "document": "fixtures/show-access.json", "check": "canonical_email_storage" }, "expected": true },
     { "id": "CLAIM-NONCANONICAL-EMAIL-REJECT", "source": { "kind": "pointer", "document": "show-access.schema.json", "pointer": "/x-avibe-invariants/canonical_email_set/reject_noncanonical_persisted_or_result" }, "expected": true },
     { "id": "CLAIM-SHARE-COLLISION-ATOMIC", "source": { "kind": "semantic", "document": "fixtures/apply-mutations.json", "check": "share_collision_atomic" }, "expected": true },
     { "id": "CLAIM-RECEIPT-A-B-A", "source": { "kind": "semantic", "document": "fixtures/apply-mutations.json", "check": "receipt_a_b_a" }, "expected": true },
+    { "id": "CLAIM-CANONICAL-RECEIPT-DIGEST", "source": { "kind": "semantic", "document": "fixtures/apply-mutations.json", "check": "canonical_receipt_digest" }, "expected": true },
+    { "id": "CLAIM-LEGACY-NULL-BINDING", "source": { "kind": "semantic", "document": "local-legacy-mapping.json", "check": "legacy_null_binding" }, "expected": true },
+    { "id": "CLAIM-PRIVATE-HMR-AUTHORITY", "source": { "kind": "semantic", "document": "runtime-context.json", "check": "private_hmr_authority" }, "expected": true },
     { "id": "CLAIM-RECEIPT-PAGE-LIFETIME", "source": { "kind": "pointer", "document": "apply-transition-algebra.json", "pointer": "/idempotency/retention/lifetime" }, "expected": "page_lifetime" },
     { "id": "CLAIM-RECEIPT-NO-TIME-EVICTION", "source": { "kind": "pointer", "document": "apply-transition-algebra.json", "pointer": "/idempotency/retention/time_eviction_allowed" }, "expected": false },
     { "id": "CLAIM-RECEIPT-NO-COUNT-EVICTION", "source": { "kind": "pointer", "document": "apply-transition-algebra.json", "pointer": "/idempotency/retention/count_eviction_allowed" }, "expected": false },
@@ -163,9 +168,10 @@
     { "id": "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/share_browsing_credential/editor_capability" }, "expected": false }
   ],
   "bindings": [
-    { "scenario_id": "SHOW-LIVE-001", "expected_evidence": "Trusted top-level navigation redirects to canonical `/show/`; resource editor receives HMR and annotations only on `/show/`; React Fast Refresh preservation remains a future browser check", "clauses": [
+    { "scenario_id": "SHOW-LIVE-001", "expected_evidence": "Trusted top-level navigation redirects to canonical `/show/`; resource editor receives HMR and annotations only on `/show/`; missing multiple or untrusted HMR Origin rejects before upstream WebSocket; React Fast Refresh preservation remains a future browser check", "clauses": [
       { "text": "Trusted top-level navigation redirects to canonical `/show/`", "claim_ids": ["CLAIM-EDITOR-P-REDIRECT"] },
       { "text": "resource editor receives HMR and annotations only on `/show/`", "claim_ids": ["CLAIM-SHOW-EDITOR-HMR", "CLAIM-SHOW-EDITOR-ANNOTATIONS", "CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] },
+      { "text": "missing multiple or untrusted HMR Origin rejects before upstream WebSocket", "claim_ids": ["CLAIM-PRIVATE-HMR-AUTHORITY"] },
       { "text": "React Fast Refresh preservation remains a future browser check", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
     ] },
     { "scenario_id": "SHOW-LIVE-002", "expected_evidence": "Trusted shell plus a current binding-scoped credential serves the opaque-origin shared page; sibling page code cannot fetch frame or open/read it; `/p/` has no HMR or annotations; new content appears only after a later refresh", "clauses": [
@@ -174,15 +180,15 @@
       { "text": "`/p/` has no HMR or annotations", "claim_ids": ["CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] },
       { "text": "new content appears only after a later refresh", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-003", "expected_evidence": "Signed state cookie nonce assertion and instance binding close one callback loop; signed state returns only to the resolved share; current local membership is absent; one generic denial returns no page bytes and does not loop", "clauses": [
-      { "text": "Signed state cookie nonce assertion and instance binding close one callback loop", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-FORM-POST"] },
+    { "scenario_id": "SHOW-LIVE-003", "expected_evidence": "Callback-scoped SameSite=None Secure HttpOnly single-use cookie plus signed state nonce assertion and instance binding close one cross-site form POST loop; signed state returns only to the resolved share; current local membership is absent; one generic denial returns no page bytes and does not loop", "clauses": [
+      { "text": "Callback-scoped SameSite=None Secure HttpOnly single-use cookie plus signed state nonce assertion and instance binding close one cross-site form POST loop", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-FORM-POST"] },
       { "text": "signed state returns only to the resolved share", "claim_ids": ["CLAIM-SAFE-RETURN-BOUND"] },
       { "text": "current local membership is absent", "claim_ids": ["CLAIM-UNLISTED-MEMBER-ABSENT", "CLAIM-UNLISTED-DENY"] },
       { "text": "one generic denial returns no page bytes and does not loop", "claim_ids": ["CLAIM-UNLISTED-NO-BYTES-OR-LOOP"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-004", "expected_evidence": "Local Apply preserves the binding and advances audience revision once; anonymous `/p/` becomes readable; shared readers still have no HMR or annotations", "clauses": [
+    { "scenario_id": "SHOW-LIVE-004", "expected_evidence": "Local Apply preserves the binding and advances audience revision once; anonymous `/p/` receives an admitted protected-content capability and becomes readable; shared readers still have no HMR or annotations", "clauses": [
       { "text": "Local Apply preserves the binding and advances audience revision once", "claim_ids": ["CLAIM-LIMITED-PUBLIC-BINDING", "CLAIM-LIMITED-PUBLIC-REVISION"] },
-      { "text": "anonymous `/p/` becomes readable", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED"] },
+      { "text": "anonymous `/p/` receives an admitted protected-content capability and becomes readable", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED", "CLAIM-PUBLIC-AND-LIMITED-ADMISSION"] },
       { "text": "shared readers still have no HMR or annotations", "claim_ids": ["CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] }
     ] },
     { "scenario_id": "SHOW-LIVE-005", "expected_evidence": "Runtime graphs are keyed by Session and context; shared lifecycle cannot rebase or close private HMR; both `/p/` audiences remain shared", "clauses": [
@@ -190,8 +196,8 @@
       { "text": "shared lifecycle cannot rebase or close private HMR", "claim_ids": ["CLAIM-SHARED-DOES-NOT-CLOSE-PRIVATE"] },
       { "text": "both `/p/` audiences remain shared", "claim_ids": ["CLAIM-LIMITED-MEMBER-SHARED", "CLAIM-PUBLIC-ANONYMOUS-SHARED"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-006", "expected_evidence": "Public `/p/` remains readable; limited `/p/` fails closed; neither outcome selects HMR", "clauses": [
-      { "text": "Public `/p/` remains readable", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED"] },
+    { "scenario_id": "SHOW-LIVE-006", "expected_evidence": "Public `/p/` independently admits anonymous protected content and remains readable; limited `/p/` fails closed; neither outcome selects HMR", "clauses": [
+      { "text": "Public `/p/` independently admits anonymous protected content and remains readable", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED", "CLAIM-PUBLIC-AND-LIMITED-ADMISSION"] },
       { "text": "limited `/p/` fails closed", "claim_ids": ["CLAIM-LIMITED-LOGIN-REQUIRED"] },
       { "text": "neither outcome selects HMR", "claim_ids": ["CLAIM-P-NO-HMR"] }
     ] },
@@ -249,9 +255,9 @@
       { "text": "protocol validation occurs before graph mutation", "claim_ids": ["CLAIM-PROTOCOL-PRECEDES-MUTATION"] },
       { "text": "ordinary editor edits never implicitly prewarm shared context", "claim_ids": ["CLAIM-IMPLICIT-PREWARM-FALSE"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-018", "expected_evidence": "One coalesced monitor observes durable state; every Session socket closes within five seconds; no in-process event is required", "clauses": [
+    { "scenario_id": "SHOW-LIVE-018", "expected_evidence": "One coalesced monitor observes durable state; poll plus closure completes within five seconds from durable offline even just after a poll; no in-process event is required", "clauses": [
       { "text": "One coalesced monitor observes durable state", "claim_ids": ["CLAIM-HMR-MONITOR-COALESCED"] },
-      { "text": "every Session socket closes within five seconds", "claim_ids": ["CLAIM-HMR-OFFLINE-DEADLINE"] },
+      { "text": "poll plus closure completes within five seconds from durable offline even just after a poll", "claim_ids": ["CLAIM-HMR-OFFLINE-DEADLINE", "CLAIM-PRIVATE-HMR-AUTHORITY"] },
       { "text": "no in-process event is required", "claim_ids": ["CLAIM-OFFLINE-DURABLE-SOURCE"] }
     ] },
     { "scenario_id": "SHOW-LIVE-019", "expected_evidence": "One local transaction preserves the stable binding and installs normalized membership; anonymous access stops immediately; Backend availability is irrelevant to Apply", "clauses": [
@@ -259,16 +265,17 @@
       { "text": "anonymous access stops immediately", "claim_ids": ["CLAIM-LIMITED-LOGIN-REQUIRED"] },
       { "text": "Backend availability is irrelevant to Apply", "claim_ids": ["CLAIM-P2L-NO-EXTERNAL"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-020", "expected_evidence": "Backend table and authorized-email endpoints are deleted; Avibe hosted-email clients are deleted; application reads stop before destructive DDL; no migration or compatibility bridge exists", "clauses": [
+    { "scenario_id": "SHOW-LIVE-020", "expected_evidence": "Backend table and authorized-email endpoints are deleted; Avibe hosted-email clients are deleted; application reads stop before destructive DDL; no migration or compatibility bridge exists; local legacy null bindings remain null while non-null bindings are preserved", "clauses": [
       { "text": "Backend table and authorized-email endpoints are deleted", "claim_ids": ["CLAIM-RETIRE-STORAGE-ACTION", "CLAIM-RETIRE-ENDPOINT-ACTION"] },
       { "text": "Avibe hosted-email clients are deleted", "claim_ids": ["CLAIM-RETIRE-CLIENT-ACTION", "CLAIM-RETIRE-AUTH-ACTION", "CLAIM-RETIRE-SOURCE"] },
       { "text": "application reads stop before destructive DDL", "claim_ids": ["CLAIM-RETIRE-DDL-ORDER"] },
-      { "text": "no migration or compatibility bridge exists", "claim_ids": ["CLAIM-RETIRE-NO-MIGRATION", "CLAIM-RETIRE-NO-BRIDGE", "CLAIM-MIGRATION-FIXTURE-ABSENT"] }
+      { "text": "no migration or compatibility bridge exists", "claim_ids": ["CLAIM-RETIRE-NO-MIGRATION", "CLAIM-RETIRE-NO-BRIDGE", "CLAIM-MIGRATION-FIXTURE-ABSENT"] },
+      { "text": "local legacy null bindings remain null while non-null bindings are preserved", "claim_ids": ["CLAIM-LEGACY-NULL-BINDING"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-021", "expected_evidence": "Before-transaction crash leaves the old aggregate; after-commit crash leaves the complete new aggregate; Apply A then B then replay A returns A's original terminal result; no cloud coordinator exists", "clauses": [
+    { "scenario_id": "SHOW-LIVE-021", "expected_evidence": "Before-transaction crash leaves the old aggregate; after-commit crash leaves the complete new aggregate; canonical digest vectors make Apply A then B then replay A return A's original terminal result; no cloud coordinator exists", "clauses": [
       { "text": "Before-transaction crash leaves the old aggregate", "claim_ids": ["CLAIM-CRASH-OLD-BEFORE"] },
       { "text": "after-commit crash leaves the complete new aggregate", "claim_ids": ["CLAIM-CRASH-NEW-AFTER", "CLAIM-CRASH-NEW-EMAIL"] },
-      { "text": "Apply A then B then replay A returns A's original terminal result", "claim_ids": ["CLAIM-RECEIPT-A-B-A", "CLAIM-IDEMPOTENCY-PAGE-MUTATION-KEY", "CLAIM-IDEMPOTENCY-SURVIVES-LATER-APPLY", "CLAIM-IDEMPOTENCY-ATOMIC"] },
+      { "text": "canonical digest vectors make Apply A then B then replay A return A's original terminal result", "claim_ids": ["CLAIM-RECEIPT-A-B-A", "CLAIM-CANONICAL-RECEIPT-DIGEST", "CLAIM-IDEMPOTENCY-PAGE-MUTATION-KEY", "CLAIM-IDEMPOTENCY-SURVIVES-LATER-APPLY", "CLAIM-IDEMPOTENCY-ATOMIC"] },
       { "text": "no cloud coordinator exists", "claim_ids": ["CLAIM-P2L-NO-EXTERNAL", "CLAIM-HOSTED-FIXTURE-ABSENT"] }
     ] },
     { "scenario_id": "SHOW-LIVE-022", "expected_evidence": "Private commits locally and disables `/p/`; the stable binding is retained but inactive; listed-only identity still cannot use `/show/`", "clauses": [
@@ -317,9 +324,9 @@
       { "text": "keyed context remains disabled", "claim_ids": ["CLAIM-HEADERLESS-KEYED-FALSE"] },
       { "text": "unknown protocol still rejects safely", "claim_ids": ["CLAIM-UNKNOWN-PROTOCOL-REJECT"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-031", "expected_evidence": "There is no partially authoritative aggregate; durable page-plus-mutation receipts survive later Apply and replay the original result; no hosted operation cleanup or reconciliation exists", "clauses": [
+    { "scenario_id": "SHOW-LIVE-031", "expected_evidence": "There is no partially authoritative aggregate; receipts with frozen canonical digests survive later Apply and replay the original result; no hosted operation cleanup or reconciliation exists", "clauses": [
       { "text": "There is no partially authoritative aggregate", "claim_ids": ["CLAIM-CRASH-OLD-BEFORE", "CLAIM-CRASH-NEW-AFTER", "CLAIM-CRASH-NEW-EMAIL"] },
-      { "text": "durable page-plus-mutation receipts survive later Apply and replay the original result", "claim_ids": ["CLAIM-CRASH-RETRY-STABLE", "CLAIM-RECEIPT-A-B-A", "CLAIM-IDEMPOTENCY-PAGE-MUTATION-KEY", "CLAIM-IDEMPOTENCY-SURVIVES-LATER-APPLY", "CLAIM-IDEMPOTENCY-ATOMIC", "CLAIM-RECEIPT-PAGE-LIFETIME", "CLAIM-RECEIPT-NO-TIME-EVICTION", "CLAIM-RECEIPT-NO-COUNT-EVICTION", "CLAIM-RECEIPT-PAGE-CASCADE"] },
+      { "text": "receipts with frozen canonical digests survive later Apply and replay the original result", "claim_ids": ["CLAIM-CRASH-RETRY-STABLE", "CLAIM-RECEIPT-A-B-A", "CLAIM-CANONICAL-RECEIPT-DIGEST", "CLAIM-IDEMPOTENCY-PAGE-MUTATION-KEY", "CLAIM-IDEMPOTENCY-SURVIVES-LATER-APPLY", "CLAIM-IDEMPOTENCY-ATOMIC", "CLAIM-RECEIPT-PAGE-LIFETIME", "CLAIM-RECEIPT-NO-TIME-EVICTION", "CLAIM-RECEIPT-NO-COUNT-EVICTION", "CLAIM-RECEIPT-PAGE-CASCADE"] },
       { "text": "no hosted operation cleanup or reconciliation exists", "claim_ids": ["CLAIM-HOSTED-FIXTURE-ABSENT", "CLAIM-RETIRE-NO-BRIDGE"] }
     ] },
     { "scenario_id": "SHOW-LIVE-032", "expected_evidence": "Availability stays offline; mode binding and membership commit atomically; neither surface is admitted until explicit activation", "clauses": [
@@ -347,9 +354,9 @@
       { "text": "response projection excludes mutation receipts and is private and no-store", "claim_ids": ["CLAIM-SETTINGS-RECEIPT-FREE", "CLAIM-SETTINGS-PRIVATE-NOSTORE"] },
       { "text": "Backend receives no whitelist data", "claim_ids": ["CLAIM-BACKEND-MEMBERSHIP-FALSE", "CLAIM-FORBIDDEN-WHITELIST"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-037", "expected_evidence": "Backend returns only one signed verified instance-bound identity assertion; Avibe closes signed-state cookie nonce callback correlation and re-resolves current membership; a binding-scoped credential serves only the opaque-origin shared `/p/` page", "clauses": [
+    { "scenario_id": "SHOW-LIVE-037", "expected_evidence": "Backend returns only one signed verified instance-bound identity assertion; Avibe closes callback-scoped cross-site cookie signed-state nonce and jti correlation then re-resolves current membership; a binding-scoped credential serves only the opaque-origin shared `/p/` page", "clauses": [
       { "text": "Backend returns only one signed verified instance-bound identity assertion", "claim_ids": ["CLAIM-IDENTITY-SIGNED-ONLY", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-INSTANCE-BOUND", "CLAIM-IDENTITY-VERIFIED-EMAIL", "CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL"] },
-      { "text": "Avibe closes signed-state cookie nonce callback correlation and re-resolves current membership", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-SHARE-RERESOLVE", "CLAIM-FRESH-LOCAL-LOOKUP"] },
+      { "text": "Avibe closes callback-scoped cross-site cookie signed-state nonce and jti correlation then re-resolves current membership", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-SHARE-RERESOLVE", "CLAIM-FRESH-LOCAL-LOOKUP"] },
       { "text": "a binding-scoped credential serves only the opaque-origin shared `/p/` page", "claim_ids": ["CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-IDENTITY-LISTED-SHARED", "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR"] }
     ] },
     { "scenario_id": "SHOW-LIVE-038", "expected_evidence": "Current membership plus a binding-scoped credential positively serves limited `/p/`; canonical document module API and HMR remain denied; membership and browsing credential create no Instance role or editor capability", "clauses": [
@@ -357,10 +364,11 @@
       { "text": "canonical document module API and HMR remain denied", "claim_ids": ["CLAIM-LISTED-SHOW-DENY", "CLAIM-LISTED-SHOW-HMR-DENY"] },
       { "text": "membership and browsing credential create no Instance role or editor capability", "claim_ids": ["CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-039", "expected_evidence": "Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker scope opener or protected bytes; every forged or ambient request is denied; trusted shell plus current membership remains the positive path", "clauses": [
+    { "scenario_id": "SHOW-LIVE-039", "expected_evidence": "Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker scope opener or protected bytes; every forged or ambient request is denied; capability-path OPTIONS and JSON mutations are credentialless and sibling attempts are sanitized; trusted shell plus current membership and public anonymous admission remain positive paths", "clauses": [
       { "text": "Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker scope opener or protected bytes", "claim_ids": ["CLAIM-SIBLING-ISOLATION"] },
       { "text": "every forged or ambient request is denied", "claim_ids": ["CLAIM-SIBLING-FETCH-DENY", "CLAIM-SIBLING-FRAME-DENY", "CLAIM-SIBLING-OPEN-DENY"] },
-      { "text": "trusted shell plus current membership remains the positive path", "claim_ids": ["CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-LIMITED-MEMBER-SHARED"] }
+      { "text": "capability-path OPTIONS and JSON mutations are credentialless and sibling attempts are sanitized", "claim_ids": ["CLAIM-CREDENTIALLESS-API-PREFLIGHT"] },
+      { "text": "trusted shell plus current membership and public anonymous admission remain positive paths", "claim_ids": ["CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-LIMITED-MEMBER-SHARED", "CLAIM-PUBLIC-AND-LIMITED-ADMISSION"] }
     ] }
   ]
 }

@@ -58,6 +58,19 @@
     "survives_later_apply": true,
     "atomic_with_effective_or_no_change_apply": true,
     "exposed_by_owner_settings_read": false,
+    "canonical_request_sha256": {
+      "owner": "CanonicalApplyReceipt",
+      "input": "fully_normalized_apply_request",
+      "included_fields": ["schema_version", "message_type", "page_id", "mutation_id", "expected_audience_revision", "target"],
+      "excluded_context": ["route_authority", "actor_context"],
+      "canonical_json": "RFC8785_JSON_Canonicalization_Scheme_recursive",
+      "object_key_order": "lexicographic_recursive",
+      "array_order": "preserved_after_field_normalization",
+      "number_domain": "nonnegative_base10_integers_only",
+      "text_encoding": "UTF-8",
+      "digest": "SHA-256",
+      "output_encoding": "lowercase_hex_64"
+    },
     "retention": {
       "lifetime": "page_lifetime",
       "time_eviction_allowed": false,

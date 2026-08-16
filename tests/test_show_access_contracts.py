@@ -90,6 +90,16 @@ def _canonical_emails(emails: list[str]) -> list[str]:
     return sorted({email.strip().lower() for email in emails})
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
 def _validate_show_access_invariants(state: dict[str, Any]) -> None:
     if state["emails"] != _canonical_emails(state["emails"]):
         raise ValueError("ShowAccess emails must be canonical, unique, and lexicographically sorted")
@@ -197,22 +207,94 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
         if check == "identity_closed_loop":
             loop = document["closed_loop_scenario"]
             start, callback, request = loop["start"], loop["callback"], loop["protected_request"]
+            handshake = document["local_handshake"]
+            cookie = handshake["correlation_cookie"]
             return (
                 callback["http_method"] == "POST"
                 and callback["delivery"] == "form_post"
                 and callback["assertion_location"] == "form_body"
+                and callback["content_type"] == "application/x-www-form-urlencoded"
+                and callback["cross_site_source"] == "https://avibe.bot"
                 and callback["callback_url"].endswith("/auth/show-identity/callback")
                 and "?" not in callback["callback_url"]
                 and "#" not in callback["callback_url"]
+                and callback["callback_url"].split("/", 3)[2] == start["callback_hostname"]
                 and callback["callback_url"].split("/", 3)[2] in start["allowed_callback_hostnames"]
                 and start["instance_id"] == callback["instance_id"] == request["credential_binding"]["instance_id"]
                 and start["page_id"] == callback["resolved_page_id"] == request["credential_binding"]["page_id"]
                 and start["share_id"] == callback["resolved_share_id"] == request["credential_binding"]["share_id"]
                 and start["nonce"] == callback["nonce"]
                 and start["correlation_cookie"] == callback["correlation_cookie"]
+                and hashlib.sha256(start["correlation_cookie"].encode("utf-8")).hexdigest()
+                == start["correlation_cookie_sha256"]
+                and start["correlation_cookie_expires_at"] <= start["signed_state_expires_at"]
+                and cookie
+                == {
+                    "name": "avibe_show_identity_correlation",
+                    "same_site": "None",
+                    "secure": True,
+                    "http_only": True,
+                    "path": "/auth/show-identity/callback",
+                    "domain_attribute_allowed": False,
+                    "single_use": True,
+                    "expires_no_later_than": "signed_state.expires_at",
+                }
                 and callback["verified_email"] in callback["current_local_emails"]
                 and callback["resolved_audience_revision"] == request["credential_binding"]["audience_revision"]
                 and request["membership_rechecked"] is True
+            )
+        if check == "public_and_limited_admission":
+            admissions = document["admission_rule"]["capability_issued_when"]
+            cases = {case["id"]: case for case in document["cases"]}
+            return (
+                admissions
+                == [
+                    {
+                        "availability": "active",
+                        "access_mode": "public",
+                        "verified_identity": "not_required",
+                        "current_local_membership": "not_required",
+                    },
+                    {
+                        "availability": "active",
+                        "access_mode": "limited",
+                        "verified_identity": "required",
+                        "current_local_membership": "required",
+                    },
+                ]
+                and cases["CONTAINMENT-TRUSTED-SHELL-PUBLIC-ANONYMOUS"]["outcome"] == "serve_shared"
+                and cases["CONTAINMENT-TRUSTED-SHELL-CURRENT-MEMBER"]["outcome"] == "serve_shared"
+                and cases["CONTAINMENT-PUBLIC-SIBLING-FETCH"]["outcome"] == "generic_deny_without_page_bytes"
+            )
+        if check == "credentialless_api_preflight":
+            cors = document["credentialless_cors"]
+            options = cors["options"]
+            mutations = document["api_mutation_cases"]
+            positive = [case for case in mutations if case["actor"] == "admitted_shared_document"]
+            sibling = [case for case in mutations if case["actor"] == "public_sibling_page_code"]
+            routes = document["browser_request_shapes"][1:]
+            return (
+                options["allowed_methods"] == ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+                and options["allowed_headers"] == ["Content-Type"]
+                and options["access_control_allow_origin"] == "*"
+                and options["access_control_allow_credentials"] is False
+                and options["set_cookie_allowed"] is False
+                and options["capability_source"] == "opaque_route_namespace_segment"
+                and options["valid_capability_requires"]
+                == [
+                    "capability_integrity_and_entropy",
+                    "current_instance_page_share_binding",
+                    "current_audience_revision",
+                    "live_namespace_and_document_handle",
+                ]
+                and options["admission_proof"] == "capability_minted_only_after_admission_rule"
+                and options["ambient_identity_or_cookie_recheck"] is False
+                and {case["method"] for case in positive} == {"POST", "PUT", "PATCH", "DELETE"}
+                and all(case["outcome"] == "serve_shared_api" for case in positive)
+                and len(sibling) == 1
+                and sibling[0]["outcome"] == "fixed_sanitized_not_found"
+                and all("/<capability>/" in shape["route"] for shape in routes)
+                and document["share_browsing_credential"]["transport"]["header_allowed"] is False
             )
         if check == "shared_response_matrix":
             matrix = document["shared_proxy_policy"]["response_policy_matrix"]
@@ -250,6 +332,53 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and replay_a["returned_audience_revision"] == a["returned_audience_revision"]
                 and replay_a["current_audience_revision"] == b["current_audience_revision"]
                 and replay_a["store_write"] is False
+            )
+        if check == "canonical_receipt_digest":
+            vectors = document["receipt_digest_vectors"]
+            by_digest = {vector["canonical_request_sha256"]: vector for vector in vectors}
+            sequence = document["receipt_sequences"][0]["steps"]
+            return (
+                len(vectors) == len(by_digest) == 2
+                and all(
+                    _canonical_json(vector["normalized_request"]) == vector["canonical_json_utf8"]
+                    and hashlib.sha256(vector["canonical_json_utf8"].encode("utf-8")).hexdigest()
+                    == vector["canonical_request_sha256"]
+                    for vector in vectors
+                )
+                and sequence[0]["canonical_request_sha256"] == sequence[2]["canonical_request_sha256"]
+                and sequence[0]["canonical_request_sha256"] != sequence[1]["canonical_request_sha256"]
+                and all(step["canonical_request_sha256"] in by_digest for step in sequence)
+            )
+        if check == "legacy_null_binding":
+            cases = {case["id"]: case for case in document["cases"]}
+            null_cases = [
+                cases["LOCAL-LEGACY-PRIVATE-NO-BINDING"],
+                cases["LOCAL-LEGACY-OFFLINE-NO-BINDING"],
+            ]
+            retained = [case for case in document["cases"] if case["source"]["share_id"] is not None]
+            return all(case["result"]["share_binding"] is None for case in null_cases) and all(
+                case["result"]["share_binding"] == {"share_id": case["source"]["share_id"]} for case in retained
+            )
+        if check == "private_hmr_authority":
+            authority = document["avibe_private_hmr_monitor"]
+            admission = authority["websocket_admission"]
+            deadline = authority["durable_offline_deadline"]
+            cases = {case["id"]: case for case in admission["cases"]}
+            trace = deadline["worst_case_just_after_poll_trace_ms"]
+            return (
+                authority["owner"] == "PrivateHmrAuthority"
+                and admission["origin_header_cardinality"] == "exactly_one"
+                and admission["validation_order"] == "before_any_upstream_websocket_open"
+                and all(
+                    cases[case_id]["outcome"] == "reject_without_upstream_websocket"
+                    for case_id in ("HMR-ORIGIN-MISSING", "HMR-ORIGIN-MULTIPLE", "HMR-ORIGIN-CROSS-SITE")
+                )
+                and admission["rejection"]["upstream_websocket_opened"] is False
+                and deadline["poll_interval_max_seconds"] + deadline["post_detection_close_budget_seconds"]
+                <= deadline["total_close_deadline_seconds"]
+                and trace["all_sockets_closed_no_later_than"] - trace["durable_offline_commit"]
+                == trace["elapsed_from_offline_commit"]
+                and trace["elapsed_from_offline_commit"] <= 5000
             )
         if check == "settings_projection_excludes_receipts":
             invariant = document["x-avibe-projection-invariants"]
@@ -502,6 +631,26 @@ def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
         "survives_later_apply": True,
         "atomic_with_effective_or_no_change_apply": True,
         "exposed_by_owner_settings_read": False,
+        "canonical_request_sha256": {
+            "owner": "CanonicalApplyReceipt",
+            "input": "fully_normalized_apply_request",
+            "included_fields": [
+                "schema_version",
+                "message_type",
+                "page_id",
+                "mutation_id",
+                "expected_audience_revision",
+                "target",
+            ],
+            "excluded_context": ["route_authority", "actor_context"],
+            "canonical_json": "RFC8785_JSON_Canonicalization_Scheme_recursive",
+            "object_key_order": "lexicographic_recursive",
+            "array_order": "preserved_after_field_normalization",
+            "number_domain": "nonnegative_base10_integers_only",
+            "text_encoding": "UTF-8",
+            "digest": "SHA-256",
+            "output_encoding": "lowercase_hex_64",
+        },
         "retention": {
             "lifetime": "page_lifetime",
             "time_eviction_allowed": False,
@@ -605,6 +754,18 @@ def test_local_removal_and_crash_traces_need_no_backend_or_reconciliation() -> N
     assert replay_a["returned_audience_revision"] == 81
     assert replay_a["returned_mutation_id"] == apply_a["mutation_id"]
     assert replay_a["store_write"] is False
+    assert apply_a["canonical_request_sha256"] == replay_a["canonical_request_sha256"]
+    assert apply_a["canonical_request_sha256"] != apply_b["canonical_request_sha256"]
+
+    vectors = _load("fixtures/apply-mutations.json")["receipt_digest_vectors"]
+    assert {vector["canonical_request_sha256"] for vector in vectors} == {
+        "fce9ed95782f988c893c0cd1e5ac6f5dc403e7db4212882089e46864c29e9919",
+        "997f1adf1dfb7eb727bf6e7d581ffedf81ba4f1dac166141d595358058775a0b",
+    }
+    for vector in vectors:
+        canonical = _canonical_json(vector["normalized_request"])
+        assert canonical == vector["canonical_json_utf8"]
+        assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == vector["canonical_request_sha256"]
 
 
 def test_local_legacy_sqlite_mapping_is_deterministic_and_fail_closed() -> None:
@@ -613,18 +774,22 @@ def test_local_legacy_sqlite_mapping_is_deterministic_and_fail_closed() -> None:
     assert contract["initial_audience_revision"] == 0
     assert contract["email_initialization"] == "empty"
     assert contract["hosted_import_allowed"] is contract["dual_write_allowed"] is False
-    cases = {case["source"]["legacy_visibility"]: case for case in contract["cases"]}
-    expected = {
-        "private": ("active", "private", False),
-        "public": ("active", "public", True),
-        "offline": ("offline", "private", False),
-    }
-    for legacy_visibility, (availability, access_mode, admitted) in expected.items():
-        case = cases[legacy_visibility]
+    cases = {case["id"]: case for case in contract["cases"]}
+    assert len(cases) == len(contract["cases"]) == 5
+    expected = [
+        ("LOCAL-LEGACY-PRIVATE", "active", "private", False),
+        ("LOCAL-LEGACY-PUBLIC", "active", "public", True),
+        ("LOCAL-LEGACY-OFFLINE-FAIL-CLOSED", "offline", "private", False),
+        ("LOCAL-LEGACY-PRIVATE-NO-BINDING", "active", "private", False),
+        ("LOCAL-LEGACY-OFFLINE-NO-BINDING", "offline", "private", False),
+    ]
+    for case_id, availability, access_mode, admitted in expected:
+        case = cases[case_id]
         result = case["result"]
         assert result["page_id"] == case["source"]["page_id"]
         assert (result["availability"], result["access_mode"]) == (availability, access_mode)
-        assert result["share_binding"]["share_id"] == case["source"]["share_id"]
+        expected_binding = {"share_id": case["source"]["share_id"]} if case["source"]["share_id"] is not None else None
+        assert result["share_binding"] == expected_binding
         assert result["audience_revision"] == 0
         assert result["emails"] == []
         assert result["last_mutation"] is None
@@ -665,6 +830,9 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "response_mode": "form_post",
         "fixed_callback_path": "/auth/show-identity/callback",
         "assertion_parameter": "assertion",
+        "state_parameter": "state",
+        "form_fields": ["state", "assertion"],
+        "additional_form_fields_allowed": False,
         "forbidden_assertion_locations": ["url_query", "url_fragment", "browser_history", "referrer"],
     }
     assert assertion["required_signed_claims"] == [
@@ -709,6 +877,24 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
     )
     assert contract["local_handshake"]["identity_session_is_authorization"] is False
     assert contract["local_handshake"]["removed_member_active_tab_policy"] == ("no_active_closure_future_requests_only")
+    assert contract["local_handshake"]["correlation_cookie"] == {
+        "name": "avibe_show_identity_correlation",
+        "same_site": "None",
+        "secure": True,
+        "http_only": True,
+        "path": "/auth/show-identity/callback",
+        "domain_attribute_allowed": False,
+        "single_use": True,
+        "expires_no_later_than": "signed_state.expires_at",
+    }
+    assert contract["local_handshake"]["reference_harness"] == {
+        "scenario_id": "AUTH-SETUP-404",
+        "actual_http_boundary": "POST /auth/show-identity/callback",
+        "content_type": "application/x-www-form-urlencoded",
+        "cross_site_source": "https://avibe.bot",
+        "active_custom_callback_origin": "https://show.example.test",
+        "production_conformance": "future_avibe_and_backend_implementation_lanes",
+    }
 
     cases = {case["id"]: case for case in contract["cases"]}
     assert cases["IDENTITY-LISTED-CURRENT"]["outcome"] == "serve_shared"
@@ -724,9 +910,15 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
     assert closed_loop["callback"]["assertion_format"] == "short_lived_signed_identity_assertion"
     assert closed_loop["callback"]["http_method"] == "POST"
     assert closed_loop["callback"]["delivery"] == "form_post"
+    assert closed_loop["callback"]["callback_url"] == "https://show.example.test/auth/show-identity/callback"
     assert closed_loop["start"]["instance_id"] == closed_loop["callback"]["instance_id"]
     assert closed_loop["start"]["nonce"] == closed_loop["callback"]["nonce"]
     assert closed_loop["start"]["correlation_cookie"] == closed_loop["callback"]["correlation_cookie"]
+    assert (
+        hashlib.sha256(closed_loop["start"]["correlation_cookie"].encode("utf-8")).hexdigest()
+        == (closed_loop["start"]["correlation_cookie_sha256"])
+    )
+    assert closed_loop["start"]["correlation_cookie_expires_at"] <= closed_loop["start"]["signed_state_expires_at"]
     assert closed_loop["start"]["page_id"] == closed_loop["callback"]["resolved_page_id"]
     assert closed_loop["start"]["share_id"] == closed_loop["callback"]["resolved_share_id"]
     assert closed_loop["callback"]["verified_email"] in closed_loop["callback"]["current_local_emails"]
@@ -756,6 +948,23 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
     assert shell["allow_same_origin"] is False
     assert all(value is False for value in shell["page_code_access"].values())
 
+    admission = contract["admission_rule"]
+    assert admission["authorization_precedes_capture"] is True
+    assert admission["capability_issued_when"] == [
+        {
+            "availability": "active",
+            "access_mode": "public",
+            "verified_identity": "not_required",
+            "current_local_membership": "not_required",
+        },
+        {
+            "availability": "active",
+            "access_mode": "limited",
+            "verified_identity": "required",
+            "current_local_membership": "required",
+        },
+    ]
+
     credential = contract["share_browsing_credential"]
     assert credential["binding_fields"] == [
         "instance_id",
@@ -767,7 +976,24 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
     ]
     assert credential["entropy_bits"] == 256
     assert credential["derived_from_binding_or_path"] is False
-    assert credential["required_surfaces"] == ["document", "module", "spa_fallback", "api_handler"]
+    assert credential["required_surfaces"] == [
+        "document",
+        "module",
+        "css",
+        "raw",
+        "worker",
+        "spa_fallback",
+        "api_handler",
+    ]
+    assert credential["transport"] == {
+        "location": "opaque_protected_route_namespace_segment",
+        "header_allowed": False,
+        "query_allowed": False,
+        "fragment_allowed": False,
+        "ambient_cookie_allowed": False,
+        "request_credentials": "omit",
+        "referrer_policy": "no-referrer",
+    }
     assert credential["browser_cookie"] is credential["instance_access_context"] is False
 
     capture = contract["runtime_capture_admission"]
@@ -780,11 +1006,41 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
         assert {"session_id", "workspace_path", "source_path", "runtime_context"} <= set(shape["forbidden_inputs"])
     protected_shapes = contract["browser_request_shapes"][1:]
     assert all("capability" in shape["required_inputs"] for shape in protected_shapes)
+    assert all("/<capability>/" in shape["route"] for shape in protected_shapes)
 
     cors = contract["credentialless_cors"]
     assert cors["access_control_allow_origin"] == "*"
     assert cors["access_control_allow_credentials"] is False
     assert cors["set_cookie_allowed"] is False
+    assert cors["request_credentials"] == "omit"
+    assert cors["referrer_policy"] == "no-referrer"
+    assert cors["options"] == {
+        "allowed_methods": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+        "allowed_headers": ["Content-Type"],
+        "access_control_allow_origin": "*",
+        "access_control_allow_credentials": False,
+        "set_cookie_allowed": False,
+        "cache_control": "private, no-store",
+        "capability_source": "opaque_route_namespace_segment",
+        "valid_capability_requires": [
+            "capability_integrity_and_entropy",
+            "current_instance_page_share_binding",
+            "current_audience_revision",
+            "live_namespace_and_document_handle",
+        ],
+        "admission_proof": "capability_minted_only_after_admission_rule",
+        "ambient_identity_or_cookie_recheck": False,
+        "valid_capability_outcome": "credentialless_preflight_allowed",
+        "invalid_capability_outcome": "fixed_sanitized_not_found",
+    }
+    api_mutations = contract["api_mutation_cases"]
+    positive_mutations = [case for case in api_mutations if case["actor"] == "admitted_shared_document"]
+    assert {case["method"] for case in positive_mutations} == {"POST", "PUT", "PATCH", "DELETE"}
+    assert all(case["content_type"] == "application/json" for case in positive_mutations)
+    assert all(case["outcome"] == "serve_shared_api" for case in positive_mutations)
+    sibling_mutation = [case for case in api_mutations if case["actor"] == "public_sibling_page_code"]
+    assert len(sibling_mutation) == 1
+    assert sibling_mutation[0]["outcome"] == "fixed_sanitized_not_found"
     assert contract["vendor_assets"] == {
         "representation": "namespace_scoped",
         "global_hashed_public_assets_allowed": False,
@@ -810,6 +1066,13 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
 
     cases = {case["id"]: case for case in contract["cases"]}
     assert cases["CONTAINMENT-TRUSTED-SHELL-CURRENT-MEMBER"]["outcome"] == "serve_shared"
+    public = cases["CONTAINMENT-TRUSTED-SHELL-PUBLIC-ANONYMOUS"]
+    assert (public["access_mode"], public["identity"], public["membership"], public["outcome"]) == (
+        "public",
+        "anonymous",
+        "not_required",
+        "serve_shared",
+    )
     attacks = {
         "fetch_limited_share",
         "frame_limited_share",
@@ -1019,7 +1282,20 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
             response_policy["axes"]["surface"],
         )
     )
-    assert len(response_points) == 2 * 8
+    assert response_policy["axes"]["surface"] == [
+        "shell",
+        "entry",
+        "document",
+        "module",
+        "css",
+        "raw",
+        "worker",
+        "spa_fallback",
+        "api_handler",
+        "redirect",
+        "error",
+    ]
+    assert len(response_points) == 2 * len(response_policy["axes"]["surface"])
     for audience_mode, surface in response_points:
         matches = [
             rule
@@ -1037,6 +1313,35 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
         "trusted_fetch_metadata",
     ]
     assert redirect["preserve_route_suffix"] is redirect["preserve_query"] is True
+
+    hmr_authority = contract["avibe_private_hmr_monitor"]
+    assert hmr_authority["owner"] == "PrivateHmrAuthority"
+    websocket = hmr_authority["websocket_admission"]
+    assert websocket["origin_allowlist"] == {
+        "derived_from": ["https://<active_instance_hostname>", "https://<active_custom_hostname>"],
+        "fact_source": "server_owned_active_instance_and_custom_hostname_configuration",
+        "wildcards_allowed": False,
+        "suffix_matching_allowed": False,
+        "forwarded_or_browser_host_inputs_allowed": False,
+    }
+    assert websocket["origin_header_cardinality"] == "exactly_one"
+    assert websocket["validation_order"] == "before_any_upstream_websocket_open"
+    assert websocket["rejection"] == {
+        "outcome": "reject_without_upstream_websocket",
+        "upstream_websocket_opened": False,
+    }
+    origin_cases = {case["id"]: case for case in websocket["cases"]}
+    assert origin_cases["HMR-ORIGIN-TRUSTED-INSTANCE"]["outcome"] == "open_after_editor_authorization"
+    for case_id in ("HMR-ORIGIN-MISSING", "HMR-ORIGIN-MULTIPLE", "HMR-ORIGIN-CROSS-SITE"):
+        assert origin_cases[case_id]["outcome"] == "reject_without_upstream_websocket"
+
+    deadline = hmr_authority["durable_offline_deadline"]
+    assert deadline["measured_from"] == "durable_offline_transaction_commit"
+    assert deadline["poll_interval_max_seconds"] + deadline["post_detection_close_budget_seconds"] <= 5
+    assert deadline["total_close_deadline_seconds"] == 5
+    trace = deadline["worst_case_just_after_poll_trace_ms"]
+    assert trace["all_sockets_closed_no_later_than"] - trace["durable_offline_commit"] == 4999
+    assert trace["elapsed_from_offline_commit"] <= 5000
 
 
 def test_runtime_release_advertisement_is_pinned_to_one_reviewed_smoked_sha() -> None:
@@ -1121,6 +1426,8 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "nonce",
         "instance_id",
         "verified_email",
+        "state",
+        "assertion",
     ]
     assert interfaces["C09"]["delivery"]["authentication"] == "server_owned_orthogonal_facts"
     assert interfaces["C13"]["signature"]["covered_fields"] == [
@@ -1137,9 +1444,12 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
     assert interfaces["C17"]["delivery"]["mechanism"] == "loopback_internal_capture_protocol"
     assert interfaces["C18"]["signature"]["schema"] == "shared-browser-containment.schema.json"
     assert interfaces["C18"]["delivery"]["authentication"] == (
-        "local_share_browsing_credential_after_current_membership"
+        "local_share_browsing_credential_after_public_or_current_member_admission"
     )
     assert interfaces["C19"]["signature"]["schema"] == "local-legacy-mapping.schema.json"
+    assert interfaces["C04"]["delivery"]["serialization_owner"].startswith("CanonicalApplyReceipt")
+    assert interfaces["C07"]["delivery"]["serialization_owner"] == "avibe.ExecutableIdentityHandshake"
+    assert interfaces["C14"]["delivery"]["serialization_owner"] == "avibe.PrivateHmrAuthority"
     for interface in interfaces.values():
         assert interface["delivery"]["authentication"]
         assert interface["delivery"]["serialization_owner"]

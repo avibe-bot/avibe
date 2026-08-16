@@ -130,11 +130,16 @@
         "document": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.json$" },
         "check": {
           "enum": [
-            "identity_closed_loop",
-            "shared_response_matrix",
-            "canonical_email_storage",
-            "share_collision_atomic",
-            "receipt_a_b_a",
+        "identity_closed_loop",
+        "public_and_limited_admission",
+        "credentialless_api_preflight",
+        "shared_response_matrix",
+        "canonical_email_storage",
+        "share_collision_atomic",
+        "receipt_a_b_a",
+        "canonical_receipt_digest",
+        "legacy_null_binding",
+        "private_hmr_authority",
             "settings_projection_excludes_receipts",
             "sibling_isolation"
           ]

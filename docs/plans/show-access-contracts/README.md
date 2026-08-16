@@ -18,6 +18,9 @@ The controller process owns one transactional writer under a stable cross-proces
 lease. That transaction also records a durable receipt keyed by page and mutation,
 so replay remains deterministic after later Apply operations. Receipts live for the
 page lifetime, are never evicted by time or count, and cascade-delete with the page.
+The receipt digest covers the full normalized Apply body using recursive RFC 8785
+canonical JSON, UTF-8, SHA-256, and lowercase hex; known-answer vectors freeze the
+bytes across language and version changes.
 The UI process
 authorizes and forwards; it never coordinates or writes.
 
@@ -25,6 +28,9 @@ Avibe Backend authenticates identity only. Its signed assertion is instance-boun
 and contains a verified email, but no page membership, page authorization, Instance
 role, or `show_page_email` access source. Local Avibe re-resolves the share and
 checks current local membership on every limited request.
+The executable identity owner uses a host-only, callback-scoped, `SameSite=None`,
+`Secure`, `HttpOnly`, single-use correlation cookie and an actual cross-site HTTP
+form POST in the shared auth scenario harness.
 
 There is no migration or compatibility phase. The unused hosted storage, endpoints,
 clients, and Instance authorization source are direct deletion targets.
@@ -60,7 +66,8 @@ clients, and Instance authorization source are direct deletion targets.
 - Receipts remain for the page lifetime with no time/count eviction and are removed
   only by the page cascade.
 - Legacy local offline maps to offline/private; private/public map active in their
-  matching mode; any existing stable binding remains and no hosted data is imported.
+  matching mode; any existing stable binding remains, a null binding stays null, and
+  no hosted data is imported.
 - Listed-only identity can read current limited `/p` and nothing privileged.
 - Resource viewer/editor authority is independent. Trusted top-level `/p`
   navigation redirects to canonical `/show`; only editor authority enables HMR and
@@ -70,10 +77,15 @@ clients, and Instance authorization source are direct deletion targets.
 - Arbitrary shared code runs in an opaque-origin sandbox and cannot obtain or reuse
   another share's bootstrap, handle, capability, cookie, DOM, CORS response, worker
   scope, opener, or protected bytes.
+- Public anonymous and current-member limited admission both mint opaque capability-
+  path authority. Protected document/module/resource/API requests are credentialless;
+  JSON mutation preflight has an exact closed method/header policy.
 - Membership removal affects the next request without Backend. Loaded guest tabs are
   not actively closed.
 - Ordinary editor file edits never create, rebase, or background-build a shared
   Runtime graph. Shared prewarm is explicit and admitted.
+- Canonical HMR rejects missing, multiple, or untrusted Origin before upstream
+  WebSocket open; durable offline polling plus closure has one five-second total bound.
 
 ## Validation
 

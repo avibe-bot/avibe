@@ -494,6 +494,44 @@
       ]
     }
   ],
+  "receipt_digest_vectors": [
+    {
+      "id": "RECEIPT-DIGEST-APPLY-A",
+      "normalized_request": {
+        "schema_version": 2,
+        "message_type": "apply_request",
+        "page_id": "ses_receipt_sequence",
+        "mutation_id": "mut_receipt_sequence_a_0001",
+        "expected_audience_revision": 80,
+        "target": {
+          "access_mode": "limited",
+          "share_intent": "preserve_or_allocate",
+          "custom_share_id": null,
+          "emails": ["a@example.com", "z@example.com"]
+        }
+      },
+      "canonical_json_utf8": "{\"expected_audience_revision\":80,\"message_type\":\"apply_request\",\"mutation_id\":\"mut_receipt_sequence_a_0001\",\"page_id\":\"ses_receipt_sequence\",\"schema_version\":2,\"target\":{\"access_mode\":\"limited\",\"custom_share_id\":null,\"emails\":[\"a@example.com\",\"z@example.com\"],\"share_intent\":\"preserve_or_allocate\"}}",
+      "canonical_request_sha256": "fce9ed95782f988c893c0cd1e5ac6f5dc403e7db4212882089e46864c29e9919"
+    },
+    {
+      "id": "RECEIPT-DIGEST-APPLY-B",
+      "normalized_request": {
+        "schema_version": 2,
+        "message_type": "apply_request",
+        "page_id": "ses_receipt_sequence",
+        "mutation_id": "mut_receipt_sequence_b_0001",
+        "expected_audience_revision": 81,
+        "target": {
+          "access_mode": "public",
+          "share_intent": "preserve_or_allocate",
+          "custom_share_id": null,
+          "emails": []
+        }
+      },
+      "canonical_json_utf8": "{\"expected_audience_revision\":81,\"message_type\":\"apply_request\",\"mutation_id\":\"mut_receipt_sequence_b_0001\",\"page_id\":\"ses_receipt_sequence\",\"schema_version\":2,\"target\":{\"access_mode\":\"public\",\"custom_share_id\":null,\"emails\":[],\"share_intent\":\"preserve_or_allocate\"}}",
+      "canonical_request_sha256": "997f1adf1dfb7eb727bf6e7d581ffedf81ba4f1dac166141d595358058775a0b"
+    }
+  ],
   "receipt_sequences": [
     {
       "id": "RECEIPT-SEQUENCE-A-B-REPLAY-A",
@@ -502,6 +540,7 @@
         {
           "event": "apply_a",
           "mutation_id": "mut_receipt_sequence_a_0001",
+          "canonical_request_sha256": "fce9ed95782f988c893c0cd1e5ac6f5dc403e7db4212882089e46864c29e9919",
           "outcome": "applied",
           "current_audience_revision": 81,
           "returned_audience_revision": 81,
@@ -511,6 +550,7 @@
         {
           "event": "apply_b",
           "mutation_id": "mut_receipt_sequence_b_0001",
+          "canonical_request_sha256": "997f1adf1dfb7eb727bf6e7d581ffedf81ba4f1dac166141d595358058775a0b",
           "outcome": "applied",
           "current_audience_revision": 82,
           "returned_audience_revision": 82,
@@ -520,6 +560,7 @@
         {
           "event": "replay_a_after_b",
           "mutation_id": "mut_receipt_sequence_a_0001",
+          "canonical_request_sha256": "fce9ed95782f988c893c0cd1e5ac6f5dc403e7db4212882089e46864c29e9919",
           "outcome": "idempotent_replay",
           "current_audience_revision": 82,
           "returned_audience_revision": 81,

@@ -10,7 +10,10 @@
     "private": { "availability": "active", "access_mode": "private" },
     "public": { "availability": "active", "access_mode": "public" },
     "offline": { "availability": "offline", "access_mode": "private" },
-    "share_binding": "retain_existing_share_id_as_stable_binding_even_when_inactive"
+    "share_binding": {
+      "non_null_share_id": "retain_as_stable_binding_even_when_inactive",
+      "null_share_id": "map_to_null_binding"
+    }
   },
   "cases": [
     {
@@ -44,6 +47,21 @@
       "shared_route_admitted": true
     },
     {
+      "id": "LOCAL-LEGACY-PRIVATE-NO-BINDING",
+      "source": { "page_id": "ses_legacy_private_no_binding", "legacy_visibility": "private", "share_id": null },
+      "result": {
+        "schema_version": 2,
+        "page_id": "ses_legacy_private_no_binding",
+        "availability": "active",
+        "access_mode": "private",
+        "share_binding": null,
+        "audience_revision": 0,
+        "emails": [],
+        "last_mutation": null
+      },
+      "shared_route_admitted": false
+    },
+    {
       "id": "LOCAL-LEGACY-OFFLINE-FAIL-CLOSED",
       "source": { "page_id": "ses_legacy_offline", "legacy_visibility": "offline", "share_id": "retained-offline-link" },
       "result": {
@@ -52,6 +70,21 @@
         "availability": "offline",
         "access_mode": "private",
         "share_binding": { "share_id": "retained-offline-link" },
+        "audience_revision": 0,
+        "emails": [],
+        "last_mutation": null
+      },
+      "shared_route_admitted": false
+    },
+    {
+      "id": "LOCAL-LEGACY-OFFLINE-NO-BINDING",
+      "source": { "page_id": "ses_legacy_offline_no_binding", "legacy_visibility": "offline", "share_id": null },
+      "result": {
+        "schema_version": 2,
+        "page_id": "ses_legacy_offline_no_binding",
+        "availability": "offline",
+        "access_mode": "private",
+        "share_binding": null,
         "audience_revision": 0,
         "emails": [],
         "last_mutation": null

@@ -251,7 +251,7 @@
     "response_policy_matrix": {
       "axes": {
         "audience_mode": ["public", "limited"],
-        "surface": ["shell", "entry", "document", "module", "spa_fallback", "api_handler", "redirect", "error"]
+        "surface": ["shell", "entry", "document", "module", "css", "raw", "worker", "spa_fallback", "api_handler", "redirect", "error"]
       },
       "rules": [
         {
@@ -271,9 +271,33 @@
     "cross_principal_response_reuse": false
   },
   "avibe_private_hmr_monitor": {
-    "id": "AVIBE-PRIVATE-HMR-REVOCATION-MONITOR",
+    "id": "AVIBE-PRIVATE-HMR-AUTHORITY",
+    "owner": "PrivateHmrAuthority",
     "implementation_owner": "avibe",
     "runtime_implementation_owner": false,
+    "websocket_admission": {
+      "route": "/show/<page_id>/__vite_hmr",
+      "origin_allowlist": {
+        "derived_from": ["https://<active_instance_hostname>", "https://<active_custom_hostname>"],
+        "fact_source": "server_owned_active_instance_and_custom_hostname_configuration",
+        "wildcards_allowed": false,
+        "suffix_matching_allowed": false,
+        "forwarded_or_browser_host_inputs_allowed": false
+      },
+      "origin_header_cardinality": "exactly_one",
+      "origin_match": "exact_scheme_host_and_effective_port",
+      "validation_order": "before_any_upstream_websocket_open",
+      "rejection": {
+        "outcome": "reject_without_upstream_websocket",
+        "upstream_websocket_opened": false
+      },
+      "cases": [
+        { "id": "HMR-ORIGIN-TRUSTED-INSTANCE", "origin_headers": ["https://alice.example.test"], "allowlist_relation": "exact_match", "outcome": "open_after_editor_authorization" },
+        { "id": "HMR-ORIGIN-MISSING", "origin_headers": [], "allowlist_relation": "not_evaluated", "outcome": "reject_without_upstream_websocket" },
+        { "id": "HMR-ORIGIN-MULTIPLE", "origin_headers": ["https://alice.example.test", "https://attacker.example"], "allowlist_relation": "ambiguous", "outcome": "reject_without_upstream_websocket" },
+        { "id": "HMR-ORIGIN-CROSS-SITE", "origin_headers": ["https://attacker.example"], "allowlist_relation": "mismatch", "outcome": "reject_without_upstream_websocket" }
+      ]
+    },
     "monitor_scope": "one_coalesced_monitor_per_active_session",
     "authorization_triggers": [
       "editor_capability_loss",
@@ -282,8 +306,20 @@
     ],
     "authorization_trigger_action": "reevaluate_and_close_unauthorized_existing_sockets",
     "durable_offline_source": "ShowPageStore",
-    "durable_offline_poll_max_seconds": 5,
-    "durable_offline_close_all_deadline_seconds": 5,
+    "durable_offline_deadline": {
+      "measured_from": "durable_offline_transaction_commit",
+      "poll_interval_max_seconds": 4,
+      "post_detection_close_budget_seconds": 1,
+      "total_close_deadline_seconds": 5,
+      "sum_of_poll_and_close_budget_must_not_exceed_total": true,
+      "worst_case_just_after_poll_trace_ms": {
+        "last_poll": 0,
+        "durable_offline_commit": 1,
+        "next_poll_no_later_than": 4000,
+        "all_sockets_closed_no_later_than": 5000,
+        "elapsed_from_offline_commit": 4999
+      }
+    },
     "share_mode_or_binding_change_closes_private_hmr_when_editor_access_remains": false
   },
   "shared_response_cases": [

@@ -3,7 +3,7 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/apply-fixture.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "fixtures", "boundary_cases", "concurrency_cases", "receipt_sequences", "sequences"],
+  "required": ["schema_version", "fixtures", "boundary_cases", "concurrency_cases", "receipt_digest_vectors", "receipt_sequences", "sequences"],
   "properties": {
     "schema_version": { "const": 2 },
     "fixtures": {
@@ -20,6 +20,12 @@
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/concurrency_case" }
+    },
+    "receipt_digest_vectors": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "$ref": "#/$defs/receipt_digest_vector" }
     },
     "receipt_sequences": {
       "type": "array",
@@ -120,6 +126,17 @@
         "assertions": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "type": "string" } }
       }
     },
+    "receipt_digest_vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "normalized_request", "canonical_json_utf8", "canonical_request_sha256"],
+      "properties": {
+        "id": { "enum": ["RECEIPT-DIGEST-APPLY-A", "RECEIPT-DIGEST-APPLY-B"] },
+        "normalized_request": { "$ref": "https://contracts.avibe.bot/show-access/v2/apply-mutation.schema.json#/$defs/apply_request" },
+        "canonical_json_utf8": { "type": "string", "minLength": 20 },
+        "canonical_request_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "receipt_sequence": {
       "type": "object",
       "additionalProperties": false,
@@ -134,10 +151,11 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["event", "mutation_id", "outcome", "current_audience_revision", "returned_audience_revision", "returned_mutation_id", "store_write"],
+            "required": ["event", "mutation_id", "canonical_request_sha256", "outcome", "current_audience_revision", "returned_audience_revision", "returned_mutation_id", "store_write"],
             "properties": {
               "event": { "enum": ["apply_a", "apply_b", "replay_a_after_b"] },
               "mutation_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/mutation_id" },
+              "canonical_request_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
               "outcome": { "enum": ["applied", "idempotent_replay"] },
               "current_audience_revision": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision" },
               "returned_audience_revision": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision" },
