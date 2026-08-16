@@ -7386,6 +7386,15 @@ def api_cloud_token():
     cookie_value = request.cookies.get(remote_access.SESSION_COOKIE_NAME)
     identity = remote_access.parse_session_identity(config, cookie_value)
     if identity is None:
+        # Local-origin requests never carry the avibe.bot session cookie, so a
+        # missing identity is the expected state there, not an expired remote
+        # session. Emitting the login-required signal would trip the frontend's
+        # global auth-recovery redirect to ``/auth/login``, which the local
+        # host rejects with ``remote_access_not_enabled`` (issue #1491).
+        # Degrade to the documented ``cloud_unavailable`` fallback instead;
+        # only genuine remote-access requests get the login signal.
+        if not _is_remote_access_request(config):
+            return jsonify({"error": "cloud_unavailable"}), 503
         return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
     resolution = remote_access.resolve_current_authorization(config, identity)
     if resolution.state == "revoked":
