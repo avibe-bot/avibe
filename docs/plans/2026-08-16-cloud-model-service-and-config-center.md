@@ -150,7 +150,8 @@ scope per instance behind them.
   — *monthly* = **UTC calendar month**, bucket key `YYYY-MM`, shared by reservations, aggregation,
   and enforcement), timestamps, `updated_by_user_id`. Exactly one platform row (unique partial index).
 - `model_service_slots`: PK (`config_id`, `capability`); `provider_label`, `base_url`, `model`,
-  `realtime_model` (nullable), `api_key_ciphertext`, `enabled`, timestamps, `updated_by_user_id`.
+  `realtime_model`, `realtime_url` (both nullable, asr only), `api_key_ciphertext`, `enabled`,
+  timestamps, `updated_by_user_id`.
 - `model_usage_events`: `id`, `call_id` (unique index — shared with the reservation's call
   identity; a retried insert after an ambiguous database result is idempotent), `probe` (bool,
   default false), `estimated` (bool, default false), `occurred_at`,
@@ -194,8 +195,8 @@ scope per instance behind them.
 - **Org admin (user session; org `owner`/`admin` of a `kind='organization'` org; uniform gate for
   all three routes, independent of plan so config can be pre-staged before activation)**:
   `GET/PUT /api/organizations/{orgId}/model-service` (slots CRUD, revision-checked),
-  `GET /api/organizations/{orgId}/model-service/usage?from&to` (per-instance rows + totals; empty
-  until the org resolves as enterprise), and
+  `GET /api/organizations/{orgId}/model-service/usage?from&to` (per-instance rows + totals; before
+  enterprise activation it contains exactly the org's pre-activation probe events), and
   `POST /api/organizations/{orgId}/model-service/verify` — one bounded probe per enabled staged
   slot (1-token chat, `"OK"` embedding, minimal ASR) through the shared egress client, allowed
   regardless of plan (the org admin exercising the org's own keys); probe calls are metered as
@@ -320,7 +321,10 @@ shape is not extended for this.
   so provider-call diagnostics stay distinguishable across identity changes. Cloud memory mode
   requires **both** `chat` and `embedding` enabled in the bound scope — anything less counts as
   no memory capability (the no-transition rule below applies), since the engine cannot start
-  without a complete LLM + embedding pair.
+  without a complete LLM + embedding pair. If an **active** cloud scope later disables either
+  slot, member instances pause memory processing (capture keeps queuing in the durable outbox),
+  surface the capability-off state, and resume automatically when the org re-enables the pair —
+  never a silent fallback to `custom` or platform.
 - **Embedding identity**: the cloud config's `embedding_identity` participates in the sidecar's
   vector-space identity exactly like a local embedding config change — an org admin changing the
   embedding slot triggers the existing rebuild flow on every member instance, with the admin UI
@@ -378,8 +382,9 @@ Lanes build against these shapes; deviations route through the PM, never lane-to
 `PUT` sends the same shape with `api_key` present only when (re)setting it; `limits` accepted only
 on the platform scope. Omitted `api_key` means **keep the currently-effective key, bound to the
 address it was entrusted to**: the kept key (stored, or env-materialized on the platform scope's
-first save) stays valid only while `base_url` is unchanged from the address that key was
-saved/materialized against; **any `base_url` change requires `api_key` in the same PUT**
+first save) stays valid only while the slot's **address fields** are unchanged from the addresses
+that key was saved/materialized against — `base_url`, and for the asr slot also `realtime_url`;
+**any address-field change requires `api_key` in the same PUT**
 (`model_service_api_key_required`, 400). *Supersedes the same-day "no address-conditioned special
 case" adjudication (PR #232 head 3)*: without this binding, write-only custody is hollow — any
 admin could recombine the stored key with an attacker-controlled public address and harvest it.
@@ -416,7 +421,10 @@ cloud memory as unavailable, matching `capabilities.embedding: false`.
 it (induced failures — `finish_reason: length`/`content_filter`, malformed payloads — cannot bypass
 metering or quota). A metering-write failure never breaks the served call: the response/transcript
 is still delivered, the failure is reported loudly (Sentry + structured log), and connections close
-in a controlled way. Fail-closed metering is deliberately deferred to M3, when enforcement turns on.
+in a controlled way. A worker crash between upstream completion and the event insert loses only
+that telemetry row — the reservation reaper keeps enforcement truthful — and falls under the same
+accepted, monitored v1 gap. Fail-closed metering is deliberately deferred to M3, when enforcement
+turns on.
 
 ### 8.4 Error codes (stable, machine-readable `code` field)
 
