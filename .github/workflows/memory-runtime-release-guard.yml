@@ -27,7 +27,10 @@ jobs:
     outputs:
       available: ${{ steps.manifests.outputs.available }}
       manifests: ${{ steps.manifests.outputs.manifests }}
+      excluded: ${{ steps.manifests.outputs.excluded }}
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
       - name: Resolve every published Memory Runtime manifest
         id: manifests
         env:
@@ -37,16 +40,22 @@ jobs:
           set -euo pipefail
           candidate_dir="$RUNNER_TEMP/memory-runtime-candidate"
           records_file="$RUNNER_TEMP/memory-runtime-manifests.jsonl"
+          excluded_file="$RUNNER_TEMP/memory-runtime-excluded.jsonl"
           mkdir -p "$candidate_dir"
           : > "$records_file"
+          : > "$excluded_file"
           while IFS= read -r candidate_tag; do
             rm -rf "$candidate_dir"
             mkdir -p "$candidate_dir"
             if ! gh release download "$candidate_tag" --repo "$GITHUB_REPOSITORY" \
               --pattern 'avibe_os-*.whl' --dir "$candidate_dir" >/dev/null 2>&1; then
+              jq -nc --arg release_tag "$candidate_tag" \
+                --arg reason "published wheel could not be downloaded" \
+                '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
               continue
             fi
-            if CANDIDATE_TAG="$candidate_tag" CANDIDATE_DIR="$candidate_dir" \
+            set +e
+            CANDIDATE_TAG="$candidate_tag" CANDIDATE_DIR="$candidate_dir" \
               python3 - <<'PY'
           import json
           import os
@@ -57,34 +66,92 @@ jobs:
           if len(wheels) != 1:
               raise SystemExit(1)
           with zipfile.ZipFile(wheels[0]) as wheel:
-              manifest = wheel.read("vibe/memory_runtime_manifest.json")
+              try:
+                  manifest = wheel.read("vibe/memory_runtime_manifest.json")
+              except KeyError:
+                  raise SystemExit(4) from None
           payload = json.loads(manifest)
           if payload.get("release_state") != "published" or payload.get("release_tag") != os.environ["CANDIDATE_TAG"]:
               raise SystemExit(1)
           (Path(os.environ["CANDIDATE_DIR"]) / "memory-runtime-manifest.json").write_bytes(manifest)
           PY
-            then
-              manifest_sha="$(sha256sum "$candidate_dir/memory-runtime-manifest.json" | cut -d' ' -f1)"
+            manifest_status=$?
+            set -e
+            # Wheels without a manifest predate Memory Runtime and are not scope exclusions.
+            if [ "$manifest_status" -eq 4 ]; then
+              continue
+            elif [ "$manifest_status" -ne 0 ]; then
+              jq -nc --arg release_tag "$candidate_tag" \
+                --arg reason "wheel does not contain a self-pinned published manifest" \
+                '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
+              continue
+            fi
+            manifest="$candidate_dir/memory-runtime-manifest.json"
+            manifest_sha="$(sha256sum "$manifest" | cut -d' ' -f1)"
+            set +e
+            policy_output="$(
+              python3 scripts/memory_runtime_release_guard.py \
+                --manifest "$manifest" check-policy 2>&1
+            )"
+            policy_status=$?
+            set -e
+            if [ "$policy_status" -eq 0 ]; then
               jq -nc --arg release_tag "$candidate_tag" --arg sha256 "$manifest_sha" \
                 '{release_tag: $release_tag, sha256: $sha256}' >> "$records_file"
+            elif [ "$policy_status" -eq 2 ]; then
+              policy_reason="$(jq -r '.error // "manifest excluded by policy"' <<<"$policy_output")"
+              jq -nc --arg release_tag "$candidate_tag" --arg reason "$policy_reason" \
+                '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
+            else
+              echo "$policy_output" >&2
+              exit "$policy_status"
             fi
           done < <(
             gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
               --jq '.[] | select(any(.assets[]?; (.name | startswith("avibe_os-")) and (.name | endswith(".whl")))) | .tag_name'
           )
-          RECORDS_FILE="$records_file" python3 - <<'PY'
+          RECORDS_FILE="$records_file" EXCLUDED_FILE="$excluded_file" python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          records = [
-              json.loads(line)
-              for line in Path(os.environ["RECORDS_FILE"]).read_text().splitlines()
-              if line.strip()
-          ]
+          def load_records(name: str) -> list[dict[str, str]]:
+              return [
+                  json.loads(line)
+                  for line in Path(os.environ[name]).read_text().splitlines()
+                  if line.strip()
+              ]
+
+          records = load_records("RECORDS_FILE")
+          excluded = load_records("EXCLUDED_FILE")
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"available={'true' if records else 'false'}\n")
               output.write(f"manifests={json.dumps(records, separators=(',', ':'))}\n")
+              output.write(f"excluded={json.dumps(excluded, separators=(',', ':'))}\n")
+
+          guarded_tags = [record["release_tag"] for record in records]
+          print(f"Guarded Memory Runtime manifests ({len(records)}): {', '.join(guarded_tags) or 'none'}")
+          print(f"Excluded Memory Runtime manifests ({len(excluded)}):")
+          for record in excluded:
+              print(f"- {record['release_tag']}: {record['reason']}")
+          if not excluded:
+              print("- none")
+
+          summary = [
+              "## Memory Runtime release guard coverage",
+              "",
+              f"Guarded Memory Runtime manifests ({len(records)}): "
+              f"{', '.join(guarded_tags) or 'none'}",
+              "",
+              f"Excluded Memory Runtime manifests ({len(excluded)}):",
+          ]
+          summary.extend(
+              f"- `{record['release_tag']}`: {record['reason']}" for record in excluded
+          )
+          if not excluded:
+              summary.append("- none")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as output:
+              output.write("\n".join(summary) + "\n")
           PY
 
   guard:
@@ -135,14 +202,35 @@ jobs:
 
       - name: Fetch and verify published assets
         id: probe
-        continue-on-error: true
+        env:
+          RELEASE_TAG: ${{ matrix.manifest.release_tag }}
+        shell: bash
         run: |
-          python3 scripts/memory_runtime_release_guard.py \
-            --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
-            fetch --output-dir "$RUNNER_TEMP/memory-runtime-release"
+          set -euo pipefail
+          set +e
+          probe_output="$(
+            python3 scripts/memory_runtime_release_guard.py \
+              --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
+              fetch --output-dir "$RUNNER_TEMP/memory-runtime-release" 2>&1
+          )"
+          probe_status=$?
+          set -e
+          echo "$probe_output"
+          failure_kind="$(jq -r '.failure_kind // empty' <<<"$probe_output" 2>/dev/null || true)"
+          if [ "$probe_status" -eq 0 ]; then
+            echo "result=verified" >> "$GITHUB_OUTPUT"
+          elif [ "$probe_status" -eq 1 ] && [ "$failure_kind" = "bytes" ]; then
+            echo "result=bytes_failure" >> "$GITHUB_OUTPUT"
+          elif [ "$probe_status" -eq 2 ] && [ "$failure_kind" = "policy" ]; then
+            echo "result=policy_excluded" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Memory Runtime manifest excluded by policy::$RELEASE_TAG: $probe_output"
+            echo "- Guard-time exclusion for \`$RELEASE_TAG\`: $probe_output" >> "$GITHUB_STEP_SUMMARY"
+          else
+            exit "$probe_status"
+          fi
 
       - name: Recover missing assets from latest verified backup
-        if: steps.probe.outcome == 'failure'
+        if: steps.probe.outputs.result == 'bytes_failure'
         env:
           GH_TOKEN: ${{ github.token }}
           MANIFEST_SHA: ${{ matrix.manifest.sha256 }}
@@ -194,7 +282,7 @@ jobs:
           gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "${missing[@]}"
 
       - name: Verify recovered release
-        if: steps.probe.outcome == 'failure'
+        if: steps.probe.outputs.result == 'bytes_failure'
         run: |
           python3 scripts/memory_runtime_release_guard.py \
             --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
@@ -202,6 +290,9 @@ jobs:
 
       - name: Check whether this manifest already has a backup
         id: backup
+        if: >-
+          steps.probe.outputs.result == 'verified' ||
+          steps.probe.outputs.result == 'bytes_failure'
         env:
           GH_TOKEN: ${{ github.token }}
           MANIFEST_SHA: ${{ matrix.manifest.sha256 }}
@@ -227,10 +318,12 @@ jobs:
 
       - name: Preserve verified release backup
         if: >-
-          github.event_name != 'schedule' ||
-          github.event.schedule == '53 4 * * 0' ||
-          steps.probe.outcome == 'failure' ||
-          steps.backup.outputs.missing == 'true'
+          (steps.probe.outputs.result == 'verified' ||
+           steps.probe.outputs.result == 'bytes_failure') &&
+          (github.event_name != 'schedule' ||
+           github.event.schedule == '53 4 * * 0' ||
+           steps.probe.outputs.result == 'bytes_failure' ||
+           steps.backup.outputs.missing == 'true')
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: memory-runtime-release-backup-${{ matrix.manifest.sha256 }}

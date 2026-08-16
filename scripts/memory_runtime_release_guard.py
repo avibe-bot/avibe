@@ -25,10 +25,21 @@ EXPECTED_PLATFORMS = frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
 EXPECTED_SYNC_BOOTSTRAP_REVISION = 1
 EXPECTED_SYNC_ARGV = ["-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"]
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
+ASSET_FAILURE_EXIT = 1
+POLICY_EXCLUSION_EXIT = 2
+INTERNAL_GUARD_FAILURE_EXIT = 3
 
 
 class ReleaseGuardError(RuntimeError):
-    """Raised when published Memory Runtime bytes do not match their manifest."""
+    """Base error for Memory Runtime release guard failures."""
+
+
+class ManifestPolicyError(ReleaseGuardError):
+    """Raised when a manifest is outside the guard's verifiable policy scope."""
+
+
+class ReleaseAssetError(ReleaseGuardError):
+    """Raised when guarded release bytes are unavailable or fail verification."""
 
 
 @dataclass(frozen=True)
@@ -40,6 +51,11 @@ class RuntimeProvenance:
 
 # Existing published manifests remain verifiable after the current pin moves.
 PUBLISHED_RUNTIME_PROVENANCE = {
+    "1.1.3": RuntimeProvenance(
+        python_version=EXPECTED_PYTHON_VERSION,
+        lock_sha256="62b00f1a9ca04cc4ea4c5af51f389ba49acdea8786e5f7044d52823244502c57",
+        uv_version=EXPECTED_UV_VERSION,
+    ),
     "1.2.1": RuntimeProvenance(
         python_version=EXPECTED_PYTHON_VERSION,
         lock_sha256="e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f",
@@ -88,7 +104,7 @@ def _sha256(path: Path) -> str:
 def _required_string(payload: dict, key: str, context: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value:
-        raise ReleaseGuardError(f"{context}.{key} must be a non-empty string")
+        raise ManifestPolicyError(f"{context}.{key} must be a non-empty string")
     return value
 
 
@@ -97,9 +113,9 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         manifest_bytes = manifest_path.read_bytes()
         payload = json.loads(manifest_bytes)
     except (OSError, json.JSONDecodeError) as exc:
-        raise ReleaseGuardError(f"cannot read Memory Runtime manifest: {exc}") from exc
+        raise ManifestPolicyError(f"cannot read Memory Runtime manifest: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-        raise ReleaseGuardError("Memory Runtime manifest schema_version must be 1")
+        raise ManifestPolicyError("Memory Runtime manifest schema_version must be 1")
     everos_version = payload.get("everos_version")
     provenance = (
         PUBLISHED_RUNTIME_PROVENANCE.get(everos_version)
@@ -107,14 +123,14 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         else None
     )
     if payload.get("release_state") != "published" or provenance is None:
-        raise ReleaseGuardError("Memory Runtime manifest must describe a published supported EverOS version")
+        raise ManifestPolicyError("Memory Runtime manifest must describe a published supported EverOS version")
     if (
         payload.get("python_version") != provenance.python_version
         or payload.get("lock_sha256") != provenance.lock_sha256
         or payload.get("lock_id") != f"uv-lock-sha256:{provenance.lock_sha256}"
         or payload.get("uv_version") != provenance.uv_version
     ):
-        raise ReleaseGuardError("Memory Runtime manifest provenance is invalid")
+        raise ManifestPolicyError("Memory Runtime manifest provenance is invalid")
     sync_revision = payload.get("sync_bootstrap_revision")
     sync_argv = payload.get("sync_argv")
     sync_digest = payload.get("sync_bootstrap_sha256")
@@ -135,17 +151,17 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
             or len(sync_scrubbers_digest) != 64
             or any(character not in "0123456789abcdef" for character in sync_scrubbers_digest)
         ):
-            raise ReleaseGuardError("Memory Runtime sync bootstrap contract is invalid")
+            raise ManifestPolicyError("Memory Runtime sync bootstrap contract is invalid")
 
     release_tag = _required_string(payload, "release_tag", "manifest")
     release_root = f"{RELEASE_DOWNLOAD_ROOT}/{release_tag}"
     raw_archives = payload.get("archives")
     if not isinstance(raw_archives, dict) or set(raw_archives) != EXPECTED_PLATFORMS:
-        raise ReleaseGuardError("Memory Runtime manifest platform set is invalid")
+        raise ManifestPolicyError("Memory Runtime manifest platform set is invalid")
     archives: list[ArchiveSpec] = []
     for platform, raw in sorted(raw_archives.items()):
         if not isinstance(raw, dict):
-            raise ReleaseGuardError(f"archives.{platform} must be an object")
+            raise ManifestPolicyError(f"archives.{platform} must be an object")
         context = f"archives.{platform}"
         name = _required_string(raw, "name", context)
         url = _required_string(raw, "url", context)
@@ -154,17 +170,17 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         bin_path = _required_string(raw, "bin_path", context)
         size = raw.get("size")
         if Path(name).name != name or url != f"{release_root}/{name}":
-            raise ReleaseGuardError(f"{context} is outside the pinned release")
+            raise ManifestPolicyError(f"{context} is outside the pinned release")
         if (
             len(sha256) != 64
             or len(binary_sha256) != 64
             or any(character not in "0123456789abcdef" for character in sha256 + binary_sha256)
         ):
-            raise ReleaseGuardError(f"{context} has an invalid digest")
+            raise ManifestPolicyError(f"{context} has an invalid digest")
         if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_ARCHIVE_BYTES:
-            raise ReleaseGuardError(f"{context}.size is invalid")
+            raise ManifestPolicyError(f"{context}.size is invalid")
         if Path(bin_path).is_absolute() or ".." in Path(bin_path).parts:
-            raise ReleaseGuardError(f"{context}.bin_path is unsafe")
+            raise ManifestPolicyError(f"{context}.bin_path is unsafe")
         archives.append(ArchiveSpec(platform, name, url, sha256, binary_sha256, size, bin_path))
     return ReleaseSpec(
         manifest_bytes=manifest_bytes,
@@ -178,22 +194,22 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
 def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
     spec = load_release_spec(manifest_path)
     if not asset_dir.is_dir():
-        raise ReleaseGuardError("Memory Runtime asset directory is missing")
+        raise ReleaseAssetError("Memory Runtime asset directory is missing")
     entries = list(asset_dir.iterdir())
     if any(path.is_symlink() or not path.is_file() for path in entries):
-        raise ReleaseGuardError("Memory Runtime asset directory contains unsafe entries")
+        raise ReleaseAssetError("Memory Runtime asset directory contains unsafe entries")
     actual = {path.name for path in entries}
     if actual != spec.expected_asset_names:
-        raise ReleaseGuardError(
+        raise ReleaseAssetError(
             f"Memory Runtime asset set mismatch: missing={sorted(spec.expected_asset_names - actual)}, "
             f"unexpected={sorted(actual - spec.expected_asset_names)}"
         )
     if (asset_dir / "memory-runtime-manifest.json").read_bytes() != spec.manifest_bytes:
-        raise ReleaseGuardError("published Memory Runtime manifest differs from the pinned manifest")
+        raise ReleaseAssetError("published Memory Runtime manifest differs from the pinned manifest")
     for archive in spec.archives:
         path = asset_dir / archive.name
         if path.stat().st_size != archive.size or _sha256(path) != archive.sha256:
-            raise ReleaseGuardError(f"Memory Runtime archive integrity mismatch: {archive.name}")
+            raise ReleaseAssetError(f"Memory Runtime archive integrity mismatch: {archive.name}")
         try:
             with tarfile.open(path, "r:gz") as bundle:
                 member = bundle.getmember(archive.bin_path)
@@ -219,13 +235,13 @@ def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
                         or marker is None
                         or marker.read() != b"import avibe_memory_sync_bootstrap\n"
                     ):
-                        raise ReleaseGuardError(
+                        raise ReleaseAssetError(
                             f"Memory Runtime sync contract mismatch: {archive.name}"
                         )
         except (KeyError, OSError, tarfile.TarError) as exc:
-            raise ReleaseGuardError(f"invalid Memory Runtime archive: {archive.name}") from exc
+            raise ReleaseAssetError(f"invalid Memory Runtime archive: {archive.name}") from exc
         if digest != archive.binary_sha256:
-            raise ReleaseGuardError(f"Memory Runtime binary integrity mismatch: {archive.name}")
+            raise ReleaseAssetError(f"Memory Runtime binary integrity mismatch: {archive.name}")
     return spec
 
 
@@ -248,21 +264,21 @@ def _download(url: str, destination: Path, expected_size: int, attempts: int = 3
                 except (TypeError, ValueError):
                     declared_size = None
                 if declared_size is not None and declared_size > expected_size:
-                    raise ReleaseGuardError(f"release asset exceeds manifest size: {url}")
+                    raise ReleaseAssetError(f"release asset exceeds manifest size: {url}")
                 downloaded = 0
                 while chunk := response.read(1024 * 1024):
                     downloaded += len(chunk)
                     if downloaded > expected_size:
-                        raise ReleaseGuardError(f"release asset exceeds manifest size: {url}")
+                        raise ReleaseAssetError(f"release asset exceeds manifest size: {url}")
                     output.write(chunk)
             return
-        except ReleaseGuardError:
+        except ReleaseAssetError:
             destination.unlink(missing_ok=True)
             raise
         except (OSError, urllib.error.URLError) as exc:
             destination.unlink(missing_ok=True)
             if attempt == attempts:
-                raise ReleaseGuardError(f"release asset download failed: {url}: {exc}") from exc
+                raise ReleaseAssetError(f"release asset download failed: {url}: {exc}") from exc
             time.sleep(float(attempt))
 
 
@@ -292,7 +308,7 @@ def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
     return spec
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -300,16 +316,33 @@ def main() -> int:
     fetch.add_argument("--output-dir", type=Path, required=True)
     verify = subparsers.add_parser("verify")
     verify.add_argument("--asset-dir", type=Path, required=True)
-    args = parser.parse_args()
+    subparsers.add_parser("check-policy")
+    args = parser.parse_args(argv)
     try:
-        spec = (
-            fetch_release_assets(args.manifest, args.output_dir)
-            if args.command == "fetch"
-            else verify_release_assets(args.manifest, args.asset_dir)
+        if args.command == "fetch":
+            spec = fetch_release_assets(args.manifest, args.output_dir)
+        elif args.command == "verify":
+            spec = verify_release_assets(args.manifest, args.asset_dir)
+        else:
+            spec = load_release_spec(args.manifest)
+    except ManifestPolicyError as exc:
+        print(
+            json.dumps({"ok": False, "failure_kind": "policy", "error": str(exc)}),
+            file=sys.stderr,
         )
+        return POLICY_EXCLUSION_EXIT
+    except ReleaseAssetError as exc:
+        print(
+            json.dumps({"ok": False, "failure_kind": "bytes", "error": str(exc)}),
+            file=sys.stderr,
+        )
+        return ASSET_FAILURE_EXIT
     except ReleaseGuardError as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
-        return 1
+        print(
+            json.dumps({"ok": False, "failure_kind": "internal", "error": str(exc)}),
+            file=sys.stderr,
+        )
+        return INTERNAL_GUARD_FAILURE_EXIT
     print(json.dumps({"ok": True, "release_tag": spec.release_tag, "asset_count": len(spec.expected_asset_names)}))
     return 0
 
