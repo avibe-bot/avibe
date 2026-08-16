@@ -154,7 +154,8 @@ scope per instance behind them.
   timestamps, `updated_by_user_id`.
 - `model_usage_events`: `id`, `call_id` (unique index — shared with the reservation's call
   identity; a retried insert after an ambiguous database result is idempotent), `probe` (bool,
-  default false), `estimated` (bool, default false), `occurred_at`,
+  default false), `estimated` (bool, default false), `window_bucket` (`YYYY-MM`, copied from the
+  reservation when one exists so monthly aggregation matches the bucket rule), `occurred_at`,
   `instance_id` (nullable for probe events), `organization_id` (nullable),
   `scope_kind`, `capability`, `model`, `prompt_tokens`, `completion_tokens`, `total_tokens`,
   `status` (`ok` | `error`). Indexes: (`organization_id`, `occurred_at`), (`instance_id`,
@@ -173,16 +174,15 @@ scope per instance behind them.
   enforcement-on paths.
 - `model_access_keys`: `instance_id` (PK), `key_hash`, `created_at`, `rotated_at`, plus
   `previous_key_hash` + `previous_valid_until`. Opaque key (`mak_` prefix), shown once at mint,
-  SHA-256 stored — same custody discipline as device secrets. **Rotation is dual-validity**: on
-  rotate, the prior key stays accepted for a 24 h grace window, because the still-running sidecar
-  and the probe-then-restart settings flow must never race the swap. Rotation retains as
-  `previous` in an **activation-safe** way: each key records `activated_at` on its first
-  successful authentication; `previous` advances only past a key that has authenticated at least
-  once, and a never-activated `current` (e.g. a lost rotation response) is replaced **in place**
-  by the next mint — `previous`, the key the sidecar still uses, is untouched. Concurrent
-  old-sidecar and candidate-probe authentications therefore cannot make the grace decision
-  ambiguous. There is no scheduled rotation; rotation is an on-demand operation
-  (suspected leak, hygiene).
+  SHA-256 stored — same custody discipline as device secrets. **Rotation contract — three
+  properties; the mechanism (state machine + tests) is owned by the M2 implementation PR and
+  deliberately not prescribed here**: (1) *grace-safe* — after any rotation, the key the sidecar
+  is actually using keeps working long enough (≥ 24 h) for the managed settings ladder to apply
+  the new one; (2) *retry-safe* — retrying a rotation whose response was lost, any number of
+  times, can never invalidate a key still in use; (3) *on-demand only* — no scheduled rotation
+  (rotation is for suspected leaks and hygiene). The schema carries whatever fields the
+  implementation needs (`previous_key_hash`, `previous_valid_until`, activation tracking) to
+  satisfy these properties.
 
 ### 6.2 Key custody
 
@@ -324,7 +324,9 @@ shape is not extended for this.
   without a complete LLM + embedding pair. If an **active** cloud scope later disables either
   slot, member instances pause memory processing (capture keeps queuing in the durable outbox),
   surface the capability-off state, and resume automatically when the org re-enables the pair —
-  never a silent fallback to `custom` or platform.
+  never a silent fallback to `custom` or platform. The resume passes through the standard identity
+  check: an embedding identity that changed while paused gates on the rebuild-confirmation flow
+  before processing restarts.
 - **Embedding identity**: the cloud config's `embedding_identity` participates in the sidecar's
   vector-space identity exactly like a local embedding config change — an org admin changing the
   embedding slot triggers the existing rebuild flow on every member instance, with the admin UI
@@ -351,8 +353,9 @@ shape is not extended for this.
   enterprise-managed, the client pauses memory processing (capture keeps queuing in the durable
   outbox; nothing is lost), surfaces a one-time transition notice, and performs the identity change
   through the same rebuild-confirmation flow on the user's acknowledgment — forced management
-  changes the model source, but the rebuild is never silent. If the org provides no memory
-  capability (`embedding_identity: null`), no transition fires: an existing working `custom`
+  changes the model source, but the rebuild is never silent. If the org provides no **cloud memory
+  capability** (the chat + embedding pair not both enabled — embedding-only and chat-only orgs
+  alike), no transition fires: an existing working `custom`
   configuration keeps running unchanged (the org has not provided a replacement model source), and
   the manual editor stays hidden only for *new* configuration; the transition applies when the org
   later enables memory slots.
@@ -388,8 +391,9 @@ that key was saved/materialized against — `base_url`, and for the asr slot als
 (`model_service_api_key_required`, 400). *Supersedes the same-day "no address-conditioned special
 case" adjudication (PR #232 head 3)*: without this binding, write-only custody is hollow — any
 admin could recombine the stored key with an attacker-controlled public address and harvest it.
-UI consequence (M1b): while the base URL field is edited, "leave blank to keep the saved key" is
-no longer offered and the key input becomes required.
+UI consequence (M1b): while any address field is edited (base URL; the realtime URL on the voice
+slot too), "leave blank to keep the saved key" is no longer offered and the key input becomes
+required.
 
 ### 8.2 Instance status payload
 
@@ -520,4 +524,6 @@ design-fidelity supervision runs as a separate codex thread against design.pen f
 Cost/currency conversion and per-provider pricing tables; billing/settlement; plan purchase flows;
 rerank in cloud mode; non-OpenAI-compatible providers; per-user attribution; usage rollup tables;
 cursor pagination on usage reports; realtime-WS verification probe in the org verify endpoint;
-cloud-token revocation-on-use.
+cloud-token revocation-on-use; a terminal-error contract for SSE streaming responses on the M2
+proxy; organization-scope limits shape; per-capability cap-completeness validation on the platform
+limits editor; platform-admin warning copy for pool-wide embedding rebuilds (M1b design note).
