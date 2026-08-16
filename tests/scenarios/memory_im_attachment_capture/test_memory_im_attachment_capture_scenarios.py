@@ -250,6 +250,35 @@ def test_claimed_attachment_preflight_failure_retries_caption_as_text_only(
     assert harness.memory_bundle_entries == ()
 
 
+def test_rejected_attachment_preserves_caption_without_multimodal_provider_call(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-010."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    harness = MemoryIMAttachmentScenarioHarness(tmp_path)
+    asyncio.run(
+        harness.capture(
+            text="Keep this caption without the rejected file",
+            payloads={
+                "excluded.svg": (
+                    "image/svg+xml",
+                    b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+                )
+            },
+        )
+    )
+
+    assert len(harness.provider.captures) == 1
+    assert harness.provider.captures[0].text == (
+        "Keep this caption without the rejected file"
+    )
+    assert harness.provider.captures[0].attachments == ()
+    assert harness.provider.call_log == []
+    assert harness.memory_bundle_entries == ()
+
+
 def test_provider_attachment_rejection_retries_caption_as_text_only(
     tmp_path,
     monkeypatch,

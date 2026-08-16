@@ -66,6 +66,7 @@ def test_memory_im_attachment_catalog_is_indexed_and_locks_the_approved_contract
         ("MEMORY-IM-ATTACH-007", "platform_contract", 5),
         ("MEMORY-IM-ATTACH-008", "platform_contract", 5),
         ("MEMORY-IM-ATTACH-009", "degradation", 6),
+        ("MEMORY-IM-ATTACH-010", "boundary", 4),
         ("MEMORY-IM-ATTACH-011", "degradation", 7),
     ],
 )
@@ -90,6 +91,7 @@ def test_memory_im_attachment_covered_scenario_contract(
         "MEMORY-IM-ATTACH-007",
         "MEMORY-IM-ATTACH-008",
         "MEMORY-IM-ATTACH-009",
+        "MEMORY-IM-ATTACH-010",
         "MEMORY-IM-ATTACH-011",
     }
     assert rows[scenario_id]["status"] == "covered"

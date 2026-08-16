@@ -314,6 +314,25 @@ def test_missing_multimodal_skips_attachment_only_turn() -> None:
     ) == CaptureSkipped(reason="memory_invalid_input")
 
 
+def test_im_attachment_only_turn_with_every_upload_filtered_is_not_captured() -> None:
+    decision = _admission().decide(
+        _facts(
+            text="",
+            files=[object()],
+            is_ordinary_text=False,
+            is_ordinary_attachment=True,
+            attachment_capture_status="ready",
+            attachment_config_generation=1,
+            attachment_selection=SimpleNamespace(
+                attachments=(),
+                skipped=("unsupported_type",),
+            ),
+        )
+    )
+
+    assert decision == CaptureSkipped(reason="memory_invalid_input")
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
