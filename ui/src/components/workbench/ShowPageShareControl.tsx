@@ -205,7 +205,7 @@ export const ShowPageShareControl: React.FC<{
         setLoading(false);
       }
     };
-    const readAccess = () => {
+    const readAccess = (thenLoadPayload: boolean) => {
       setAccessLoading(!access);
       setAccessError(false);
       void (async () => {
@@ -225,14 +225,19 @@ export const ShowPageShareControl: React.FC<{
         } finally {
           setAccessLoading(false);
         }
-        await loadPayload(canManageInstance || nextAccess?.can_use === true);
+        // Only the sequenced caller loads here: the parallel branch already
+        // started its payload read alongside this one — loading twice would
+        // duplicate the ensure request and the inventory merge.
+        if (thenLoadPayload) {
+          await loadPayload(canManageInstance || nextAccess?.can_use === true);
+        }
       })();
     };
     if (canManageInstance || access?.can_use === true) {
       void loadPayload(true);
-      readAccess();
+      readAccess(false);
     } else {
-      readAccess();
+      readAccess(true);
     }
   };
 
@@ -326,7 +331,10 @@ export const ShowPageShareControl: React.FC<{
       >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
 
-        {loading && !access ? (
+        {/* Access-less callers (the app-window title bar) resolve access first, so
+            the access read itself is part of the loading presentation — without
+            it the popover would flash the load-error text for the whole request. */}
+        {(loading || accessLoading) && !access ? (
           <div className="flex items-center gap-2 py-2 text-sm text-muted">
             <Loader2 className="size-4 animate-spin" />
             {t('common.loading')}
@@ -398,6 +406,7 @@ export const ShowPageShareControl: React.FC<{
             active={open}
             sessionId={sessionId}
             onConfirmationOpenChange={setWorkspaceConfirmationOpen}
+            ownerWindowId={ownerWindowId}
           />
           {accessError ? (
             <p className="mt-2 text-[11px] leading-snug text-destructive-ink">

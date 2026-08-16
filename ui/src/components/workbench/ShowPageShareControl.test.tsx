@@ -12,11 +12,24 @@ const api = {
   ensureShowPage: vi.fn(),
   getShowPageAccess: vi.fn(),
   getShowPageAuthorizedEmails: vi.fn(),
+  replaceShowPageAuthorizedEmails: vi.fn(),
+  listOrganizationResources: vi.fn(),
+  listOrganizationGroups: vi.fn(),
   setShowPageVisibility: vi.fn(),
   rotateShowPageShare: vi.fn(),
 };
 
 vi.mock('../../context/ApiContext', () => ({
+  ApiError: class ApiError extends Error {
+    code = null;
+  },
+  useApi: () => api,
+}));
+
+vi.mock('@/context/ApiContext', () => ({
+  ApiError: class ApiError extends Error {
+    code = null;
+  },
   useApi: () => api,
 }));
 
@@ -148,5 +161,87 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       },
       { timeout: 250 },
     );
+  });
+
+  it('issues exactly one payload read on the authorized parallel path', async () => {
+    // A caller holding access (the chat header passes initialAccess) reads the
+    // payload and access in parallel — the post-access hook must NOT fire a
+    // second ensure request.
+    api.getShowPageAccess.mockResolvedValue({
+      ok: true,
+      mode: 'local',
+      can_use: true,
+      can_manage: true,
+      can_publish_public: true,
+      public_link_enabled: false,
+    });
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'private',
+      active_url: '/show/ses-1/',
+      share_id: null,
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl
+          sessionId="ses-1"
+          initialAccess={{
+            ok: true,
+            mode: 'local',
+            can_use: true,
+            can_manage: true,
+            can_publish_public: true,
+            public_link_enabled: false,
+          } as never}
+        />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    await waitFor(() => {
+      expect(api.getShowPageAccess).toHaveBeenCalled();
+    });
+    await vi.waitFor(() => {
+      expect(api.ensureShowPage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('shows the loading state while a first access read is pending', async () => {
+    // The app-window caller has no access yet: while the access read is in
+    // flight the popover must show the loading row, not the load-error text.
+    let release: (() => void) | null = null;
+    api.getShowPageAccess.mockImplementation(
+      () => new Promise((resolve) => {
+        release = () => resolve({
+          ok: true,
+          mode: 'local',
+          can_use: false,
+          can_manage: true,
+          can_publish_public: false,
+          public_link_enabled: false,
+        });
+      }),
+    );
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Loading...')).toBeTruthy();
+      expect(screen.queryByText("Couldn't load this Show Page.")).toBeNull();
+    });
+
+    (release ?? (() => undefined))();
+    await waitFor(() => {
+      expect(api.getShowPageAccess).toHaveBeenCalled();
+    });
   });
 });
