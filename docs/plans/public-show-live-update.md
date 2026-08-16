@@ -17,7 +17,8 @@ the resulting representation:
 | Surface and viewer | Runtime representation | Update behavior |
 | --- | --- | --- |
 | Private `/show/<session>/`, authorized editor | Canonical private Vite context | Vite HMR and React Fast Refresh |
-| Limited or public `/p/<share>/`, authorized editor navigation | Redirect to canonical `/show/<session>/` | Vite HMR and React Fast Refresh after the redirect |
+| Limited or public `/p/<share>/`, authorized editor navigation with a negotiated Runtime | Redirect to canonical `/show/<session>/` | Vite HMR and React Fast Refresh after the redirect |
+| Limited or public `/p/<share>/`, authorized editor with a legacy Runtime | Existing shared compatibility context | Agents annotations remain available; no Hot Reload |
 | Limited `/p/<share>/`, signed-in exact-email viewer | Negotiated isolated shared context; legacy compatibility context otherwise | No Hot Reload or annotations; refresh reads current content |
 | Limited `/p/<share>/`, anonymous or unauthorized viewer | None | Login challenge or access denied; no page bytes |
 | Public `/p/<share>/`, anonymous, read-only, expired, resource-forbidden, or unverifiable | Negotiated isolated shared context; legacy compatibility context otherwise | No Hot Reload or annotations; refresh reads current content |
@@ -98,9 +99,12 @@ custom-slug, and rotate-link controls appear for both `limited` and `public`.
 
 `offline` is not a fourth audience. Availability is an orthogonal lifecycle
 state (`active | offline`) controlled by archive/offline operations. An offline
-page serves no route and its audience control is read-only until reactivated.
-Separating availability from audience also stops an offline transition from
-silently destroying the page's intended audience.
+page serves no route, but an authorized owner may still change its audience,
+replace or clear its limited grants, and rotate its future share binding without
+reactivating it. Apply and recovery use the same coordinator while route admission
+remains disabled. Separating availability from audience stops an offline transition
+from silently destroying the page's intended audience and does not force an owner to
+publish a page merely to clean up access.
 
 The persisted model is therefore:
 
@@ -140,11 +144,11 @@ promote itself through a broader Instance endpoint.
 Audience changes use one Apply action and one durable fail-closed coordinator
 rather than three independent writes. The coordinator is a cross-process write
 boundary, not an in-memory mutex. Every current-version entry point that can mutate
-`ShowAccess`, its legacy projection, or coordinator recovery state -- including the
-CLI, Web API, startup/migration reconciliation, and updater -- must acquire the same
+`ShowAccess` or coordinator recovery state -- including the CLI, Web API, and
+startup/migration reconciliation -- must acquire the same
 exclusive advisory lock at a stable file in Avibe's state directory before reading
-mutation preconditions. The lock file is never replaced or deleted during the
-compatibility window, so every process locks the same inode. Store mutation methods
+mutation preconditions. The lock file is never replaced or deleted, so every process
+locks the same inode. Store mutation methods
 require a held lock lease; callers cannot bypass the coordinator with a direct
 `ShowPageStore` write. The lock is acquired before any database transaction, and no
 code may wait for it while holding a database or hosted-operation lock.
@@ -153,14 +157,18 @@ Every Apply allocates a client mutation ID and holds the process-shared lease fr
 its first authoritative precondition read through either its terminal local commit
 or the durable recording of a fail-closed pending phase. A process crash releases
 the OS lock, but it can leave only a prepared non-authoritative hosted operation or
-a locally recorded pending phase that downgrade preflight rejects. For a change that
+a locally recorded pending phase that the next current-version process reconciles
+before admitting limited reads. For a change that
 carries exact emails, the device first sends the normalized in-memory target and
 expected page-scoped `grant_revision` to a backend `prepare` operation. Preparation
-stores the target only inside the existing hosted grant trust boundary, changes no
-grant authority, and returns an opaque operation ID plus an opaque target
-`grant_commitment`. The backend generates a fresh cryptographically random 256-bit
-commitment after canonicalizing the page-bound email set and binds it to that
-prepared operation; it is never derived from an email or a client-held key. A
+canonicalizes before comparing it with the authoritative current set. If they match,
+it returns a terminal `no_change` result containing the existing commitment and
+revision; the device creates no pending hosted operation and does not close an
+already-open gate. Otherwise preparation stores the target only inside the existing
+hosted grant trust boundary, changes no grant authority, and returns an opaque
+operation ID plus an opaque target `grant_commitment`. The backend generates a fresh
+cryptographically random 256-bit commitment and binds it to that prepared operation;
+it is never derived from an email or a client-held key. A
 prepared operation has a non-renewable 24-hour lifetime. If this step fails or its
 response is lost, no local transition is accepted and the previous audience remains
 authoritative; an unreferenced preparation can only expire, never commit itself.
@@ -168,11 +176,14 @@ authoritative; an unreferenced preparation can only expire, never commit itself.
 After preparation succeeds, one local transaction persists only the opaque
 operation ID, source audience revision, source page grant revision, target mode,
 target or preserved share binding, target commitment, and phase. It never persists
-the email addresses. Any transition that can add, remove, or replace page-email
-authority also sets `share_admission_gate=closed_pending` in that same transaction.
-This gate is orthogonal to `access_mode`: while it is closed, every `/p/` read and
-editor redirect is denied and the page-email branch of the canonical `/show/` ACL
-rejects claims, but the committed mode and `share_id` remain intact for recovery.
+the email addresses. Before a transition whose target mode is `limited` can add,
+remove, or replace page-email authority, it also sets
+`share_admission_gate=closed_pending` in that transaction. While a limited gate is
+closed, every `/p/` read and editor redirect is denied and the page-email branch of
+the canonical `/show/` ACL rejects claims. Entry into limited commits the conservative
+target mode and preserved `share_id` together with the closed gate; an edit to an
+already limited list leaves that mode and binding intact. Public reads do not depend
+on this limited-only gate.
 Owner and organization resource ACLs on canonical `/show/` remain independent.
 
 The device then asks the backend to `commit` the prepared operation. Commit
@@ -188,8 +199,10 @@ backend's committed operation, exact current set/commitment, and returned page g
 revision match the local record and that revision has been persisted locally. The
 backend deletes the prepared target copy after device acknowledgement or the
 24-hour hard limit; a terminal result retains only non-PII metadata and the opaque
-commitment. A same-set no-op returns the existing commitment and revision; a later
-change back to a previously used set receives a new random commitment. Consequently,
+commitment. A terminal same-set response is also the reconciliation proof for a
+local mode-only transition into `limited`: the device persists exactly the returned
+existing commitment/revision and opens the new limited audience atomically. A later
+real change back to a previously used set receives a new random commitment. Consequently,
 a copied SQLite database or backup exposes no deterministic verifier for guessed
 email addresses.
 If the result copy has expired after commit, the authoritative current page-grant
@@ -202,22 +215,23 @@ page-grant revision poll is recovery evidence, never the security boundary.
 
 The coordinator applies that invariant to every transition:
 
-1. Entering `limited` from `public` closes only `share_admission_gate`, preserving
-   the committed `public` mode and exact `share_id` while all `/p/` reads are denied.
-   It then replaces and reconciles the cloud email set and atomically commits
-   `limited` with that same binding while reopening the gate. A crash therefore
-   cannot expose anonymous access or silently rotate the URL.
-2. Entering `limited` from `private` follows the same closed-barrier protocol.
-   At least one address is required; any requested or allocated target binding is
-   non-sensitive coordinator state until the terminal local transaction.
+1. Entering `limited` from `public` atomically commits the conservative target mode,
+   closes `share_admission_gate`, and preserves the exact `share_id` before any hosted
+   commit. It then replaces and reconciles the cloud email set and reopens that same
+   limited binding. A crash therefore cannot preserve anonymous access or silently
+   rotate the URL.
+2. Entering `limited` from `private` follows the same closed-barrier protocol and
+   commits the requested or allocated binding with the closed target mode. At least
+   one address is required.
 3. Editing a live limited list closes the share admission gate before sending the
    replacement. Removed and retained viewers are both denied during ambiguity;
    the reconciled revision reopens the new set together.
-4. Leaving `limited` commits `private` or `public` locally first. Page-email
+4. Leaving `limited` commits `private` or `public` locally with
+   `share_admission_gate=open`. Page-email
    claims are accepted only when the current durable mode is exactly `limited`,
    so the local commit removes their authority from both `/p/` and `/show/`
    before best-effort backend cleanup. Failed cleanup is retried and surfaced as
-   pending but cannot restore authority.
+   pending but cannot restore authority or make a committed public page unavailable.
 5. Switching `private` and `public` is one local transaction. Link allocation,
    mode, revision, and old-route invalidation commit together.
 
@@ -345,9 +359,9 @@ that requirement 7 has been met.
 ```text
 GET /p/<share>/...
   -> resolve current limited/public share and availability
-  -> require share_admission_gate == open
   -> access_mode == limited?
-     -> yes: require current page-bound email grant at grant_revision or ShowEditorCapability
+     -> yes: require share_admission_gate == open, then require current page-bound
+             email grant at grant_revision or ShowEditorCapability
      -> no: public read is allowed
   -> top-level navigation + Runtime keyed-context capability?
      -> yes: compute ShowEditorCapability
@@ -403,11 +417,11 @@ X-Avibe-Show-Context: private | shared
 A legacy Runtime ignores both unknown headers. A new Runtime treats protocol `1`
 as an explicit client declaration and requires a valid context before resolving a
 Session or changing Vite ownership. A request with no protocol header is from a
-released/rolled-back Avibe client: Runtime ignores any context value, selects the
+released Avibe client: Runtime ignores any context value, selects the
 legacy singleton base-switching path from the existing `x-vibe-show-base`, and does
 not claim keyed isolation. An unknown protocol value fails closed. This preserves
-old-Avibe/new-Runtime source and rollback pairings without letting a missing header
-from a declared new client silently downgrade its contract. Avibe strips any
+old-Avibe/new-Runtime source compatibility without letting a missing header from a
+declared new client silently weaken its contract. Avibe strips any
 browser-supplied copy of both protocol headers. Runtime health alone, an accepted
 app request, a package version, or support for `x-vibe-show-base` is not capability
 evidence.
@@ -465,6 +479,24 @@ path policy as an invariant over the whole shared request surface:
 The shared context continues to use inert, versioned `@vite/client` and React
 Refresh shims. It exposes neither Runtime diagnostics nor a message channel.
 
+The legacy compatibility path is availability-preserving, not a second
+implementation of keyed isolation. It never enables HMR. A viewer with current
+`ShowEditorCapability` keeps the existing share-scoped annotation bootstrap and
+write token (`canAnnotate=true`); page-email, anonymous, and other read-only viewers
+receive `canAnnotate=false`. This capability choice changes only annotation UI and
+dispatch, never the Runtime context or module namespace.
+
+Legacy Runtime output is accepted only where the existing shared proxy can prove it
+safe without a new Runtime feature. Avibe-authored exact-file and API responses keep
+their existing behavior. A successful legacy Runtime response must complete the
+existing shared body, URL, and header transforms; if it contains a raw or nested
+`/@fs/` reference that requires the new immutable-snapshot registry, transformation
+fails closed with a fixed path-free unavailable response. For a Runtime error or
+failed transform without valid provenance metadata, Avibe replaces the body and
+URL-bearing headers with that same fixed response. It does not guess that an
+unclassified error is application-authored. This reduced compatibility surface is
+temporary because the capability ships with the bundled Runtime.
+
 Vite's native `/@fs/<absolute-path>` form cannot cross that shared boundary.
 When a shared transform references an allowed absolute file, Runtime opens it
 through a confinement-safe root descriptor: resolution cannot escape the selected
@@ -515,6 +547,8 @@ authored application/API bodies and successful assets, but replaces every
 preserving only the safe status class. Source frames, plugin errors, stack traces,
 and local paths remain in a redacted operator log. HTTP error status alone is not
 trusted to distinguish an authored API error from a Vite transform failure.
+Missing or invalid provenance follows the legacy fail-closed rule above; only an
+Avibe-authored response that did not traverse Runtime may bypass Runtime provenance.
 
 The shared proxy also treats response headers as URL output. It always removes
 `SourceMap`, `X-SourceMap`, `Content-Location`, and `Refresh`. It parses `Location`
@@ -630,19 +664,20 @@ request.
 | Missing/expired identity on limited page | Redirect to login for a top-level navigation; otherwise deny without page bytes | Redacted authorization reason |
 | Signed-in user lacks exact limited grant | Return one generic access-denied response; do not reveal whether the address or page exists | Redacted page-bound denial |
 | Identity service unavailable | Fully public stays readable; limited fails closed and remains retryable | Authorization availability metric/log |
-| Definitive keyed-context capability absence | Do not redirect; serve `/p/` through the legacy no-HMR path with its existing single-context limitation recorded | Runtime capability metric/log |
+| Definitive keyed-context capability absence | Do not redirect; serve `/p/` through the reduced legacy no-HMR path; preserve annotations only for a proven editor | Runtime capability metric/log |
 | Transient capability negotiation failure | Send the backward-compatible explicit `shared` context, keep the current allowed request shared, and retry after bounded backoff | Redacted probe state and retry metric |
 | Private Runtime unavailable after an editor redirect | Existing private sanitized recovery behavior; never fall through to a raw shared-route socket | Private Runtime log |
 | Shared context unavailable | Existing sanitized shared unavailable/static fallback | Shared Runtime log without source detail |
 | Shared Runtime admission is saturated | Reclaim the oldest non-in-flight shared bundle; if none is reclaimable, return a sanitized retryable unavailable response without consuming the private reserve | Global weighted-budget admission/reclamation metric |
 | A shared document outlives its absolute namespace/context lifetime | Return a fixed stale-document response for later module or lazy-asset reads and require reload | Namespace hard-expiry metric without source paths |
 | Runtime emits a development diagnostic or unsafe URL header | Preserve only a safe status class/body and filtered headers | Redacted operator-only diagnostic |
+| Legacy Runtime omits provenance or emits a graph requiring raw `@fs` paths | Preserve only a fully transformed safe success response; otherwise return a fixed path-free unavailable response | Redacted compatibility refusal reason |
 | Limited-list replacement has an ambiguous result | Keep the durable share admission gate closed across retries and restarts until read-after-write reconciliation persists the exact mutation result | Mutation ID, opaque target commitment, and redacted reconciliation state |
 | Prepared email operation expires before commit | Reopen the prior share audience only after authoritative commitment/revision proof that no commit occurred; otherwise remain closed and require target resubmission | Operation expiry and opaque target commitment |
 | Limited email removed | Reject the viewer's next network request by page grant revision; no HMR or annotation channel exists to close | Page-grant revision log |
 | Unrelated Instance authorization changes | Refresh generic session freshness without changing any page grant revision or denying an unchanged limited viewer | Instance and page revision metrics kept distinct |
-| Limited page becomes private/public while hosted cleanup fails | Reject page-email claims on both `/p/` and `/show/` from the local mode commit; retry cleanup without reopening authority | Durable audience state and cleanup-pending record |
-| Binary downgrade sees a limited/non-empty/pending page or cannot attest the backend fence | Refuse executable/schema replacement; while the fence is active, reject every released exact-email write | Fence epoch and redacted preflight reason |
+| Limited page becomes private/public while hosted cleanup fails | Reject page-email claims on both `/p/` and `/show/` from the local mode commit; keep public reads open and retry cleanup without reopening email authority | Durable audience state and cleanup-pending record |
+| Audience changes while the page is offline | Keep every route disabled; run the normal coordinator and persist the future audience without temporary publication | Durable audience state and coordinator evidence |
 | Editor role revoked but read ACL remains | Close private HMR; retain entitled private document/module reads; next `/p/` navigation stays shared only if its audience read rule succeeds | Existing authorization-revision/resource-revocation log |
 | Show Page read access revoked | Close private HMR and reject later private document/module reads; `/p/` is re-evaluated independently | Existing resource-revocation log |
 | Share rotates or becomes private | Old network-reached `/p/` reads fail immediately; an entitled canonical private socket remains independent; previously cached bytes remain a client-cache limitation | Durable Show Page state |
@@ -722,10 +757,9 @@ feature, not a prerequisite for capability-gated editor HMR.
    `limited | public`; keep availability separate.
 3. Implement backend prepare/commit email operations, page-scoped grant revisions,
    opaque grant commitments, the non-PII persistent share admission barrier, the
-   process-shared audience write lease, idempotent
-   mutation-result/current-grant lookup, the downgrade legacy-write fence, and the
-   fail-closed access coordinator. Retire the independent visibility and email
-   mutation paths after compatibility callers migrate.
+   process-shared audience write lease, idempotent no-op and
+   mutation-result/current-grant lookup, and the fail-closed access coordinator.
+   Retire the independent visibility and email mutation paths after callers migrate.
 4. Make `/p/<share>/` resolve both `limited` and `public`. Add the limited login,
    mode-scoped exact page-entitlement check on both `/p/` and `/show/`, generic
    denial, page-grant revision check, and private/no-store response policy.
@@ -752,7 +786,7 @@ feature, not a prerequisite for capability-gated editor HMR.
    diagnostics cannot cross the shared boundary.
 10. Add the coalesced durable availability monitor for private HMR sockets.
 11. Add cache, Service Worker scope, network-revocation, mixed-version,
-    negotiation retry, total context propagation, concurrency, rollback-write,
+    negotiation retry, total context propagation, concurrency, one-way migration,
     path-swap confinement, and audience-transition contract tests.
 12. Run local Incus regression with editor, exact-email, anonymous, denied, and
     revoked viewers open concurrently.
@@ -779,87 +813,33 @@ The schema migration separates availability from audience and is fail-closed:
 | `visibility=private` with a non-empty exact-email set | `active` after connected reconciliation | `limited` | Reuse a valid dormant ID or allocate one |
 | `visibility=offline` | `offline` | `private` | Clear; the old model did not retain a trustworthy prior audience |
 
-Until the device can read the hosted grant set, an old private page stays
-private and records migration pending with the source `audience_revision` and
-legacy-audience journal generation; it is never guessed to be limited. The hosted
-read returns the page-scoped grant revision and commitment, and reconciliation may
-commit only with a compare-and-swap proving that all three inputs are still current. The
-Instance-wide authorization revision is deliberately absent from this page-state
-comparison.
-Every authoritative audience Apply and every reconciled legacy write increments
-`audience_revision` and deletes any pending migration in the same local transaction
-before remote work begins. A stale worker discards its hosted read and any provisional
-share allocation when that compare-and-swap fails; it cannot convert a newer public
-or private choice to `limited`. An old public page remains public, and any
-independently stored email set is cleared after the local public state is
-authoritative. Organization resource policies are not mapped into external audience
-modes; they remain canonical `/show/` collaborator policy.
+Until the device can read the hosted grant set, an old private page stays private
+and records migration pending with its source `audience_revision`; it is never
+guessed to be limited. The hosted read returns the page-scoped grant revision and
+commitment, and reconciliation may commit only with a compare-and-swap proving that
+the source revision is still current. The Instance-wide authorization revision is
+deliberately absent from this page-state comparison.
 
-The compatibility read API projects the complete legacy audience for one rollback
-window. New writes maintain a safe projection: public maps to old `public`; private
-and limited map to old `private`; offline maps to old `offline`; and the projected
-legacy `share_id` is the current binding only for a shareable mode.
+Every authoritative audience Apply increments `audience_revision` and deletes any
+pending migration in the same local transaction before remote work begins. A stale
+worker discards its hosted read and any provisional share allocation when the
+compare-and-swap fails; it cannot convert a newer public or private choice to
+`limited`. An old public page remains public, and any independently stored email set
+is cleared after the local public state is authoritative. Organization resource
+policies are not mapped into external audience modes; they remain canonical
+`/show/` collaborator policy.
 
-The migration installs one durable legacy-audience journal rather than a
-visibility-only marker. Database triggers cover every assignment to any projected
-legacy audience column and record a monotonic generation plus the complete
-post-write legacy snapshot. The invariant is field-based: adding another projected
-audience column automatically requires it in the journal trigger and snapshot
-contract. It therefore captures visibility changes, generated rotations, custom
-slug writes, and unchanged assignments without depending on which released
-`ShowPageStore` method performed the write. A new writer updates `ShowAccess`, writes
-the complete legacy projection, and acknowledges the resulting journal generation
-after those writes but before their single transaction commits. An old binary cannot
-acknowledge it. The compatibility columns, journal, triggers, and acknowledgement
-survive application rollback and schema downgrade for the entire supported rollback
-window; cleanup is a later migration after old binaries are no longer supported.
-
-On startup or re-upgrade, the newest unacknowledged journal snapshot is the legacy
-user intent to reconcile before serving the page. Legacy `private` becomes active
-`private` and clears the binding; legacy `offline` becomes offline `private` and
-clears it; legacy `public` becomes active `public` with the exact journaled slug
-after an atomic uniqueness/ownership check. A missing/corrupt snapshot or a slug
-conflict fails to private with no share route and requires the owner to choose a new
-link; stale `ShowAccess` never wins the conflict. The reconciled transaction makes
-page-email claims inapplicable unless the result is later opened as `limited`
-through the connected coordinator, writes the complete new projection, advances
-`audience_revision`, and only then acknowledges the journal generation. A rollback
-projection represents `limited` as legacy private for schema compatibility, but the
-updater never starts an old binary while any limited page exists because that binary
-cannot enforce the new read-versus-development boundary. Visibility, rotation, or
-custom-slug writes made during an allowed rollback still cannot be overwritten by
-stale `ShowAccess` on re-upgrade.
-
-Binary downgrade has a fail-closed preflight before the current executable or
-compatibility schema is replaced. Before preflight, the updater acquires the same
-stable process-shared audience write lock used by CLI, Web, migration, and recovery
-writers. It waits for any writer that already owns the lease, prevents a new writer
-from starting after preflight, and holds the lease through service quiescence and
-executable/schema replacement. Under that lock it requires the hosted resolver to
-be reachable, no audience transition or migration to be pending, every share
-admission gate to be open, no page to be `limited`, and every hosted page-email set
-to be empty with its page grant revision/commitment reconciled locally and the
-resulting Instance-wide authorization watermark persisted for the released binary's
-session-freshness check. Owners must first move every limited page
-to private or public and complete the empty-set cleanup; an open limited gate is
-never rollback-compatible because the released `/show/` HMR handler accepts
-page-email viewers.
-
-After those checks, the backend atomically activates an Instance-scoped,
-mutation-ID-bound `legacy_page_email_write_fence` and returns a signed fence epoch.
-The fence applies to the paired Instance rather than trusting a client version
-header: every released exact-email replacement endpoint rejects writes while it is
-active. The updater persists the attested epoch before replacing the executable, so
-an old binary can continue serving private/public/offline pages but cannot create a
-new page-email viewer or restore that viewer's legacy HMR access. If fence activation,
-persistence, or any preflight check fails, downgrade is refused and the current
-binary/schema remain intact. A crash after activation but before replacement is
-recovered by the same idempotent mutation ID; an explicitly aborted updater may
-clear its epoch only after proving the new executable still owns the quiesced lock.
-Otherwise the fence remains closed. Re-upgrade keeps it active until the new binary
-has reconciled every empty grant revision and its prepare/commit API is ready, then
-clears exactly that epoch. This makes the rollback restriction reversible without
-asking an old HMR handler to enforce a capability it does not understand.
+This is an explicit one-way product migration. Avibe's supported updater advances
+to newer releases; it does not offer application or schema downgrade. Once the new
+access schema is committed, manually installing an older binary against that state
+is unsupported and the older binary must not be started. Backup restore remains a
+whole-state operation to a release that understands the restored schema, not a
+cross-version audience-write protocol. This boundary removes the need for legacy
+audience projections, write journals, hosted write fences, and re-upgrade conflict
+resolution, none of which correspond to a supported user workflow. The migration
+itself remains restartable and idempotent: an interrupted current-version process
+resumes from the pending record under the shared writer lease before admitting a
+limited route.
 
 ## Verification Plan
 
@@ -872,10 +852,10 @@ asking an old HMR handler to enforce a capability it does not understand.
   retry, and double submission; the share admission gate is the only transient
   route barrier, and no intermediate state may grant more read access than the last
   committed or requested target
-- enumerate every current-version CLI, Web, migration, recovery, and updater audience
+- enumerate every current-version CLI, Web, migration, and recovery audience
   mutation entry point and prove its store write requires the same process-shared
-  lease; race real CLI and Web writer processes against downgrade in both acquisition
-  orders, and prove no mutation can begin between preflight and executable replacement
+  lease; race real CLI and Web writer processes in both acquisition orders and prove
+  stale preconditions cannot commit
 - copy local state containing one-address and few-address limited sets and prove the
   opaque grant commitments cannot validate guessed emails offline; same-set retry
   keeps its revision/commitment while every real set change receives a fresh random
@@ -895,27 +875,29 @@ asking an old HMR handler to enforce a capability it does not understand.
   cannot trigger the redirect
 - prove the redirect preserves the route suffix and query while both redirect and
   shared entry responses are private/no-store and vary on cookies
-- prove shared and private documents retain every existing Show bootstrap key,
-  shared configuration exposes `canAnnotate=false`, and it contains no Session
-  identifier or private path
+- prove shared and private documents retain every existing Show bootstrap key;
+  page-email and public viewers receive `canAnnotate=false`, a compatibility-path
+  editor receives `canAnnotate=true` without HMR, and no shared bootstrap contains a
+  Session identifier or private path
 - prove migration maps old public, private-with-grants, private-without-grants,
   and offline rows exactly as specified, with disconnected reconciliation staying
   private
-- perform a real new-write, binary rollback, every legacy audience-field mutation,
-  and re-upgrade round trip; the journal must preserve the complete latest snapshot,
-  including unchanged assignments, generated rotations, and custom slugs, while a
-  corrupt snapshot or uniqueness conflict fails closed
+- interrupt and restart the one-way migration at every local and hosted boundary;
+  only the current schema serves afterward, the migration is idempotent, and an
+  older executable is never started against migrated state
 - leave an upgrade migration pending, perform a newer audience Apply, then restore
   connectivity; the source-revision compare-and-swap discards the stale migration
   and cannot allocate or reopen a limited audience
-- attempt downgrade while a limited-to-private/public cleanup or mutation result is
-  pending or while any limited page exists; preflight preserves the current binary
-  and schema until every page is non-limited and its hosted grant set is empty at the
-  reconciled page revision and the resulting global watermark invalidates old claims
-- interrupt downgrade before and after backend fence activation, attestation
-  persistence, executable replacement, and re-upgrade readiness; a released email
-  mutation is rejected for every active fence epoch, and abort clears only an epoch
-  whose new-binary lock ownership is proven
+- submit a canonical same-set grant target from every audience source mode; prepare
+  returns the current commitment/revision, creates no hosted operation, and either
+  leaves an open limited gate untouched or atomically completes a mode-only entry
+  into limited
+- leave limited for public while empty-set cleanup is unavailable; anonymous reads
+  remain available, stale page-email claims remain rejected, and cleanup later
+  converges without changing the public binding
+- change, clear, and rotate an offline page's future audience while hosted service is
+  available, unavailable, and recovering; no route becomes reachable until an
+  explicit activation
 - interrupt every limited-list mutation before backend prepare, after prepare but
   before the local transaction, after the local transaction but before commit, after
   backend commit, after a lost response, and before local revision persistence; the
@@ -959,6 +941,10 @@ asking an old HMR handler to enforce a capability it does not understand.
   development diagnostic receives a fixed shared body; unsafe `SourceMap`,
   `X-SourceMap`, `Content-Location`, `Refresh`, `Location`, and `Link` values are
   stripped or safely rewritten
+- a legacy Runtime with no provenance may return only a fully transformed successful
+  shared response; an error, failed transform, or raw/nested `@fs` graph receives a
+  fixed path-free unavailable response, while a proven editor still retains
+  annotations without HMR
 - old opaque namespaces survive lazy loads while leased, expire as a whole after
   30 idle minutes or the non-renewable two-hour lifetime, never cross graph/share
   boundaries, and cannot be kept admitted by anonymous reads
@@ -1006,23 +992,23 @@ asking an old HMR handler to enforce a capability it does not understand.
 | `SHOW-LIVE-016` | Shared transforms emit nested `/@fs/` imports, URL-bearing headers, and Vite errors | Only leased context-bound handles and safe rewritten headers reach the browser; every development error is fixed and path-free |
 | `SHOW-LIVE-017` | Startup reconciliation and `vibe show update` prewarm shared and private graphs | Each request carries its typed context; a missing/invalid context fails before creating or rebasing either graph |
 | `SHOW-LIVE-018` | Direct CLI changes an active page to offline with private HMR connected | The coalesced durable monitor closes every socket for the Session within five seconds without relying on an in-process event |
-| `SHOW-LIVE-019` | Public changes to limited and the cloud write fails | The share admission gate stays closed while the public mode and binding remain recoverable; neither anonymous nor stale listed viewers can read until reconciliation succeeds |
+| `SHOW-LIVE-019` | Public changes to limited and the cloud write fails | The target limited mode and original binding remain durable with the gate closed; neither anonymous nor stale listed viewers can read until reconciliation succeeds |
 | `SHOW-LIVE-020` | Old private/public/offline rows and exact-email grants upgrade | Each page matches the migration table; a disconnected private-with-grants page stays private and pending |
 | `SHOW-LIVE-021` | A live limited-list replacement commits remotely, its response is lost, and Avibe restarts | All page-email reads remain closed until the mutation result and revision reconcile; removed viewers never regain access |
 | `SHOW-LIVE-022` | Limited changes to private while hosted cleanup is unavailable | A stale page-email cookie is rejected on both `/p/` and `/show/`; independent resource collaborators retain their canonical access |
-| `SHOW-LIVE-023` | A public page upgrades, rolls back, is set private by the old binary, then re-upgrades | The newest complete journal snapshot wins and the page stays private; stale `ShowAccess` cannot reopen anonymous access |
+| `SHOW-LIVE-023` | A legacy Runtime returns an unclassified transform error and a nested raw `/@fs/` import | Both responses fail closed with fixed path-free output; no host path or diagnostic reaches the browser |
 | `SHOW-LIVE-024` | An allowed source is replaced by a sensitive symlink after an opaque handle is issued | The issued handle returns only immutable captured bytes, and the changed path cannot receive a new handle |
 | `SHOW-LIVE-025` | A disconnected private-page migration is pending, then the owner chooses public and later private before reconnecting | The newer revision cancels migration; reconnect cannot allocate a slug, commit limited, or restore the old email audience |
-| `SHOW-LIVE-026` | Limited changes to private while hosted cleanup is unavailable, then binary downgrade is requested | Downgrade is refused without replacing executable/schema; it can proceed only after no limited page exists and every grant set is empty at its reconciled page revision |
+| `SHOW-LIVE-026` | Applying a canonically identical limited email set | Backend returns the current commitment/revision, creates no pending operation, and the open gate never closes |
 | `SHOW-LIVE-027` | An anonymous client reads every superseded namespace just before each idle deadline | Each namespace still reaches its non-renewable hard expiry, releases all snapshot bytes, and requires stale documents to reload |
 | `SHOW-LIVE-028` | Anonymous clients keep shared pages active across more Sessions than the Runtime-wide budget | Context and memory stay under the hard limit, reclaimable shared bundles rotate, private HMR keeps its reserve, and excess shared admission is sanitized |
-| `SHOW-LIVE-029` | A public page rolls back, then the old binary rotates and assigns a custom slug before re-upgrade | The newest complete journal snapshot wins; only the final slug resolves, and a conflict fails private without resurrecting stale `ShowAccess` |
+| `SHOW-LIVE-029` | Limited changes to public while hosted empty-set cleanup remains unavailable | Anonymous reads start from the committed public binding, stale listed claims stay rejected, and cleanup retries do not close the public route |
 | `SHOW-LIVE-030` | A released Avibe client starts a new Runtime and sends only `x-vibe-show-base` | Entry, module, and prewarm requests retain the legacy singleton behavior; keyed isolation remains disabled until a protocol-`1` client supplies context |
 | `SHOW-LIVE-031` | A limited-list Apply crashes at every prepare/local/commit boundary and later exceeds operation retention | No local row contains an email, prepare alone never changes grants, committed state reconciles by page commitment/revision, and the prior audience reopens only after proof that an expired operation did not commit |
-| `SHOW-LIVE-032` | Downgrade is attempted with a limited page, then retried after conversion and empty cleanup | The first attempt is refused; the second invalidates old claims and activates an attested legacy-email-write fence, so the old binary cannot add listed viewers or expose its viewer-authorized HMR socket |
+| `SHOW-LIVE-032` | An offline page changes from limited to private, then prepares a future public custom slug | No route is admitted while offline; grant cleanup and the future audience converge without temporary activation |
 | `SHOW-LIVE-033` | An unrelated Instance ACL change advances the global authorization revision while a limited list is unchanged | Refreshed listed viewers remain readable at the same page grant revision; changing that page's list advances only its grant revision and rejects older claims |
 | `SHOW-LIVE-034` | A custom-slug public page crashes at every boundary while changing to limited | Every ambiguous `/p/` read is denied, and successful recovery preserves the exact slug without rotating or losing the route |
-| `SHOW-LIVE-035` | A direct CLI or Web audience mutation races binary downgrade from another process | Both entry points contend on one stable process-shared lease; a writer completes before preflight or remains blocked until replacement, so no limited or pending state can appear inside the downgrade window |
+| `SHOW-LIVE-035` | An authorized editor uses `/p/` with a definitive legacy Runtime | The editor remains on the shared compatibility representation with annotations enabled, no HMR socket, and no private module namespace |
 | `SHOW-LIVE-036` | An attacker obtains local state for a limited page with a small email set | The stored random commitment provides no offline email-guess verifier; only the hosted trust boundary can bind it to the canonical set |
 
 Focused unit/contract tests, Ruff, repository CI, and local Incus browser
@@ -1049,10 +1035,10 @@ The design is implemented when all of the following are true:
   after idempotent read-after-write reconciliation; an ambiguous response, restart,
   or expired operation cannot leave stale grants usable, email targets on disk, or
   a share binding lost.
-- Every current-version local audience writer and binary downgrade uses one stable
-  process-shared write lease from its authoritative precondition read through a
-  terminal or durably pending state; store writes cannot bypass the lease, and local
-  grant commitments are opaque random backend values rather than email-derived hashes.
+- Every current-version local audience writer uses one stable process-shared write
+  lease from its authoritative precondition read through a terminal or durably
+  pending state; store writes cannot bypass the lease, and local grant commitments
+  are opaque random backend values rather than email-derived hashes.
 - Authorized share-link editor navigations redirect to the corresponding private URL
   and get the same Vite HMR and React Fast Refresh behavior as private editors.
 - Annotation writes and the share-link editor redirect consume one validated,
@@ -1077,18 +1063,19 @@ The design is implemented when all of the following are true:
 - Context selection is mandatory at every protocol-`1` Runtime app-graph call site,
   including prewarm and fallback paths, and missing selection fails before Vite
   ownership; a headerless released client retains only the singleton legacy path.
+- The legacy Runtime path never enables HMR, preserves annotations only for a proven
+  editor, and fails closed for unclassified errors or graphs that need raw absolute
+  paths; missing provenance cannot expose a development diagnostic.
 - Shared file references use leased context-bound opaque handles backed by bounded
   immutable snapshots captured through confinement-safe opens; handle reads never
   reopen mutable pathnames. Raw absolute paths, unsafe URL-bearing response headers,
   and Runtime development diagnostics never reach the browser.
-- Every compatibility audience-field write is captured as one complete durable
-  legacy snapshot and reconciled before serving, so visibility and share-link
-  changes made by an old binary cannot be overwritten by stale `ShowAccess` after
-  re-upgrade.
-- Pending legacy migration is revision-bound and cancelled by every newer audience
-  mutation. Downgrade requires zero limited pages and empty reconciled grant sets,
-  then keeps a backend legacy-email-write fence active until the new binary is ready
-  again, so the old serving path can neither mint listed viewers nor grant them HMR.
+- The access-schema migration is restartable, idempotent, revision-bound, and
+  explicitly one-way. Avibe never starts an older executable against migrated state;
+  no legacy audience projection or cross-version writer is part of the contract.
+- A same-set grant prepare reuses the current commitment/revision without creating a
+  pending operation. Leaving limited for public keeps anonymous reads open during
+  best-effort grant cleanup, and offline audience changes never admit a route.
 - Shared Vite contexts, opaque namespaces, handles, and snapshot bytes share one
   Runtime-wide weighted budget with a private-editor reserve and non-renewable
   lifetimes, so anonymous traffic cannot pin admission indefinitely.
