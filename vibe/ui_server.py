@@ -111,6 +111,19 @@ _SHOW_RUNTIME_REQUEST_HEADER_ALLOWLIST = {
     "user-agent",
     SHOW_EVENT_WRITE_TOKEN_HEADER.lower(),
 }
+
+
+def _show_runtime_forwarded_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    from core.show_runtime import SHOW_RUNTIME_CONTEXT_HEADER, SHOW_RUNTIME_PROTOCOL_HEADER
+
+    blocked = {SHOW_RUNTIME_PROTOCOL_HEADER.lower(), SHOW_RUNTIME_CONTEXT_HEADER.lower()}
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() in _SHOW_RUNTIME_REQUEST_HEADER_ALLOWLIST and key.lower() not in blocked
+    }
+
+
 _SHOW_RUNTIME_RESPONSE_HEADER_ALLOWLIST = {
     "accept-ranges",
     "cache-control",
@@ -4035,16 +4048,31 @@ async def _proxy_show_runtime_websocket(
     *,
     external_prefix: str | None = None,
 ) -> None:
-    from core.show_runtime import get_show_runtime_manager
+    from core.show_runtime import (
+        ShowRuntimeContext,
+        ShowRuntimeProtocolEnvelope,
+        get_show_runtime_manager,
+    )
 
     if external_prefix is None:
         external_prefix = f"/show/{quote(session_id, safe='')}"
+        context = ShowRuntimeContext.PRIVATE
+    else:
+        context = ShowRuntimeContext.SHARED
     runtime_path = f"{external_prefix.rstrip('/')}/__vite_hmr"
     if websocket.url.query:
         runtime_path = f"{runtime_path}?{websocket.url.query}"
-    upstream_url = await get_show_runtime_manager().websocket_url(runtime_path)
+    upstream = await get_show_runtime_manager().websocket_target(
+        runtime_path,
+        envelope=ShowRuntimeProtocolEnvelope(context),
+    )
     async with ClientSession() as session:
-        async with session.ws_connect(upstream_url, protocols=["vite-hmr"], autoping=True) as upstream:
+        async with session.ws_connect(
+            upstream.url,
+            headers=upstream.headers,
+            protocols=["vite-hmr"],
+            autoping=True,
+        ) as upstream:
             async def client_to_upstream():
                 try:
                     while True:
@@ -13989,9 +14017,14 @@ async def show_session_prewarm(session_id: str):
     base_path = payload.get("base_path")
     if base_path is not None and not isinstance(base_path, str):
         return jsonify({"ok": False, "code": "invalid_base_path"}), 400
-    from core.show_runtime import prewarm_show_page_session
+    from core.show_runtime import ShowRuntimeContext, prewarm_show_page_session
 
-    result = await prewarm_show_page_session(session_id, base_path=base_path)
+    try:
+        context = ShowRuntimeContext(payload.get("context"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "code": "invalid_show_runtime_context"}), 400
+
+    result = await prewarm_show_page_session(session_id, context=context, base_path=base_path)
     status_code = 200 if result.available else 202
     return jsonify({"ok": result.available, "reason": result.reason, "base_url": result.base_url}), status_code
 
@@ -14012,13 +14045,9 @@ async def show_runtime_vendor_asset(vendor_path: str):
         runtime_path = f"{runtime_path}?{request._request.url.query}"
     from core.show_runtime import get_show_runtime_manager
 
-    forwarded_headers = {
-        key: value
-        for key, value in request._request.headers.items()
-        if key.lower() in _SHOW_RUNTIME_REQUEST_HEADER_ALLOWLIST
-    }
+    forwarded_headers = _show_runtime_forwarded_headers(request._request.headers)
     try:
-        proxied = await get_show_runtime_manager().request(
+        proxied = await get_show_runtime_manager().request_global(
             request.method,
             runtime_path,
             headers=forwarded_headers,
@@ -14144,7 +14173,11 @@ async def _show_page_runtime_response(
     show_authenticated: bool = False,
     show_config_session_id: str | None = None,
 ):
-    from core.show_runtime import get_show_runtime_manager
+    from core.show_runtime import (
+        ShowRuntimeContext,
+        ShowRuntimeProtocolEnvelope,
+        get_show_runtime_manager,
+    )
 
     session_part = quote(session_id, safe="")
 
@@ -14158,19 +14191,18 @@ async def _show_page_runtime_response(
         return path
 
     runtime_path = runtime_app_path(asset_path)
-    forwarded_headers = {
-        key: value
-        for key, value in starlette_request.headers.items()
-        if key.lower() in _SHOW_RUNTIME_REQUEST_HEADER_ALLOWLIST
-    }
+    forwarded_headers = _show_runtime_forwarded_headers(starlette_request.headers)
     if external_prefix:
         forwarded_headers["x-vibe-show-base"] = f"{external_prefix.rstrip('/')}/"
+    context = ShowRuntimeContext.SHARED if external_prefix else ShowRuntimeContext.PRIVATE
+    envelope = ShowRuntimeProtocolEnvelope(context)
     body = await starlette_request.body()
     request_started = time.monotonic()
     manager = get_show_runtime_manager()
     proxied = await manager.request(
         starlette_request.method,
         runtime_path,
+        envelope=envelope,
         headers=forwarded_headers,
         body=body or None,
     )
@@ -14183,6 +14215,7 @@ async def _show_page_runtime_response(
         proxied = await manager.request(
             starlette_request.method,
             runtime_path,
+            envelope=envelope,
             headers=forwarded_headers,
             body=body or None,
         )
@@ -15098,7 +15131,11 @@ async def _reconcile_startup_dependencies_task() -> None:
         result = await asyncio.to_thread(api.reconcile_startup_dependencies)
         show_runtime = result.get("show_runtime") if isinstance(result.get("show_runtime"), dict) else {}
         if show_runtime.get("ok"):
-            from core.show_runtime import prewarm_show_page_session, prewarm_show_runtime
+            from core.show_runtime import (
+                ShowRuntimeContext,
+                prewarm_show_page_session,
+                prewarm_show_runtime,
+            )
 
             prewarm = await prewarm_show_runtime()
             show_runtime["prewarmed"] = prewarm.available
@@ -15112,8 +15149,20 @@ async def _reconcile_startup_dependencies_task() -> None:
                     session_id = str(page.get("session_id") or "")
                     if not session_id:
                         continue
+                    try:
+                        context = ShowRuntimeContext(page.get("context"))
+                    except (TypeError, ValueError):
+                        page_results.append(
+                            {
+                                "session_id": session_id,
+                                "ok": False,
+                                "reason": "invalid_show_runtime_context",
+                            }
+                        )
+                        continue
                     session_prewarm = await prewarm_show_page_session(
                         session_id,
+                        context=context,
                         base_path=page.get("base_path") if isinstance(page.get("base_path"), str) else None,
                     )
                     page_results.append(

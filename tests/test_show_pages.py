@@ -1773,7 +1773,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     )
     assert (tmp_path / "show" / "ses123" / "index.html").exists()
     assert captured["url"] == "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm"
-    assert captured["payload"] == {}
+    assert captured["payload"] == {"context": "private"}
     assert captured["timeout"] == 3
 
 
@@ -2084,7 +2084,7 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     share_path = "/" + public_payload["public_url"].split("https://alex.avibe.bot/", 1)[1]
     assert prewarmed[-1] == (
         "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm",
-        {"base_path": share_path},
+        {"context": "shared", "base_path": share_path},
     )
 
     args = parser.parse_args(["show", "update", "--session-id", "ses123", "--visibility", "private", "--json"])
@@ -2093,7 +2093,10 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     assert private_payload["visibility"] == "private"
     assert private_payload["active_url"] == "https://alex.avibe.bot/show/ses123/"
     assert private_payload["previous_public_url"] == public_payload["public_url"]
-    assert prewarmed[-1] == ("http://127.0.0.1:5123/api/show/sessions/ses123/prewarm", {})
+    assert prewarmed[-1] == (
+        "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm",
+        {"context": "private"},
+    )
 
 
 def test_show_status_and_update_default_to_caller_session(monkeypatch, tmp_path, capsys):

@@ -10,6 +10,7 @@ import struct
 import tarfile
 import threading
 import urllib.error
+import urllib.parse
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,9 @@ from core.show_pages import (
     show_public_event_write_token,
 )
 from core.show_runtime import (
+    ShowRuntimeContext,
     ShowRuntimeManager,
+    ShowRuntimeWebSocketTarget,
     _runtime_download_error,
     _runtime_platform_tag,
     _safe_extract_tar,
@@ -96,12 +99,13 @@ class _FakeShowRuntimeManager:
         self.status_by_path = status_by_path or {}
         self.calls = []
         self.websocket_paths = []
+        self.websocket_headers = []
         self.stopped = False
 
-    async def request(self, method, path, *, headers=None, body=None):
+    async def request(self, method, path, *, envelope, headers=None, body=None):
         import httpx
 
-        self.calls.append((method, path, headers, body))
+        self.calls.append((method, path, envelope.headers(headers), body))
         if self.fail:
             raise RuntimeError("runtime unavailable")
         headers = {
@@ -115,9 +119,28 @@ class _FakeShowRuntimeManager:
             headers=headers,
         )
 
-    async def websocket_url(self, path):
+    async def request_global(self, method, path, *, headers=None, body=None):
+        import httpx
+
+        self.calls.append((method, path, headers or {}, body))
+        if self.fail:
+            raise RuntimeError("runtime unavailable")
+        response_headers = {
+            "content-type": "text/html; charset=utf-8",
+            "set-cookie": "__Host-vibe_remote_session=attacker",
+            "x-runtime-private-header": "secret",
+        } | self.extra_headers | self.headers_by_path.get(path, {})
+        return httpx.Response(
+            self.status_by_path.get(path, self.status_code),
+            content=self.bodies_by_path.get(path, self.body),
+            headers=response_headers,
+        )
+
+    async def websocket_target(self, path, *, envelope):
         self.websocket_paths.append(path)
-        return f"ws://127.0.0.1:1{path}"
+        headers = envelope.headers()
+        self.websocket_headers.append(headers)
+        return ShowRuntimeWebSocketTarget(url=f"ws://127.0.0.1:1{path}", headers=headers)
 
     def stop(self):
         self.stopped = True
@@ -490,10 +513,57 @@ def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     assert manager.calls[0][0] == "GET"
     assert manager.calls[0][1] == "/sessions/ses123/app/"
     assert manager.calls[0][2]["accept"] == "text/html"
+    assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
+    assert manager.calls[0][2]["X-Avibe-Show-Context"] == "private"
     assert "accept-encoding" not in manager.calls[0][2]
     assert "authorization" not in manager.calls[0][2]
     assert "cookie" not in manager.calls[0][2]
     assert "x-vibe-csrf-token" not in manager.calls[0][2]
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+def test_show_live_005_protocol_context_crosses_non_ascii_avibe_request_boundary(
+    monkeypatch,
+    tmp_path,
+    surface,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    session_id = "ses-unicode-path"
+    asset_path = "路径/组件.tsx"
+    share_id = _create_show_page(session_id, surface)
+    encoded_session = urllib.parse.quote(session_id, safe="")
+    encoded_asset = urllib.parse.quote(asset_path, safe="/")
+    if surface == "private":
+        url = f"/show/{encoded_session}/{encoded_asset}"
+        request_kwargs = {"base_url": "http://127.0.0.1:5123"}
+        expected_context = "private"
+    else:
+        url = f"/p/{share_id}/{encoded_asset}"
+        request_kwargs = {
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": _remote_peer(),
+        }
+        expected_context = "shared"
+    manager = _FakeShowRuntimeManager(body=b"export default true")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            url,
+            headers={
+                "Accept": "text/javascript",
+                "X-Avibe-Show-Protocol": "999",
+                "X-Avibe-Show-Context": "shared" if surface == "private" else "private",
+            },
+            **request_kwargs,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert manager.calls[0][1] == f"/sessions/{encoded_session}/app/{encoded_asset}"
+    assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
+    assert manager.calls[0][2]["X-Avibe-Show-Context"] == expected_context
 
 
 @pytest.mark.parametrize("surface", ["private", "public"])
@@ -542,6 +612,9 @@ def test_show_page_history_route_retries_entry_after_runtime_404(monkeypatch, tm
     assert f'"basePath":"{expected_base}"' in body
     assert response.headers["cache-control"] == "no-store"
     assert [call[1] for call in manager.calls] == [route_runtime_path, entry_runtime_path]
+    expected_context = "private" if surface == "private" else "shared"
+    assert all(call[2]["X-Avibe-Show-Protocol"] == "1" for call in manager.calls)
+    assert all(call[2]["X-Avibe-Show-Context"] == expected_context for call in manager.calls)
     if surface == "public":
         assert all(call[2]["x-vibe-show-base"] == expected_base for call in manager.calls)
 
@@ -1187,7 +1260,11 @@ def test_private_show_page_injects_runtime_event_config(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("authenticated", [False, True])
-def test_public_show_page_injects_auth_aware_annotation_config(monkeypatch, tmp_path, authenticated):
+def test_show_live_035_public_show_page_injects_auth_aware_annotation_config(
+    monkeypatch,
+    tmp_path,
+    authenticated,
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
@@ -1212,6 +1289,8 @@ def test_public_show_page_injects_auth_aware_annotation_config(monkeypatch, tmp_
         set_show_runtime_manager_for_tests(None)
 
     assert response.status_code == 200
+    assert response.headers.get("location") is None
+    assert manager.calls[0][2]["X-Avibe-Show-Context"] == "shared"
     body = response.content.decode("utf-8")
     base_path = f"/p/{share_id}/"
     assert f'"sessionId":"{share_id}"' in body
@@ -2118,6 +2197,8 @@ def test_private_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
     assert manager.calls[0][0] == "POST"
     assert manager.calls[0][1] == "/sessions/ses123/app/api/health"
     assert manager.calls[0][2]["content-type"] == "application/json"
+    assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
+    assert manager.calls[0][2]["X-Avibe-Show-Context"] == "private"
     assert "cookie" not in manager.calls[0][2]
     assert manager.calls[0][3] == b'{"ping":true}'
 
@@ -3868,8 +3949,38 @@ def test_cli_show_prewarm_ingress_uses_ui_runtime_manager(monkeypatch, tmp_path)
     _save_config(tmp_path)
     calls = []
 
-    async def fake_prewarm(session_id, *, base_path=None):
-        calls.append((session_id, base_path))
+    async def fake_prewarm(session_id, *, context, base_path=None):
+        calls.append((session_id, context, base_path))
+        return SimpleNamespace(available=True, reason=None, base_url="http://127.0.0.1:49200")
+
+    monkeypatch.setattr("core.show_runtime.prewarm_show_page_session", fake_prewarm)
+
+    response = app.test_client().post(
+        "/api/show/sessions/ses123/prewarm",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "Content-Type": "application/json",
+            "X-Vibe-Show-Client": "cli",
+            "X-Vibe-Show-Cli-Token": show_cli_event_token(),
+        },
+        json={"context": "shared", "base_path": "/p/share123/"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+    assert calls == [("ses123", ShowRuntimeContext.SHARED, "/p/share123/")]
+
+
+def test_show_live_017_cli_show_prewarm_rejects_missing_context_before_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls = []
+
+    async def fake_prewarm(*args, **kwargs):
+        calls.append((args, kwargs))
         return SimpleNamespace(available=True, reason=None, base_url="http://127.0.0.1:49200")
 
     monkeypatch.setattr("core.show_runtime.prewarm_show_page_session", fake_prewarm)
@@ -3885,9 +3996,9 @@ def test_cli_show_prewarm_ingress_uses_ui_runtime_manager(monkeypatch, tmp_path)
         json={"base_path": "/p/share123/"},
     )
 
-    assert response.status_code == 200
-    assert response.get_json()["ok"] is True
-    assert calls == [("ses123", "/p/share123/")]
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "invalid_show_runtime_context"
+    assert calls == []
 
 
 def test_cli_show_prewarm_ingress_requires_cli_token(monkeypatch, tmp_path):
@@ -4679,10 +4790,10 @@ def test_show_runtime_manager_prewarm_loads_entry_module(monkeypatch, tmp_path):
     }
     calls = []
 
-    async def fake_request(self, method, path, *, headers=None, body=None):
+    async def fake_request(self, method, path, *, envelope, headers=None, body=None):
         import httpx
 
-        calls.append((method, path, headers, body))
+        calls.append((method, path, envelope.headers(headers), body))
         status, content, headers_out = responses[path]
         return httpx.Response(status, content=content, headers=headers_out)
 
@@ -4693,23 +4804,34 @@ def test_show_runtime_manager_prewarm_loads_entry_module(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(ShowRuntimeManager, "request", fake_request)
 
-    result = asyncio.run(manager.prewarm_session("ses123", base_path="/show/ses123/"))
+    result = asyncio.run(
+        manager.prewarm_session(
+            "ses123",
+            context=ShowRuntimeContext.PRIVATE,
+            base_path="/show/ses123/",
+        )
+    )
 
     assert result.available is True
+    private_headers = {
+        "x-vibe-show-base": "/show/ses123/",
+        "X-Avibe-Show-Protocol": "1",
+        "X-Avibe-Show-Context": "private",
+    }
     assert calls == [
-        ("GET", "/sessions/ses123/app/", {"x-vibe-show-base": "/show/ses123/"}, None),
-        ("GET", "/sessions/ses123/app/src/main.tsx", {"x-vibe-show-base": "/show/ses123/"}, None),
-        ("GET", "/sessions/ses123/app/src/App.tsx", {"x-vibe-show-base": "/show/ses123/"}, None),
+        ("GET", "/sessions/ses123/app/", private_headers, None),
+        ("GET", "/sessions/ses123/app/src/main.tsx", private_headers, None),
+        ("GET", "/sessions/ses123/app/src/App.tsx", private_headers, None),
         (
             "GET",
             "/sessions/ses123/app/@fs/runtime/packages/ui/dist/button.js",
-            {"x-vibe-show-base": "/show/ses123/"},
+            private_headers,
             None,
         ),
         (
             "GET",
             "/sessions/ses123/app/@fs/runtime/vite-cache/deps/react_jsx-runtime.js?v=abc",
-            {"x-vibe-show-base": "/show/ses123/"},
+            private_headers,
             None,
         ),
     ]
@@ -4734,7 +4856,7 @@ def test_show_runtime_manager_prewarm_reports_nested_module_failures(monkeypatch
         ),
     }
 
-    async def fake_request(self, method, path, *, headers=None, body=None):
+    async def fake_request(self, method, path, *, envelope, headers=None, body=None):
         import httpx
 
         status, content, headers_out = responses[path]
@@ -4747,7 +4869,13 @@ def test_show_runtime_manager_prewarm_reports_nested_module_failures(monkeypatch
     )
     monkeypatch.setattr(ShowRuntimeManager, "request", fake_request)
 
-    result = asyncio.run(manager.prewarm_session("ses123", base_path="/p/share123/"))
+    result = asyncio.run(
+        manager.prewarm_session(
+            "ses123",
+            context=ShowRuntimeContext.SHARED,
+            base_path="/p/share123/",
+        )
+    )
 
     assert result.available is False
     assert result.reason == "session_prewarm_module_failed:504:/sessions/ses123/app/src/App.tsx"
@@ -5819,8 +5947,8 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
         called["runtime"] += 1
         return SimpleNamespace(available=True, reason=None)
 
-    async def fake_session_prewarm(session_id, *, base_path=None):
-        called["sessions"].append((session_id, base_path))
+    async def fake_session_prewarm(session_id, *, context, base_path=None):
+        called["sessions"].append((session_id, context, base_path))
         return SimpleNamespace(available=True, reason=None)
 
     monkeypatch.setattr("vibe.api.reconcile_startup_dependencies", fake_reconcile)
@@ -5830,8 +5958,8 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
             "ok": True,
             "limit": 2,
             "pages": [
-                {"session_id": "ses_private", "base_path": None},
-                {"session_id": "ses_public", "base_path": "/p/share123/"},
+                {"session_id": "ses_private", "context": "private", "base_path": None},
+                {"session_id": "ses_public", "context": "shared", "base_path": "/p/share123/"},
             ],
         },
     )
@@ -5843,7 +5971,10 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
     assert called == {
         "reconcile": 1,
         "runtime": 1,
-        "sessions": [("ses_private", None), ("ses_public", "/p/share123/")],
+        "sessions": [
+            ("ses_private", ShowRuntimeContext.PRIVATE, None),
+            ("ses_public", ShowRuntimeContext.SHARED, "/p/share123/"),
+        ],
     }
 
 
@@ -6163,6 +6294,14 @@ def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypat
     finally:
         set_show_runtime_manager_for_tests(None)
 
+    assert manager.websocket_paths == ["/show/ses123/__vite_hmr"]
+    assert manager.websocket_headers == [
+        {
+            "X-Avibe-Show-Protocol": "1",
+            "X-Avibe-Show-Context": "private",
+        }
+    ]
+
 
 def test_public_show_page_hmr_websocket_accepts_local_peer(monkeypatch, tmp_path):
     # Amendment §2.3: the HMR socket serves public pages too, so a public page's
@@ -6193,6 +6332,7 @@ def test_public_show_page_hmr_websocket_accepts_local_peer(monkeypatch, tmp_path
         set_show_runtime_manager_for_tests(None)
 
     assert manager.websocket_paths == ["/show/ses123/__vite_hmr"]
+    assert manager.websocket_headers[0]["X-Avibe-Show-Context"] == "private"
 
 
 def test_private_show_page_hmr_websocket_accepts_trusted_public_origin(monkeypatch, tmp_path):
@@ -6225,6 +6365,7 @@ def test_private_show_page_hmr_websocket_accepts_trusted_public_origin(monkeypat
         set_show_runtime_manager_for_tests(None)
 
     assert manager.websocket_paths == ["/show/ses123/__vite_hmr"]
+    assert manager.websocket_headers[0]["X-Avibe-Show-Context"] == "private"
 
 
 def test_private_show_page_hmr_websocket_rejects_trusted_public_origin_mismatch(monkeypatch, tmp_path):
@@ -6273,6 +6414,12 @@ def test_public_show_page_hmr_websocket_uses_share_path(monkeypatch, tmp_path):
         set_show_runtime_manager_for_tests(None)
 
     assert manager.websocket_paths == [f"/p/{share_id}/__vite_hmr?token=test-token"]
+    assert manager.websocket_headers == [
+        {
+            "X-Avibe-Show-Protocol": "1",
+            "X-Avibe-Show-Context": "shared",
+        }
+    ]
 
 
 def test_public_show_page_hmr_websocket_requires_public_page(monkeypatch, tmp_path):
@@ -6359,6 +6506,8 @@ def test_public_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     assert manager.calls[0][0] == "GET"
     assert manager.calls[0][1] == "/sessions/ses123/app/"
     assert manager.calls[0][2]["x-vibe-show-base"] == f"/p/{share_id}/"
+    assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
+    assert manager.calls[0][2]["X-Avibe-Show-Context"] == "shared"
 
 
 def test_public_show_page_materializes_workspace_before_runtime_proxy(monkeypatch, tmp_path):
@@ -6435,6 +6584,8 @@ def test_public_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
     assert manager.calls[0][1] == "/sessions/ses123/app/api/health"
     assert manager.calls[0][2]["content-type"] == "application/json"
     assert manager.calls[0][2]["x-vibe-show-base"] == f"/p/{share_id}/"
+    assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
+    assert manager.calls[0][2]["X-Avibe-Show-Context"] == "shared"
     assert "cookie" not in manager.calls[0][2]
     assert manager.calls[0][3] == b'{"ping":true}'
 
@@ -6691,6 +6842,10 @@ def test_show_runtime_vendor_asset_proxy_is_immutable(monkeypatch, tmp_path):
         response = app.test_client().get(
             "/_show-runtime/vendor/abc123/react.js",
             base_url="http://127.0.0.1:5123",
+            headers={
+                "X-Avibe-Show-Protocol": "999",
+                "X-Avibe-Show-Context": "private",
+            },
         )
     finally:
         set_show_runtime_manager_for_tests(None)
@@ -6700,6 +6855,8 @@ def test_show_runtime_vendor_asset_proxy_is_immutable(monkeypatch, tmp_path):
     # The vendor prefix is forwarded verbatim, never under a per-session base path.
     assert manager.calls[-1][0] == "GET"
     assert manager.calls[-1][1] == "/_show-runtime/vendor/abc123/react.js"
+    assert "X-Avibe-Show-Protocol" not in manager.calls[-1][2]
+    assert "X-Avibe-Show-Context" not in manager.calls[-1][2]
     assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert response.headers["content-type"] == "text/javascript; charset=utf-8"
     assert "set-cookie" not in response.headers
