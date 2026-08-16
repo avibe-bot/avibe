@@ -27,11 +27,14 @@ export function ShowPageEmailAccessEditor({
   canManage,
   sessionId,
   onConfirmationOpenChange,
+  ownerWindowId,
 }: {
   active: boolean;
   canManage: boolean;
   sessionId: string;
   onConfirmationOpenChange?: (open: boolean) => void;
+  /** Attribute this control's body-portalled ConfirmDialog to its owning app window. */
+  ownerWindowId?: string;
 }) {
   const { t } = useTranslation();
   const api = useApi();
@@ -261,6 +264,7 @@ export function ShowPageEmailAccessEditor({
         description={t('organization.resources.narrowBody')}
         confirmLabel={t('organization.actions.saveChanges')}
         onConfirm={commit}
+        windowOwnerId={ownerWindowId}
       />
     </>
   );

@@ -3062,9 +3062,10 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   const sessionReadOnly = readOnlyReason !== null;
   const showPageActions = showPageControlActions(sessionReadOnly, showPageMode);
   const showLaunchControl = showPageActions.visualize && (showPageMode || canOpenShowPage);
-  const showShareControl = !sessionReadOnly
-    && canManageShowPage
-    && (showPageMode || showPageAccess !== null);
+  // Share lives ONLY while the page is framed (owner ruling 2026-08-17): the
+  // chat header never carries it, for anyone — access-only managers reach it
+  // from the framed view (or the app window title bar) instead.
+  const showShareControl = showPageActions.share && canManageShowPage;
   // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
   // read-only session, and the withdrawal is re-stated here so this header cannot
   // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
@@ -3180,7 +3181,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             icon-only on mobile. In Show Page mode a Share control sits beside the
             back-to-chat button. */}
         {/* In Show Page mode the order is: annotation control, launch/back, Share.
-            Access-only managers can open Share from chat without receiving page use. */}
+            Share exists only there — never on the plain chat header. */}
         {(showLaunchControl || showShareControl || hasMobileSessionActions) && (
           <div className="ml-auto flex items-center gap-1.5">
             {showPageActions.annotate && writable && (

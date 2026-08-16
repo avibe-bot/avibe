@@ -120,11 +120,14 @@ export function ShowPageWorkspaceAccessControl({
   active,
   sessionId,
   onConfirmationOpenChange,
+  ownerWindowId,
 }: {
   access: ShowPageAccess | null;
   active: boolean;
   sessionId: string;
   onConfirmationOpenChange?: (open: boolean) => void;
+  /** Attribute this control's body-portalled ConfirmDialog to its owning app window. */
+  ownerWindowId?: string;
 }) {
   const { t } = useTranslation();
   const [gate, setGate] = useState<ManagementGate>('idle');
@@ -438,6 +441,7 @@ export function ShowPageWorkspaceAccessControl({
           canManage={access.can_publish_public}
           sessionId={sessionId}
           onConfirmationOpenChange={onConfirmationOpenChange}
+          ownerWindowId={ownerWindowId}
         />
       ) : null}
       </section>
@@ -448,6 +452,7 @@ export function ShowPageWorkspaceAccessControl({
         description={t('organization.resources.narrowBody')}
         confirmLabel={t('organization.actions.saveChanges')}
         onConfirm={commit}
+        windowOwnerId={ownerWindowId}
       />
     </>
   );

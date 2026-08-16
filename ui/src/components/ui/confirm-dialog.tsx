@@ -33,6 +33,12 @@ export interface ConfirmDialogProps {
    * theme and clash with its opener.
    */
   dataTheme?: 'dark';
+  /**
+   * Associate the body-portalled dialog with its owning app window so window
+   * keyboard chords (e.g. ⌘W) still resolve to that window while the dialog
+   * holds focus. See windowChords.ts `data-window-owner-id`.
+   */
+  windowOwnerId?: string;
 }
 
 /**
@@ -53,6 +59,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   confirmDisabled = false,
   onConfirm,
   dataTheme,
+  windowOwnerId,
 }) => {
   const { t } = useTranslation();
   const [remaining, setRemaining] = React.useState(0);
@@ -98,7 +105,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         if (!busy) onOpenChange(next);
       }}
     >
-      <DialogContent className="max-w-md" data-theme={dataTheme}>
+      <DialogContent className="max-w-md" data-theme={dataTheme} data-window-owner-id={windowOwnerId}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}

@@ -16,7 +16,9 @@ import { WindowBodyGestureShield } from './WindowBodyGestureShield';
 import { shouldShieldWindowBody } from './windowGesture';
 import { ErrorBoundary } from '../ui/error-boundary';
 import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
+import { ShowPageShareControl } from '../workbench/ShowPageShareControl';
 import { useShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHostContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
   { dir: 'n', className: 'left-2 right-2 top-0 h-1.5 cursor-ns-resize' },
@@ -57,6 +59,7 @@ export const AppWindow: React.FC<{
   // maximize/restore don't animate at all.
   const [dragging, setDragging] = useState(false);
   const [annotateOpen, setAnnotateOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const focusWindow = wm.focus;
   const handleAnnotateOpenChange = useCallback(
     (open: boolean) => {
@@ -65,6 +68,16 @@ export const AppWindow: React.FC<{
     },
     [focusWindow, win.id],
   );
+  // The Share popover floats over the window's iframe exactly like the annotate
+  // popover: opening it also claims window focus so the portal stays owned here.
+  const handleShareOpenChange = useCallback(
+    (open: boolean) => {
+      if (open) focusWindow(win.id);
+      setShareOpen(open);
+    },
+    [focusWindow, win.id],
+  );
+  const { capabilities } = useInstanceAuthorization();
 
   // Keep a visible window reachable when the geometry around it changes without a
   // drag: the layer shrinking, or the window being restored / un-maximized after the
@@ -291,7 +304,7 @@ export const AppWindow: React.FC<{
         onDoubleClick={() => wm.toggleMaximize(win.id)}
         className="flex h-9 shrink-0 select-none items-center gap-3 border-b border-border px-3.5"
       >
-        <div className={clsx('flex shrink-0 items-center gap-2', showpageSid ? 'w-20' : 'w-[52px]')}>
+        <div className={clsx('flex shrink-0 items-center gap-2', showpageSid ? 'w-28' : 'w-[52px]')}>
           {lights.map((l) => (
             <button
               key={l.key}
@@ -328,8 +341,10 @@ export const AppWindow: React.FC<{
           <span className="truncate text-[13px] font-semibold text-foreground">{win.title ?? t(def.titleKey)}</span>
         </div>
         {/* Mirror the left cluster so the title stays centered. Show Page windows
-            add a compact annotation control before chat + open-in-new-tab. */}
-        <div className={clsx('flex shrink-0 items-center justify-end gap-1', showpageSid ? 'w-20' : 'w-[52px]')}>
+            add a compact annotation control and a Share control before chat +
+            open-in-new-tab — up to four size-6 controls plus gaps (108px), so both
+            clusters reserve w-28 (112px) to keep them from crowding the title. */}
+        <div className={clsx('flex shrink-0 items-center justify-end gap-1', showpageSid ? 'w-28' : 'w-[52px]')}>
           {showpageSid && annotationHost?.src && !win.minimized && exitKind === null && (
             <div
               onPointerDown={(e) => e.stopPropagation()}
@@ -376,6 +391,23 @@ export const AppWindow: React.FC<{
               <MessageCircle className="size-3.5" />
             </button>
           )}
+          {showpageSid && annotationHost?.src && !win.minimized && exitKind === null
+            && capabilities.can_use_show_pages && (
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+              className="flex size-6 shrink-0 items-center justify-center"
+            >
+              <ShowPageShareControl
+                compact
+                sessionId={showpageSid}
+                canManageInstance={capabilities.can_manage_instance}
+                onOpenChange={handleShareOpenChange}
+                ownerWindowId={win.id}
+              />
+            </div>
+          )}
           {safeExternalHref && (
             <a
               href={safeExternalHref}
@@ -404,7 +436,7 @@ export const AppWindow: React.FC<{
             transparent overlay so a gesture's pointer can't be stolen by the iframe and the
             cursor doesn't flicker over it — belt-and-braces with the gesture's pointer capture. */}
         <WindowBodyGestureShield active={shouldShieldWindowBody(wm.gestureActive, win.minimized)} />
-        {annotateOpen && annotationHost?.src && (
+        {(annotateOpen || shareOpen) && annotationHost?.src && (
           <div aria-hidden data-annotation-shield className="absolute inset-0 z-20" />
         )}
       </div>

@@ -48,12 +48,19 @@ export const ShowPageShareControl: React.FC<{
   // inert while it is open so an outside tap there falls through to the parent
   // document and Radix can dismiss (a tap inside an iframe never reaches us).
   onOpenChange?: (open: boolean) => void;
+  // Keep a single icon trigger at every viewport size (window title bars),
+  // matching the compact annotate control's chrome styling.
+  compact?: boolean;
+  // Associate portalled popover focus with its owning app window.
+  ownerWindowId?: string;
 }> = ({
   sessionId,
   initialAccess = null,
   canManageInstance = false,
   onPayloadChange,
   onOpenChange,
+  compact = false,
+  ownerWindowId,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -174,42 +181,64 @@ export const ShowPageShareControl: React.FC<{
   // refreshing so reopening doesn't flash a spinner.
   const refresh = () => {
     const seq = ++reqSeq.current;
-    const canLoadPayload = canManageInstance || access?.can_use === true;
-    setLoading(canLoadPayload && !payload);
-    setAccessLoading(!access);
-    setAccessError(false);
-    void (async () => {
-      if (canLoadPayload) {
-        try {
-          const res: ShowPagePayload = await api.ensureShowPage(sessionId);
-          if (seq !== reqSeq.current) return;
-          applyPayload(res);
-          if (!inventoryPage) reload();
-        } catch {
-          // An archived Show Page cannot be ensured, but its applied access
-          // metadata is still useful and is loaded below.
-        } finally {
-          setLoading(false);
-        }
-      } else {
+    // Callers that already hold authority (instance managers, or a caller that
+    // passed initialAccess) read the payload and the access in parallel like
+    // before. A caller with NEITHER (the app window title bar) must sequence:
+    // the payload read is gated on access, so it starts only after access
+    // resolves — otherwise a granted can_use arrives with no payload behind it
+    // until the popover is reopened.
+    const loadPayload = async (granted: boolean) => {
+      if (!granted) {
+        setLoading(false);
+        return;
+      }
+      setLoading(!payload);
+      try {
+        const res: ShowPagePayload = await api.ensureShowPage(sessionId);
+        if (seq !== reqSeq.current) return;
+        applyPayload(res);
+        if (!inventoryPage) reload();
+      } catch {
+        // An archived Show Page cannot be ensured, but its applied access
+        // metadata is still useful and is loaded below.
+      } finally {
         setLoading(false);
       }
-
-      try {
-        const nextAccess = await api.getShowPageAccess(sessionId);
-        if (seq !== reqSeq.current) return;
-        setAccess(nextAccess);
-      } catch {
-        if (seq !== reqSeq.current) return;
-        // A failed refresh cannot leave the previous authority actionable. The
-        // payload stays cached for a later successful refresh, but is withdrawn
-        // while accessError invalidates this control's authorization state.
-        setAccess(null);
-        setAccessError(true);
-      } finally {
-        setAccessLoading(false);
-      }
-    })();
+    };
+    const readAccess = (thenLoadPayload: boolean) => {
+      setAccessLoading(!access);
+      setAccessError(false);
+      void (async () => {
+        let nextAccess: ShowPageAccess | null = null;
+        try {
+          nextAccess = await api.getShowPageAccess(sessionId);
+          if (seq !== reqSeq.current) return;
+          setAccess(nextAccess);
+        } catch {
+          if (seq !== reqSeq.current) return;
+          // A failed refresh cannot leave the previous authority actionable. The
+          // payload stays cached for a later successful refresh, but is withdrawn
+          // while accessError invalidates this control's authorization state.
+          setAccess(null);
+          setAccessError(true);
+          return;
+        } finally {
+          setAccessLoading(false);
+        }
+        // Only the sequenced caller loads here: the parallel branch already
+        // started its payload read alongside this one — loading twice would
+        // duplicate the ensure request and the inventory merge.
+        if (thenLoadPayload) {
+          await loadPayload(canManageInstance || nextAccess?.can_use === true);
+        }
+      })();
+    };
+    if (canManageInstance || access?.can_use === true) {
+      void loadPayload(true);
+      readAccess(false);
+    } else {
+      readAccess(true);
+    }
   };
 
   const handleOpenChange = (next: boolean) => {
@@ -283,7 +312,9 @@ export const ShowPageShareControl: React.FC<{
           type="button"
           variant="ghost"
           size="icon"
-          className="size-7 shrink-0"
+          className={compact
+            ? 'size-6 shrink-0 rounded-md text-muted hover:bg-foreground/[0.06] hover:text-foreground'
+            : 'size-7 shrink-0'}
           aria-label={t('chat.showPage.share')}
           title={t('chat.showPage.share')}
         >
@@ -293,13 +324,17 @@ export const ShowPageShareControl: React.FC<{
       <PopoverContent
         align="end"
         className="w-80 space-y-3"
+        data-window-owner-id={ownerWindowId}
         onInteractOutside={(event) => {
           if (workspaceConfirmationOpen) event.preventDefault();
         }}
       >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
 
-        {loading && !access ? (
+        {/* Access-less callers (the app-window title bar) resolve access first, so
+            the access read itself is part of the loading presentation — without
+            it the popover would flash the load-error text for the whole request. */}
+        {(loading || accessLoading) && !access ? (
           <div className="flex items-center gap-2 py-2 text-sm text-muted">
             <Loader2 className="size-4 animate-spin" />
             {t('common.loading')}
@@ -371,6 +406,7 @@ export const ShowPageShareControl: React.FC<{
             active={open}
             sessionId={sessionId}
             onConfirmationOpenChange={setWorkspaceConfirmationOpen}
+            ownerWindowId={ownerWindowId}
           />
           {accessError ? (
             <p className="mt-2 text-[11px] leading-snug text-destructive-ink">
