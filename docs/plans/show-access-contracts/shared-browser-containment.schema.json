@@ -3,7 +3,7 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/shared-browser-containment.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "owner", "canonical_public_url", "trusted_shell", "admission_rule", "runtime_capture_admission", "share_browsing_credential", "browser_request_shapes", "credentialless_cors", "api_mutation_cases", "vendor_assets", "cross_share_isolation", "expiry_reclamation", "failure_responses", "dependency_cases", "residual_evidence", "cases"],
+  "required": ["schema_version", "owner", "canonical_public_url", "trusted_shell", "admission_rule", "runtime_capture_admission", "share_browsing_credential", "protected_request_validation", "browser_request_shapes", "credentialless_cors", "api_mutation_cases", "vendor_assets", "cross_share_isolation", "expiry_reclamation", "failure_responses", "dependency_cases", "residual_evidence", "cases"],
   "properties": {
     "schema_version": { "const": 2 },
     "owner": { "const": "SharedViewerBrowserContainment" },
@@ -53,6 +53,7 @@
       "const": {
         "issuer": "local_avibe_after_admission_rule",
         "binding_fields": ["instance_id", "page_id", "share_id", "audience_revision", "namespace_handle", "document_handle"],
+        "server_record_fields": ["instance_id", "page_id", "share_id", "audience_revision", "namespace_handle", "document_handle", "admitted_normalized_email_if_limited", "expires_at"],
         "entropy_bits": 256,
         "derived_from_binding_or_path": false,
         "lifetime": "short_lived_nonrenewable",
@@ -73,6 +74,93 @@
         },
         "required_surfaces": ["document", "module", "css", "raw", "worker", "spa_fallback", "api_handler"],
         "revision_mismatch_outcome": "reresolve_share_and_membership_before_new_credential"
+      }
+    },
+    "protected_request_validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "invoked_for_surfaces", "invoked_for_methods", "local_linearization", "runtime_linearization", "audience_revision_policy", "input_space", "valid_point_constraints", "decision_semantics", "decision_rules", "post_mint_transition_cases", "loaded_guest_document_policy", "instance_resource_acl_revision_is_orthogonal"],
+      "properties": {
+        "owner": {"const": "SharedViewerBrowserContainment.protected_request_validation"},
+        "invoked_for_surfaces": {"const": ["document", "module", "css", "raw", "worker", "spa_fallback", "api_handler"]},
+        "invoked_for_methods": {"const": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]},
+        "local_linearization": {
+          "const": {
+            "transaction": "one_authoritative_ShowAccess_snapshot",
+            "checks": ["page_exists", "availability_is_active", "access_mode_is_limited_or_public", "exact_share_binding_matches", "audience_revision_matches_capability", "limited_admitted_email_is_current_member", "capability_not_expired"],
+            "runtime_audience_decision_allowed": false
+          }
+        },
+        "runtime_linearization": {
+          "const": {
+            "after_local_validation": true,
+            "operation": "atomically_pin_live_namespace_and_document_handle",
+            "checks": ["capability_namespace_document_binding_matches", "namespace_is_live"],
+            "in_flight_pin": "request_linearized_before_change_may_finish",
+            "later_request": "must_repeat_full_validation"
+          }
+        },
+        "audience_revision_policy": {
+          "const": {
+            "request_admission_revision_field": "ShowAccess.audience_revision",
+            "durable_availability_transition_advances_once": true,
+            "audience_or_binding_change_advances_once": true,
+            "no_op_advances": false,
+            "apply_may_mutate_availability": false,
+            "separate_capability_revision_allowed": false
+          }
+        },
+        "input_space": {
+          "const": {
+            "capability_integrity": ["valid", "invalid"],
+            "page_state": ["present", "missing"],
+            "availability": ["active", "offline"],
+            "access_mode": ["limited", "public", "private"],
+            "share_binding": ["match", "mismatch"],
+            "audience_revision": ["match", "mismatch"],
+            "capability_lifetime": ["live", "expired"],
+            "namespace_binding": ["match", "mismatch"],
+            "namespace_liveness": ["live", "idle_expired", "absolute_expired", "reclaimed"],
+            "limited_membership": ["current", "absent", "not_applicable"]
+          }
+        },
+        "valid_point_constraints": {"const": ["limited_requires_membership_current_or_absent", "public_or_private_requires_membership_not_applicable"]},
+        "decision_semantics": {"const": "ordered_first_match_then_runtime_pin"},
+        "decision_rules": {
+          "type": "array",
+          "minItems": 13,
+          "maxItems": 13,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "stage", "field", "equals", "outcome"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^PROTECTED-[A-Z0-9-]+$"},
+              "stage": {"enum": ["local", "runtime"]},
+              "field": {"enum": ["capability_integrity", "page_state", "capability_lifetime", "share_binding", "availability", "access_mode", "audience_revision", "limited_membership", "namespace_binding", "namespace_liveness", "all_prior_checks"]},
+              "equals": {"type": "string"},
+              "outcome": {"enum": ["fixed_sanitized_expired", "fixed_sanitized_not_found", "fixed_stale_document_reload_required", "serve_pinned_shared_response"]}
+            }
+          }
+        },
+        "post_mint_transition_cases": {
+          "type": "array",
+          "minItems": 15,
+          "maxItems": 15,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "revision_advance", "later_request_outcome", "in_flight_outcome"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[A-Z0-9-]+$"},
+              "revision_advance": {"type": "integer", "minimum": 0, "maximum": 2},
+              "later_request_outcome": {"enum": ["serve_pinned_shared_response", "fixed_sanitized_not_found", "fixed_sanitized_expired", "fixed_stale_document_reload_required"]},
+              "in_flight_outcome": {"const": "finish_pinned_response"}
+            }
+          }
+        },
+        "loaded_guest_document_policy": {"const": "never_actively_close_dom_or_javascript"},
+        "instance_resource_acl_revision_is_orthogonal": {"const": true}
       }
     },
     "browser_request_shapes": {
@@ -121,9 +209,7 @@
           "capability_source": "opaque_route_namespace_segment",
           "valid_capability_requires": [
             "capability_integrity_and_entropy",
-            "current_instance_page_share_binding",
-            "current_audience_revision",
-            "live_namespace_and_document_handle"
+            "protected_request_validation"
           ],
           "admission_proof": "capability_minted_only_after_admission_rule",
           "ambient_identity_or_cookie_recheck": false,

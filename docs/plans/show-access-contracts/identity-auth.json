@@ -2,7 +2,7 @@
   "schema_version": 2,
   "owner": "ExecutableIdentityHandshake",
   "backend_assertion": {
-    "format": "short_lived_signed_identity_assertion",
+    "format": "rfc7519_compact_jwt_jws",
     "authorize_endpoint": {
       "method": "GET",
       "path_template": "/api/v1/instances/{instanceId}/show-identity/authorize"
@@ -28,6 +28,51 @@
       "path": "/auth/show-identity/callback",
       "hostname_source": ["active_instance_hostname", "active_custom_hostname"]
     },
+    "wire_protocol": {
+      "serialization": "compact_jws",
+      "segment_count": 3,
+      "payload_kind": "jwt_claims",
+      "protected_header": {
+        "required_and_only_fields": ["alg", "typ", "kid"],
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "nonempty_server_key_identifier"
+      },
+      "forbidden_algorithms": ["none", "HS256", "ES256", "EdDSA"],
+      "forbidden_header_parameters": ["jku", "jwk", "x5u", "x5c", "crit", "b64"],
+      "unsupported_critical_or_unencoded_payload_outcome": "reject_identity_assertion",
+      "payload_claim_set_exact": true
+    },
+    "pairing_trust": {
+      "authority": "local_paired_instance_record",
+      "trusted_fields": ["issuer", "oauth_client_id", "instance_id", "jwks_uri"],
+      "issuer_requirement": "paired_https_issuer",
+      "audience_derivation": "avibe-show-identity:<oauthClientId>",
+      "audience_cardinality": "exactly_one_string",
+      "jwks_uri_derivation": "<issuer>/oauth/jwks.json",
+      "jwks_uri_same_origin_with_issuer": true,
+      "oidc_discovery_policy": "optional_but_if_used_must_match_exact_paired_issuer_and_jwks_uri",
+      "cross_origin_jwks_redirect_allowed": false,
+      "token_or_request_selects_trust": false
+    },
+    "jwks_verification": {
+      "matching_key_count": "exactly_one",
+      "key_requirements": {
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "minimum_modulus_bits": 2048
+      },
+      "duplicate_kid_outcome": "reject_identity_assertion",
+      "changed_material_same_kid_outcome": "reject_identity_assertion",
+      "unknown_kid_policy": {
+        "forced_refresh_scope": "issuer_coalesced",
+        "maximum_forced_refreshes": 1,
+        "maximum_verification_retries": 1,
+        "still_unknown_or_refresh_failure_outcome": "reject_identity_assertion"
+      },
+      "malformed_or_unavailable_outcome": "reject_identity_assertion"
+    },
     "required_signed_claims": ["iss", "aud", "sub", "iat", "exp", "jti", "nonce", "instance_id", "verified_email"],
     "audience_derivation": "avibe-show-identity:<oauthClientId>",
     "ttl_seconds": 300,
@@ -46,51 +91,68 @@
       "minimum_overlap_seconds": 660
     },
     "terminal_errors": [
-      { "code": "identity_not_verified", "cache_control": "no-store", "assertion_returned": false },
-      { "code": "identity_unavailable", "cache_control": "no-store", "assertion_returned": false }
+      {"code": "identity_not_verified", "cache_control": "no-store", "assertion_returned": false},
+      {"code": "identity_unavailable", "cache_control": "no-store", "assertion_returned": false}
     ],
     "missing_login_session_action": "redirect_to_login_with_safe_next_only",
     "jti_unique": true,
-    "forbidden_claims": [
-      "page_id",
-      "share_id",
-      "page_authorization",
-      "page_membership",
-      "whitelist",
-      "audience_revision",
-      "grant_revision",
-      "grant_commitment",
-      "instance_role",
-      "instance_access_source",
-      "show_page_email"
-    ],
+    "forbidden_claims": ["page_id", "share_id", "page_authorization", "page_membership", "whitelist", "audience_revision", "grant_revision", "grant_commitment", "instance_role", "instance_access_source", "show_page_email"],
     "instance_access_context_created": false,
     "instance_role_derived": false,
-    "page_membership_decided": false
+    "page_membership_decided": false,
+    "interoperability_vectors": [
+      {"id": "JWT-CURRENT-KEY", "token_key": "current", "jwks_state": "current_plus_previous", "refreshes": 0, "outcome": "verified_identity"},
+      {"id": "JWT-PREVIOUS-KEY-OVERLAP", "token_key": "previous", "jwks_state": "current_plus_previous", "refreshes": 0, "outcome": "verified_identity"},
+      {"id": "JWT-NEW-KEY-AFTER-REFRESH", "token_key": "new_current", "jwks_state": "previous_cache_then_rotated_refresh", "refreshes": 1, "outcome": "verified_identity"},
+      {"id": "JWT-UNKNOWN-KID", "token_key": "unknown", "jwks_state": "unchanged_after_refresh", "refreshes": 1, "outcome": "reject_identity_assertion"},
+      {"id": "JWKS-DUPLICATE-KID", "token_key": "current", "jwks_state": "duplicate_kid", "refreshes": 0, "outcome": "reject_identity_assertion"},
+      {"id": "JWKS-CHANGED-MATERIAL", "token_key": "unknown", "jwks_state": "changed_material_same_kid_on_refresh", "refreshes": 1, "outcome": "reject_identity_assertion"},
+      {"id": "JWKS-CROSS-ORIGIN", "token_key": "current", "jwks_state": "cross_origin_uri_or_redirect", "refreshes": 0, "outcome": "reject_identity_assertion"},
+      {"id": "JWT-UNSUPPORTED-HEADER", "token_key": "current", "jwks_state": "current_plus_previous", "refreshes": 0, "outcome": "reject_identity_assertion"}
+    ]
   },
   "local_handshake": {
     "producer": "avibe",
     "server_resolved_before_start": ["instance_id", "page_id", "share_id", "safe_public_return_target"],
-    "signed_state_fields": ["instance_id", "share_id", "safe_public_return_target", "callback_hostname", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"],
+    "signed_state_fields": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_hostname", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"],
     "correlation_cookie": {
-      "name": "avibe_show_identity_correlation",
+      "name_template": "__Secure-avibe_show_identity_c_<base64url_nonce>",
+      "name_source": "verified_signed_state_nonce",
+      "value": "independent_32_byte_csprng_secret",
       "same_site": "None",
       "secure": true,
       "http_only": true,
       "path": "/auth/show-identity/callback",
       "domain_attribute_allowed": false,
       "single_use": true,
-      "expires_no_later_than": "signed_state.expires_at"
+      "expires_no_later_than": "signed_state.expires_at",
+      "state_verification_precedes_cookie_selection": true,
+      "invalid_state_cookie_deletion": "none",
+      "terminal_callback_cookie_action": "consume_and_delete_matching_flow_only"
     },
-    "callback_checks": [
-      "assertion_signature_issuer_audience_and_expiry",
-      "nonce_and_jti_match_and_are_single_use",
-      "assertion_instance_matches_paired_instance",
-      "form_post_targets_fixed_https_callback_without_query_or_fragment",
-      "correlation_cookie_hash_matches_signed_state_and_cookie_is_consumed_once",
-      "return_target_matches_signed_same_share_target",
-      "share_reresolves_before_membership_check"
-    ],
+    "callback_checks": ["assertion_compact_jws_header_and_rs256_signature", "assertion_pairing_issuer_audience_instance_and_jwks", "assertion_expiry_and_exact_claim_set", "nonce_and_jti_match_and_are_atomically_single_use", "form_post_targets_fixed_https_callback_without_query_or_fragment", "flow_specific_cookie_hash_matches_signed_state", "return_target_matches_signed_same_share_target", "share_reresolves_before_membership_check"],
+    "consumption_store": {
+      "key_fields": ["nonce", "jti"],
+      "consume_operation": "atomic_compare_absent_then_insert",
+      "retention_deadline": "max_signed_state_or_assertion_expiry_plus_verifier_clock_skew",
+      "same_callback_race_successes": 1
+    },
+    "concurrent_flow_state_machine": {
+      "flow_identity": ["verified_signed_nonce", "cookie_name", "cookie_secret_hash", "jti"],
+      "independent_same_host_flows": true,
+      "terminal_callback_affects_other_flows": false,
+      "cases": [
+        {"id": "FLOW-A-THEN-B", "sequence": ["complete_a", "complete_b"], "successes": ["a", "b"], "remaining_cookies": []},
+        {"id": "FLOW-B-THEN-A", "sequence": ["complete_b", "complete_a"], "successes": ["b", "a"], "remaining_cookies": []},
+        {"id": "FLOW-SWAP-STATE-ASSERTION", "sequence": ["post_a_state_with_b_assertion"], "successes": [], "remaining_cookies": ["b"]},
+        {"id": "FLOW-SWAP-STATE-COOKIE", "sequence": ["post_a_state_with_b_cookie"], "successes": [], "remaining_cookies": ["b"]},
+        {"id": "FLOW-REPLAY", "sequence": ["complete_a", "replay_a"], "successes": ["a"], "remaining_cookies": []},
+        {"id": "FLOW-RESTORED-COOKIE", "sequence": ["complete_a", "restore_a_cookie", "replay_a"], "successes": ["a"], "remaining_cookies": []},
+        {"id": "FLOW-A-EXPIRES-B-COMPLETES", "sequence": ["expire_a", "complete_a", "complete_b"], "successes": ["b"], "remaining_cookies": []},
+        {"id": "FLOW-SAME-CALLBACK-RACE", "sequence": ["race_a", "race_a"], "successes": ["a"], "remaining_cookies": []},
+        {"id": "FLOW-OLD-NEW-KEY-CONCURRENT", "sequence": ["verify_old_key_a", "verify_new_key_b"], "successes": ["a", "b"], "remaining_cookies": []}
+      ]
+    },
     "membership_lookup": "fresh_local_page_email_lookup_on_every_limited_request",
     "identity_session_is_authorization": false,
     "unlisted_outcome": "generic_deny_without_page_bytes_or_login_loop",
@@ -98,9 +160,11 @@
     "reference_harness": {
       "scenario_id": "AUTH-SETUP-404",
       "actual_http_boundary": "POST /auth/show-identity/callback",
+      "components": ["local_state_signer", "backend_rs256_issuer_and_jwks", "avibe_jwt_verifier"],
       "content_type": "application/x-www-form-urlencoded",
-      "cross_site_source": "https://avibe.bot",
       "active_custom_callback_origin": "https://show.example.test",
+      "contract_evidence": "http_form_jwt_jwks_and_atomic_state_machine",
+      "browser_cookie_delivery_evidence": "future_real_browser_conformance",
       "production_conformance": "future_avibe_and_backend_implementation_lanes"
     }
   },
@@ -116,8 +180,9 @@
       "allowed_callback_hostnames": ["alice.example.test", "show.example.test"],
       "nonce": "nonce_identity_contract_0001",
       "signed_state_valid": true,
-      "correlation_cookie": "cookie_identity_contract_0001",
-      "correlation_cookie_sha256": "26b27df81b729e14db0da3ad5169d6cfe30b40c655136f441e03be31ff2760ba",
+      "correlation_cookie_name": "__Secure-avibe_show_identity_c_nonce_identity_contract_0001",
+      "correlation_cookie": "Y29va2llX2lkZW50aXR5X2NvbnRyYWN0XzMyX2J5dGVzISE",
+      "correlation_cookie_sha256": "e780ccc652f9cdd29c6ed7a235c2a9717d26c9ae2dba9aa4df94858693c8f964",
       "signed_state_expires_at": 1800000300,
       "correlation_cookie_expires_at": 1800000300
     },
@@ -127,13 +192,13 @@
       "assertion_location": "form_body",
       "callback_url": "https://show.example.test/auth/show-identity/callback",
       "content_type": "application/x-www-form-urlencoded",
-      "cross_site_source": "https://avibe.bot",
-      "assertion_format": "short_lived_signed_identity_assertion",
+      "assertion_format": "rfc7519_compact_jwt_jws",
       "assertion_valid": true,
       "instance_id": "ins_identity_contract",
       "nonce": "nonce_identity_contract_0001",
       "jti": "jti_identity_contract_0001",
-      "correlation_cookie": "cookie_identity_contract_0001",
+      "correlation_cookie_name": "__Secure-avibe_show_identity_c_nonce_identity_contract_0001",
+      "correlation_cookie": "Y29va2llX2lkZW50aXR5X2NvbnRyYWN0XzMyX2J5dGVzISE",
       "verified_email": "bob@example.com",
       "resolved_page_id": "ses_identity_contract",
       "resolved_share_id": "identity-contract-share",
@@ -142,148 +207,30 @@
       "outcome": "issue_share_bound_browsing_credential"
     },
     "protected_request": {
-      "credential_binding": {
-        "instance_id": "ins_identity_contract",
-        "page_id": "ses_identity_contract",
-        "share_id": "identity-contract-share",
-        "audience_revision": 12
-      },
+      "credential_binding": {"instance_id": "ins_identity_contract", "page_id": "ses_identity_contract", "share_id": "identity-contract-share", "audience_revision": 12},
       "membership_rechecked": true,
       "outcome": "serve_shared"
     },
     "negative_callbacks": [
-      {
-        "id": "IDENTITY-CALLBACK-NONCE-REPLAY",
-        "mutation": "reuse_consumed_nonce",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-INSTANCE-MISMATCH",
-        "mutation": "replace_assertion_instance_id",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-SHARE-MISMATCH",
-        "mutation": "replace_signed_return_share",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-COOKIE-MISMATCH",
-        "mutation": "replace_correlation_cookie",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-URL-QUERY",
-        "mutation": "add_callback_query",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-URL-FRAGMENT",
-        "mutation": "add_callback_fragment",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-HISTORY-LEAK",
-        "mutation": "place_assertion_in_browser_history",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-REFERRER-LEAK",
-        "mutation": "place_assertion_in_referrer",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-UNTRUSTED-HOST",
-        "mutation": "replace_callback_hostname",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-FORBIDDEN-CLAIM",
-        "mutation": "add_page_authorization_claim",
-        "outcome": "reject_without_credential_or_page_bytes"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-NOT-VERIFIED",
-        "mutation": "identity_not_verified",
-        "outcome": "identity_not_verified_no_store_without_assertion"
-      },
-      {
-        "id": "IDENTITY-CALLBACK-IDENTITY-UNAVAILABLE",
-        "mutation": "identity_unavailable",
-        "outcome": "identity_unavailable_no_store_without_assertion"
-      }
+      {"id": "IDENTITY-CALLBACK-NONCE-REPLAY", "mutation": "reuse_consumed_nonce", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-INSTANCE-MISMATCH", "mutation": "replace_assertion_instance_id", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-SHARE-MISMATCH", "mutation": "replace_signed_return_share", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-COOKIE-MISMATCH", "mutation": "replace_correlation_cookie", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-URL-QUERY", "mutation": "add_callback_query", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-URL-FRAGMENT", "mutation": "add_callback_fragment", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-HISTORY-LEAK", "mutation": "place_assertion_in_browser_history", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-REFERRER-LEAK", "mutation": "place_assertion_in_referrer", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-UNTRUSTED-HOST", "mutation": "replace_callback_hostname", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-FORBIDDEN-CLAIM", "mutation": "add_page_authorization_claim", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-NOT-VERIFIED", "mutation": "identity_not_verified", "outcome": "identity_not_verified_no_store_without_assertion"},
+      {"id": "IDENTITY-CALLBACK-IDENTITY-UNAVAILABLE", "mutation": "identity_unavailable", "outcome": "identity_unavailable_no_store_without_assertion"}
     ]
   },
   "cases": [
-    {
-      "id": "IDENTITY-LISTED-CURRENT",
-      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-037", "SHOW-LIVE-038"],
-      "assertion_valid": true,
-      "instance_binding": "match",
-      "verified_email": "bob@example.com",
-      "current_local_emails": ["bob@example.com"],
-      "outcome": "serve_shared",
-      "instance_access": false,
-      "canonical_show_access": false,
-      "hmr": false,
-      "annotations": false,
-      "agents": false
-    },
-    {
-      "id": "IDENTITY-UNLISTED",
-      "scenario_ids": ["SHOW-LIVE-003"],
-      "assertion_valid": true,
-      "instance_binding": "match",
-      "verified_email": "mallory@example.com",
-      "current_local_emails": ["bob@example.com"],
-      "outcome": "generic_deny",
-      "instance_access": false,
-      "canonical_show_access": false,
-      "hmr": false,
-      "annotations": false,
-      "agents": false
-    },
-    {
-      "id": "IDENTITY-REMOVED-AFTER-SESSION",
-      "scenario_ids": ["SHOW-LIVE-008", "SHOW-LIVE-033"],
-      "assertion_valid": true,
-      "instance_binding": "match",
-      "verified_email": "bob@example.com",
-      "current_local_emails": [],
-      "outcome": "generic_deny",
-      "instance_access": false,
-      "canonical_show_access": false,
-      "hmr": false,
-      "annotations": false,
-      "agents": false
-    },
-    {
-      "id": "IDENTITY-CROSS-INSTANCE",
-      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-037"],
-      "assertion_valid": true,
-      "instance_binding": "mismatch",
-      "verified_email": "bob@example.com",
-      "current_local_emails": ["bob@example.com"],
-      "outcome": "reject_identity_assertion",
-      "instance_access": false,
-      "canonical_show_access": false,
-      "hmr": false,
-      "annotations": false,
-      "agents": false
-    },
-    {
-      "id": "IDENTITY-FORBIDDEN-PAGE-CLAIM",
-      "scenario_ids": ["SHOW-LIVE-020", "SHOW-LIVE-038"],
-      "assertion_valid": false,
-      "instance_binding": "match",
-      "verified_email": "bob@example.com",
-      "current_local_emails": ["bob@example.com"],
-      "outcome": "reject_identity_assertion",
-      "instance_access": false,
-      "canonical_show_access": false,
-      "hmr": false,
-      "annotations": false,
-      "agents": false
-    }
+    {"id": "IDENTITY-LISTED-CURRENT", "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-037", "SHOW-LIVE-038"], "assertion_valid": true, "instance_binding": "match", "verified_email": "bob@example.com", "current_local_emails": ["bob@example.com"], "outcome": "serve_shared", "instance_access": false, "canonical_show_access": false, "hmr": false, "annotations": false, "agents": false},
+    {"id": "IDENTITY-UNLISTED", "scenario_ids": ["SHOW-LIVE-003"], "assertion_valid": true, "instance_binding": "match", "verified_email": "mallory@example.com", "current_local_emails": ["bob@example.com"], "outcome": "generic_deny", "instance_access": false, "canonical_show_access": false, "hmr": false, "annotations": false, "agents": false},
+    {"id": "IDENTITY-REMOVED-AFTER-SESSION", "scenario_ids": ["SHOW-LIVE-008", "SHOW-LIVE-033"], "assertion_valid": true, "instance_binding": "match", "verified_email": "bob@example.com", "current_local_emails": [], "outcome": "generic_deny", "instance_access": false, "canonical_show_access": false, "hmr": false, "annotations": false, "agents": false},
+    {"id": "IDENTITY-CROSS-INSTANCE", "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-037"], "assertion_valid": true, "instance_binding": "mismatch", "verified_email": "bob@example.com", "current_local_emails": ["bob@example.com"], "outcome": "reject_identity_assertion", "instance_access": false, "canonical_show_access": false, "hmr": false, "annotations": false, "agents": false},
+    {"id": "IDENTITY-FORBIDDEN-PAGE-CLAIM", "scenario_ids": ["SHOW-LIVE-020", "SHOW-LIVE-038"], "assertion_valid": false, "instance_binding": "match", "verified_email": "bob@example.com", "current_local_emails": ["bob@example.com"], "outcome": "reject_identity_assertion", "instance_access": false, "canonical_show_access": false, "hmr": false, "annotations": false, "agents": false}
   ]
 }

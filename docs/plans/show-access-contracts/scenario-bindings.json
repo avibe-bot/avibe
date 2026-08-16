@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "design_source": "docs/plans/public-show-live-update.md",
-  "design_sha": "d34970d739d3ab6d84ac9d0fb667b124fe8649e7",
-  "design_blob_sha": "d34970d739d3ab6d84ac9d0fb667b124fe8649e7",
+  "design_sha": "b4afbcb4949352a044b45ddf62f2c21300d6744c",
+  "design_blob_sha": "b4afbcb4949352a044b45ddf62f2c21300d6744c",
   "evidence_boundaries": {
     "contract": "machine_contract_proof",
     "residual_browser": "future_browser_conformance",
@@ -141,11 +141,13 @@
     { "id": "CLAIM-SETTINGS-NORMALIZED-EMAILS", "source": { "kind": "canonical_emails", "document": "fixtures/owner-settings.json", "pointer": "/allowed_cases/0/result/show_access/emails" }, "expected": "alice@example.com,bob@example.com" },
     { "id": "CLAIM-IDENTITY-INSTANCE-BOUND", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/required_signed_claims", "value": "instance_id" }, "expected": true },
     { "id": "CLAIM-IDENTITY-VERIFIED-EMAIL", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/required_signed_claims", "value": "verified_email" }, "expected": true },
-    { "id": "CLAIM-IDENTITY-SIGNED-ONLY", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/format" }, "expected": "short_lived_signed_identity_assertion" },
+    { "id": "CLAIM-IDENTITY-SIGNED-ONLY", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/format" }, "expected": "rfc7519_compact_jwt_jws" },
     { "id": "CLAIM-IDENTITY-FORM-POST", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/delivery/response_mode" }, "expected": "form_post" },
     { "id": "CLAIM-IDENTITY-CLOSED-LOOP", "source": { "kind": "semantic", "document": "identity-auth.json", "check": "identity_closed_loop" }, "expected": true },
+    { "id": "CLAIM-IDENTITY-WIRE-STATE-MACHINE", "source": { "kind": "semantic", "document": "identity-auth.json", "check": "identity_wire_state_machine" }, "expected": true },
     { "id": "CLAIM-PUBLIC-AND-LIMITED-ADMISSION", "source": { "kind": "semantic", "document": "shared-browser-containment.json", "check": "public_and_limited_admission" }, "expected": true },
     { "id": "CLAIM-CREDENTIALLESS-API-PREFLIGHT", "source": { "kind": "semantic", "document": "shared-browser-containment.json", "check": "credentialless_api_preflight" }, "expected": true },
+    { "id": "CLAIM-PROTECTED-REQUEST-STATE-MACHINE", "source": { "kind": "semantic", "document": "shared-browser-containment.json", "check": "protected_request_state_machine" }, "expected": true },
     { "id": "CLAIM-SHARED-RESPONSE-MATRIX", "source": { "kind": "semantic", "document": "runtime-context.json", "check": "shared_response_matrix" }, "expected": true },
     { "id": "CLAIM-CANONICAL-EMAIL-STORAGE", "source": { "kind": "semantic", "document": "fixtures/show-access.json", "check": "canonical_email_storage" }, "expected": true },
     { "id": "CLAIM-NONCANONICAL-EMAIL-REJECT", "source": { "kind": "pointer", "document": "show-access.schema.json", "pointer": "/x-avibe-invariants/canonical_email_set/reject_noncanonical_persisted_or_result" }, "expected": true },
@@ -175,13 +177,13 @@
       { "text": "React Fast Refresh preservation remains a future browser check", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
     ] },
     { "scenario_id": "SHOW-LIVE-002", "expected_evidence": "Trusted shell plus a current binding-scoped credential serves the opaque-origin shared page; sibling page code cannot fetch frame or open/read it; `/p/` has no HMR or annotations; new content appears only after a later refresh", "clauses": [
-      { "text": "Trusted shell plus a current binding-scoped credential serves the opaque-origin shared page", "claim_ids": ["CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-LIMITED-MEMBER-SHARED"] },
+      { "text": "Trusted shell plus a current binding-scoped credential serves the opaque-origin shared page", "claim_ids": ["CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-LIMITED-MEMBER-SHARED", "CLAIM-PROTECTED-REQUEST-STATE-MACHINE"] },
       { "text": "sibling page code cannot fetch frame or open/read it", "claim_ids": ["CLAIM-SIBLING-ISOLATION", "CLAIM-SIBLING-FETCH-DENY", "CLAIM-SIBLING-FRAME-DENY", "CLAIM-SIBLING-OPEN-DENY"] },
       { "text": "`/p/` has no HMR or annotations", "claim_ids": ["CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] },
       { "text": "new content appears only after a later refresh", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
     ] },
     { "scenario_id": "SHOW-LIVE-003", "expected_evidence": "Callback-scoped SameSite=None Secure HttpOnly single-use cookie plus signed state nonce assertion and instance binding close one cross-site form POST loop; signed state returns only to the resolved share; current local membership is absent; one generic denial returns no page bytes and does not loop", "clauses": [
-      { "text": "Callback-scoped SameSite=None Secure HttpOnly single-use cookie plus signed state nonce assertion and instance binding close one cross-site form POST loop", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-FORM-POST"] },
+      { "text": "Callback-scoped SameSite=None Secure HttpOnly single-use cookie plus signed state nonce assertion and instance binding close one cross-site form POST loop", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-WIRE-STATE-MACHINE"] },
       { "text": "signed state returns only to the resolved share", "claim_ids": ["CLAIM-SAFE-RETURN-BOUND"] },
       { "text": "current local membership is absent", "claim_ids": ["CLAIM-UNLISTED-MEMBER-ABSENT", "CLAIM-UNLISTED-DENY"] },
       { "text": "one generic denial returns no page bytes and does not loop", "claim_ids": ["CLAIM-UNLISTED-NO-BYTES-OR-LOOP"] }
@@ -208,7 +210,7 @@
     ] },
     { "scenario_id": "SHOW-LIVE-008", "expected_evidence": "One local transaction replaces the membership set; the next request is denied without Backend access; an already loaded guest tab is not actively closed", "clauses": [
       { "text": "One local transaction replaces the membership set", "claim_ids": ["CLAIM-REMOVED-EMAIL-ABSENT", "CLAIM-APPLY-ATOMIC-MEMBERSHIP"] },
-      { "text": "the next request is denied without Backend access", "claim_ids": ["CLAIM-REMOVED-NEXT-REQUEST-DENY", "CLAIM-P2L-NO-EXTERNAL"] },
+      { "text": "the next request is denied without Backend access", "claim_ids": ["CLAIM-REMOVED-NEXT-REQUEST-DENY", "CLAIM-P2L-NO-EXTERNAL", "CLAIM-PROTECTED-REQUEST-STATE-MACHINE"] },
       { "text": "an already loaded guest tab is not actively closed", "claim_ids": ["CLAIM-NO-ACTIVE-GUEST-CLOSURE"] }
     ] },
     { "scenario_id": "SHOW-LIVE-009", "expected_evidence": "The shared HMR endpoint is absent; cookies and membership cannot enable it", "clauses": [
@@ -355,7 +357,7 @@
       { "text": "Backend receives no whitelist data", "claim_ids": ["CLAIM-BACKEND-MEMBERSHIP-FALSE", "CLAIM-FORBIDDEN-WHITELIST"] }
     ] },
     { "scenario_id": "SHOW-LIVE-037", "expected_evidence": "Backend returns only one signed verified instance-bound identity assertion; Avibe closes callback-scoped cross-site cookie signed-state nonce and jti correlation then re-resolves current membership; a binding-scoped credential serves only the opaque-origin shared `/p/` page", "clauses": [
-      { "text": "Backend returns only one signed verified instance-bound identity assertion", "claim_ids": ["CLAIM-IDENTITY-SIGNED-ONLY", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-INSTANCE-BOUND", "CLAIM-IDENTITY-VERIFIED-EMAIL", "CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL"] },
+      { "text": "Backend returns only one signed verified instance-bound identity assertion", "claim_ids": ["CLAIM-IDENTITY-SIGNED-ONLY", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-INSTANCE-BOUND", "CLAIM-IDENTITY-VERIFIED-EMAIL", "CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL", "CLAIM-IDENTITY-WIRE-STATE-MACHINE"] },
       { "text": "Avibe closes callback-scoped cross-site cookie signed-state nonce and jti correlation then re-resolves current membership", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-SHARE-RERESOLVE", "CLAIM-FRESH-LOCAL-LOOKUP"] },
       { "text": "a binding-scoped credential serves only the opaque-origin shared `/p/` page", "claim_ids": ["CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-IDENTITY-LISTED-SHARED", "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR"] }
     ] },

@@ -8,6 +8,14 @@
       "normalization_steps": ["trim_ascii_surrounding_whitespace", "lowercase", "deduplicate", "unicode_codepoint_lexicographic_sort"],
       "applies_before": ["request_digest", "equality_comparison", "persistence", "result_serialization"],
       "reject_noncanonical_persisted_or_result": true
+    },
+    "request_admission_revision": {
+      "field": "audience_revision",
+      "single_monotonic_revision": true,
+      "advances_once_for": ["durable_availability_transition", "effective_access_mode_change", "effective_share_binding_change", "effective_canonical_email_set_change"],
+      "no_op_advances": false,
+      "apply_may_mutate_availability": false,
+      "offline_to_active_cannot_reactivate_old_capability": true
     }
   },
   "type": "object",

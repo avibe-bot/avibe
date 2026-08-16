@@ -277,25 +277,49 @@
     "runtime_implementation_owner": false,
     "websocket_admission": {
       "route": "/show/<page_id>/__vite_hmr",
-      "origin_allowlist": {
-        "derived_from": ["https://<active_instance_hostname>", "https://<active_custom_hostname>"],
-        "fact_source": "server_owned_active_instance_and_custom_hostname_configuration",
-        "wildcards_allowed": false,
-        "suffix_matching_allowed": false,
-        "forwarded_or_browser_host_inputs_allowed": false
+      "authorization_checks": ["server_validated_origin_source", "resource_editor_authority"],
+      "request_trust_classifier": {
+        "reuse_functions": ["vibe.ui_server._websocket_is_local_request", "vibe.ui_server._websocket_trusted_public_origin_local_request", "vibe.ui_server._websocket_origin_matches_effective_request", "vibe.ui_server._remote_access_public_origin_matches"],
+        "local_source_classes": ["direct_loopback", "explicit_setup_host", "wildcard_resolved_interface", "docker_loopback_bridge"],
+        "remote_source_classes": ["configured_hosted_instance", "active_custom_hostname", "trusted_public_proxy"],
+        "parallel_network_trust_model_allowed": false
       },
       "origin_header_cardinality": "exactly_one",
-      "origin_match": "exact_scheme_host_and_effective_port",
+      "origin_normalization": ["lowercase_scheme", "normalized_dns_or_ip_host", "ipv4_mapped_normalization", "default_or_explicit_effective_port"],
+      "origin_match": "exact_normalized_scheme_host_or_ip_and_effective_port",
+      "never_authority": ["0.0.0.0", "::", "*", "raw_host_header", "untrusted_forwarded_metadata", "wildcard_match", "suffix_match"],
       "validation_order": "before_any_upstream_websocket_open",
       "rejection": {
         "outcome": "reject_without_upstream_websocket",
         "upstream_websocket_opened": false
       },
-      "cases": [
-        { "id": "HMR-ORIGIN-TRUSTED-INSTANCE", "origin_headers": ["https://alice.example.test"], "allowlist_relation": "exact_match", "outcome": "open_after_editor_authorization" },
-        { "id": "HMR-ORIGIN-MISSING", "origin_headers": [], "allowlist_relation": "not_evaluated", "outcome": "reject_without_upstream_websocket" },
-        { "id": "HMR-ORIGIN-MULTIPLE", "origin_headers": ["https://alice.example.test", "https://attacker.example"], "allowlist_relation": "ambiguous", "outcome": "reject_without_upstream_websocket" },
-        { "id": "HMR-ORIGIN-CROSS-SITE", "origin_headers": ["https://attacker.example"], "allowlist_relation": "mismatch", "outcome": "reject_without_upstream_websocket" }
+      "positive_source_cases": [
+        {"id": "HMR-SOURCE-HOSTED-INSTANCE", "source_class": "configured_hosted_instance", "origin_headers": ["https://alice.avibe.bot"], "resolved_trusted_origin": "https://alice.avibe.bot:443", "server_facts": ["paired_active_instance_hostname", "remote_session_authorized"], "peer_or_network_checks": ["remote_access_request_classification"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-CUSTOM-HOST", "source_class": "active_custom_hostname", "origin_headers": ["https://show.example.test"], "resolved_trusted_origin": "https://show.example.test:443", "server_facts": ["active_custom_hostname", "remote_session_authorized"], "peer_or_network_checks": ["remote_access_request_classification"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-LOCALHOST", "source_class": "direct_loopback", "origin_headers": ["http://localhost:5123"], "resolved_trusted_origin": "http://localhost:5123", "server_facts": ["actual_ui_listener_port"], "peer_or_network_checks": ["loopback_peer", "loopback_host"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-IPV4-LOOPBACK", "source_class": "direct_loopback", "origin_headers": ["http://127.0.0.1:5123"], "resolved_trusted_origin": "http://127.0.0.1:5123", "server_facts": ["actual_ui_listener_port"], "peer_or_network_checks": ["loopback_peer", "loopback_host"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-IPV6-LOOPBACK", "source_class": "direct_loopback", "origin_headers": ["http://[::1]:5123"], "resolved_trusted_origin": "http://[::1]:5123", "server_facts": ["actual_ui_listener_port"], "peer_or_network_checks": ["loopback_peer", "loopback_host"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-PRIVATE-SETUP", "source_class": "explicit_setup_host", "origin_headers": ["http://192.168.2.3:5123"], "resolved_trusted_origin": "http://192.168.2.3:5123", "server_facts": ["configured_setup_host", "actual_ui_listener_port"], "peer_or_network_checks": ["private_peer", "same_interface_network"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-CGNAT-SETUP", "source_class": "explicit_setup_host", "origin_headers": ["http://100.64.1.10:5123"], "resolved_trusted_origin": "http://100.64.1.10:5123", "server_facts": ["configured_setup_host", "actual_ui_listener_port"], "peer_or_network_checks": ["private_or_cgnat_peer", "tailscale_peer_if_overlay"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-LINK-LOCAL-SETUP", "source_class": "explicit_setup_host", "origin_headers": ["http://[fe80::10]:5123"], "resolved_trusted_origin": "http://[fe80::10]:5123", "server_facts": ["configured_setup_host", "actual_ui_listener_port"], "peer_or_network_checks": ["link_local_peer", "same_link"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-WILDCARD-LAN", "source_class": "wildcard_resolved_interface", "origin_headers": ["http://192.168.2.3:5123"], "resolved_trusted_origin": "http://192.168.2.3:5123", "server_facts": ["server_enumerated_trusted_lan_interface", "actual_ui_listener_port"], "peer_or_network_checks": ["private_peer", "same_interface_network"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-WILDCARD-TAILSCALE", "source_class": "wildcard_resolved_interface", "origin_headers": ["http://100.100.2.3:5123"], "resolved_trusted_origin": "http://100.100.2.3:5123", "server_facts": ["server_enumerated_tailscale_interface", "actual_ui_listener_port"], "peer_or_network_checks": ["trusted_tailscale_peer"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-DOCKER-LOOPBACK", "source_class": "docker_loopback_bridge", "origin_headers": ["http://127.0.0.1:5123"], "resolved_trusted_origin": "http://127.0.0.1:5123", "server_facts": ["docker_loopback_peers_explicitly_enabled", "loopback_only_port_binding", "actual_ui_listener_port"], "peer_or_network_checks": ["trusted_docker_bridge_peer"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true},
+        {"id": "HMR-SOURCE-TRUSTED-PROXY", "source_class": "trusted_public_proxy", "origin_headers": ["https://avibe.example.com"], "resolved_trusted_origin": "https://avibe.example.com:443", "server_facts": ["configured_trusted_public_origin", "safe_forwarded_host_proto_port"], "peer_or_network_checks": ["explicit_trusted_proxy_peer", "trusted_forwarded_client"], "resource_editor_authority": true, "outcome": "open_after_origin_and_editor_authorization", "upstream_websocket_opened": true}
+      ],
+      "negative_mutations": [
+        {"id": "HMR-REJECT-MISSING-ORIGIN", "applies_to": "all_source_classes", "mutation": "origin_cardinality_zero", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-MULTIPLE-ORIGIN", "applies_to": "all_source_classes", "mutation": "origin_cardinality_multiple", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-NULL-ORIGIN", "applies_to": "all_source_classes", "mutation": "origin_null", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-SCHEME-DRIFT", "applies_to": "all_source_classes", "mutation": "origin_scheme_mismatch", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-HOST-DRIFT", "applies_to": "all_source_classes", "mutation": "origin_host_or_ip_mismatch", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-PORT-DRIFT", "applies_to": "all_source_classes", "mutation": "origin_effective_port_mismatch", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-WILDCARD-OR-SUFFIX", "applies_to": "all_source_classes", "mutation": "wildcard_or_suffix_match_only", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-RAW-HOST", "applies_to": "all_source_classes", "mutation": "raw_host_is_only_authority", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-UNTRUSTED-PEER", "applies_to": "peer_validated_source_classes", "mutation": "peer_or_network_check_fails", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-UNTRUSTED-FORWARDED", "applies_to": "all_source_classes", "mutation": "forwarded_metadata_from_untrusted_peer", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-FORWARDED-MISMATCH", "applies_to": "trusted_public_proxy", "mutation": "safe_forwarded_origin_not_configured", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false},
+        {"id": "HMR-REJECT-NO-EDITOR", "applies_to": "all_source_classes", "mutation": "resource_editor_authority_false", "outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false}
       ]
     },
     "monitor_scope": "one_coalesced_monitor_per_active_session",
@@ -305,6 +329,10 @@
       "authorization_revision_change"
     ],
     "authorization_trigger_action": "reevaluate_and_close_unauthorized_existing_sockets",
+    "post_connect_policy": {
+      "close_triggers": ["editor_capability_loss", "resource_access_revocation", "remote_authorization_loss", "durable_offline_state"],
+      "non_close_triggers_while_active_editor_remains": ["access_mode_change", "share_binding_change", "guest_membership_change", "audience_revision_change"]
+    },
     "durable_offline_source": "ShowPageStore",
     "durable_offline_deadline": {
       "measured_from": "durable_offline_transaction_commit",

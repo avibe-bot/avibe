@@ -50,6 +50,7 @@
   "share_browsing_credential": {
     "issuer": "local_avibe_after_admission_rule",
     "binding_fields": ["instance_id", "page_id", "share_id", "audience_revision", "namespace_handle", "document_handle"],
+    "server_record_fields": ["instance_id", "page_id", "share_id", "audience_revision", "namespace_handle", "document_handle", "admitted_normalized_email_if_limited", "expires_at"],
     "entropy_bits": 256,
     "derived_from_binding_or_path": false,
     "lifetime": "short_lived_nonrenewable",
@@ -70,6 +71,79 @@
     },
     "required_surfaces": ["document", "module", "css", "raw", "worker", "spa_fallback", "api_handler"],
     "revision_mismatch_outcome": "reresolve_share_and_membership_before_new_credential"
+  },
+  "protected_request_validation": {
+    "owner": "SharedViewerBrowserContainment.protected_request_validation",
+    "invoked_for_surfaces": ["document", "module", "css", "raw", "worker", "spa_fallback", "api_handler"],
+    "invoked_for_methods": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+    "local_linearization": {
+      "transaction": "one_authoritative_ShowAccess_snapshot",
+      "checks": ["page_exists", "availability_is_active", "access_mode_is_limited_or_public", "exact_share_binding_matches", "audience_revision_matches_capability", "limited_admitted_email_is_current_member", "capability_not_expired"],
+      "runtime_audience_decision_allowed": false
+    },
+    "runtime_linearization": {
+      "after_local_validation": true,
+      "operation": "atomically_pin_live_namespace_and_document_handle",
+      "checks": ["capability_namespace_document_binding_matches", "namespace_is_live"],
+      "in_flight_pin": "request_linearized_before_change_may_finish",
+      "later_request": "must_repeat_full_validation"
+    },
+    "audience_revision_policy": {
+      "request_admission_revision_field": "ShowAccess.audience_revision",
+      "durable_availability_transition_advances_once": true,
+      "audience_or_binding_change_advances_once": true,
+      "no_op_advances": false,
+      "apply_may_mutate_availability": false,
+      "separate_capability_revision_allowed": false
+    },
+    "input_space": {
+      "capability_integrity": ["valid", "invalid"],
+      "page_state": ["present", "missing"],
+      "availability": ["active", "offline"],
+      "access_mode": ["limited", "public", "private"],
+      "share_binding": ["match", "mismatch"],
+      "audience_revision": ["match", "mismatch"],
+      "capability_lifetime": ["live", "expired"],
+      "namespace_binding": ["match", "mismatch"],
+      "namespace_liveness": ["live", "idle_expired", "absolute_expired", "reclaimed"],
+      "limited_membership": ["current", "absent", "not_applicable"]
+    },
+    "valid_point_constraints": ["limited_requires_membership_current_or_absent", "public_or_private_requires_membership_not_applicable"],
+    "decision_semantics": "ordered_first_match_then_runtime_pin",
+    "decision_rules": [
+      {"id": "PROTECTED-CAPABILITY-INVALID", "stage": "local", "field": "capability_integrity", "equals": "invalid", "outcome": "fixed_sanitized_not_found"},
+      {"id": "PROTECTED-PAGE-MISSING", "stage": "local", "field": "page_state", "equals": "missing", "outcome": "fixed_sanitized_not_found"},
+      {"id": "PROTECTED-CAPABILITY-EXPIRED", "stage": "local", "field": "capability_lifetime", "equals": "expired", "outcome": "fixed_sanitized_expired"},
+      {"id": "PROTECTED-SHARE-MISMATCH", "stage": "local", "field": "share_binding", "equals": "mismatch", "outcome": "fixed_sanitized_not_found"},
+      {"id": "PROTECTED-OFFLINE", "stage": "local", "field": "availability", "equals": "offline", "outcome": "fixed_stale_document_reload_required"},
+      {"id": "PROTECTED-PRIVATE", "stage": "local", "field": "access_mode", "equals": "private", "outcome": "fixed_stale_document_reload_required"},
+      {"id": "PROTECTED-REVISION-MISMATCH", "stage": "local", "field": "audience_revision", "equals": "mismatch", "outcome": "fixed_stale_document_reload_required"},
+      {"id": "PROTECTED-MEMBER-ABSENT", "stage": "local", "field": "limited_membership", "equals": "absent", "outcome": "fixed_stale_document_reload_required"},
+      {"id": "PROTECTED-NAMESPACE-BINDING-MISMATCH", "stage": "runtime", "field": "namespace_binding", "equals": "mismatch", "outcome": "fixed_stale_document_reload_required"},
+      {"id": "PROTECTED-NAMESPACE-IDLE-EXPIRED", "stage": "runtime", "field": "namespace_liveness", "equals": "idle_expired", "outcome": "fixed_stale_document_reload_required"},
+      {"id": "PROTECTED-NAMESPACE-ABSOLUTE-EXPIRED", "stage": "runtime", "field": "namespace_liveness", "equals": "absolute_expired", "outcome": "fixed_stale_document_reload_required"},
+      {"id": "PROTECTED-NAMESPACE-RECLAIMED", "stage": "runtime", "field": "namespace_liveness", "equals": "reclaimed", "outcome": "fixed_stale_document_reload_required"},
+      {"id": "PROTECTED-CURRENT", "stage": "runtime", "field": "all_prior_checks", "equals": "pass", "outcome": "serve_pinned_shared_response"}
+    ],
+    "post_mint_transition_cases": [
+      {"id": "UNCHANGED", "revision_advance": 0, "later_request_outcome": "serve_pinned_shared_response", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "AUDIENCE-NO-OP", "revision_advance": 0, "later_request_outcome": "serve_pinned_shared_response", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "ACTIVE-TO-OFFLINE", "revision_advance": 1, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "OFFLINE-TO-ACTIVE-OLD-CAPABILITY", "revision_advance": 1, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "SHARED-TO-PRIVATE", "revision_advance": 1, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "PUBLIC-TO-LIMITED", "revision_advance": 1, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "LIMITED-TO-PUBLIC", "revision_advance": 1, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "SHARE-BINDING-CHANGE", "revision_advance": 1, "later_request_outcome": "fixed_sanitized_not_found", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "AUDIENCE-REVISION-CHANGE", "revision_advance": 1, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "LIMITED-MEMBER-REMOVE", "revision_advance": 1, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "LIMITED-MEMBER-REMOVE-READD-OLD-CAPABILITY", "revision_advance": 2, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "CAPABILITY-EXPIRY", "revision_advance": 0, "later_request_outcome": "fixed_sanitized_expired", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "NAMESPACE-IDLE-EXPIRY", "revision_advance": 0, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "NAMESPACE-ABSOLUTE-EXPIRY", "revision_advance": 0, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"},
+      {"id": "BUDGET-RECLAIM-DURING-REQUEST", "revision_advance": 0, "later_request_outcome": "fixed_stale_document_reload_required", "in_flight_outcome": "finish_pinned_response"}
+    ],
+    "loaded_guest_document_policy": "never_actively_close_dom_or_javascript",
+    "instance_resource_acl_revision_is_orthogonal": true
   },
   "browser_request_shapes": [
     {
@@ -114,9 +188,7 @@
       "capability_source": "opaque_route_namespace_segment",
       "valid_capability_requires": [
         "capability_integrity_and_entropy",
-        "current_instance_page_share_binding",
-        "current_audience_revision",
-        "live_namespace_and_document_handle"
+        "protected_request_validation"
       ],
       "admission_proof": "capability_minted_only_after_admission_rule",
       "ambient_identity_or_cookie_recheck": false,

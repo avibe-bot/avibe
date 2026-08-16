@@ -299,57 +299,96 @@
       }
     },
     "avibe_private_hmr_monitor": {
-      "const": {
-        "id": "AVIBE-PRIVATE-HMR-AUTHORITY",
-        "owner": "PrivateHmrAuthority",
-        "implementation_owner": "avibe",
-        "runtime_implementation_owner": false,
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "owner", "implementation_owner", "runtime_implementation_owner", "websocket_admission", "monitor_scope", "authorization_triggers", "authorization_trigger_action", "post_connect_policy", "durable_offline_source", "durable_offline_deadline", "share_mode_or_binding_change_closes_private_hmr_when_editor_access_remains"],
+      "properties": {
+        "id": {"const": "AVIBE-PRIVATE-HMR-AUTHORITY"},
+        "owner": {"const": "PrivateHmrAuthority"},
+        "implementation_owner": {"const": "avibe"},
+        "runtime_implementation_owner": {"const": false},
         "websocket_admission": {
-          "route": "/show/<page_id>/__vite_hmr",
-          "origin_allowlist": {
-            "derived_from": ["https://<active_instance_hostname>", "https://<active_custom_hostname>"],
-            "fact_source": "server_owned_active_instance_and_custom_hostname_configuration",
-            "wildcards_allowed": false,
-            "suffix_matching_allowed": false,
-            "forwarded_or_browser_host_inputs_allowed": false
-          },
-          "origin_header_cardinality": "exactly_one",
-          "origin_match": "exact_scheme_host_and_effective_port",
-          "validation_order": "before_any_upstream_websocket_open",
-          "rejection": {
-            "outcome": "reject_without_upstream_websocket",
-            "upstream_websocket_opened": false
-          },
-          "cases": [
-            { "id": "HMR-ORIGIN-TRUSTED-INSTANCE", "origin_headers": ["https://alice.example.test"], "allowlist_relation": "exact_match", "outcome": "open_after_editor_authorization" },
-            { "id": "HMR-ORIGIN-MISSING", "origin_headers": [], "allowlist_relation": "not_evaluated", "outcome": "reject_without_upstream_websocket" },
-            { "id": "HMR-ORIGIN-MULTIPLE", "origin_headers": ["https://alice.example.test", "https://attacker.example"], "allowlist_relation": "ambiguous", "outcome": "reject_without_upstream_websocket" },
-            { "id": "HMR-ORIGIN-CROSS-SITE", "origin_headers": ["https://attacker.example"], "allowlist_relation": "mismatch", "outcome": "reject_without_upstream_websocket" }
-          ]
-        },
-        "monitor_scope": "one_coalesced_monitor_per_active_session",
-        "authorization_triggers": [
-          "editor_capability_loss",
-          "resource_access_revocation",
-          "authorization_revision_change"
-        ],
-        "authorization_trigger_action": "reevaluate_and_close_unauthorized_existing_sockets",
-        "durable_offline_source": "ShowPageStore",
-        "durable_offline_deadline": {
-          "measured_from": "durable_offline_transaction_commit",
-          "poll_interval_max_seconds": 4,
-          "post_detection_close_budget_seconds": 1,
-          "total_close_deadline_seconds": 5,
-          "sum_of_poll_and_close_budget_must_not_exceed_total": true,
-          "worst_case_just_after_poll_trace_ms": {
-            "last_poll": 0,
-            "durable_offline_commit": 1,
-            "next_poll_no_later_than": 4000,
-            "all_sockets_closed_no_later_than": 5000,
-            "elapsed_from_offline_commit": 4999
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["route", "authorization_checks", "request_trust_classifier", "origin_header_cardinality", "origin_normalization", "origin_match", "never_authority", "validation_order", "rejection", "positive_source_cases", "negative_mutations"],
+          "properties": {
+            "route": {"const": "/show/<page_id>/__vite_hmr"},
+            "authorization_checks": {"const": ["server_validated_origin_source", "resource_editor_authority"]},
+            "request_trust_classifier": {
+              "const": {
+                "reuse_functions": ["vibe.ui_server._websocket_is_local_request", "vibe.ui_server._websocket_trusted_public_origin_local_request", "vibe.ui_server._websocket_origin_matches_effective_request", "vibe.ui_server._remote_access_public_origin_matches"],
+                "local_source_classes": ["direct_loopback", "explicit_setup_host", "wildcard_resolved_interface", "docker_loopback_bridge"],
+                "remote_source_classes": ["configured_hosted_instance", "active_custom_hostname", "trusted_public_proxy"],
+                "parallel_network_trust_model_allowed": false
+              }
+            },
+            "origin_header_cardinality": {"const": "exactly_one"},
+            "origin_normalization": {"const": ["lowercase_scheme", "normalized_dns_or_ip_host", "ipv4_mapped_normalization", "default_or_explicit_effective_port"]},
+            "origin_match": {"const": "exact_normalized_scheme_host_or_ip_and_effective_port"},
+            "never_authority": {"const": ["0.0.0.0", "::", "*", "raw_host_header", "untrusted_forwarded_metadata", "wildcard_match", "suffix_match"]},
+            "validation_order": {"const": "before_any_upstream_websocket_open"},
+            "rejection": {"const": {"outcome": "reject_without_upstream_websocket", "upstream_websocket_opened": false}},
+            "positive_source_cases": {
+              "type": "array",
+              "minItems": 12,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "source_class", "origin_headers", "resolved_trusted_origin", "server_facts", "peer_or_network_checks", "resource_editor_authority", "outcome", "upstream_websocket_opened"],
+                "properties": {
+                  "id": {"type": "string", "pattern": "^HMR-SOURCE-[A-Z0-9-]+$"},
+                  "source_class": {"enum": ["configured_hosted_instance", "active_custom_hostname", "direct_loopback", "explicit_setup_host", "wildcard_resolved_interface", "docker_loopback_bridge", "trusted_public_proxy"]},
+                  "origin_headers": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "string", "pattern": "^https?://"}},
+                  "resolved_trusted_origin": {"type": "string", "pattern": "^https?://"},
+                  "server_facts": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+                  "peer_or_network_checks": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+                  "resource_editor_authority": {"const": true},
+                  "outcome": {"const": "open_after_origin_and_editor_authorization"},
+                  "upstream_websocket_opened": {"const": true}
+                }
+              }
+            },
+            "negative_mutations": {
+              "type": "array",
+              "minItems": 12,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "applies_to", "mutation", "outcome", "upstream_websocket_opened"],
+                "properties": {
+                  "id": {"type": "string", "pattern": "^HMR-REJECT-[A-Z0-9-]+$"},
+                  "applies_to": {"enum": ["all_source_classes", "peer_validated_source_classes", "trusted_public_proxy"]},
+                  "mutation": {"type": "string"},
+                  "outcome": {"const": "reject_without_upstream_websocket"},
+                  "upstream_websocket_opened": {"const": false}
+                }
+              }
+            }
           }
         },
-        "share_mode_or_binding_change_closes_private_hmr_when_editor_access_remains": false
+        "monitor_scope": {"const": "one_coalesced_monitor_per_active_session"},
+        "authorization_triggers": {"const": ["editor_capability_loss", "resource_access_revocation", "authorization_revision_change"]},
+        "authorization_trigger_action": {"const": "reevaluate_and_close_unauthorized_existing_sockets"},
+        "post_connect_policy": {
+          "const": {
+            "close_triggers": ["editor_capability_loss", "resource_access_revocation", "remote_authorization_loss", "durable_offline_state"],
+            "non_close_triggers_while_active_editor_remains": ["access_mode_change", "share_binding_change", "guest_membership_change", "audience_revision_change"]
+          }
+        },
+        "durable_offline_source": {"const": "ShowPageStore"},
+        "durable_offline_deadline": {
+          "const": {
+            "measured_from": "durable_offline_transaction_commit",
+            "poll_interval_max_seconds": 4,
+            "post_detection_close_budget_seconds": 1,
+            "total_close_deadline_seconds": 5,
+            "sum_of_poll_and_close_budget_must_not_exceed_total": true,
+            "worst_case_just_after_poll_trace_ms": {"last_poll": 0, "durable_offline_commit": 1, "next_poll_no_later_than": 4000, "all_sockets_closed_no_later_than": 5000, "elapsed_from_offline_commit": 4999}
+          }
+        },
+        "share_mode_or_binding_change_closes_private_hmr_when_editor_access_remains": {"const": false}
       }
     },
     "shared_response_cases": {

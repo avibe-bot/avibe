@@ -5,8 +5,8 @@
     "source_issue_updated_at": "2026-08-16T18:44:25Z",
     "source_design_path": "docs/plans/public-show-live-update.md",
     "source_ref_kind": "git_blob",
-    "source_sha": "d34970d739d3ab6d84ac9d0fb667b124fe8649e7",
-    "source_design_blob_sha": "d34970d739d3ab6d84ac9d0fb667b124fe8649e7"
+    "source_sha": "b4afbcb4949352a044b45ddf62f2c21300d6744c",
+    "source_design_blob_sha": "b4afbcb4949352a044b45ddf62f2c21300d6744c"
   },
   "repositories": [
     {
@@ -85,15 +85,15 @@
       "id": "C07",
       "producer": { "repository": "avibe", "path": "vibe/ui_server.py", "symbol": "start_limited_page_identity_login" },
       "consumers": [{ "repository": "avibe-backend", "path": "app/api/v1/instances/[instanceId]/show-identity/authorize/route.ts", "symbol": "GET" }],
-      "signature": { "schema": "identity-auth.json#/local_handshake", "request": "GET authorize with exactly state nonce and redirect_uri", "result": "short-lived signed identity assertion only", "covered_fields": ["state", "nonce", "redirect_uri", "correlation_cookie_sha256", "callback_hostname"] },
-      "delivery": { "mechanism": "authorization_redirect", "route_or_channel": "GET /api/v1/instances/{instanceId}/show-identity/authorize", "authentication": "signed_local_state_and_paired_instance", "serialization_owner": "avibe.ExecutableIdentityHandshake", "version": 2 }
+      "signature": { "schema": "identity-auth.json#/local_handshake", "request": "GET authorize with exactly state nonce and redirect_uri", "result": "flow-specific host-only correlation plus RS256 identity assertion only", "covered_fields": ["state", "nonce", "redirect_uri", "page_id", "correlation_cookie_sha256", "correlation_cookie.name_template", "callback_hostname", "consumption_store"] },
+      "delivery": { "mechanism": "authorization_redirect", "route_or_channel": "GET /api/v1/instances/{instanceId}/show-identity/authorize", "authentication": "signed_local_state_flow_specific_cookie_and_paired_instance", "serialization_owner": "avibe.ExecutableIdentityHandshake", "version": 2 }
     },
     {
       "id": "C08",
       "producer": { "repository": "avibe-backend", "path": "lib/show-identity/assertion.ts", "symbol": "issueVerifiedIdentityAssertion" },
       "consumers": [{ "repository": "avibe", "path": "vibe/ui_server.py", "symbol": "limited_page_identity_callback" }],
-      "signature": { "schema": "identity-auth.json#/backend_assertion", "request": "authenticated identity and paired instance", "result": "short-lived signed verified identity form_post plus returned state", "covered_fields": ["iss", "aud", "sub", "iat", "exp", "jti", "nonce", "instance_id", "verified_email", "state", "assertion"] },
-      "delivery": { "mechanism": "form_post_signed_identity_assertion", "route_or_channel": "POST /auth/show-identity/callback without query or fragment", "authentication": "backend_verified_identity_plus_local_callback_cookie_state_nonce_jti", "serialization_owner": "avibe.ExecutableIdentityHandshake", "version": 2 }
+      "signature": { "schema": "identity-auth.json#/backend_assertion", "request": "authenticated identity and paired instance", "result": "RFC 7519 compact RS256 JWT form_post plus returned state and paired JWKS verification", "covered_fields": ["alg", "typ", "kid", "iss", "aud", "sub", "iat", "exp", "jti", "nonce", "instance_id", "verified_email", "state", "assertion", "paired_jwks_uri", "unknown_kid_refresh"] },
+      "delivery": { "mechanism": "form_post_rs256_identity_jwt", "route_or_channel": "POST /auth/show-identity/callback without query or fragment plus exact paired issuer /oauth/jwks.json", "authentication": "backend_verified_identity_plus_local_pairing_cookie_state_nonce_jti", "serialization_owner": "avibe.ExecutableIdentityHandshake", "version": 2 }
     },
     {
       "id": "C09",
@@ -134,8 +134,8 @@
       "id": "C14",
       "producer": { "repository": "avibe", "path": "core/show_access.py", "symbol": "PrivateHmrAuthority" },
       "consumers": [{ "repository": "avibe", "path": "vibe/ui_server.py", "symbol": "show_runtime_hmr_websocket" }],
-      "signature": { "schema": "runtime-context.json#/avibe_private_hmr_monitor", "request": "server-owned Origin allowlist plus Session sockets resource and durable offline facts", "result": "pre-upstream Origin decision and bounded unauthorized socket closure", "covered_fields": ["websocket_admission.origin_allowlist", "websocket_admission.origin_header_cardinality", "websocket_admission.validation_order", "authorization_triggers", "durable_offline_deadline.poll_interval_max_seconds", "durable_offline_deadline.post_detection_close_budget_seconds", "durable_offline_deadline.total_close_deadline_seconds"] },
-      "delivery": { "mechanism": "in_process_value", "route_or_channel": "canonical HMR admission plus one coalesced monitor per active Session", "authentication": "server_owned_origin_existing_resource_broker_and_durable_state", "serialization_owner": "avibe.PrivateHmrAuthority", "version": 1 }
+      "signature": { "schema": "runtime-context.json#/avibe_private_hmr_monitor", "request": "closed server-validated Origin source algebra plus resource editor and durable offline facts", "result": "pre-upstream exact Origin decision and bounded unauthorized socket closure", "covered_fields": ["websocket_admission.request_trust_classifier", "websocket_admission.positive_source_cases", "websocket_admission.negative_mutations", "websocket_admission.origin_header_cardinality", "websocket_admission.origin_match", "websocket_admission.validation_order", "post_connect_policy", "durable_offline_deadline.total_close_deadline_seconds"] },
+      "delivery": { "mechanism": "in_process_value", "route_or_channel": "canonical HMR admission reusing WebSocket local/remote trust classification plus one coalesced monitor per active Session", "authentication": "server_validated_origin_source_and_resource_editor_before_upstream", "serialization_owner": "avibe.PrivateHmrAuthority", "version": 1 }
     },
     {
       "id": "C15",
@@ -165,8 +165,8 @@
         { "repository": "avibe", "path": "ui/src/lib/showPageAccess.ts", "symbol": "SharedPageSandboxHost" },
         { "repository": "avibe", "path": "core/show_access.py", "symbol": "verify_share_browsing_credential" }
       ],
-      "signature": { "schema": "shared-browser-containment.schema.json", "request": "trusted shell admission for active public or current-member limited audience", "result": "opaque-origin shared page with capability-path credentialless protected requests and API preflight", "covered_fields": ["instance_id", "page_id", "share_id", "audience_revision", "namespace_handle", "document_handle", "capability", "admission_rule", "opaque_protected_route_namespace_segment", "credentialless_cors.options", "iframe_sandbox_tokens", "required_surfaces"] },
-      "delivery": { "mechanism": "local_http_sandboxed_iframe", "route_or_channel": "canonical /p/<share_id>/ shell and capability-path protected document resource fallback and API routes", "authentication": "local_share_browsing_credential_after_public_or_current_member_admission", "serialization_owner": "avibe.SharedViewerBrowserContainment", "version": 2 }
+      "signature": { "schema": "shared-browser-containment.schema.json", "request": "trusted shell admission followed by every-request local ShowAccess validation and Runtime handle pin", "result": "opaque-origin shared page with capability-path credentialless protected requests and closed stale outcomes", "covered_fields": ["instance_id", "page_id", "share_id", "audience_revision", "admitted_normalized_email_if_limited", "namespace_handle", "document_handle", "capability", "protected_request_validation", "credentialless_cors.options", "iframe_sandbox_tokens", "required_surfaces"] },
+      "delivery": { "mechanism": "local_http_sandboxed_iframe", "route_or_channel": "canonical /p/<share_id>/ shell and every capability-path document resource fallback and API request", "authentication": "full_current_local_show_access_validation_then_atomic_runtime_pin", "serialization_owner": "avibe.SharedViewerBrowserContainment.protected_request_validation", "version": 2 }
     },
     {
       "id": "C19",

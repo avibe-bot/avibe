@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
@@ -214,7 +215,6 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and callback["delivery"] == "form_post"
                 and callback["assertion_location"] == "form_body"
                 and callback["content_type"] == "application/x-www-form-urlencoded"
-                and callback["cross_site_source"] == "https://avibe.bot"
                 and callback["callback_url"].endswith("/auth/show-identity/callback")
                 and "?" not in callback["callback_url"]
                 and "#" not in callback["callback_url"]
@@ -224,13 +224,16 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and start["page_id"] == callback["resolved_page_id"] == request["credential_binding"]["page_id"]
                 and start["share_id"] == callback["resolved_share_id"] == request["credential_binding"]["share_id"]
                 and start["nonce"] == callback["nonce"]
+                and start["correlation_cookie_name"] == callback["correlation_cookie_name"]
                 and start["correlation_cookie"] == callback["correlation_cookie"]
                 and hashlib.sha256(start["correlation_cookie"].encode("utf-8")).hexdigest()
                 == start["correlation_cookie_sha256"]
                 and start["correlation_cookie_expires_at"] <= start["signed_state_expires_at"]
                 and cookie
                 == {
-                    "name": "avibe_show_identity_correlation",
+                    "name_template": "__Secure-avibe_show_identity_c_<base64url_nonce>",
+                    "name_source": "verified_signed_state_nonce",
+                    "value": "independent_32_byte_csprng_secret",
                     "same_site": "None",
                     "secure": True,
                     "http_only": True,
@@ -238,10 +241,46 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                     "domain_attribute_allowed": False,
                     "single_use": True,
                     "expires_no_later_than": "signed_state.expires_at",
+                    "state_verification_precedes_cookie_selection": True,
+                    "invalid_state_cookie_deletion": "none",
+                    "terminal_callback_cookie_action": "consume_and_delete_matching_flow_only",
                 }
                 and callback["verified_email"] in callback["current_local_emails"]
                 and callback["resolved_audience_revision"] == request["credential_binding"]["audience_revision"]
                 and request["membership_rechecked"] is True
+            )
+        if check == "identity_wire_state_machine":
+            wire = document["backend_assertion"]["wire_protocol"]
+            trust = document["backend_assertion"]["pairing_trust"]
+            jwks = document["backend_assertion"]["jwks_verification"]
+            flows = document["local_handshake"]["concurrent_flow_state_machine"]
+            vectors = {item["id"]: item for item in document["backend_assertion"]["interoperability_vectors"]}
+            return (
+                wire["serialization"] == "compact_jws"
+                and wire["segment_count"] == 3
+                and wire["protected_header"]["required_and_only_fields"] == ["alg", "typ", "kid"]
+                and wire["protected_header"]["alg"] == "RS256"
+                and trust["authority"] == "local_paired_instance_record"
+                and trust["token_or_request_selects_trust"] is False
+                and trust["jwks_uri_same_origin_with_issuer"] is True
+                and jwks["matching_key_count"] == "exactly_one"
+                and jwks["unknown_kid_policy"]["maximum_forced_refreshes"] == 1
+                and jwks["unknown_kid_policy"]["maximum_verification_retries"] == 1
+                and vectors["JWT-PREVIOUS-KEY-OVERLAP"]["outcome"] == "verified_identity"
+                and vectors["JWT-NEW-KEY-AFTER-REFRESH"]["refreshes"] == 1
+                and vectors["JWT-UNKNOWN-KID"]["outcome"] == "reject_identity_assertion"
+                and vectors["JWKS-DUPLICATE-KID"]["outcome"] == "reject_identity_assertion"
+                and flows["independent_same_host_flows"] is True
+                and flows["terminal_callback_affects_other_flows"] is False
+                and {item["id"] for item in flows["cases"]}
+                >= {
+                    "FLOW-A-THEN-B",
+                    "FLOW-B-THEN-A",
+                    "FLOW-SWAP-STATE-ASSERTION",
+                    "FLOW-SWAP-STATE-COOKIE",
+                    "FLOW-SAME-CALLBACK-RACE",
+                    "FLOW-OLD-NEW-KEY-CONCURRENT",
+                }
             )
         if check == "public_and_limited_admission":
             admissions = document["admission_rule"]["capability_issued_when"]
@@ -283,9 +322,7 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and options["valid_capability_requires"]
                 == [
                     "capability_integrity_and_entropy",
-                    "current_instance_page_share_binding",
-                    "current_audience_revision",
-                    "live_namespace_and_document_handle",
+                    "protected_request_validation",
                 ]
                 and options["admission_proof"] == "capability_minted_only_after_admission_rule"
                 and options["ambient_identity_or_cookie_recheck"] is False
@@ -295,6 +332,62 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and sibling[0]["outcome"] == "fixed_sanitized_not_found"
                 and all("/<capability>/" in shape["route"] for shape in routes)
                 and document["share_browsing_credential"]["transport"]["header_allowed"] is False
+            )
+        if check == "protected_request_state_machine":
+            validation = document["protected_request_validation"]
+            axes = validation["input_space"]
+            rules = validation["decision_rules"]
+            points = []
+            for values in itertools.product(*(axes[field] for field in axes)):
+                point = dict(zip(axes, values, strict=True))
+                valid_membership = (
+                    point["access_mode"] == "limited"
+                    and point["limited_membership"] in {"current", "absent"}
+                    or point["access_mode"] in {"public", "private"}
+                    and point["limited_membership"] == "not_applicable"
+                )
+                if valid_membership:
+                    points.append(point)
+
+            def decide(point: dict[str, str]) -> str:
+                for rule in rules[:-1]:
+                    if point[rule["field"]] == rule["equals"]:
+                        return rule["outcome"]
+                return rules[-1]["outcome"]
+
+            cross_product = itertools.product(
+                validation["invoked_for_surfaces"],
+                validation["invoked_for_methods"],
+                points,
+            )
+            outcomes = [decide(point) for _, _, point in cross_product]
+            transitions = {item["id"]: item for item in validation["post_mint_transition_cases"]}
+            return (
+                len(outcomes)
+                == len(validation["invoked_for_surfaces"]) * len(validation["invoked_for_methods"]) * len(points)
+                and all(outcome in {rule["outcome"] for rule in rules} for outcome in outcomes)
+                and decide(
+                    {
+                        "capability_integrity": "valid",
+                        "page_state": "present",
+                        "availability": "active",
+                        "access_mode": "limited",
+                        "share_binding": "match",
+                        "audience_revision": "match",
+                        "capability_lifetime": "live",
+                        "namespace_binding": "match",
+                        "namespace_liveness": "live",
+                        "limited_membership": "current",
+                    }
+                )
+                == "serve_pinned_shared_response"
+                and transitions["ACTIVE-TO-OFFLINE"]["revision_advance"] == 1
+                and transitions["OFFLINE-TO-ACTIVE-OLD-CAPABILITY"]["later_request_outcome"]
+                == "fixed_stale_document_reload_required"
+                and transitions["LIMITED-MEMBER-REMOVE-READD-OLD-CAPABILITY"]["revision_advance"] == 2
+                and transitions["BUDGET-RECLAIM-DURING-REQUEST"]["in_flight_outcome"] == "finish_pinned_response"
+                and validation["loaded_guest_document_policy"] == "never_actively_close_dom_or_javascript"
+                and validation["instance_resource_acl_revision_is_orthogonal"] is True
             )
         if check == "shared_response_matrix":
             matrix = document["shared_proxy_policy"]["response_policy_matrix"]
@@ -363,16 +456,38 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
             authority = document["avibe_private_hmr_monitor"]
             admission = authority["websocket_admission"]
             deadline = authority["durable_offline_deadline"]
-            cases = {case["id"]: case for case in admission["cases"]}
+            positive = admission["positive_source_cases"]
+            negative = admission["negative_mutations"]
             trace = deadline["worst_case_just_after_poll_trace_ms"]
             return (
                 authority["owner"] == "PrivateHmrAuthority"
                 and admission["origin_header_cardinality"] == "exactly_one"
                 and admission["validation_order"] == "before_any_upstream_websocket_open"
-                and all(
-                    cases[case_id]["outcome"] == "reject_without_upstream_websocket"
-                    for case_id in ("HMR-ORIGIN-MISSING", "HMR-ORIGIN-MULTIPLE", "HMR-ORIGIN-CROSS-SITE")
-                )
+                and admission["request_trust_classifier"]["parallel_network_trust_model_allowed"] is False
+                and {case["source_class"] for case in positive}
+                == {
+                    "configured_hosted_instance",
+                    "active_custom_hostname",
+                    "direct_loopback",
+                    "explicit_setup_host",
+                    "wildcard_resolved_interface",
+                    "docker_loopback_bridge",
+                    "trusted_public_proxy",
+                }
+                and all(case["upstream_websocket_opened"] is True for case in positive)
+                and all(case["upstream_websocket_opened"] is False for case in negative)
+                and {item["mutation"] for item in negative}
+                >= {
+                    "origin_cardinality_zero",
+                    "origin_cardinality_multiple",
+                    "origin_null",
+                    "origin_scheme_mismatch",
+                    "origin_host_or_ip_mismatch",
+                    "origin_effective_port_mismatch",
+                    "peer_or_network_check_fails",
+                    "forwarded_metadata_from_untrusted_peer",
+                    "resource_editor_authority_false",
+                }
                 and admission["rejection"]["upstream_websocket_opened"] is False
                 and deadline["poll_interval_max_seconds"] + deadline["post_detection_close_budget_seconds"]
                 <= deadline["total_close_deadline_seconds"]
@@ -459,6 +574,19 @@ def test_local_show_access_state_is_closed_canonical_and_route_safe() -> None:
     schema = _load("show-access.schema.json")
     assert schema["$defs"]["access_mode"]["enum"] == ["private", "limited", "public"]
     assert schema["$defs"]["availability"]["enum"] == ["active", "offline"]
+    assert schema["x-avibe-invariants"]["request_admission_revision"] == {
+        "field": "audience_revision",
+        "single_monotonic_revision": True,
+        "advances_once_for": [
+            "durable_availability_transition",
+            "effective_access_mode_change",
+            "effective_share_binding_change",
+            "effective_canonical_email_set_change",
+        ],
+        "no_op_advances": False,
+        "apply_may_mutate_availability": False,
+        "offline_to_active_cannot_reactivate_old_capability": True,
+    }
     assert set(schema["required"]) == {
         "schema_version",
         "page_id",
@@ -819,13 +947,47 @@ def test_owner_settings_reads_exact_emails_only_from_local_authorized_state() ->
 def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fresh() -> None:
     contract = _load("identity-auth.json")
     assertion = contract["backend_assertion"]
-    assert assertion["format"] == "short_lived_signed_identity_assertion"
+    assert assertion["format"] == "rfc7519_compact_jwt_jws"
     assert assertion["authorize_endpoint"] == {
         "method": "GET",
         "path_template": "/api/v1/instances/{instanceId}/show-identity/authorize",
     }
     assert assertion["request_inputs"]["required"] == ["state", "nonce", "redirect_uri"]
     assert assertion["request_inputs"]["additional_allowed"] is False
+    assert assertion["wire_protocol"] == {
+        "serialization": "compact_jws",
+        "segment_count": 3,
+        "payload_kind": "jwt_claims",
+        "protected_header": {
+            "required_and_only_fields": ["alg", "typ", "kid"],
+            "alg": "RS256",
+            "typ": "JWT",
+            "kid": "nonempty_server_key_identifier",
+        },
+        "forbidden_algorithms": ["none", "HS256", "ES256", "EdDSA"],
+        "forbidden_header_parameters": ["jku", "jwk", "x5u", "x5c", "crit", "b64"],
+        "unsupported_critical_or_unencoded_payload_outcome": "reject_identity_assertion",
+        "payload_claim_set_exact": True,
+    }
+    trust = assertion["pairing_trust"]
+    assert trust["authority"] == "local_paired_instance_record"
+    assert trust["jwks_uri_derivation"] == "<issuer>/oauth/jwks.json"
+    assert trust["jwks_uri_same_origin_with_issuer"] is True
+    assert trust["token_or_request_selects_trust"] is False
+    verification = assertion["jwks_verification"]
+    assert verification["matching_key_count"] == "exactly_one"
+    assert verification["key_requirements"] == {
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "minimum_modulus_bits": 2048,
+    }
+    assert verification["unknown_kid_policy"] == {
+        "forced_refresh_scope": "issuer_coalesced",
+        "maximum_forced_refreshes": 1,
+        "maximum_verification_retries": 1,
+        "still_unknown_or_refresh_failure_outcome": "reject_identity_assertion",
+    }
     assert assertion["delivery"] == {
         "response_mode": "form_post",
         "fixed_callback_path": "/auth/show-identity/callback",
@@ -878,7 +1040,9 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
     assert contract["local_handshake"]["identity_session_is_authorization"] is False
     assert contract["local_handshake"]["removed_member_active_tab_policy"] == ("no_active_closure_future_requests_only")
     assert contract["local_handshake"]["correlation_cookie"] == {
-        "name": "avibe_show_identity_correlation",
+        "name_template": "__Secure-avibe_show_identity_c_<base64url_nonce>",
+        "name_source": "verified_signed_state_nonce",
+        "value": "independent_32_byte_csprng_secret",
         "same_site": "None",
         "secure": True,
         "http_only": True,
@@ -886,13 +1050,24 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "domain_attribute_allowed": False,
         "single_use": True,
         "expires_no_later_than": "signed_state.expires_at",
+        "state_verification_precedes_cookie_selection": True,
+        "invalid_state_cookie_deletion": "none",
+        "terminal_callback_cookie_action": "consume_and_delete_matching_flow_only",
+    }
+    assert contract["local_handshake"]["consumption_store"] == {
+        "key_fields": ["nonce", "jti"],
+        "consume_operation": "atomic_compare_absent_then_insert",
+        "retention_deadline": "max_signed_state_or_assertion_expiry_plus_verifier_clock_skew",
+        "same_callback_race_successes": 1,
     }
     assert contract["local_handshake"]["reference_harness"] == {
         "scenario_id": "AUTH-SETUP-404",
         "actual_http_boundary": "POST /auth/show-identity/callback",
+        "components": ["local_state_signer", "backend_rs256_issuer_and_jwks", "avibe_jwt_verifier"],
         "content_type": "application/x-www-form-urlencoded",
-        "cross_site_source": "https://avibe.bot",
         "active_custom_callback_origin": "https://show.example.test",
+        "contract_evidence": "http_form_jwt_jwks_and_atomic_state_machine",
+        "browser_cookie_delivery_evidence": "future_real_browser_conformance",
         "production_conformance": "future_avibe_and_backend_implementation_lanes",
     }
 
@@ -907,7 +1082,7 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         )
 
     closed_loop = contract["closed_loop_scenario"]
-    assert closed_loop["callback"]["assertion_format"] == "short_lived_signed_identity_assertion"
+    assert closed_loop["callback"]["assertion_format"] == "rfc7519_compact_jwt_jws"
     assert closed_loop["callback"]["http_method"] == "POST"
     assert closed_loop["callback"]["delivery"] == "form_post"
     assert closed_loop["callback"]["callback_url"] == "https://show.example.test/auth/show-identity/callback"
@@ -921,6 +1096,7 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
     assert closed_loop["start"]["correlation_cookie_expires_at"] <= closed_loop["start"]["signed_state_expires_at"]
     assert closed_loop["start"]["page_id"] == closed_loop["callback"]["resolved_page_id"]
     assert closed_loop["start"]["share_id"] == closed_loop["callback"]["resolved_share_id"]
+    assert closed_loop["start"]["correlation_cookie_name"] == closed_loop["callback"]["correlation_cookie_name"]
     assert closed_loop["callback"]["verified_email"] in closed_loop["callback"]["current_local_emails"]
     assert closed_loop["protected_request"]["membership_rechecked"] is True
     assert {case["mutation"] for case in closed_loop["negative_callbacks"]} == {
@@ -974,6 +1150,7 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
         "namespace_handle",
         "document_handle",
     ]
+    assert credential["server_record_fields"][-2:] == ["admitted_normalized_email_if_limited", "expires_at"]
     assert credential["entropy_bits"] == 256
     assert credential["derived_from_binding_or_path"] is False
     assert credential["required_surfaces"] == [
@@ -1002,6 +1179,95 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
     assert capture["browser_visible_session_or_path_fields"] is False
     assert capture["result_fields"] == ["namespace_handle", "document_handle", "expires_at"]
 
+    validation = contract["protected_request_validation"]
+    assert validation["owner"] == "SharedViewerBrowserContainment.protected_request_validation"
+    assert validation["invoked_for_surfaces"] == credential["required_surfaces"]
+    assert validation["invoked_for_methods"] == ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+    assert validation["local_linearization"]["transaction"] == "one_authoritative_ShowAccess_snapshot"
+    assert {
+        "availability_is_active",
+        "access_mode_is_limited_or_public",
+        "exact_share_binding_matches",
+        "audience_revision_matches_capability",
+        "limited_admitted_email_is_current_member",
+    } <= set(validation["local_linearization"]["checks"])
+    assert validation["local_linearization"]["runtime_audience_decision_allowed"] is False
+    assert validation["runtime_linearization"]["operation"] == ("atomically_pin_live_namespace_and_document_handle")
+    revision_policy = validation["audience_revision_policy"]
+    assert revision_policy == {
+        "request_admission_revision_field": "ShowAccess.audience_revision",
+        "durable_availability_transition_advances_once": True,
+        "audience_or_binding_change_advances_once": True,
+        "no_op_advances": False,
+        "apply_may_mutate_availability": False,
+        "separate_capability_revision_allowed": False,
+    }
+
+    rules = validation["decision_rules"]
+
+    def decide(point: dict[str, str]) -> str:
+        for rule in rules[:-1]:
+            if point[rule["field"]] == rule["equals"]:
+                return rule["outcome"]
+        return rules[-1]["outcome"]
+
+    axes = validation["input_space"]
+    valid_points = []
+    for values in itertools.product(*(axes[field] for field in axes)):
+        point = dict(zip(axes, values, strict=True))
+        if point["access_mode"] == "limited":
+            valid = point["limited_membership"] in {"current", "absent"}
+        else:
+            valid = point["limited_membership"] == "not_applicable"
+        if valid:
+            valid_points.append(point)
+    for surface, method, point in itertools.product(
+        validation["invoked_for_surfaces"], validation["invoked_for_methods"], valid_points
+    ):
+        outcome = decide(point)
+        assert outcome in {rule["outcome"] for rule in rules}, (surface, method, point)
+
+    current_limited = {
+        "capability_integrity": "valid",
+        "page_state": "present",
+        "availability": "active",
+        "access_mode": "limited",
+        "share_binding": "match",
+        "audience_revision": "match",
+        "capability_lifetime": "live",
+        "namespace_binding": "match",
+        "namespace_liveness": "live",
+        "limited_membership": "current",
+    }
+    assert decide(current_limited) == "serve_pinned_shared_response"
+    for field, value in (
+        ("availability", "offline"),
+        ("access_mode", "private"),
+        ("audience_revision", "mismatch"),
+        ("limited_membership", "absent"),
+        ("namespace_liveness", "reclaimed"),
+    ):
+        assert decide({**current_limited, field: value}) == "fixed_stale_document_reload_required"
+    assert decide({**current_limited, "share_binding": "mismatch"}) == "fixed_sanitized_not_found"
+    assert decide({**current_limited, "capability_integrity": "invalid"}) == "fixed_sanitized_not_found"
+    assert decide({**current_limited, "page_state": "missing"}) == "fixed_sanitized_not_found"
+    assert decide({**current_limited, "capability_lifetime": "expired"}) == "fixed_sanitized_expired"
+
+    transitions = {item["id"]: item for item in validation["post_mint_transition_cases"]}
+    assert len(transitions) == len(validation["post_mint_transition_cases"]) == 15
+    assert transitions["ACTIVE-TO-OFFLINE"]["revision_advance"] == 1
+    assert transitions["OFFLINE-TO-ACTIVE-OLD-CAPABILITY"]["later_request_outcome"] == (
+        "fixed_stale_document_reload_required"
+    )
+    assert transitions["LIMITED-MEMBER-REMOVE-READD-OLD-CAPABILITY"]["revision_advance"] == 2
+    assert transitions["BUDGET-RECLAIM-DURING-REQUEST"] == {
+        "id": "BUDGET-RECLAIM-DURING-REQUEST",
+        "revision_advance": 0,
+        "later_request_outcome": "fixed_stale_document_reload_required",
+        "in_flight_outcome": "finish_pinned_response",
+    }
+    assert all(item["in_flight_outcome"] == "finish_pinned_response" for item in transitions.values())
+
     for shape in contract["browser_request_shapes"]:
         assert {"session_id", "workspace_path", "source_path", "runtime_context"} <= set(shape["forbidden_inputs"])
     protected_shapes = contract["browser_request_shapes"][1:]
@@ -1024,9 +1290,7 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
         "capability_source": "opaque_route_namespace_segment",
         "valid_capability_requires": [
             "capability_integrity_and_entropy",
-            "current_instance_page_share_binding",
-            "current_audience_revision",
-            "live_namespace_and_document_handle",
+            "protected_request_validation",
         ],
         "admission_proof": "capability_minted_only_after_admission_rule",
         "ambient_identity_or_cookie_recheck": False,
@@ -1317,23 +1581,142 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
     hmr_authority = contract["avibe_private_hmr_monitor"]
     assert hmr_authority["owner"] == "PrivateHmrAuthority"
     websocket = hmr_authority["websocket_admission"]
-    assert websocket["origin_allowlist"] == {
-        "derived_from": ["https://<active_instance_hostname>", "https://<active_custom_hostname>"],
-        "fact_source": "server_owned_active_instance_and_custom_hostname_configuration",
-        "wildcards_allowed": False,
-        "suffix_matching_allowed": False,
-        "forwarded_or_browser_host_inputs_allowed": False,
+    assert websocket["authorization_checks"] == [
+        "server_validated_origin_source",
+        "resource_editor_authority",
+    ]
+    assert websocket["request_trust_classifier"] == {
+        "reuse_functions": [
+            "vibe.ui_server._websocket_is_local_request",
+            "vibe.ui_server._websocket_trusted_public_origin_local_request",
+            "vibe.ui_server._websocket_origin_matches_effective_request",
+            "vibe.ui_server._remote_access_public_origin_matches",
+        ],
+        "local_source_classes": [
+            "direct_loopback",
+            "explicit_setup_host",
+            "wildcard_resolved_interface",
+            "docker_loopback_bridge",
+        ],
+        "remote_source_classes": [
+            "configured_hosted_instance",
+            "active_custom_hostname",
+            "trusted_public_proxy",
+        ],
+        "parallel_network_trust_model_allowed": False,
     }
     assert websocket["origin_header_cardinality"] == "exactly_one"
+    assert websocket["origin_match"] == "exact_normalized_scheme_host_or_ip_and_effective_port"
+    assert websocket["never_authority"] == [
+        "0.0.0.0",
+        "::",
+        "*",
+        "raw_host_header",
+        "untrusted_forwarded_metadata",
+        "wildcard_match",
+        "suffix_match",
+    ]
     assert websocket["validation_order"] == "before_any_upstream_websocket_open"
     assert websocket["rejection"] == {
         "outcome": "reject_without_upstream_websocket",
         "upstream_websocket_opened": False,
     }
-    origin_cases = {case["id"]: case for case in websocket["cases"]}
-    assert origin_cases["HMR-ORIGIN-TRUSTED-INSTANCE"]["outcome"] == "open_after_editor_authorization"
-    for case_id in ("HMR-ORIGIN-MISSING", "HMR-ORIGIN-MULTIPLE", "HMR-ORIGIN-CROSS-SITE"):
-        assert origin_cases[case_id]["outcome"] == "reject_without_upstream_websocket"
+    origin_cases = websocket["positive_source_cases"]
+    assert len(origin_cases) == 12
+    assert {case["source_class"] for case in origin_cases} == {
+        "configured_hosted_instance",
+        "active_custom_hostname",
+        "direct_loopback",
+        "explicit_setup_host",
+        "wildcard_resolved_interface",
+        "docker_loopback_bridge",
+        "trusted_public_proxy",
+    }
+
+    def origin_identity(value: str) -> tuple[str, str, int]:
+        parsed = urlsplit(value)
+        assert parsed.scheme in {"http", "https"} and parsed.hostname
+        return parsed.scheme, parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    def evaluate_origin(case: dict[str, Any], mutation: str | None = None) -> tuple[str, bool]:
+        headers = list(case["origin_headers"])
+        editor = case["resource_editor_authority"]
+        peer_checks_pass = True
+        forwarded_trust = True
+        raw_host_only = False
+        wildcard_or_suffix = False
+        if mutation == "cardinality_zero":
+            headers = []
+        elif mutation == "cardinality_multiple":
+            headers.append("https://attacker.example")
+        elif mutation == "null":
+            headers = ["null"]
+        elif mutation == "peer":
+            peer_checks_pass = False
+        elif mutation == "forwarded":
+            forwarded_trust = False
+        elif mutation == "editor":
+            editor = False
+        elif mutation == "raw_host":
+            raw_host_only = True
+        elif mutation == "wildcard":
+            wildcard_or_suffix = True
+        if len(headers) != 1 or headers[0] == "null":
+            return "reject_without_upstream_websocket", False
+        actual = list(origin_identity(headers[0]))
+        expected = origin_identity(case["resolved_trusted_origin"])
+        if mutation == "scheme":
+            actual[0] = "http" if actual[0] == "https" else "https"
+        elif mutation == "host":
+            actual[1] = "attacker.example"
+        elif mutation == "port":
+            actual[2] += 1
+        if (
+            tuple(actual) != expected
+            or not editor
+            or not peer_checks_pass
+            or not forwarded_trust
+            or raw_host_only
+            or wildcard_or_suffix
+        ):
+            return "reject_without_upstream_websocket", False
+        return "open_after_origin_and_editor_authorization", True
+
+    for case in origin_cases:
+        assert evaluate_origin(case) == ("open_after_origin_and_editor_authorization", True)
+        for mutation in (
+            "cardinality_zero",
+            "cardinality_multiple",
+            "null",
+            "scheme",
+            "host",
+            "port",
+            "peer",
+            "forwarded",
+            "editor",
+            "raw_host",
+            "wildcard",
+        ):
+            assert evaluate_origin(case, mutation) == ("reject_without_upstream_websocket", False), (
+                case["id"],
+                mutation,
+            )
+    assert all(item["upstream_websocket_opened"] is False for item in websocket["negative_mutations"])
+
+    assert hmr_authority["post_connect_policy"] == {
+        "close_triggers": [
+            "editor_capability_loss",
+            "resource_access_revocation",
+            "remote_authorization_loss",
+            "durable_offline_state",
+        ],
+        "non_close_triggers_while_active_editor_remains": [
+            "access_mode_change",
+            "share_binding_change",
+            "guest_membership_change",
+            "audience_revision_change",
+        ],
+    }
 
     deadline = hmr_authority["durable_offline_deadline"]
     assert deadline["measured_from"] == "durable_offline_transaction_commit"
@@ -1417,6 +1800,9 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
     assert interfaces["C03"]["delivery"]["mechanism"] == "internal_socket_json"
     assert "stable_writer_lease" in interfaces["C03"]["delivery"]["serialization_owner"]
     assert interfaces["C08"]["signature"]["covered_fields"] == [
+        "alg",
+        "typ",
+        "kid",
         "iss",
         "aud",
         "sub",
@@ -1428,6 +1814,8 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "verified_email",
         "state",
         "assertion",
+        "paired_jwks_uri",
+        "unknown_kid_refresh",
     ]
     assert interfaces["C09"]["delivery"]["authentication"] == "server_owned_orthogonal_facts"
     assert interfaces["C13"]["signature"]["covered_fields"] == [
@@ -1444,12 +1832,15 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
     assert interfaces["C17"]["delivery"]["mechanism"] == "loopback_internal_capture_protocol"
     assert interfaces["C18"]["signature"]["schema"] == "shared-browser-containment.schema.json"
     assert interfaces["C18"]["delivery"]["authentication"] == (
-        "local_share_browsing_credential_after_public_or_current_member_admission"
+        "full_current_local_show_access_validation_then_atomic_runtime_pin"
     )
     assert interfaces["C19"]["signature"]["schema"] == "local-legacy-mapping.schema.json"
     assert interfaces["C04"]["delivery"]["serialization_owner"].startswith("CanonicalApplyReceipt")
     assert interfaces["C07"]["delivery"]["serialization_owner"] == "avibe.ExecutableIdentityHandshake"
     assert interfaces["C14"]["delivery"]["serialization_owner"] == "avibe.PrivateHmrAuthority"
+    assert interfaces["C14"]["delivery"]["authentication"] == (
+        "server_validated_origin_source_and_resource_editor_before_upstream"
+    )
     for interface in interfaces.values():
         assert interface["delivery"]["authentication"]
         assert interface["delivery"]["serialization_owner"]

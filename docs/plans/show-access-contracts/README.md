@@ -24,13 +24,16 @@ bytes across language and version changes.
 The UI process
 authorizes and forwards; it never coordinates or writes.
 
-Avibe Backend authenticates identity only. Its signed assertion is instance-bound
+Avibe Backend authenticates identity only. Its compact RS256 JWT/JWS assertion is instance-bound
 and contains a verified email, but no page membership, page authorization, Instance
 role, or `show_page_email` access source. Local Avibe re-resolves the share and
 checks current local membership on every limited request.
-The executable identity owner uses a host-only, callback-scoped, `SameSite=None`,
-`Secure`, `HttpOnly`, single-use correlation cookie and an actual cross-site HTTP
-form POST in the shared auth scenario harness.
+The executable identity owner derives one host-only, callback-scoped,
+`SameSite=None`, `Secure`, `HttpOnly` cookie per signed nonce. The cookie value is
+an independent 32-byte secret, state is verified before cookie selection, and atomic
+nonce/`jti` retention supports concurrent flows. The reference harness performs a
+real HTTP form POST plus compact JWT/JWKS verification; browser cookie delivery is
+residual real-browser evidence.
 
 There is no migration or compatibility phase. The unused hosted storage, endpoints,
 clients, and Instance authorization source are direct deletion targets.
@@ -45,10 +48,10 @@ clients, and Instance authorization source are direct deletion targets.
 | `apply-transition-algebra.json` | Exhaustive CAS, idempotency, binding, membership, and revision algebra |
 | `fixtures/apply-mutations.json` | Canonical transitions, crash/idempotency trace, next-request revocation |
 | `owner-settings.schema.json` | Local authorized exact-email settings read with `private, no-store` |
-| `identity-auth.json` | Backend identity assertion and local signed-state/callback ownership |
+| `identity-auth.json` | Compact RS256/JWKS identity wire contract and concurrent local callback state machine |
 | `local-legacy-mapping.json` | Deterministic local SQLite private/public/offline mapping with offline fail-closed |
 | `capability-matrix.json` | Closed `/p` and `/show` decision over independent resource and membership axes |
-| `shared-browser-containment.json` | Trusted shell, opaque Runtime capture, protected browser requests, sibling isolation |
+| `shared-browser-containment.json` | Trusted shell, opaque Runtime capture, every-request validation, sibling isolation |
 | `retirement.json` | Direct removal inventory with migration and compatibility forbidden |
 | `runtime-context.json` | Protocol, trusted envelope, isolated graphs, demand-only shared work, confinement and budgets |
 | `mirror-registry.json` | Exact future producer, consumer, signature, delivery and serialization owner |
@@ -58,7 +61,8 @@ clients, and Instance authorization source are direct deletion targets.
 
 - Private disables but retains a stable binding; limited/public reuse it; explicit
   rotation or custom binding replaces it.
-- Apply never changes availability and never calls Backend.
+- Apply never changes availability and never calls Backend. A separate durable
+  availability transition advances the same `audience_revision` exactly once.
 - Canonical mode, binding, or email-set change advances `audience_revision` once;
   canonical no-op does not.
 - Same mutation and payload replays its stored terminal result even after later
@@ -80,17 +84,25 @@ clients, and Instance authorization source are direct deletion targets.
 - Public anonymous and current-member limited admission both mint opaque capability-
   path authority. Protected document/module/resource/API requests are credentialless;
   JSON mutation preflight has an exact closed method/header policy.
+- Every protected surface and method revalidates active local ShowAccess, shared mode,
+  exact binding, revision, capability lifetime, and limited membership before Runtime
+  atomically pins a live namespace/document handle. Offline-to-active never revives an
+  old capability; a request pinned before change may finish and later requests reload.
 - Membership removal affects the next request without Backend. Loaded guest tabs are
   not actively closed.
 - Ordinary editor file edits never create, rebase, or background-build a shared
   Runtime graph. Shared prewarm is explicit and admitted.
-- Canonical HMR rejects missing, multiple, or untrusted Origin before upstream
-  WebSocket open; durable offline polling plus closure has one five-second total bound.
+- Canonical HMR accepts only one exact Origin resolved by the existing WebSocket trust
+  classifier across hosted/custom, loopback, setup, enumerated wildcard interface,
+  Docker-loopback, and trusted-proxy sources. Origin and resource-editor authority
+  both pass before upstream open; durable offline polling plus closure has one
+  five-second total bound.
 
 ## Validation
 
 `tests/test_show_access_contracts.py` parses every JSON document, validates all
-schema examples, exhausts both the Apply algebra and capability matrix, rejects
+schema examples, exhausts Apply, capability, protected-request, identity-flow, and
+HMR-origin state spaces, rejects
 retired vocabulary/files, checks Runtime constants and release provenance, and
 evaluates every scenario leaf claim. Each scalar claim is also evaluated with a
 mutated expectation to prove the check is sensitive to the claimed value.

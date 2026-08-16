@@ -167,14 +167,27 @@ Limited login starts only after Avibe resolves the current share binding. Local
 Avibe owns signed state, the safe same-share return target, nonce and single-use
 handling, callback correlation, and final share re-resolution.
 
-The local correlation cookie is host-only, `SameSite=None`, `Secure`, `HttpOnly`,
-scoped exactly to `/auth/show-identity/callback`, single-use, and expires no later
-than signed state. Signed state binds its hash, the callback hostname, nonce,
-instance, share, safe return, and expiry. This permits the Backend's cross-site
-`form_post` to an active custom hostname without placing assertion material in a URL.
+Each login flow has a distinct host-only correlation cookie named
+`__Secure-avibe_show_identity_c_<base64url_nonce>`. Its independent value is a
+32-byte CSPRNG secret; it is `SameSite=None`, `Secure`, `HttpOnly`, scoped exactly
+to `/auth/show-identity/callback`, single-use, and expires no later than signed
+state. Signed state binds the page, its hash, callback hostname, nonce, instance,
+share, safe return, and expiry. Avibe verifies state before selecting a cookie;
+invalid state deletes none, and a terminal callback consumes only its flow. Nonce
+and `jti` consumption is atomic and retained through the later state/assertion
+expiry plus verifier skew. Concurrent same-host flows may finish in either order,
+while swapped state/assertion/cookie inputs and replay have exactly one winner.
+This permits the Backend's cross-site `form_post` to an active custom hostname
+without placing assertion material in a URL. Real browser cookie delivery remains
+browser conformance, not something an HTTP reference harness can prove from a
+handwritten Origin header.
 
-Avibe Backend returns one short-lived signed identity assertion. Authorization-code
-exchange is not part of this contract.
+Avibe Backend returns one short-lived RFC 7519 compact JWT/JWS identity assertion.
+It has exactly three base64url segments and uses RS256 only. The protected header
+contains exactly `alg=RS256`, `typ=JWT`, and one nonempty `kid`; `none`, other
+algorithms, token-directed key URLs/embedded keys, unsupported critical headers,
+and unencoded payload behavior fail closed. Authorization-code exchange is not part
+of this contract.
 The browser calls
 `GET /api/v1/instances/{instanceId}/show-identity/authorize` with exactly signed
 `state`, `nonce`, and an HTTPS `redirect_uri` on the active instance/custom hostname
@@ -187,13 +200,23 @@ The signed assertion contains only:
 - the paired `instance_id`;
 - one verified normalized email.
 
-Its audience is `avibe-show-identity:<oauthClientId>`, normal lifetime is 300
-seconds, hard maximum is 600 seconds, and verifier skew is 60 seconds. The email is
-ASCII-trimmed and lowercased from a fresh verified Backend identity lookup. Only the
-current key signs; JWKS keeps current plus previous public keys for at least the hard
-maximum plus skew. `identity_not_verified` and `identity_unavailable` are no-store,
-assertion-free terminal errors. Backend issues unique `jti`; local Avibe consumes
-the nonce and `jti` once.
+Issuer, OAuth client ID/audience, instance ID, and JWKS URI come only from the local
+pairing record. Its audience is the single string
+`avibe-show-identity:<oauthClientId>`. The trusted issuer is HTTPS and the only JWKS
+URI is the exact same-origin `<issuer>/oauth/jwks.json`; discovery, when checked,
+must agree, and redirects or token-selected key sources cannot cross origin. One RSA
+signature key must match `kid`, `kty=RSA`, `use=sig`, and `alg=RS256`, with a modulus
+of at least 2048 bits. Duplicate `kid` or changed key material under an existing
+`kid` fails closed. An unknown `kid` causes one issuer-coalesced forced refresh and
+one verification retry, then fails closed.
+
+Normal lifetime is 300 seconds, hard maximum is 600 seconds, and verifier skew is
+60 seconds. The email is ASCII-trimmed and lowercased from a fresh verified Backend
+identity lookup. Only the current key signs; JWKS keeps current plus previous public
+keys for at least the hard maximum plus skew. Old and new assertions remain
+verifiable during that overlap. `identity_not_verified` and `identity_unavailable`
+are no-store, assertion-free terminal errors. Backend issues unique `jti`; local
+Avibe consumes the nonce and `jti` once.
 
 It contains no `page_id`, `share_id`, membership result, page authorization,
 Instance role, `InstanceAccessSource`, audience revision, grant revision, or
@@ -239,6 +262,25 @@ role, resource authority, or editor capability. A binding or revision mismatch
 re-resolves the share and current membership before any new credential or page bytes.
 Consequently, code on a sibling public page cannot fetch, frame, open and read, or
 reuse ambient credentials for a limited page.
+
+Minting is not a lasting authorization decision. Every protected document, module,
+CSS, raw, worker, fallback, API, preflight, and write request first linearizes one
+current local `ShowAccess` snapshot and requires active availability, a shared mode,
+the exact binding and `audience_revision`, an unexpired capability, and current
+membership for the server-recorded limited identity. Only then does Runtime
+atomically pin the live namespace/document handle; Runtime never decides audience.
+The same validation covers GET, HEAD, OPTIONS, POST, PUT, PATCH, and DELETE.
+
+`audience_revision` is also the single request-admission revision. Every durable
+availability transition advances it once even though Apply cannot mutate
+availability; effective mode, binding, or email-set changes retain their existing
+single increment, and no-ops do not advance it. Thus offline-to-active cannot revive
+an old capability. Active/offline replay, shared/private changes, public/limited
+changes, binding/revision changes, member remove/re-add, capability expiry,
+namespace expiry, and budget reclaim each have one closed later-request outcome.
+An in-flight request pinned before a transition may finish, but every later request
+revalidates. Already loaded guest DOM/JavaScript is never actively closed, and
+Instance/resource ACL revision remains orthogonal.
 
 ### Direct retirement of the unused hosted model
 
@@ -307,12 +349,17 @@ Worker scope headers and cannot be reused across principals or after an audience
 change. Redirects preserve safe route suffix and query while remaining outside shared
 worker scope. `/p/<share_id>/__vite_hmr` never exists.
 
-Canonical `/show/` HMR derives an exact Origin allowlist only from server-owned active
-instance and custom hostnames. Missing, multiple, wildcard/suffix-derived, or
-untrusted Origin values reject before any upstream WebSocket opens. It then
-revalidates resource access, editor capability, and authorization revision. Existing
-sockets close on editor loss, resource revocation,
-authorization revision change, or durable offline state. Avibe owns one coalesced
+Canonical `/show/` HMR accepts exactly one normalized Origin only after the existing
+local/remote WebSocket trust classifier resolves one server-owned source: configured
+hosted instance, active custom hostname, direct localhost/IPv4/IPv6 loopback at the
+actual UI port, explicit private/CGNAT/link-local setup host, a wildcard bind resolved
+to a concrete enumerated LAN/Tailscale interface, an explicitly enabled loopback-only
+Docker bridge, or trusted-proxy facts resolving to a configured public origin.
+`0.0.0.0`, `::`, `*`, raw Host, untrusted forwarded values, wildcard/suffix matches,
+and scheme/host/effective-port drift are never authority. Origin and resource-editor
+authority both pass before any upstream WebSocket opens. Existing sockets close on
+editor loss, resource revocation, remote authorization loss, or durable offline
+state. Avibe owns one coalesced
 monitor per active Session; the maximum poll interval plus post-detection close budget
 is at most five seconds measured from the durable offline transaction, including a
 transition immediately after a poll. Audience or share changes do not close canonical HMR while independent
@@ -383,10 +430,12 @@ Contract tests must:
   does not promise active tab closure;
 - prove identity assertions cannot carry page authority, membership, Instance roles,
   or privileged surface capability;
-- execute the signed-state, correlation-cookie, single-use nonce, instance binding,
-  safe return, share re-resolution, and current-membership login loop;
+- execute compact RS256 JWT/JWKS verification, paired trust, rotation/refresh failure
+  vectors, and the flow-specific cookie/state/nonce/`jti` concurrent login machine;
 - prove the trusted `/p/` shell can load a current limited member while arbitrary
   sibling page code cannot fetch, frame, open/read, or use ambient credentials for it;
+- exhaust every protected surface and method across current/offline/mode/binding/
+  revision/membership/expiry/reclaim inputs and the full post-mint transition table;
 - exhaust public/limited shared response surfaces and require `private, no-store`;
 - reject noncanonical stored/result emails, globally contended share bindings, and a
   latest-only receipt implementation using known-answer canonical digest vectors and
@@ -395,6 +444,8 @@ Contract tests must:
 - prove stable binding retention and explicit rotation in every audience mode;
 - prove direct retirement contains no migration or compatibility phase;
 - prove repeated editor edits never create or rebase a shared graph;
+- exhaust every HMR server-owned origin source and mutate cardinality, scheme, host,
+  port, peer, forwarded trust, and editor authority before upstream open;
 - keep existing Runtime constant, response-sanitization, confinement, budget,
   revocation, and release-SHA checks;
 - bind every semicolon-delimited Expected evidence clause below to one or more
@@ -463,9 +514,9 @@ The design is ready for implementation lanes only when:
 - local removal denies the next limited request without Backend and no contract
   promises active guest-tab closure;
 - identity-only Backend assertions cannot express page or Instance authorization;
-- the shared auth scenario executes cross-site form POST with the callback-scoped
-  single-use correlation cookie and all signed-state, nonce, `jti`, host, and safe
-  return checks;
+- the shared auth scenario executes form POST with compact RS256/JWKS verification,
+  flow-specific callback cookies, atomic concurrent nonce/`jti` consumption, paired
+  issuer/audience/instance trust, and safe return checks;
 - resource viewer/editor authority remains independent of local membership;
 - private disables but retains a stable binding, limited/public preserve it, and
   explicit rotation replaces it;
@@ -477,7 +528,10 @@ The design is ready for implementation lanes only when:
   opaque capability, browser authority, or protected bytes;
 - public anonymous and current-member limited admissions both reach protected shared
   content through credentialless capability-path requests and a closed API preflight;
-- private HMR validates one exact server-owned Origin before upstream open, and its
+- every protected request revalidates active local state and the single admission
+  revision before atomically pinning Runtime handles;
+- private HMR validates one exact server-owned Origin from the closed source algebra
+  plus resource-editor authority before upstream open, and its
   durable-offline poll plus closure budget is at most five seconds total;
 - Runtime protocol, graph isolation, immutable shared confinement, budgets, proxy
   sanitation, and release provenance remain frozen;

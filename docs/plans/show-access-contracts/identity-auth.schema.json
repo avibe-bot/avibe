@@ -16,6 +16,9 @@
         "request_inputs",
         "delivery",
         "callback_uri_policy",
+        "wire_protocol",
+        "pairing_trust",
+        "jwks_verification",
         "required_signed_claims",
         "audience_derivation",
         "ttl_seconds",
@@ -30,10 +33,11 @@
         "forbidden_claims",
         "instance_access_context_created",
         "instance_role_derived",
-        "page_membership_decided"
+        "page_membership_decided",
+        "interoperability_vectors"
       ],
       "properties": {
-        "format": { "const": "short_lived_signed_identity_assertion" },
+        "format": { "const": "rfc7519_compact_jwt_jws" },
         "authorize_endpoint": {
           "const": {
             "method": "GET",
@@ -65,6 +69,52 @@
             "fragment_allowed": false,
             "path": "/auth/show-identity/callback",
             "hostname_source": ["active_instance_hostname", "active_custom_hostname"]
+          }
+        },
+        "wire_protocol": {
+          "const": {
+            "serialization": "compact_jws",
+            "segment_count": 3,
+            "payload_kind": "jwt_claims",
+            "protected_header": {
+              "required_and_only_fields": ["alg", "typ", "kid"],
+              "alg": "RS256",
+              "typ": "JWT",
+              "kid": "nonempty_server_key_identifier"
+            },
+            "forbidden_algorithms": ["none", "HS256", "ES256", "EdDSA"],
+            "forbidden_header_parameters": ["jku", "jwk", "x5u", "x5c", "crit", "b64"],
+            "unsupported_critical_or_unencoded_payload_outcome": "reject_identity_assertion",
+            "payload_claim_set_exact": true
+          }
+        },
+        "pairing_trust": {
+          "const": {
+            "authority": "local_paired_instance_record",
+            "trusted_fields": ["issuer", "oauth_client_id", "instance_id", "jwks_uri"],
+            "issuer_requirement": "paired_https_issuer",
+            "audience_derivation": "avibe-show-identity:<oauthClientId>",
+            "audience_cardinality": "exactly_one_string",
+            "jwks_uri_derivation": "<issuer>/oauth/jwks.json",
+            "jwks_uri_same_origin_with_issuer": true,
+            "oidc_discovery_policy": "optional_but_if_used_must_match_exact_paired_issuer_and_jwks_uri",
+            "cross_origin_jwks_redirect_allowed": false,
+            "token_or_request_selects_trust": false
+          }
+        },
+        "jwks_verification": {
+          "const": {
+            "matching_key_count": "exactly_one",
+            "key_requirements": {"kty": "RSA", "use": "sig", "alg": "RS256", "minimum_modulus_bits": 2048},
+            "duplicate_kid_outcome": "reject_identity_assertion",
+            "changed_material_same_kid_outcome": "reject_identity_assertion",
+            "unknown_kid_policy": {
+              "forced_refresh_scope": "issuer_coalesced",
+              "maximum_forced_refreshes": 1,
+              "maximum_verification_retries": 1,
+              "still_unknown_or_refresh_failure_outcome": "reject_identity_assertion"
+            },
+            "malformed_or_unavailable_outcome": "reject_identity_assertion"
           }
         },
         "required_signed_claims": {
@@ -108,7 +158,24 @@
         },
         "instance_access_context_created": { "const": false },
         "instance_role_derived": { "const": false },
-        "page_membership_decided": { "const": false }
+        "page_membership_decided": { "const": false },
+        "interoperability_vectors": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "token_key", "jwks_state", "refreshes", "outcome"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^(JWT|JWKS)-[A-Z0-9-]+$"},
+              "token_key": {"enum": ["current", "previous", "new_current", "unknown"]},
+              "jwks_state": {"enum": ["current_plus_previous", "previous_cache_then_rotated_refresh", "unchanged_after_refresh", "duplicate_kid", "changed_material_same_kid_on_refresh", "cross_origin_uri_or_redirect"]},
+              "refreshes": {"type": "integer", "minimum": 0, "maximum": 1},
+              "outcome": {"enum": ["verified_identity", "reject_identity_assertion"]}
+            }
+          }
+        }
       }
     },
     "local_handshake": {
@@ -120,6 +187,8 @@
         "signed_state_fields",
         "correlation_cookie",
         "callback_checks",
+        "consumption_store",
+        "concurrent_flow_state_machine",
         "membership_lookup",
         "identity_session_is_authorization",
         "unlisted_outcome",
@@ -132,18 +201,23 @@
           "const": ["instance_id", "page_id", "share_id", "safe_public_return_target"]
         },
         "signed_state_fields": {
-          "const": ["instance_id", "share_id", "safe_public_return_target", "callback_hostname", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"]
+          "const": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_hostname", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"]
         },
         "correlation_cookie": {
           "const": {
-            "name": "avibe_show_identity_correlation",
+            "name_template": "__Secure-avibe_show_identity_c_<base64url_nonce>",
+            "name_source": "verified_signed_state_nonce",
+            "value": "independent_32_byte_csprng_secret",
             "same_site": "None",
             "secure": true,
             "http_only": true,
             "path": "/auth/show-identity/callback",
             "domain_attribute_allowed": false,
             "single_use": true,
-            "expires_no_later_than": "signed_state.expires_at"
+            "expires_no_later_than": "signed_state.expires_at",
+            "state_verification_precedes_cookie_selection": true,
+            "invalid_state_cookie_deletion": "none",
+            "terminal_callback_cookie_action": "consume_and_delete_matching_flow_only"
           }
         },
         "callback_checks": { "type": "array", "minItems": 5, "uniqueItems": true, "items": { "type": "string" } },
@@ -155,10 +229,46 @@
           "const": {
             "scenario_id": "AUTH-SETUP-404",
             "actual_http_boundary": "POST /auth/show-identity/callback",
+            "components": ["local_state_signer", "backend_rs256_issuer_and_jwks", "avibe_jwt_verifier"],
             "content_type": "application/x-www-form-urlencoded",
-            "cross_site_source": "https://avibe.bot",
             "active_custom_callback_origin": "https://show.example.test",
+            "contract_evidence": "http_form_jwt_jwks_and_atomic_state_machine",
+            "browser_cookie_delivery_evidence": "future_real_browser_conformance",
             "production_conformance": "future_avibe_and_backend_implementation_lanes"
+          }
+        },
+        "consumption_store": {
+          "const": {
+            "key_fields": ["nonce", "jti"],
+            "consume_operation": "atomic_compare_absent_then_insert",
+            "retention_deadline": "max_signed_state_or_assertion_expiry_plus_verifier_clock_skew",
+            "same_callback_race_successes": 1
+          }
+        },
+        "concurrent_flow_state_machine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["flow_identity", "independent_same_host_flows", "terminal_callback_affects_other_flows", "cases"],
+          "properties": {
+            "flow_identity": {"const": ["verified_signed_nonce", "cookie_name", "cookie_secret_hash", "jti"]},
+            "independent_same_host_flows": {"const": true},
+            "terminal_callback_affects_other_flows": {"const": false},
+            "cases": {
+              "type": "array",
+              "minItems": 9,
+              "maxItems": 9,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "sequence", "successes", "remaining_cookies"],
+                "properties": {
+                  "id": {"type": "string", "pattern": "^FLOW-[A-Z0-9-]+$"},
+                  "sequence": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                  "successes": {"type": "array", "items": {"enum": ["a", "b"]}},
+                  "remaining_cookies": {"type": "array", "items": {"enum": ["a", "b"]}}
+                }
+              }
+            }
           }
         }
       }
@@ -178,7 +288,7 @@
         "start": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_hostname", "allowed_callback_hostnames", "nonce", "signed_state_valid", "correlation_cookie", "correlation_cookie_sha256", "signed_state_expires_at", "correlation_cookie_expires_at"],
+          "required": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_hostname", "allowed_callback_hostnames", "nonce", "signed_state_valid", "correlation_cookie_name", "correlation_cookie", "correlation_cookie_sha256", "signed_state_expires_at", "correlation_cookie_expires_at"],
           "properties": {
             "instance_id": { "type": "string", "minLength": 3 },
             "page_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id" },
@@ -188,6 +298,7 @@
             "allowed_callback_hostnames": { "const": ["alice.example.test", "show.example.test"] },
             "nonce": { "type": "string", "minLength": 20 },
             "signed_state_valid": { "const": true },
+            "correlation_cookie_name": {"type": "string", "pattern": "^__Secure-avibe_show_identity_c_[A-Za-z0-9_-]+$"},
             "correlation_cookie": { "type": "string", "minLength": 20 },
             "correlation_cookie_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "signed_state_expires_at": { "type": "integer", "minimum": 1 },
@@ -197,19 +308,19 @@
         "callback": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["http_method", "delivery", "assertion_location", "callback_url", "content_type", "cross_site_source", "assertion_format", "assertion_valid", "instance_id", "nonce", "jti", "correlation_cookie", "verified_email", "resolved_page_id", "resolved_share_id", "resolved_audience_revision", "current_local_emails", "outcome"],
+          "required": ["http_method", "delivery", "assertion_location", "callback_url", "content_type", "assertion_format", "assertion_valid", "instance_id", "nonce", "jti", "correlation_cookie_name", "correlation_cookie", "verified_email", "resolved_page_id", "resolved_share_id", "resolved_audience_revision", "current_local_emails", "outcome"],
           "properties": {
             "http_method": { "const": "POST" },
             "delivery": { "const": "form_post" },
             "assertion_location": { "const": "form_body" },
             "callback_url": { "const": "https://show.example.test/auth/show-identity/callback" },
             "content_type": { "const": "application/x-www-form-urlencoded" },
-            "cross_site_source": { "const": "https://avibe.bot" },
-            "assertion_format": { "const": "short_lived_signed_identity_assertion" },
+            "assertion_format": { "const": "rfc7519_compact_jwt_jws" },
             "assertion_valid": { "const": true },
             "instance_id": { "type": "string", "minLength": 3 },
             "nonce": { "type": "string", "minLength": 20 },
             "jti": { "type": "string", "minLength": 20 },
+            "correlation_cookie_name": {"type": "string", "pattern": "^__Secure-avibe_show_identity_c_[A-Za-z0-9_-]+$"},
             "correlation_cookie": { "type": "string", "minLength": 20 },
             "verified_email": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/normalized_email" },
             "resolved_page_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id" },
