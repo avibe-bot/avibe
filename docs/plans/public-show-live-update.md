@@ -536,25 +536,40 @@ unclassified error is application-authored. This reduced compatibility surface i
 temporary because the capability ships with the bundled Runtime.
 
 Vite's native `/@fs/<absolute-path>` form cannot cross that shared boundary.
-When a shared transform references an allowed absolute file, Runtime opens it
-through a confinement-safe root descriptor: resolution cannot escape the selected
-allowed root or traverse a symlink prohibited by the existing policy, the final
-descriptor is verified against the allowed-root and sensitive-segment policy, and
-bounded bytes are copied into a namespace-owned immutable snapshot.
-Runtime compares descriptor metadata before and after the copy and rejects a file
-that changes during capture. It then allocates a stable opaque handle from a
-Runtime-process secret, the Session, the current share generation, the namespace,
-and the snapshot digest, not from a pathname.
+When a shared Vite resolve produces an allowed absolute request ID, Runtime retains
+its complete transform identity server-side: the resolved pathname, query-qualified
+loader mode such as `?raw` or `?worker`, importer identity, and representation type.
+It opens the file through a confinement-safe root descriptor: resolution cannot
+escape the selected allowed root or traverse a symlink prohibited by the existing
+policy, the final descriptor is verified against the allowed-root and
+sensitive-segment policy, and bounded bytes are copied into a namespace-owned
+immutable snapshot. Runtime compares descriptor metadata before and after the copy
+and rejects a file that changes during capture. It then binds the snapshot and
+transform identity to a namespace-local virtual module ID; neither that ID nor its
+browser handle is derived from or reveals the pathname.
+
+An opaque handle never means "serve the captured source bytes". Registry entries are
+typed as either an immutable asset response or an immutable virtual-module request.
+Assets may use their captured bytes and verified media type directly. Modules,
+stylesheets, and query-qualified loaders run through the same Vite
+resolve/load/transform semantics as their original request, but a context-scoped
+virtual-module plugin supplies the captured bytes and resolves every discovered
+dependency through the same confinement, snapshot, and opaque-handle pipeline. The
+query, importer conditions, transformed body, content type, safe response headers,
+provenance, and rewritten dependency handles are committed together. A transform
+that asks for an uncaptured mutable path, cannot resolve a nested dependency, or
+cannot produce a complete browser response fails closed; it cannot fall back to raw
+source delivery.
 
 The browser receives only
 `/p/<share>/__avibe_asset/<namespace>/<handle>`; Runtime's process-local registry
-serves the immutable snapshot inside the matching shared namespace and never
-reopens the source path for a handle read. Replacing the original file or any
-parent with a symlink therefore cannot retarget an existing handle. A later valid
-source edit creates a new snapshot in a new transformed graph; a newly unsafe path
-is rejected before allocation. A browser cannot submit a raw `/@fs/` path or mint a
-mapping, handles reveal no path bytes, and share rotation or Runtime replacement
-prevents new admission into the old namespace.
+serves the committed asset or transformed response inside the matching shared
+namespace and never reopens the source path for a handle read. Replacing the original
+file or any parent with a symlink therefore cannot retarget an existing handle. A
+later valid source edit creates a new snapshot and transformed response in a new
+graph; a newly unsafe path is rejected before allocation. A browser cannot submit a
+raw `/@fs/` path or mint a mapping, handles reveal no path bytes, and share rotation
+or Runtime replacement prevents new admission into the old namespace.
 
 Each transformed entry graph owns both a 30-minute idle namespace lease and a
 non-renewable two-hour absolute lifetime measured from admission. A successful
@@ -988,6 +1003,10 @@ limited route.
 - unprivileged documents reference only shared paths, opaque immutable-snapshot
   handles, and immutable shims; raw `/@fs/`, host paths, and Session paths are
   denied
+- absolute TSX, CSS, `?raw`, and `?worker` dependencies are captured into virtual
+  modules and retain their original Vite transform semantics; recursively emitted
+  imports receive handles from the same namespace, and no handle returns raw
+  non-browser source as a successful response
 - Runtime response provenance preserves authored application errors while every
   development diagnostic receives a fixed shared body; unsafe `SourceMap`,
   `X-SourceMap`, `Content-Location`, `Refresh`, `Location`, and `Link` values are
@@ -1004,7 +1023,8 @@ limited route.
   the private-editor reserve, and returns sanitized overload responses when nothing
   is reclaimable
 - after handle allocation, replace the source or any parent with an out-of-root or
-  sensitive symlink; the old handle serves only its captured immutable bytes, a new
+  sensitive symlink; an asset handle serves only its captured bytes, a module handle
+  serves only the response transformed from its captured virtual graph, a new
   allocation is denied, and no handle read reopens the pathname
 - `/p/<share>/__vite_hmr` rejects every connection
 - private document/module requests retain resource-reader ACL; private HMR repeats
@@ -1040,7 +1060,7 @@ limited route.
 | `SHOW-LIVE-013` | Shared content registers a share-scoped Service Worker, then the editor opens the link | No private bytes are served at `/p/`; any network-reached redirect lands outside the worker scope at `/show/`, and cached old bytes are recorded as a client-cache limitation |
 | `SHOW-LIVE-014` | Avibe runs against a Runtime without `show-context-key-v1` | Every `/p/` viewer stays on the compatibility no-HMR path; the existing single-context limitation is explicit and cannot be mistaken for negotiated isolation |
 | `SHOW-LIVE-015` | The first capability probe times out while the new Runtime app endpoint is ready | The request carries `shared` and succeeds, a later bounded retry detects support, and the next eligible navigation redirects without restart |
-| `SHOW-LIVE-016` | Shared transforms emit nested `/@fs/` imports, URL-bearing headers, and Vite errors | Only leased context-bound handles and safe rewritten headers reach the browser; every development error is fixed and path-free |
+| `SHOW-LIVE-016` | Shared transforms emit nested `/@fs/` TSX, CSS, `?raw`, and `?worker` imports, URL-bearing headers, and Vite errors | Each handle serves a complete browser response transformed from the immutable virtual graph with recursively rewritten same-namespace dependencies; raw source, paths, and development errors never reach the browser |
 | `SHOW-LIVE-017` | Startup reconciliation and `vibe show update` prewarm shared and private graphs | Each request carries its typed context; a missing/invalid context fails before creating or rebasing either graph |
 | `SHOW-LIVE-018` | Direct CLI changes an active page to offline with private HMR connected | The coalesced durable monitor closes every socket for the Session within five seconds without relying on an in-process event |
 | `SHOW-LIVE-019` | Public changes to limited and the cloud write fails | The target limited mode and original binding remain durable with the gate closed; neither anonymous nor stale listed viewers can read until reconciliation succeeds |
@@ -1129,9 +1149,12 @@ The design is implemented when all of the following are true:
   editor, and fails closed for unclassified errors or graphs that need raw absolute
   paths; missing provenance cannot expose a development diagnostic.
 - Shared file references use leased context-bound opaque handles backed by bounded
-  immutable snapshots captured through confinement-safe opens; handle reads never
-  reopen mutable pathnames. Raw absolute paths, unsafe URL-bearing response headers,
-  and Runtime development diagnostics never reach the browser.
+  immutable snapshots captured through confinement-safe opens. Asset handles serve
+  captured bytes, while module, stylesheet, and query-qualified handles serve
+  committed responses produced through context-scoped virtual-module transforms;
+  handle reads never reopen mutable pathnames or return raw module source. Raw
+  absolute paths, unsafe URL-bearing response headers, and Runtime development
+  diagnostics never reach the browser.
 - The access-schema migration is restartable, idempotent, revision-bound, and
   explicitly one-way. Avibe never starts an older executable against migrated state;
   no legacy audience projection or cross-version writer is part of the contract.
