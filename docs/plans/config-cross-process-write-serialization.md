@@ -38,13 +38,13 @@ read-merge-write cycle); a snapshot overwrite silently reverts them.
 
 | Option | Verdict |
 | --- | --- |
-| **Patch writes** — typed mutators (`update_config_fields`) / payload merges (`save_config`) | ✅ **Ratified.** The fix. |
+| **Patch writes** — typed mutators (`update_config_fields`) | ✅ **Ratified.** The fix. `save_config` is NOT yet patch-shaped: its base snapshot loads outside the file lock and several callers pass full snapshots — its read-merge-write cycle moves to stage ③ below. |
 | Cross-process flock around whole RMW (generalize Memory transaction) | ✅ Landed as the serialization substrate (#1465); not sufficient alone — still needs patch-shaped writers. |
 | Single-writer via controller IPC (declarative patches over the dispatch socket) | ⏸️ Parked. Removes the need for cross-process discipline AND would simplify the controller-memory reconciliation dance, but patch semantics + flock already eliminate the race; revisit when reconciliation pain grows. |
 | Split `config.json` into per-section files | ❌ Rejected. Shipped-surface migration for a blast-radius reduction only — same-section races (codex auth vs marker, the confirmed conflict pair) remain. |
 | Dirty-tracking `save()` (auto-merge changed fields) | ❌ Rejected. Invasive across all config dataclasses; in-place mutations of dict/list fields bypass `__setattr__` — correctness holes. |
 | Move config into SQLite | ❌ Rejected. Disproportionate. |
-| CI grep guard + AGENTS.md convention ("direct load→save is a defect") | ❌ Dropped (owner). Detail belongs at the chokepoint: the `V2Config.save()` / `update_config_fields` docstrings already carry the warning where writers browse. No global doc, no guard. |
+| CI grep guard + AGENTS.md convention ("direct load→save is a defect") | ❌ Dropped (owner). Detail belongs at the chokepoint: the `V2Config.save()` and `update_config_fields` docstrings carry the warning where writers browse. No global doc, no guard. |
 
 ## Landed
 
@@ -55,14 +55,25 @@ read-merge-write cycle); a snapshot overwrite silently reverts them.
 
 ## Remaining — stage ③ (the close-out)
 
-Migrate the section writers to `update_config_fields`:
+Migrate every remaining direct writer to `update_config_fields`:
 
-1. `core/handlers/model_hub/service.py` — model_hub section save
-2. `vibe/api.py` codex auth save cluster (`save_codex_auth` mirror write)
-3. `vibe/api.py` claude auth save cluster
-4. `vibe/api.py` remove-key V2Config clear
-5. `core/agent_auth_service.py` auth-mode persist (3 sites; the marker
-   pre-persist folds into the transaction, removing the two-step dance)
+1. `vibe/api.py` `save_config` — serialize the WHOLE read-merge-write
+   cycle (base load currently happens outside the file lock, so a
+   controller write between load and save is overwritten); callers that
+   pass a full snapshot rather than a partial payload are reclassified
+   as snapshot overwrites and narrowed to the fields they own.
+2. `core/handlers/model_hub/service.py` — model_hub section save.
+3. `vibe/api.py` codex auth save mirror + claude auth save mirror.
+4. `vibe/api.py` remove-key V2Config clear.
+5. `core/agent_auth_service.py` auth-mode persist (3 sites). The
+   relay-marker pre-persist boundary is **retained as-is**: the marker
+   must be durable BEFORE `_clear_codex_api_key_for_oauth()` destroys
+   its only on-disk source, while the auth-mode mirror must only land
+   AFTER the external codex files updated — one transaction cannot
+   preserve both failure guarantees across an external-file write.
+6. `vibe/api.py:7047` agent install cli_path update,
+   `vibe/api.py:7325` avault install cli_path update,
+   `vibe/api.py:11900` opencode default-provider clear.
 
 Non-goals: no schema change, no file split, no new IPC, no guards.
 

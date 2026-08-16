@@ -3530,7 +3530,19 @@ class V2Config:
         return config
 
     def save(self, config_path: Optional[Path] = None) -> None:
-        """Persist non-Memory changes while preserving the durable Memory unit."""
+        """Persist non-Memory changes while preserving the durable Memory unit.
+
+        WARNING — cross-process lost updates: this writes the object's
+        FULL snapshot. If this ``V2Config`` was loaded earlier (another
+        request, minutes ago) while a different process (UI API server
+        vs controller, both write this file) committed changes since,
+        saving here silently reverts them. UI/controller writers must
+        instead declare their change through ``update_config_fields``
+        (see docs/plans/config-cross-process-write-serialization.md),
+        which loads fresh inside the cross-process file lock and only
+        applies the caller's fields. Direct load → mutate → ``save()``
+        cycles are only acceptable in single-writer contexts.
+        """
 
         if self.load_warnings:
             raise ValueError(
