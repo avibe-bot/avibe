@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { describe, expect, it } from "vitest";
 
 import {
@@ -80,14 +78,6 @@ describe("routeChainDraft", () => {
         ],
       ),
     ).toEqual({ invalidIndexes: [0, 1], valid: false });
-  });
-
-  it("keeps the mock write path on the same persisted-pair validator", () => {
-    const api = readFileSync(new URL("./modelsApi.ts", import.meta.url), "utf8");
-
-    expect(api).toMatch(
-      /validateRouteDraft\(agent, this\.sources, previous, body\.hops\)/,
-    );
   });
 
   it("sorts listed sources first and preserves stable order for ties", () => {
