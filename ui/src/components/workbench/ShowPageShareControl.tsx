@@ -48,12 +48,19 @@ export const ShowPageShareControl: React.FC<{
   // inert while it is open so an outside tap there falls through to the parent
   // document and Radix can dismiss (a tap inside an iframe never reaches us).
   onOpenChange?: (open: boolean) => void;
+  // Keep a single icon trigger at every viewport size (window title bars),
+  // matching the compact annotate control's chrome styling.
+  compact?: boolean;
+  // Associate portalled popover focus with its owning app window.
+  ownerWindowId?: string;
 }> = ({
   sessionId,
   initialAccess = null,
   canManageInstance = false,
   onPayloadChange,
   onOpenChange,
+  compact = false,
+  ownerWindowId,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -283,7 +290,9 @@ export const ShowPageShareControl: React.FC<{
           type="button"
           variant="ghost"
           size="icon"
-          className="size-7 shrink-0"
+          className={compact
+            ? 'size-6 shrink-0 rounded-md text-muted hover:bg-foreground/[0.06] hover:text-foreground'
+            : 'size-7 shrink-0'}
           aria-label={t('chat.showPage.share')}
           title={t('chat.showPage.share')}
         >
@@ -293,6 +302,7 @@ export const ShowPageShareControl: React.FC<{
       <PopoverContent
         align="end"
         className="w-80 space-y-3"
+        data-window-owner-id={ownerWindowId}
         onInteractOutside={(event) => {
           if (workspaceConfirmationOpen) event.preventDefault();
         }}
