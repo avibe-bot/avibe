@@ -131,6 +131,51 @@ describe('useShowPageAnnotation host Escape forwarding', () => {
     expect(frameKeydown).not.toHaveBeenCalled();
   });
 
+  it('leaves Escape with a target inside a custom menu', () => {
+    const { iframe } = mountBridge();
+    const frameKeydown = listenForFrameKeydown(iframe);
+    reportState(iframe, true);
+
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    const menuItem = document.createElement('button');
+    menu.append(menuItem);
+    document.body.append(menu);
+
+    dispatchParentKeydown(menuItem);
+
+    expect(frameKeydown).not.toHaveBeenCalled();
+  });
+
+  it('leaves Escape with an expanded popup trigger', () => {
+    const { iframe } = mountBridge();
+    const frameKeydown = listenForFrameKeydown(iframe);
+    reportState(iframe, true);
+
+    const trigger = document.createElement('button');
+    trigger.setAttribute('aria-expanded', 'true');
+    trigger.setAttribute('aria-haspopup', 'menu');
+    document.body.append(trigger);
+
+    dispatchParentKeydown(trigger);
+
+    expect(frameKeydown).not.toHaveBeenCalled();
+  });
+
+  it('forwards Escape from an expanded non-popup control', () => {
+    const { iframe } = mountBridge();
+    const frameKeydown = listenForFrameKeydown(iframe);
+    reportState(iframe, true);
+
+    const accordionTrigger = document.createElement('button');
+    accordionTrigger.setAttribute('aria-expanded', 'true');
+    document.body.append(accordionTrigger);
+
+    dispatchParentKeydown(accordionTrigger);
+
+    expect(frameKeydown).toHaveBeenCalledTimes(1);
+  });
+
   it('forwards Escape from the non-modal pinned Show Page window container', () => {
     const { iframe } = mountBridge();
     const frameKeydown = listenForFrameKeydown(iframe);
