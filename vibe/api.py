@@ -8541,6 +8541,7 @@ def startup_show_page_prewarm_targets(limit: int | None = None) -> dict:
         return {"ok": True, "limit": resolved_limit, "pages": []}
 
     from core.show_pages import ShowPageStore, VISIBILITY_PRIVATE, VISIBILITY_PUBLIC
+    from core.show_runtime import ShowRuntimeContext
     from storage.pagination import PageRequest
 
     store = ShowPageStore()
@@ -8556,12 +8557,14 @@ def startup_show_page_prewarm_targets(limit: int | None = None) -> dict:
     pages = []
     for page in candidates[:resolved_limit]:
         base_path = f"/p/{page.share_id}/" if page.visibility == VISIBILITY_PUBLIC and page.share_id else None
+        context = ShowRuntimeContext.SHARED if base_path else ShowRuntimeContext.PRIVATE
         pages.append(
             {
                 "session_id": page.session_id,
                 "visibility": page.visibility,
                 "updated_at": page.updated_at,
                 "base_path": base_path,
+                "context": context.value,
             }
         )
     return {"ok": True, "limit": resolved_limit, "pages": pages}

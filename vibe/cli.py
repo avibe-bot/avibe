@@ -12780,13 +12780,17 @@ def cmd_show_list(args):
 
 def cmd_show_path(args):
     from core.show_pages import ensure_show_page_dir
+    from core.show_runtime import ShowRuntimeContext
 
     store = _load_show_page_store()
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show path --help")
         page = store.ensure(session_id)
         page_dir = ensure_show_page_dir(session_id)
-        _prewarm_show_page_session_best_effort(session_id)
+        _prewarm_show_page_session_best_effort(
+            session_id,
+            context=ShowRuntimeContext.PRIVATE.value,
+        )
         payload = _show_page_result(
             page,
             message=f"Show Page workspace is ready at {page_dir}.",
@@ -12805,8 +12809,13 @@ def cmd_show_path(args):
         store.close()
 
 
-def _prewarm_show_page_session_best_effort(session_id: str, *, base_path: str | None = None) -> None:
-    if _request_show_page_prewarm_best_effort(session_id, base_path=base_path) is None:
+def _prewarm_show_page_session_best_effort(
+    session_id: str,
+    *,
+    context: str,
+    base_path: str | None = None,
+) -> None:
+    if _request_show_page_prewarm_best_effort(session_id, context=context, base_path=base_path) is None:
         logger.debug("Show Page session prewarm skipped for %s", session_id)
 
 
@@ -12850,6 +12859,7 @@ def cmd_show_status(args):
 
 def cmd_show_update(args):
     from core.show_pages import public_url, show_page_payload
+    from core.show_runtime import ShowRuntimeContext
 
     store = _load_show_page_store()
     try:
@@ -12901,7 +12911,12 @@ def cmd_show_update(args):
 
         if updated.visibility != "offline":
             base_path = f"/p/{updated.share_id}/" if updated.visibility == "public" and updated.share_id else None
-            _prewarm_show_page_session_best_effort(updated.session_id, base_path=base_path)
+            context = ShowRuntimeContext.SHARED if base_path else ShowRuntimeContext.PRIVATE
+            _prewarm_show_page_session_best_effort(
+                updated.session_id,
+                context=context.value,
+                base_path=base_path,
+            )
         payload = _show_page_result(updated, message=message, extra=extra)
         if getattr(args, "json", False):
             _print_json(payload)
@@ -13020,13 +13035,20 @@ def _show_prewarm_target_matches_ui_pid(url: str, expected_ui_pid: int | None) -
     return actual_ui_pid == expected_ui_pid
 
 
-def _request_show_page_prewarm_best_effort(session_id: str, *, base_path: str | None = None) -> dict | None:
+def _request_show_page_prewarm_best_effort(
+    session_id: str,
+    *,
+    context: str,
+    base_path: str | None = None,
+) -> dict | None:
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
 
     targets = _local_show_prewarm_targets(session_id)
     if not targets:
         return None
-    payload = {"base_path": base_path} if base_path else {}
+    payload = {"context": context}
+    if base_path:
+        payload["base_path"] = base_path
     body = json.dumps(payload).encode("utf-8")
     headers = {
         "Content-Type": "application/json",

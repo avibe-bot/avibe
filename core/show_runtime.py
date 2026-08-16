@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import platform
+import random
 import re
 import shlex
 import shutil
@@ -15,12 +16,14 @@ import signal
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from sysconfig import get_platform
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 
@@ -48,6 +51,51 @@ _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
 _PREWARM_MAX_DEPTH = 4
+SHOW_RUNTIME_PROTOCOL_VERSION = 1
+SHOW_RUNTIME_PROTOCOL_HEADER = "X-Avibe-Show-Protocol"
+SHOW_RUNTIME_CONTEXT_HEADER = "X-Avibe-Show-Context"
+SHOW_RUNTIME_CONTEXT_KEY_FEATURE = "show-context-key-v1"
+_CAPABILITY_RETRY_BASE_SECONDS = 0.25
+_CAPABILITY_RETRY_MAX_SECONDS = 5.0
+_CAPABILITY_RETRYABLE_STATUS_CODES = {408, 429}
+_MISSING = object()
+
+
+class ShowRuntimeContext(str, Enum):
+    PRIVATE = "private"
+    SHARED = "shared"
+
+
+class ShowRuntimeContextCapability(str, Enum):
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    TRANSIENT_UNKNOWN = "transient-unknown"
+
+
+@dataclass(frozen=True)
+class ShowRuntimeProtocolEnvelope:
+    context: ShowRuntimeContext
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.context, ShowRuntimeContext):
+            raise TypeError("Show Runtime protocol 1 requires an explicit private or shared context")
+
+    def headers(self, forwarded: Mapping[str, str] | None = None) -> dict[str, str]:
+        blocked = {SHOW_RUNTIME_PROTOCOL_HEADER.lower(), SHOW_RUNTIME_CONTEXT_HEADER.lower()}
+        headers = {
+            key: value
+            for key, value in (forwarded or {}).items()
+            if key.lower() not in blocked
+        }
+        headers[SHOW_RUNTIME_PROTOCOL_HEADER] = str(SHOW_RUNTIME_PROTOCOL_VERSION)
+        headers[SHOW_RUNTIME_CONTEXT_HEADER] = self.context.value
+        return headers
+
+
+@dataclass(frozen=True)
+class ShowRuntimeWebSocketTarget:
+    url: str
+    headers: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -139,6 +187,12 @@ class ShowRuntimeManager:
         self._process: subprocess.Popen[str] | None = None
         self._base_url: str | None = None
         self._lock = asyncio.Lock()
+        self._capability_lock = asyncio.Lock()
+        self._capability_identity: tuple[str, int | None] | None = None
+        self._context_key_capability: ShowRuntimeContextCapability | None = None
+        self._capability_retry_deadline = 0.0
+        self._capability_retry_attempt = 0
+        self._capability_generation = 0
 
     async def ensure(self) -> ShowRuntimeResult:
         if self._base_url and await self._healthy(self._base_url):
@@ -195,26 +249,62 @@ class ShowRuntimeManager:
         method: str,
         path: str,
         *,
+        envelope: ShowRuntimeProtocolEnvelope,
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
     ) -> httpx.Response:
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
             raise RuntimeError(ready.reason or "show runtime unavailable")
+        await self._negotiate_context_key_capability(ready.base_url)
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
-            return await client.request(method, f"{ready.base_url}{path}", headers=headers, content=body)
+            return await client.request(
+                method,
+                f"{ready.base_url}{path}",
+                headers=envelope.headers(headers),
+                content=body,
+            )
 
-    async def prewarm_session(self, session_id: str, *, base_path: str | None = None) -> ShowRuntimeResult:
+    async def request_global(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: bytes | None = None,
+    ) -> httpx.Response:
+        """Request a capability-independent Runtime resource without an app context."""
+        ready = await self.ensure()
+        if not ready.available or not ready.base_url:
+            raise RuntimeError(ready.reason or "show runtime unavailable")
+        blocked = {SHOW_RUNTIME_PROTOCOL_HEADER.lower(), SHOW_RUNTIME_CONTEXT_HEADER.lower()}
+        forwarded = {
+            key: value
+            for key, value in (headers or {}).items()
+            if key.lower() not in blocked
+        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            return await client.request(method, f"{ready.base_url}{path}", headers=forwarded, content=body)
+
+    async def prewarm_session(
+        self,
+        session_id: str,
+        *,
+        context: ShowRuntimeContext,
+        base_path: str | None = None,
+    ) -> ShowRuntimeResult:
         session_part = urllib.parse.quote(session_id, safe="")
         runtime_path = f"/sessions/{session_part}/app/"
         headers = {"x-vibe-show-base": base_path} if base_path else None
+        envelope = ShowRuntimeProtocolEnvelope(context)
         try:
-            response = await self.request("GET", runtime_path, headers=headers)
+            response = await self.request("GET", runtime_path, envelope=envelope, headers=headers)
             if response.status_code >= 500:
                 return ShowRuntimeResult(False, reason=f"session_prewarm_failed:{response.status_code}")
             result = await self._prewarm_session_module_graph(
                 session_id,
                 runtime_path=runtime_path,
+                envelope=envelope,
                 headers=headers,
                 seed_responses=[(runtime_path, response)],
                 base_path=base_path,
@@ -230,6 +320,7 @@ class ShowRuntimeManager:
         session_id: str,
         *,
         runtime_path: str,
+        envelope: ShowRuntimeProtocolEnvelope,
         headers: dict[str, str] | None,
         seed_responses: list[tuple[str, httpx.Response]],
         base_path: str | None,
@@ -252,7 +343,7 @@ class ShowRuntimeManager:
             if path in visited or depth > _PREWARM_MAX_DEPTH:
                 continue
             visited.add(path)
-            response = await self.request("GET", path, headers=headers)
+            response = await self.request("GET", path, envelope=envelope, headers=headers)
             if response.status_code >= 500:
                 return ShowRuntimeResult(False, reason=f"session_prewarm_module_failed:{response.status_code}:{path}")
             if response.status_code >= 400:
@@ -269,11 +360,107 @@ class ShowRuntimeManager:
                     pending.append((import_path, depth + 1))
         return ShowRuntimeResult(True, self._base_url)
 
-    async def websocket_url(self, path: str) -> str:
+    async def websocket_target(
+        self,
+        path: str,
+        *,
+        envelope: ShowRuntimeProtocolEnvelope,
+    ) -> ShowRuntimeWebSocketTarget:
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
             raise RuntimeError(ready.reason or "show runtime unavailable")
-        return f"{ready.base_url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1)}{path}"
+        await self._negotiate_context_key_capability(ready.base_url)
+        url = f"{ready.base_url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1)}{path}"
+        return ShowRuntimeWebSocketTarget(url=url, headers=envelope.headers())
+
+    async def context_key_capability(self) -> ShowRuntimeContextCapability:
+        ready = await self.ensure()
+        if not ready.available or not ready.base_url:
+            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+        return await self._negotiate_context_key_capability(ready.base_url)
+
+    async def _negotiate_context_key_capability(
+        self,
+        base_url: str,
+    ) -> ShowRuntimeContextCapability:
+        async with self._capability_lock:
+            identity = self._runtime_identity(base_url)
+            if identity != self._capability_identity:
+                self._clear_capability_state(identity=identity)
+
+            if self._context_key_capability in {
+                ShowRuntimeContextCapability.SUPPORTED,
+                ShowRuntimeContextCapability.UNSUPPORTED,
+            }:
+                return self._context_key_capability
+
+            now = time.monotonic()
+            if (
+                self._context_key_capability is ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+                and now < self._capability_retry_deadline
+            ):
+                return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+
+            generation = self._capability_generation
+            outcome = await self._probe_context_key_capability(base_url)
+            if generation != self._capability_generation or identity != self._runtime_identity(base_url):
+                return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+
+            self._context_key_capability = outcome
+            if outcome is ShowRuntimeContextCapability.TRANSIENT_UNKNOWN:
+                self._capability_retry_attempt += 1
+                self._capability_retry_deadline = time.monotonic() + _show_runtime_capability_retry_delay(
+                    self._capability_retry_attempt
+                )
+            else:
+                self._capability_retry_attempt = 0
+                self._capability_retry_deadline = 0.0
+            return outcome
+
+    async def _probe_context_key_capability(self, base_url: str) -> ShowRuntimeContextCapability:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=0.5)) as client:
+                response = await client.get(f"{base_url}/capabilities")
+        except (httpx.TimeoutException, httpx.TransportError):
+            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+
+        if response.status_code == 404:
+            return ShowRuntimeContextCapability.UNSUPPORTED
+        if response.status_code in _CAPABILITY_RETRYABLE_STATUS_CODES or response.status_code >= 500:
+            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+        if not 200 <= response.status_code < 300:
+            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+        try:
+            payload = response.json()
+        except (UnicodeDecodeError, ValueError):
+            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+        if not isinstance(payload, dict):
+            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+
+        protocol = payload.get("protocol", _MISSING)
+        features = payload.get("features", _MISSING)
+        if protocol is not _MISSING and (isinstance(protocol, bool) or not isinstance(protocol, int)):
+            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+        if features is not _MISSING and (
+            not isinstance(features, list) or any(not isinstance(feature, str) for feature in features)
+        ):
+            return ShowRuntimeContextCapability.TRANSIENT_UNKNOWN
+        if protocol == SHOW_RUNTIME_PROTOCOL_VERSION and SHOW_RUNTIME_CONTEXT_KEY_FEATURE in (
+            features if isinstance(features, list) else []
+        ):
+            return ShowRuntimeContextCapability.SUPPORTED
+        return ShowRuntimeContextCapability.UNSUPPORTED
+
+    def _runtime_identity(self, base_url: str) -> tuple[str, int | None]:
+        process = self._process
+        return base_url, getattr(process, "pid", None) if process is not None else None
+
+    def _clear_capability_state(self, *, identity: tuple[str, int | None] | None = None) -> None:
+        self._capability_identity = identity
+        self._context_key_capability = None
+        self._capability_retry_deadline = 0.0
+        self._capability_retry_attempt = 0
+        self._capability_generation += 1
 
     async def _healthy(self, base_url: str) -> bool:
         try:
@@ -303,6 +490,7 @@ class ShowRuntimeManager:
         process = self._process
         self._process = None
         self._base_url = None
+        self._clear_capability_state()
         if not process or process.poll() is not None:
             return
         signal_process_tree(process, signal.SIGTERM, logger, "show runtime")
@@ -1330,8 +1518,17 @@ async def prewarm_show_runtime() -> ShowRuntimeResult:
     return await get_show_runtime_manager().ensure()
 
 
-async def prewarm_show_page_session(session_id: str, *, base_path: str | None = None) -> ShowRuntimeResult:
-    return await get_show_runtime_manager().prewarm_session(session_id, base_path=base_path)
+async def prewarm_show_page_session(
+    session_id: str,
+    *,
+    context: ShowRuntimeContext,
+    base_path: str | None = None,
+) -> ShowRuntimeResult:
+    return await get_show_runtime_manager().prewarm_session(
+        session_id,
+        context=context,
+        base_path=base_path,
+    )
 
 
 def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> None:
@@ -1427,6 +1624,12 @@ def _join_show_runtime_prewarm_path(runtime_path: str, asset_path: str, separato
     if separator:
         path = f"{path}?{query}"
     return path
+
+
+def _show_runtime_capability_retry_delay(attempt: int) -> float:
+    exponent = max(0, min(attempt - 1, 16))
+    ceiling = min(_CAPABILITY_RETRY_MAX_SECONDS, _CAPABILITY_RETRY_BASE_SECONDS * (2**exponent))
+    return ceiling * (0.5 + random.random() * 0.5)
 
 
 def _auto_install_enabled() -> bool:
