@@ -89,7 +89,7 @@ The share control exposes one mutually exclusive select:
 | `access_mode` | UI label | Share route | Read rule | Conditional UI |
 | --- | --- | --- | --- | --- |
 | `private` | Private | Disabled | Existing canonical `/show/` resource access only | No email editor or share-link controls |
-| `limited` | Limited access | `/p/<share>/` | Current, page-bound exact-email grant, or `ShowEditorCapability` | Exact-email editor and share-link controls |
+| `limited` | Limited access | `/p/<share>/` | Current, page-bound exact-email grant on this shared route, or `ShowEditorCapability` | Exact-email editor and share-link controls |
 | `public` | Fully public | `/p/<share>/` | Anyone; editors may redirect to `/show/` | Share-link controls only |
 
 The separate public-link switch is removed. The exact-email editor exists only
@@ -136,6 +136,15 @@ share-audience control and cannot satisfy the exact-email gate for a limited
 `/p/` request. Only a resource-aware editor may bypass that viewer gate by taking
 the canonical redirect.
 
+The reverse boundary is equally strict: page-email entitlement is an input only
+to the limited `/p/` shared-read gate. It is not general Show Page resource
+authority and must not make `can_use_show_page()` or any equivalent canonical
+resource check succeed. Every `/show/<session>/` document, module, API, and socket
+requires the existing owner/organization resource ACL independently of any
+`show_page_email` claim. A viewer whose only authority is the limited email list
+therefore remains on `/p/` and cannot obtain the private Vite graph by decoding
+their signed page ID and constructing a `/show/` URL.
+
 Only the page owner or existing sharing-control authority may change
 `access_mode`, the email set, or the slug. A page-bound `show_page_email` viewer
 cannot read these settings APIs, mutate the audience, load the Workbench, or
@@ -179,12 +188,12 @@ target or preserved share binding, target commitment, and phase. It never persis
 the email addresses. Before a transition whose target mode is `limited` can add,
 remove, or replace page-email authority, it also sets
 `share_admission_gate=closed_pending` in that transaction. While a limited gate is
-closed, every `/p/` read and editor redirect is denied and the page-email branch of
-the canonical `/show/` ACL rejects claims. Entry into limited commits the conservative
-target mode and preserved `share_id` together with the closed gate; an edit to an
-already limited list leaves that mode and binding intact. Public reads do not depend
-on this limited-only gate.
-Owner and organization resource ACLs on canonical `/show/` remain independent.
+closed, every `/p/` read and editor redirect is denied. Entry into limited commits
+the conservative target mode and preserved `share_id` together with the closed
+gate; an edit to an already limited list leaves that mode and binding intact.
+Public reads do not depend on this limited-only gate. Canonical `/show/` reads are
+always decided by the independent owner/organization resource ACL and never inspect
+page-email entitlement.
 
 The device then asks the backend to `commit` the prepared operation. Commit
 atomically replaces the exact-email set under the expected page `grant_revision`,
@@ -207,10 +216,14 @@ a copied SQLite database or backup exposes no deterministic verifier for guessed
 email addresses.
 If the result copy has expired after commit, the authoritative current page-grant
 read supplies the same commitment and revision proof. An unavailable, ambiguous,
-conflicting, or unpersisted result leaves the durable gate closed. A proven expired
-and uncommitted preparation may restore the prior gate only when the authoritative
-page commitment/revision still equal the recorded source; otherwise the owner must
-resubmit the target. Empty-set cleanup can retry automatically. A periodic
+conflicting, or unpersisted result leaves the durable gate closed. When an edit to
+an already limited audience is proven expired and uncommitted, the coordinator may
+reopen that unchanged limited binding only after the authoritative page
+commitment/revision equal the recorded source. An entry from `private` or `public`
+to `limited` never attempts to reconstruct its overwritten source mode or binding:
+an expired uncommitted entry remains limited with the gate closed and requires a
+new owner Apply. The owner may resubmit the limited target or explicitly choose a
+different audience. Empty-set cleanup can retry automatically. A periodic
 page-grant revision poll is recovery evidence, never the security boundary.
 
 The coordinator applies that invariant to every transition:
@@ -227,16 +240,16 @@ The coordinator applies that invariant to every transition:
    replacement. Removed and retained viewers are both denied during ambiguity;
    the reconciled revision reopens the new set together.
 4. Leaving `limited` commits `private` or `public` locally with
-   `share_admission_gate=open`. Page-email
-   claims are accepted only when the current durable mode is exactly `limited`,
-   so the local commit removes their authority from both `/p/` and `/show/`
-   before best-effort backend cleanup. Failed cleanup is retried and surfaced as
-   pending but cannot restore authority or make a committed public page unavailable.
+   `share_admission_gate=open`. Page-email claims are accepted only by `/p/` and
+   only when the current durable mode is exactly `limited`, so the local commit
+   removes their shared-route authority before best-effort backend cleanup.
+   `/show/` never accepted that authority. Failed cleanup is retried and surfaced
+   as pending but cannot restore authority or make a committed public page unavailable.
 5. Switching `private` and `public` is one local transaction. Link allocation,
    mode, revision, and old-route invalidation commit together.
 
-Every request that considers page-email authority requires active availability,
-current mode `limited`, the current share binding where applicable,
+Every `/p/` request that considers page-email authority requires active availability,
+current mode `limited`, the current share binding,
 `share_admission_gate=open`, and a signed claim `show_page_grant_revision` equal to
 the reconciled local page `grant_revision`. A change to an unrelated Instance ACL
 cannot invalidate an unchanged page grant, while a mutation of this page invalidates
@@ -253,6 +266,31 @@ comparison value only from an authenticated current-grant or committed-operation
 response. Browser input cannot supply either revision. The generic Instance
 authorization watermark remains a separate signed freshness input and never
 substitutes for the page revision.
+
+Limited-link authentication is initiated only after Avibe has resolved the current
+`/p/<share>/` binding to a Show Page. The share handler passes that server-owned
+page ID and binding to the existing login helper explicitly; the helper must not try
+to infer a page ID only from a `/show/` return path, and a browser-supplied `next`
+value can select only a safe return location. The signed OAuth state, the
+single-use server-side handshake record, and the browser-bound handshake cookie all
+carry the resolved page ID, current share binding, and safe `/p/` return target.
+The hosted authorization request receives the page ID from that bound handshake.
+
+A current generic login session does not short-circuit this flow when it lacks a
+current exact grant for the resolved limited page. Avibe performs one page-specific
+reauthorization so the hosted resolver can issue the page-scoped source, page ID,
+and grant revision together. On callback Avibe verifies the signed/state-bound page
+ID and share binding, requires any returned page-email claim to match that page,
+then re-resolves the return `/p/` route and requires it still to map to the same
+active limited page. The ordinary shared-read gate performs the final current mode,
+gate, email, and grant-revision check before returning bytes. A rotated, rebound,
+public, private, offline, unlisted, or stale result receives one generic denial and
+cannot install authority for another page. Completion without a matching page grant
+sets only a one-shot reauthorization-attempted marker that can suppress another
+redirect and produce the generic denial; the marker is never positive authority and
+is stripped from the safe return URL afterward. This is one closed-loop auth
+contract; it applies equally to the normal cookie path and the existing device-bound
+server-side handshake fallback.
 
 ### One editor capability
 
@@ -370,7 +408,7 @@ GET /p/<share>/...
      -> no: shared compatibility representation
 
 GET /show/<session>/...
-  -> existing private Show read ACL
+  -> existing private Show read ACL, evaluated without page-email entitlement
   -> canonical private Vite context
   -> editor-only HMR socket and revocation
 ```
@@ -576,14 +614,13 @@ redirect that selected `/show/`.
 That editor requirement applies to HMR, annotation writes, and the share-link
 redirect, not to ordinary private document and module reads. `/show/` keeps the
 existing owner/organization resource-reader ACL so a read-only collaborator can
-load the complete private module graph without receiving an HMR channel. Its
-page-email branch is narrower: it can authorize a read only while the current local
-mode is `limited`, the share admission gate is open, and the claim's page-scoped
-grant revision is current. A transition to `private` or `public` therefore rejects
-stale page-email cookies on the canonical path even if hosted cleanup fails. A
-downgrade from editor to an
-independently entitled resource viewer closes HMR but does not manufacture a blank
-page by denying modules that viewer is still entitled to read.
+load the complete private module graph without receiving an HMR channel. This ACL
+has no page-email branch: a `show_page_email` claim never authorizes `/show/`, even
+while the page is limited and its shared gate is open. A caller who independently
+holds resource-reader authority may use `/show/`; that decision must be recomputed
+without the page-email entitlement. A downgrade from editor to such an independently
+entitled resource viewer closes HMR but does not manufacture a blank page by denying
+modules that viewer is still entitled to read.
 
 `/p/<share>/__vite_hmr` is removed for every viewer. A redirected editor uses the
 canonical private socket, while every document that remains at `/p/` contains no
@@ -632,9 +669,10 @@ The model adds authorization routing, not a production publication pipeline:
 
 The capability decision adds one redirect round trip for an authorized share-link
 navigation. A public request without a Workbench cookie immediately stays shared.
-A limited request without a session enters the existing login flow; an authenticated
-request uses the current bounded/cached identity resolution and authorization
-revision already used by resource access.
+A limited request without a current page grant enters the page-bound login flow;
+this includes a caller with an otherwise current generic session. The flow reuses
+the existing bounded/cached identity resolution and authorization revision, but its
+signed handshake is explicitly bound to the server-resolved Show Page and share.
 
 After its one redirect, an authorized `/p/` load should have the same cold and
 warm profile as `/show/`.
@@ -673,10 +711,10 @@ request.
 | Runtime emits a development diagnostic or unsafe URL header | Preserve only a safe status class/body and filtered headers | Redacted operator-only diagnostic |
 | Legacy Runtime omits provenance or emits a graph requiring raw `@fs` paths | Preserve only a fully transformed safe success response; otherwise return a fixed path-free unavailable response | Redacted compatibility refusal reason |
 | Limited-list replacement has an ambiguous result | Keep the durable share admission gate closed across retries and restarts until read-after-write reconciliation persists the exact mutation result | Mutation ID, opaque target commitment, and redacted reconciliation state |
-| Prepared email operation expires before commit | Reopen the prior share audience only after authoritative commitment/revision proof that no commit occurred; otherwise remain closed and require target resubmission | Operation expiry and opaque target commitment |
+| Prepared email operation expires before commit | Reopen an already-limited unchanged audience only after authoritative proof that no commit occurred; an entry from private/public stays limited-and-closed and requires a new owner Apply | Operation expiry, source grant proof, and opaque target commitment |
 | Limited email removed | Reject the viewer's next network request by page grant revision; no HMR or annotation channel exists to close | Page-grant revision log |
 | Unrelated Instance authorization changes | Refresh generic session freshness without changing any page grant revision or denying an unchanged limited viewer | Instance and page revision metrics kept distinct |
-| Limited page becomes private/public while hosted cleanup fails | Reject page-email claims on both `/p/` and `/show/` from the local mode commit; keep public reads open and retry cleanup without reopening email authority | Durable audience state and cleanup-pending record |
+| Limited page becomes private/public while hosted cleanup fails | Reject page-email claims on `/p/` from the local mode commit; `/show/` remains governed only by its independent resource ACL; keep public reads open and retry cleanup without reopening email authority | Durable audience state and cleanup-pending record |
 | Audience changes while the page is offline | Keep every route disabled; run the normal coordinator and persist the future audience without temporary publication | Durable audience state and coordinator evidence |
 | Editor role revoked but read ACL remains | Close private HMR; retain entitled private document/module reads; next `/p/` navigation stays shared only if its audience read rule succeeds | Existing authorization-revision/resource-revocation log |
 | Show Page read access revoked | Close private HMR and reject later private document/module reads; `/p/` is re-evaluated independently | Existing resource-revocation log |
@@ -760,9 +798,12 @@ feature, not a prerequisite for capability-gated editor HMR.
    process-shared audience write lease, idempotent no-op and
    mutation-result/current-grant lookup, and the fail-closed access coordinator.
    Retire the independent visibility and email mutation paths after callers migrate.
-4. Make `/p/<share>/` resolve both `limited` and `public`. Add the limited login,
-   mode-scoped exact page-entitlement check on both `/p/` and `/show/`, generic
-   denial, page-grant revision check, and private/no-store response policy.
+4. Make `/p/<share>/` resolve both `limited` and `public`. Add the server-resolved,
+   page-bound limited-login handshake, page-specific reauthorization for a generic
+   session, mode-scoped exact page-entitlement check on `/p/`, generic denial,
+   page-grant revision check, and private/no-store response policy. Remove
+   page-email bypass from canonical Show resource authorization so `/show/` accepts
+   only its independent owner/organization ACL.
 5. Factor annotation authorization into the shared, resource-aware
    `ShowEditorCapability`, explicitly excluding page-email entitlement, and use
    the same result for top-level editor navigation.
@@ -862,14 +903,22 @@ limited route.
   commitment
 - seed every supported identity/resource shape and assert that `canAnnotate` and
   the share-link redirect are produced by the same editor capability
-- prove page-email entitlement can satisfy only limited read, cannot satisfy the
-  editor's resource proof, and cannot access settings, Workbench, Agents,
-  annotations, HMR, or any other Show Page
+- prove page-email entitlement can satisfy only a limited `/p/` shared read, cannot
+  satisfy canonical Show resource access or the editor's resource proof, and cannot
+  access `/show/`, settings, Workbench, Agents, annotations, HMR, or any other Show
+  Page; an independently authorized resource reader still retains `/show/` access
 - prove a real independent page editor still redirects when the same email is
   also listed
 - prove anonymous, expired, resource-forbidden, and unverifiable public
   navigations receive only the shared representation, while equivalent limited
   requests enter login or receive a generic denial with no page bytes
+- drive the real limited-link login from initial `/p/` resolution through OAuth
+  callback and the final shared read: signed state, cookie, and server-side fallback
+  bind the same server-resolved page/share; a listed viewer receives the current
+  page claim, an existing generic session is reauthorized, and rebound or unlisted
+  results receive only the generic denial; extend `AUTH-SETUP-401` in the auth/setup
+  catalog and its Show Page email harness to cover this closed loop rather than only
+  asserting a browser redirect
 - prove query parameters, headers outside the trusted identity boundary,
   annotation write tokens, subresource requests, and missing Fetch Metadata
   cannot trigger the redirect
@@ -904,17 +953,19 @@ limited route.
   local record never contains an email, a preparation never changes authority by
   itself, and the share admission gate stays closed until the exact result reconciles
 - expire prepared and committed-operation result copies, then recover from opaque
-  operation ID, target commitment, and the authoritative page grant revision; reopen the
-  prior audience only after proof that an expired operation did not commit, and
-  require resubmission without persisting removed/failed email PII otherwise
+  operation ID, target commitment, and the authoritative page grant revision;
+  reopen only an unchanged already-limited audience after proof that the operation
+  did not commit, while an entry from private/public remains limited-and-closed
+  until a new owner Apply, without persisting removed/failed email PII
 - advance the Instance-wide authorization revision for every unrelated ACL shape and
   prove an unchanged limited page remains readable, then advance that page's grant
   revision and prove every older page-email claim is rejected
 - crash a public-to-limited transition at every local and hosted boundary; `/p/`
   remains closed during ambiguity and completion preserves the exact original custom
   or generated `share_id`
-- prove a page-email cookie is rejected by both `/p/` and `/show/` immediately after
-  the local mode leaves `limited`, even while backend cleanup is unavailable
+- prove a page-email-only cookie is rejected by `/show/` in every audience mode and
+  by `/p/` immediately after the local mode leaves `limited`, even while backend
+  cleanup is unavailable
 
 ### Runtime and proxy tests
 
@@ -976,7 +1027,7 @@ limited route.
 | --- | --- | --- |
 | `SHOW-LIVE-001` | Authorized editor opens `/p/<share>/` and the Agent edits a component | The navigation redirects to `/show/`; React Fast Refresh preserves component state |
 | `SHOW-LIVE-002` | Exact-email viewer opens a limited link and the Agent edits | The viewer stays on `/p/`, has no annotation UI or HMR socket, and sees new content only after refresh |
-| `SHOW-LIVE-003` | Anonymous viewer opens the limited link, signs in with an unlisted email, then retries | Login returns to the same `/p/` route, which gives a generic denial and no page bytes |
+| `SHOW-LIVE-003` | Anonymous viewer opens the limited link, signs in with an unlisted email, then retries | The handshake stays bound to the server-resolved page and returns to the same `/p/` route, which gives one generic denial with no page bytes or login loop |
 | `SHOW-LIVE-004` | The same link changes from limited to fully public | Anonymous refresh becomes readable; listed viewers still receive no HMR or annotations |
 | `SHOW-LIVE-005` | Direct `/show/`, redirected editor `/show/`, exact-email `/p/`, and anonymous public `/p/` are open together | Both private documents keep HMR while all `/p/` traffic uses an independent shared context |
 | `SHOW-LIVE-006` | Identity resolution fails for public and limited requests | Public remains readable with no HMR; limited fails closed without leaking its audience |
@@ -985,7 +1036,7 @@ limited route.
 | `SHOW-LIVE-009` | A viewer connects directly to `/p/<share>/__vite_hmr` | The connection is rejected regardless of cookies or visibility |
 | `SHOW-LIVE-010` | Editor and shared viewers remain open through repeated edits | Context and leased-namespace counts stay bounded, private HMR remains stable, and no shared background build occurs |
 | `SHOW-LIVE-011` | A shared document starts while identity is unavailable and identity recovers during module loading | Every module stays on `/p/`; no Vite client or mixed transform graph appears |
-| `SHOW-LIVE-012` | A read-only user opens `/show/<session>/` | The complete private module graph loads, while the HMR socket is denied |
+| `SHOW-LIVE-012` | A read-only user with independent Show resource ACL opens `/show/<session>/` | The complete private module graph loads, while the HMR socket is denied |
 | `SHOW-LIVE-013` | Shared content registers a share-scoped Service Worker, then the editor opens the link | No private bytes are served at `/p/`; any network-reached redirect lands outside the worker scope at `/show/`, and cached old bytes are recorded as a client-cache limitation |
 | `SHOW-LIVE-014` | Avibe runs against a Runtime without `show-context-key-v1` | Every `/p/` viewer stays on the compatibility no-HMR path; the existing single-context limitation is explicit and cannot be mistaken for negotiated isolation |
 | `SHOW-LIVE-015` | The first capability probe times out while the new Runtime app endpoint is ready | The request carries `shared` and succeeds, a later bounded retry detects support, and the next eligible navigation redirects without restart |
@@ -995,7 +1046,7 @@ limited route.
 | `SHOW-LIVE-019` | Public changes to limited and the cloud write fails | The target limited mode and original binding remain durable with the gate closed; neither anonymous nor stale listed viewers can read until reconciliation succeeds |
 | `SHOW-LIVE-020` | Old private/public/offline rows and exact-email grants upgrade | Each page matches the migration table; a disconnected private-with-grants page stays private and pending |
 | `SHOW-LIVE-021` | A live limited-list replacement commits remotely, its response is lost, and Avibe restarts | All page-email reads remain closed until the mutation result and revision reconcile; removed viewers never regain access |
-| `SHOW-LIVE-022` | Limited changes to private while hosted cleanup is unavailable | A stale page-email cookie is rejected on both `/p/` and `/show/`; independent resource collaborators retain their canonical access |
+| `SHOW-LIVE-022` | Limited changes to private while hosted cleanup is unavailable | A stale page-email cookie is rejected on `/p/`; `/show/` continues to reject page-email-only authority while independent resource collaborators retain canonical access |
 | `SHOW-LIVE-023` | A legacy Runtime returns an unclassified transform error and a nested raw `/@fs/` import | Both responses fail closed with fixed path-free output; no host path or diagnostic reaches the browser |
 | `SHOW-LIVE-024` | An allowed source is replaced by a sensitive symlink after an opaque handle is issued | The issued handle returns only immutable captured bytes, and the changed path cannot receive a new handle |
 | `SHOW-LIVE-025` | A disconnected private-page migration is pending, then the owner chooses public and later private before reconnecting | The newer revision cancels migration; reconnect cannot allocate a slug, commit limited, or restore the old email audience |
@@ -1004,12 +1055,14 @@ limited route.
 | `SHOW-LIVE-028` | Anonymous clients keep shared pages active across more Sessions than the Runtime-wide budget | Context and memory stay under the hard limit, reclaimable shared bundles rotate, private HMR keeps its reserve, and excess shared admission is sanitized |
 | `SHOW-LIVE-029` | Limited changes to public while hosted empty-set cleanup remains unavailable | Anonymous reads start from the committed public binding, stale listed claims stay rejected, and cleanup retries do not close the public route |
 | `SHOW-LIVE-030` | A released Avibe client starts a new Runtime and sends only `x-vibe-show-base` | Entry, module, and prewarm requests retain the legacy singleton behavior; keyed isolation remains disabled until a protocol-`1` client supplies context |
-| `SHOW-LIVE-031` | A limited-list Apply crashes at every prepare/local/commit boundary and later exceeds operation retention | No local row contains an email, prepare alone never changes grants, committed state reconciles by page commitment/revision, and the prior audience reopens only after proof that an expired operation did not commit |
+| `SHOW-LIVE-031` | An already-limited list Apply crashes at every prepare/local/commit boundary and later exceeds operation retention | No local row contains an email, prepare alone never changes grants, committed state reconciles by page commitment/revision, and the unchanged limited audience reopens only after proof that an expired operation did not commit |
 | `SHOW-LIVE-032` | An offline page changes from limited to private, then prepares a future public custom slug | No route is admitted while offline; grant cleanup and the future audience converge without temporary activation |
 | `SHOW-LIVE-033` | An unrelated Instance ACL change advances the global authorization revision while a limited list is unchanged | Refreshed listed viewers remain readable at the same page grant revision; changing that page's list advances only its grant revision and rejects older claims |
-| `SHOW-LIVE-034` | A custom-slug public page crashes at every boundary while changing to limited | Every ambiguous `/p/` read is denied, and successful recovery preserves the exact slug without rotating or losing the route |
+| `SHOW-LIVE-034` | A custom-slug public page crashes at every boundary while changing to limited | Every ambiguous `/p/` read is denied, successful recovery preserves the exact slug, and a proven uncommitted expiry stays limited-and-closed until a new owner Apply |
 | `SHOW-LIVE-035` | An authorized editor uses `/p/` with a definitive legacy Runtime | The editor remains on the shared compatibility representation with annotations enabled, no HMR socket, and no private module namespace |
 | `SHOW-LIVE-036` | An attacker obtains local state for a limited page with a small email set | The stored random commitment provides no offline email-guess verifier; only the hosted trust boundary can bind it to the canonical set |
+| `SHOW-LIVE-037` | A listed viewer with only a generic session opens a limited `/p/` link and completes login | Avibe reauthorizes against the server-resolved page, validates the same page/share on callback, and serves only the shared representation with the current page grant |
+| `SHOW-LIVE-038` | A page-email-only viewer copies its signed page ID and requests `/show/<session>/` while the page remains limited | Canonical document, module, API, and HMR requests are denied; the claim remains usable only through the current limited `/p/` gate |
 
 Focused unit/contract tests, Ruff, repository CI, and local Incus browser
 regression are required. Green unit tests do not replace simultaneous editor,
@@ -1027,14 +1080,22 @@ The design is implemented when all of the following are true:
   exact page grant and fully public remains anonymously readable.
 - Page-email authority is view-only and cannot contribute evidence to
   `ShowEditorCapability`, settings, Workbench, Agents annotations, HMR, or another
-  Show Page. It authorizes page reads only while current mode is `limited`, the
-  durable share admission gate is open, and its signed page grant revision is
-  current; the Instance-wide revision is not used as that page-set version.
+  Show Page. It authorizes only `/p/` shared reads while current mode is `limited`,
+  the durable share admission gate is open, the share still resolves to that page,
+  and its signed page grant revision is current. It never contributes to canonical
+  `/show/` resource access; the Instance-wide revision is not used as the page-set
+  version.
+- A limited-link OAuth handshake is created from the server-resolved page/share,
+  carries that binding through signed state plus both handshake recovery paths,
+  reauthorizes an otherwise generic session, and validates the current binding again
+  on callback and before serving bytes.
 - Every grant-set mutation is prepared without changing authority, then closes a
   persistent non-PII local share admission gate before commit and reopens it only
   after idempotent read-after-write reconciliation; an ambiguous response, restart,
   or expired operation cannot leave stale grants usable, email targets on disk, or
-  a share binding lost.
+  a share binding lost. An expired uncommitted entry from private/public remains
+  limited-and-closed until a new owner Apply rather than guessing the overwritten
+  source audience.
 - Every current-version local audience writer uses one stable process-shared write
   lease from its authoritative precondition read through a terminal or durably
   pending state; store writes cannot bypass the lease, and local grant commitments
@@ -1054,8 +1115,9 @@ The design is implemented when all of the following are true:
 - Capability-varying responses cannot be shared across viewers by a cache.
 - Shared Service Workers cannot cache private bytes at `/p/` or control `/show/`;
   server-side revocation claims are limited to requests that reach Avibe.
-- Ordinary private module reads preserve resource-viewer access while HMR remains
-  editor-only.
+- Ordinary private module reads preserve independently authorized resource-viewer
+  access while HMR remains editor-only; page-email-only viewers are never private
+  resource viewers.
 - Runtime support is accepted only through the explicit keyed-context capability
   handshake and per-request protocol envelope; definitive mixed versions retain the
   existing compatibility limitation, while transient negotiation failures carry
