@@ -164,8 +164,12 @@ scope per instance behind them.
   `previous_key_hash` + `previous_valid_until`. Opaque key (`mak_` prefix), shown once at mint,
   SHA-256 stored — same custody discipline as device secrets. **Rotation is dual-validity**: on
   rotate, the prior key stays accepted for a 24 h grace window, because the still-running sidecar
-  and the probe-then-restart settings flow must never race the swap. There is no scheduled
-  rotation; rotation is an on-demand operation (suspected leak, hygiene).
+  and the probe-then-restart settings flow must never race the swap. Rotation retains as
+  `previous` the most-recently-**authenticated** key rather than the last-minted one: a
+  minted-but-never-used key (e.g. a lost rotation response) is discarded by the next rotation
+  without consuming the grace slot, so retrying after a lost response can never orphan the key the
+  sidecar is still using. There is no scheduled rotation; rotation is an on-demand operation
+  (suspected leak, hygiene).
 
 ### 6.2 Key custody
 
@@ -183,8 +187,9 @@ scope per instance behind them.
   `POST /api/organizations/{orgId}/model-service/verify` — one bounded probe per enabled staged
   slot (1-token chat, `"OK"` embedding, minimal ASR) through the shared egress client, allowed
   regardless of plan (the org admin exercising the org's own keys); probe calls are metered as
-  normal organization-scope usage. Ships with M1 so stage → verify → flip needs no plan flip to
-  test.
+  organization-scope usage with `probe: true` and `instance_id: null` (the caller is an admin
+  session, not an instance) — totals include them, per-instance tables exclude them. Ships with M1
+  so stage → verify → flip needs no plan flip to test.
 - **Platform admin (user session; email ∈ `PLATFORM_ADMIN_EMAILS`, new env following the
   `ORGANIZATION_CREATION_ALLOWED_EMAILS` pattern)**:
   `GET/PUT /api/admin/model-service` (platform slots + limits), `GET /api/admin/model-service/usage`
@@ -206,8 +211,10 @@ scope per instance behind them.
   voice attributes to the right instance (verify; add the claim if absent). **Claim rollout**:
   tokens lacking the claim are rejected (401) at the rewired routes; released clients self-heal —
   they refresh at half-life and re-mint once on a 401 (verified client behavior,
-  `ui/src/lib/avibeFetch.ts`), and realtime re-mints on reconnect — so the worst case is one
-  silent retry, never a broken session.
+  `ui/src/lib/avibeFetch.ts`) — the worst case on HTTP paths is one silent retry. The realtime WS
+  path has **no verified in-session retry**, so that route alone accepts claimless tokens for a
+  12 h transition window after deploy (attributed to platform scope as unattributed-legacy), then
+  enforces; every other rewired route enforces immediately.
 
 ### 6.4 Quota (platform scope only, v1)
 
@@ -220,8 +227,14 @@ per call (fixed per-capability reservation constants; realtime reserves then ext
 audio chunk), then exactly-once settlement — `usage-reported` settles actual; `usage-absent`
 charges the full reservation (usage-less providers cannot make positive quotas free);
 transport-ambiguous retains the conservative charge; certainly-not-sent releases. Limits updates
-serialize against the same quota key. **Reservation/settlement persistence failure fails closed on
-enforcement-on paths** (`model_service_unavailable`, 503); pure-telemetry event writes stay
+serialize against the same quota key. On enforcement-on paths the gateway also **bounds each
+call's theoretical maximum to its reservation** (clamping `max_tokens` / rejecting oversized
+inputs), so N admitted calls can never exceed N reservations by construction; upstream-reported
+input variance may overshoot marginally and is absorbed by the next window. **Reservation-write
+failure fails closed on enforcement-on paths** (`model_service_unavailable`, 503; no upstream call
+made). **Settlement-write failure after a completed upstream call never voids the served
+response**: the response is delivered, the un-settled reservation is later reaped as a retained
+conservative charge, and the failure is loudly surfaced. Pure-telemetry event writes stay
 fail-open per §8.3. Cloud user tokens: TTL drops 12 h → 1 h (clients already refresh at half-life);
 revocation-on-use is a recorded follow-up.
 
@@ -237,7 +250,9 @@ Every cross-cutting property has exactly one code owner; routes never re-impleme
    `readUsageSummarySnapshot`.
 3. **ModelServiceUpstreamClient** — the only egress owner: destination classification
    (allow-only-global-unicast per the IANA IPv4/IPv6 special-purpose registries; transition/tunnel
-   prefixes — NAT64 incl. local-use, 6to4, Teredo — rejected outright), connection-time pinning for
+   prefixes — NAT64 incl. local-use, 6to4, Teredo — rejected outright), **TLS-only upstreams**
+   (`https`/`wss`; plaintext rejected at validation and at connect — decrypted keys never traverse
+   cleartext), connection-time pinning for
    HTTP + redirects + WS, response/payload caps, secret scrubbing of ALL provider-controlled
    strings (incl. WS error frames and close reasons — provider error codes map to our stable codes,
    never pass through raw), and structured tri-state usage extraction
@@ -256,15 +271,20 @@ cross-scope fallback). Platform scope: existing env-driven multi-provider chain 
 internal implementation detail of the platform slots during migration. **Once a platform config is
 saved, platform cleanup is single-upstream too** — the env chain is legacy-era resilience, not
 carried into saved configs (adjudicated 2026-08-16; cleanup stays optional and degrades to the raw
-transcript). First-save materialization must preserve effective cleanup behavior for the
+transcript). While the legacy chain remains active, every provider attempt in one logical cleanup
+meters as its own usage event — failed billed attempts included. First-save materialization must
+preserve effective cleanup behavior for the
 materialized provider — dialect/endpoint equivalence proven by a regression test; the §8.1 payload
 shape is not extended for this.
 
 ## 7. Client design (`avibe`)
 
 - New resolution client: fetch `/api/v1/instances/{id}/model-service` (poll/cached + on pairing
-  events); persists mode, capability availability, `embedding_identity`, and the minted model key
-  (config-scrubbed like other secrets).
+  events); persists the server-resolved **scope** (`organization` | `platform`), capability
+  availability, `embedding_identity`, and the minted model key (config-scrubbed like other
+  secrets). The local **mode** layers the user's choice on top: `organization` scope forces cloud
+  wiring; otherwise the local choice selects `platform` (default) or `custom` — `custom` is
+  client-local and never appears in the server payload (§8.2).
 - **Memory**: in `organization`/`platform` modes, the runtime feeds the sidecar cloud endpoints +
   `mak_` key via the existing `EVEROS_*` env plumbing (`core/memory/process.py`); `custom` mode is
   the unchanged current path. Mode changes route through the existing settings-change ladder.
@@ -339,7 +359,9 @@ no longer offered and the key input becomes required.
 ```
 
 `mode` ∈ `organization | platform`. `embedding_identity` is an opaque hash of the embedding slot's
-(base_url, model); it changes iff vector-space identity changes.
+(base_url, model); it changes iff vector-space identity changes, and is `null` when the bound
+scope has no enabled embedding slot (e.g. a voice-only enterprise org) — the client then treats
+cloud memory as unavailable, matching `capabilities.embedding: false`.
 
 ### 8.3 Usage row
 
@@ -359,8 +381,10 @@ in a controlled way. Fail-closed metering is deliberately deferred to M3, when e
 ### 8.4 Error codes (stable, machine-readable `code` field)
 
 - `model_service_not_configured` (503) — resolved scope lacks an enabled slot for the capability.
-- `model_service_unavailable` (503) — quota reservation/settlement persistence failed on an
-  enforcement-on path; no upstream call made.
+- `model_service_unavailable` (503) — quota **reservation** persistence failed on an
+  enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
+  never produces this error: the response is served and the un-settled reservation is reaped as a
+  retained charge (§6.4).
 - `model_quota_exhausted` (429) — platform scope, enforcement on, cap reached. No upstream call made.
 - `model_upstream_error` (502) — upstream provider failure (message scrubbed of secrets).
 - Existing voice error codes unchanged.
@@ -381,8 +405,10 @@ in a controlled way. Fail-closed metering is deliberately deferred to M3, when e
    and nowhere else; config reads expose only `has_api_key`.
 4. The upstream model invoked is always the configured slot's model, regardless of any
    client-supplied model string.
-5. A fresh personal instance gets working voice and (post-M2) memory with zero model configuration;
-   an enterprise member instance renders no manual model-configuration affordance.
+5. A fresh personal instance **paired with Avibe Cloud** gets working voice and (post-M2) memory
+   with zero model configuration; unpaired installations keep today's behavior (cloud voice
+   unavailable, memory manual-only); an enterprise member instance renders no manual
+   model-configuration affordance.
 6. Released voice clients keep working unchanged across the M1 rewiring (device-secret path,
    cloud-token path, realtime WS).
 7. `embedding_identity` changes iff the embedding slot's (base_url, model) changes, and every
