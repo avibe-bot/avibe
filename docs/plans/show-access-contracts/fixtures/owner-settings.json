@@ -1,55 +1,89 @@
 {
-  "schema_version": 1,
-  "fixtures": [
+  "schema_version": 2,
+  "allowed_cases": [
     {
-      "id": "SETTINGS-LIMITED-OWNER-READ",
-      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-038"],
-      "route_page_id": "ses_settings_limited",
+      "id": "SETTINGS-LIMITED-OWNER-LOCAL",
+      "scenario_ids": ["SHOW-LIVE-036"],
+      "route_page_id": "ses_settings_local",
       "authority": "owner",
       "request": {
-        "schema_version": 1,
+        "schema_version": 2,
         "message_type": "owner_settings_read_request",
-        "page_id": "ses_settings_limited"
+        "page_id": "ses_settings_local"
       },
       "result": {
-        "schema_version": 1,
+        "schema_version": 2,
         "message_type": "owner_settings_read_result",
-        "page_id": "ses_settings_limited",
+        "page_id": "ses_settings_local",
         "show_access": {
-          "schema_version": 1,
-          "page_id": "ses_settings_limited",
+          "schema_version": 2,
+          "page_id": "ses_settings_local",
           "availability": "active",
           "access_mode": "limited",
-          "share_binding": { "share_id": "settings-limited-link" },
+          "share_binding": { "share_id": "settings-local" },
           "audience_revision": 14,
-          "grant_revision": 22,
-          "grant_commitment": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-          "share_admission_gate": "open",
-          "coordinator": { "state": "idle" }
+          "emails": ["alice@example.com", "bob@example.com"],
+          "last_mutation": null
         },
-        "hosted_current_grant": {
-          "schema_version": 1,
-          "message_type": "current_grant_result",
-          "page_id": "ses_settings_limited",
-          "authenticated_result": true,
-          "legacy_write_policy": "disabled",
-          "grant_revision": 22,
-          "grant_commitment": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-          "emails": ["owner-visible@example.com"]
+        "storage_source": "local_authoritative_transactional_store",
+        "cache_control": "private, no-store"
+      }
+    },
+    {
+      "id": "SETTINGS-LIMITED-SHARING-CONTROL-LOCAL",
+      "scenario_ids": ["SHOW-LIVE-036"],
+      "route_page_id": "ses_settings_shared_control",
+      "authority": "sharing_control",
+      "request": {
+        "schema_version": 2,
+        "message_type": "owner_settings_read_request",
+        "page_id": "ses_settings_shared_control"
+      },
+      "result": {
+        "schema_version": 2,
+        "message_type": "owner_settings_read_result",
+        "page_id": "ses_settings_shared_control",
+        "show_access": {
+          "schema_version": 2,
+          "page_id": "ses_settings_shared_control",
+          "availability": "active",
+          "access_mode": "limited",
+          "share_binding": { "share_id": "settings-control" },
+          "audience_revision": 15,
+          "emails": ["viewer@example.com"],
+          "last_mutation": null
         },
-        "storage_policy": "request_scoped_transient_no_store",
+        "storage_source": "local_authoritative_transactional_store",
         "cache_control": "private, no-store"
       }
     }
   ],
   "denied_cases": [
     {
-      "id": "SETTINGS-PAGE-EMAIL-DENIED",
+      "id": "SETTINGS-PAGE-MEMBER-DENIED",
       "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-038"],
-      "authority": "page_email_only",
-      "outcome": "generic_deny",
-      "hosted_current_grant_requested": false,
-      "settings_returned": false
+      "authority": "page_member_only",
+      "result": {
+        "schema_version": 2,
+        "message_type": "owner_settings_read_denied",
+        "page_id": "ses_settings_local",
+        "outcome": "generic_deny",
+        "store_read": false,
+        "settings_returned": false
+      }
+    },
+    {
+      "id": "SETTINGS-RESOURCE-VIEWER-DENIED",
+      "scenario_ids": ["SHOW-LIVE-012"],
+      "authority": "resource_viewer",
+      "result": {
+        "schema_version": 2,
+        "message_type": "owner_settings_read_denied",
+        "page_id": "ses_settings_local",
+        "outcome": "generic_deny",
+        "store_read": false,
+        "settings_returned": false
+      }
     }
   ]
 }

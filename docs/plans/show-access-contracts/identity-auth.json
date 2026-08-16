@@ -1,0 +1,114 @@
+{
+  "schema_version": 2,
+  "owner": "LimitedPageIdentityOnlyAuthorization",
+  "backend_assertion": {
+    "format": "short_lived_signed_identity_assertion_or_code",
+    "required_signed_claims": ["iss", "aud", "sub", "iat", "exp", "jti", "nonce", "instance_id", "verified_email"],
+    "maximum_lifetime_seconds": 600,
+    "verified_email_normalization": ["trim_ascii_surrounding_whitespace", "lowercase"],
+    "forbidden_claims": [
+      "page_id",
+      "share_id",
+      "page_authorization",
+      "page_membership",
+      "whitelist",
+      "audience_revision",
+      "grant_revision",
+      "grant_commitment",
+      "instance_role",
+      "instance_access_source",
+      "show_page_email"
+    ],
+    "instance_access_context_created": false,
+    "instance_role_derived": false,
+    "page_membership_decided": false
+  },
+  "local_handshake": {
+    "producer": "avibe",
+    "server_resolved_before_start": ["instance_id", "page_id", "share_id", "safe_public_return_target"],
+    "signed_state_fields": ["instance_id", "share_id", "safe_public_return_target", "nonce", "issued_at", "expires_at"],
+    "callback_checks": [
+      "assertion_signature_issuer_audience_and_expiry",
+      "nonce_matches_and_is_single_use",
+      "assertion_instance_matches_paired_instance",
+      "return_target_matches_signed_same_share_target",
+      "share_reresolves_before_membership_check"
+    ],
+    "membership_lookup": "fresh_local_page_email_lookup_on_every_limited_request",
+    "identity_session_is_authorization": false,
+    "unlisted_outcome": "generic_deny_without_page_bytes_or_login_loop",
+    "removed_member_active_tab_policy": "no_active_closure_future_requests_only"
+  },
+  "cases": [
+    {
+      "id": "IDENTITY-LISTED-CURRENT",
+      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-037", "SHOW-LIVE-038"],
+      "assertion_valid": true,
+      "instance_binding": "match",
+      "verified_email": "bob@example.com",
+      "current_local_emails": ["bob@example.com"],
+      "outcome": "serve_shared",
+      "instance_access": false,
+      "canonical_show_access": false,
+      "hmr": false,
+      "annotations": false,
+      "agents": false
+    },
+    {
+      "id": "IDENTITY-UNLISTED",
+      "scenario_ids": ["SHOW-LIVE-003"],
+      "assertion_valid": true,
+      "instance_binding": "match",
+      "verified_email": "mallory@example.com",
+      "current_local_emails": ["bob@example.com"],
+      "outcome": "generic_deny",
+      "instance_access": false,
+      "canonical_show_access": false,
+      "hmr": false,
+      "annotations": false,
+      "agents": false
+    },
+    {
+      "id": "IDENTITY-REMOVED-AFTER-SESSION",
+      "scenario_ids": ["SHOW-LIVE-008", "SHOW-LIVE-033"],
+      "assertion_valid": true,
+      "instance_binding": "match",
+      "verified_email": "bob@example.com",
+      "current_local_emails": [],
+      "outcome": "generic_deny",
+      "instance_access": false,
+      "canonical_show_access": false,
+      "hmr": false,
+      "annotations": false,
+      "agents": false
+    },
+    {
+      "id": "IDENTITY-CROSS-INSTANCE",
+      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-037"],
+      "assertion_valid": true,
+      "instance_binding": "mismatch",
+      "verified_email": "bob@example.com",
+      "current_local_emails": ["bob@example.com"],
+      "outcome": "reject_identity_assertion",
+      "instance_access": false,
+      "canonical_show_access": false,
+      "hmr": false,
+      "annotations": false,
+      "agents": false
+    },
+    {
+      "id": "IDENTITY-FORBIDDEN-PAGE-CLAIM",
+      "scenario_ids": ["SHOW-LIVE-020", "SHOW-LIVE-038"],
+      "assertion_valid": false,
+      "instance_binding": "match",
+      "verified_email": "bob@example.com",
+      "current_local_emails": ["bob@example.com"],
+      "outcome": "reject_identity_assertion",
+      "instance_access": false,
+      "canonical_show_access": false,
+      "hmr": false,
+      "annotations": false,
+      "agents": false
+    }
+  ]
+}

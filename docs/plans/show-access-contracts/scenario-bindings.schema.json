@@ -1,31 +1,168 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contracts.avibe.bot/show-access/v1/scenario-bindings.schema.json",
-  "title": "SHOW-LIVE scenario bindings v1",
+  "$id": "https://contracts.avibe.bot/show-access/v2/scenario-bindings.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "design_source", "design_sha", "design_blob_sha", "bindings"],
+  "required": ["schema_version", "design_source", "design_sha", "design_blob_sha", "evidence_boundaries", "claims", "bindings"],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "design_source": { "const": "docs/plans/public-show-live-update.md" },
     "design_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "design_blob_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "evidence_boundaries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "residual_browser", "residual_backend", "residual_runtime", "residual_incus"],
+      "properties": {
+        "contract": { "const": "machine_contract_proof" },
+        "residual_browser": { "const": "future_browser_conformance" },
+        "residual_backend": { "const": "future_backend_conformance" },
+        "residual_runtime": { "const": "future_runtime_conformance" },
+        "residual_incus": { "const": "future_local_incus_acceptance" }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "minItems": 40,
+      "items": { "$ref": "#/$defs/claim" }
+    },
     "bindings": {
       "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["scenario_id", "anchors"],
-        "properties": {
-          "scenario_id": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" },
-          "anchors": {
-            "type": "array",
-            "minItems": 1,
-            "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1 }
-          }
+      "minItems": 38,
+      "maxItems": 38,
+      "items": { "$ref": "#/$defs/binding" }
+    }
+  },
+  "$defs": {
+    "scalar": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "boolean" },
+        { "type": "integer" },
+        { "type": "null" }
+      ]
+    },
+    "point": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "minProperties": 1
+    },
+    "pointer_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "document", "pointer"],
+      "properties": {
+        "kind": { "const": "pointer" },
+        "document": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.json$" },
+        "pointer": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "object_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "document", "collection", "id", "pointer"],
+      "properties": {
+        "kind": { "const": "object" },
+        "document": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.json$" },
+        "collection": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "pointer": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "matrix_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "point", "field"],
+      "properties": {
+        "kind": { "const": "matrix" },
+        "point": { "$ref": "#/$defs/point" },
+        "field": { "type": "string", "minLength": 1 }
+      }
+    },
+    "algebra_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "point", "field"],
+      "properties": {
+        "kind": { "const": "algebra" },
+        "point": { "$ref": "#/$defs/point" },
+        "field": {
+          "enum": ["decision", "outcome", "binding_outcome", "audience_revision_delta", "availability", "external_service_calls"]
         }
+      }
+    },
+    "contains_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "document", "pointer", "value"],
+      "properties": {
+        "kind": { "const": "contains" },
+        "document": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.json$" },
+        "pointer": { "type": "string", "pattern": "^/" },
+        "value": { "$ref": "#/$defs/scalar" }
+      }
+    },
+    "canonical_emails_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "document", "pointer"],
+      "properties": {
+        "kind": { "const": "canonical_emails" },
+        "document": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.json$" },
+        "pointer": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "path_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": { "const": "path_exists" },
+        "path": { "type": "string", "pattern": "^docs/plans/show-access-contracts/" }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "expected"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^CLAIM-[A-Z0-9-]+$" },
+        "source": {
+          "oneOf": [
+            { "$ref": "#/$defs/pointer_source" },
+            { "$ref": "#/$defs/object_source" },
+            { "$ref": "#/$defs/matrix_source" },
+            { "$ref": "#/$defs/algebra_source" },
+            { "$ref": "#/$defs/contains_source" },
+            { "$ref": "#/$defs/canonical_emails_source" },
+            { "$ref": "#/$defs/path_source" }
+          ]
+        },
+        "expected": { "$ref": "#/$defs/scalar" }
+      }
+    },
+    "clause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "claim_ids"],
+      "properties": {
+        "text": { "type": "string", "minLength": 3, "pattern": "^[^;]+$" },
+        "claim_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^CLAIM-[A-Z0-9-]+$" }
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "expected_evidence", "clauses"],
+      "properties": {
+        "scenario_id": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" },
+        "expected_evidence": { "type": "string", "minLength": 3 },
+        "clauses": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/clause" } }
       }
     }
   }

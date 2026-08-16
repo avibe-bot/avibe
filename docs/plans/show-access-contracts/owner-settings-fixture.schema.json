@@ -1,68 +1,58 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contracts.avibe.bot/show-access/v1/owner-settings-fixture.schema.json",
-  "title": "Owner settings read examples v1",
+  "$id": "https://contracts.avibe.bot/show-access/v2/owner-settings-fixture.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "fixtures", "denied_cases"],
+  "required": ["schema_version", "allowed_cases", "denied_cases"],
   "properties": {
-    "schema_version": { "const": 1 },
-    "fixtures": {
+    "schema_version": { "const": 2 },
+    "allowed_cases": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 2,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "scenario_ids", "route_page_id", "authority", "request", "result"],
         "properties": {
-          "id": { "const": "SETTINGS-LIMITED-OWNER-READ" },
-          "scenario_ids": {
-            "type": "array",
-            "minItems": 1,
-            "uniqueItems": true,
-            "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
-          },
+          "id": { "type": "string", "pattern": "^SETTINGS-[A-Z0-9-]+$" },
+          "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
           "route_page_id": {
-            "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/page_id"
+            "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id"
           },
           "authority": { "enum": ["owner", "sharing_control"] },
           "request": {
-            "$ref": "https://contracts.avibe.bot/show-access/v1/owner-settings.schema.json#/$defs/settings_read_request"
+            "$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_read_request"
           },
           "result": {
-            "$ref": "https://contracts.avibe.bot/show-access/v1/owner-settings.schema.json#/$defs/settings_read_result"
+            "$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_read_result"
           }
         }
       }
     },
     "denied_cases": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 2,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "id",
-          "scenario_ids",
-          "authority",
-          "outcome",
-          "hosted_current_grant_requested",
-          "settings_returned"
-        ],
+        "required": ["id", "scenario_ids", "authority", "result"],
         "properties": {
-          "id": { "const": "SETTINGS-PAGE-EMAIL-DENIED" },
-          "scenario_ids": {
-            "type": "array",
-            "minItems": 1,
-            "uniqueItems": true,
-            "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
-          },
-          "authority": { "const": "page_email_only" },
-          "outcome": { "const": "generic_deny" },
-          "hosted_current_grant_requested": { "const": false },
-          "settings_returned": { "const": false }
+          "id": { "type": "string", "pattern": "^SETTINGS-[A-Z0-9-]+$" },
+          "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
+          "authority": { "enum": ["resource_viewer", "page_member_only", "anonymous"] },
+          "result": {
+            "$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_read_denied"
+          }
         }
       }
+    }
+  },
+  "$defs": {
+    "scenario_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
     }
   }
 }

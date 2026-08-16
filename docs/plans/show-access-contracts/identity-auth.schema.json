@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v2/identity-auth.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "owner", "backend_assertion", "local_handshake", "cases"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "owner": { "const": "LimitedPageIdentityOnlyAuthorization" },
+    "backend_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "required_signed_claims",
+        "maximum_lifetime_seconds",
+        "verified_email_normalization",
+        "forbidden_claims",
+        "instance_access_context_created",
+        "instance_role_derived",
+        "page_membership_decided"
+      ],
+      "properties": {
+        "format": { "const": "short_lived_signed_identity_assertion_or_code" },
+        "required_signed_claims": {
+          "const": ["iss", "aud", "sub", "iat", "exp", "jti", "nonce", "instance_id", "verified_email"]
+        },
+        "maximum_lifetime_seconds": { "type": "integer", "minimum": 1, "maximum": 600 },
+        "verified_email_normalization": {
+          "const": ["trim_ascii_surrounding_whitespace", "lowercase"]
+        },
+        "forbidden_claims": {
+          "type": "array",
+          "minItems": 10,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "instance_access_context_created": { "const": false },
+        "instance_role_derived": { "const": false },
+        "page_membership_decided": { "const": false }
+      }
+    },
+    "local_handshake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producer",
+        "server_resolved_before_start",
+        "signed_state_fields",
+        "callback_checks",
+        "membership_lookup",
+        "identity_session_is_authorization",
+        "unlisted_outcome",
+        "removed_member_active_tab_policy"
+      ],
+      "properties": {
+        "producer": { "const": "avibe" },
+        "server_resolved_before_start": {
+          "const": ["instance_id", "page_id", "share_id", "safe_public_return_target"]
+        },
+        "signed_state_fields": {
+          "const": ["instance_id", "share_id", "safe_public_return_target", "nonce", "issued_at", "expires_at"]
+        },
+        "callback_checks": { "type": "array", "minItems": 5, "uniqueItems": true, "items": { "type": "string" } },
+        "membership_lookup": { "const": "fresh_local_page_email_lookup_on_every_limited_request" },
+        "identity_session_is_authorization": { "const": false },
+        "unlisted_outcome": { "const": "generic_deny_without_page_bytes_or_login_loop" },
+        "removed_member_active_tab_policy": { "const": "no_active_closure_future_requests_only" }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "scenario_ids",
+          "assertion_valid",
+          "instance_binding",
+          "verified_email",
+          "current_local_emails",
+          "outcome",
+          "instance_access",
+          "canonical_show_access",
+          "hmr",
+          "annotations",
+          "agents"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^IDENTITY-[A-Z0-9-]+$" },
+          "scenario_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
+          },
+          "assertion_valid": { "type": "boolean" },
+          "instance_binding": { "enum": ["match", "mismatch"] },
+          "verified_email": {
+            "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/normalized_email"
+          },
+          "current_local_emails": {
+            "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/canonical_email_set"
+          },
+          "outcome": { "enum": ["serve_shared", "generic_deny", "reject_identity_assertion"] },
+          "instance_access": { "const": false },
+          "canonical_show_access": { "const": false },
+          "hmr": { "const": false },
+          "annotations": { "const": false },
+          "agents": { "const": false }
+        }
+      }
+    }
+  }
+}

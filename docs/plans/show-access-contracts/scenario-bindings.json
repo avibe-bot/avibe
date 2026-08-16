@@ -1,212 +1,333 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "design_source": "docs/plans/public-show-live-update.md",
-  "design_sha": "38925dda50da6280ae63e323ba34a4ef601f5bc9",
-  "design_blob_sha": "6fc8fa580ef8eb35860e133b121cf82ce1eb3955",
+  "design_sha": "fffcbfcecdebcee16f940f1f36131857b5912476",
+  "design_blob_sha": "fffcbfcecdebcee16f940f1f36131857b5912476",
+  "evidence_boundaries": {
+    "contract": "machine_contract_proof",
+    "residual_browser": "future_browser_conformance",
+    "residual_backend": "future_backend_conformance",
+    "residual_runtime": "future_runtime_conformance",
+    "residual_incus": "future_local_incus_acceptance"
+  },
+  "claims": [
+    { "id": "CLAIM-EDITOR-P-REDIRECT", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "trusted_top_level_navigation", "resource_authority": "editor", "identity_state": "verified", "page_membership": "current", "keyed_context": "unsupported" }, "field": "read_decision" }, "expected": "redirect_private" },
+    { "id": "CLAIM-VIEWER-P-REDIRECT", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "trusted_top_level_navigation", "resource_authority": "viewer", "identity_state": "unverified", "page_membership": "absent", "keyed_context": "unsupported" }, "field": "read_decision" }, "expected": "redirect_private" },
+    { "id": "CLAIM-SHOW-EDITOR-HMR", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "editor", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "hmr" }, "expected": true },
+    { "id": "CLAIM-SHOW-EDITOR-ANNOTATIONS", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": "editor", "identity_state": "unverified", "page_membership": "absent", "keyed_context": "unsupported" }, "field": "annotations" }, "expected": true },
+    { "id": "CLAIM-RESIDUAL-BROWSER", "source": { "kind": "pointer", "document": "scenario-bindings.json", "pointer": "/evidence_boundaries/residual_browser" }, "expected": "future_browser_conformance" },
+    { "id": "CLAIM-LIMITED-MEMBER-SHARED", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "trusted_top_level_navigation", "resource_authority": "none", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "serve_shared" },
+    { "id": "CLAIM-P-NO-HMR", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "editor", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "hmr" }, "expected": false },
+    { "id": "CLAIM-P-NO-ANNOTATIONS", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": "editor", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "annotations" }, "expected": false },
+    { "id": "CLAIM-SAFE-RETURN-BOUND", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/local_handshake/signed_state_fields", "value": "safe_public_return_target" }, "expected": true },
+    { "id": "CLAIM-UNLISTED-DENY", "source": { "kind": "object", "document": "identity-auth.json", "collection": "cases", "id": "IDENTITY-UNLISTED", "pointer": "/outcome" }, "expected": "generic_deny" },
+    { "id": "CLAIM-UNLISTED-NO-BYTES-OR-LOOP", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/local_handshake/unlisted_outcome" }, "expected": "generic_deny_without_page_bytes_or_login_loop" },
+    { "id": "CLAIM-LIMITED-PUBLIC-BINDING", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-LIMITED-TO-PUBLIC", "pointer": "/result/show_access/share_binding/share_id" }, "expected": "same-stable-link" },
+    { "id": "CLAIM-LIMITED-PUBLIC-REVISION", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-LIMITED-TO-PUBLIC", "pointer": "/result/show_access/audience_revision" }, "expected": 9 },
+    { "id": "CLAIM-PUBLIC-ANONYMOUS-SHARED", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": "none", "identity_state": "unverified", "page_membership": "absent", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "serve_shared" },
+    { "id": "CLAIM-GRAPH-KEY-SESSION", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/runtime_graph_ownership/graph_key/0" }, "expected": "session_id" },
+    { "id": "CLAIM-GRAPH-KEY-CONTEXT", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/runtime_graph_ownership/graph_key/1" }, "expected": "context" },
+    { "id": "CLAIM-SHARED-DOES-NOT-CLOSE-PRIVATE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/runtime_graph_ownership/shared_activity_closes_private_hmr" }, "expected": false },
+    { "id": "CLAIM-LIMITED-LOGIN-REQUIRED", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "none", "identity_state": "unverified", "page_membership": "absent", "keyed_context": "transient-unknown" }, "field": "read_decision" }, "expected": "login_required" },
+    { "id": "CLAIM-HMR-REVOCATION-ACTION", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/authorization_trigger_action" }, "expected": "reevaluate_and_close_unauthorized_existing_sockets" },
+    { "id": "CLAIM-SHOW-VIEWER-READ", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "viewer", "identity_state": "verified", "page_membership": "absent", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "serve_private" },
+    { "id": "CLAIM-SHOW-VIEWER-NO-HMR", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": "viewer", "identity_state": "unverified", "page_membership": "absent", "keyed_context": "unsupported" }, "field": "hmr" }, "expected": false },
+    { "id": "CLAIM-REMOVED-EMAIL-ABSENT", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/sequences/0/steps/2/state/emails", "value": "bob@example.com" }, "expected": false },
+    { "id": "CLAIM-REMOVED-NEXT-REQUEST-DENY", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "sequences", "id": "SEQUENCE-LOCAL-REMOVAL-NEXT-REQUEST", "pointer": "/steps/2/request_outcome" }, "expected": "deny" },
+    { "id": "CLAIM-NO-ACTIVE-GUEST-CLOSURE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "sequences", "id": "SEQUENCE-LOCAL-REMOVAL-NEXT-REQUEST", "pointer": "/steps/2/active_guest_tab_closed" }, "expected": false },
+    { "id": "CLAIM-SHARED-ROUTE-HMR-FALSE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/route_invariants/shared_route/hmr" }, "expected": false },
+    { "id": "CLAIM-EDIT-PRIVATE-IDENTITY-STABLE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/ordinary_editor_file_edit/private_hmr_identity" }, "expected": "stable" },
+    { "id": "CLAIM-EDIT-NO-SHARED-CREATE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/ordinary_editor_file_edit/shared_graph_create" }, "expected": false },
+    { "id": "CLAIM-EDIT-NO-SHARED-REBASE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/ordinary_editor_file_edit/shared_graph_rebase" }, "expected": false },
+    { "id": "CLAIM-EDIT-NO-SHARED-BUILD", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/ordinary_editor_file_edit/shared_background_build" }, "expected": false },
+    { "id": "CLAIM-EDIT-RESOURCE-BOUND", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/ordinary_editor_file_edit/resource_bound" }, "expected": "resource_governance" },
+    { "id": "CLAIM-SHARED-NO-PRIVATE-BYTES", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/route_invariants/shared_route/private_bytes" }, "expected": false },
+    { "id": "CLAIM-SW-SCOPE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_proxy_policy/maximum_service_worker_scope" }, "expected": "/p/<share_id>/" },
+    { "id": "CLAIM-REDIRECT-SUFFIX", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/route_invariants/resource_redirect/preserve_route_suffix" }, "expected": true },
+    { "id": "CLAIM-REDIRECT-QUERY", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/route_invariants/resource_redirect/preserve_query" }, "expected": true },
+    { "id": "CLAIM-LEGACY-OUTCOME", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/negotiation_cases/1/outcome" }, "expected": "unsupported" },
+    { "id": "CLAIM-LEGACY-HEADERLESS-SINGLETON", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/outcome" }, "expected": "legacy_singleton" },
+    { "id": "CLAIM-PROBE-RETRY-BOUND", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/capability_cache/maximum_retry_delay_seconds" }, "expected": 5 },
+    { "id": "CLAIM-PROBE-CACHE-RESET", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/capability_cache/identity_change_clears", "value": "all_outcomes" }, "expected": true },
+    { "id": "CLAIM-NAMESPACE-SAME", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_namespace_confinement/recursive_dependency_closure/namespace_relation" }, "expected": "same_opaque_namespace" },
+    { "id": "CLAIM-HANDLE-NO-REOPEN", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_namespace_confinement/handle/source_path_reopen" }, "expected": "forbidden" },
+    { "id": "CLAIM-NAMESPACE-NO-ESCAPE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_namespace_confinement/recursive_dependency_closure/cross_namespace_escape_allowed" }, "expected": false },
+    { "id": "CLAIM-LEGACY-SANITIZED", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_response_cases/2/outcome" }, "expected": "fixed_path_free_unavailable" },
+    { "id": "CLAIM-LEGACY-NO-HOST-PATH", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_response_cases/3/host_path" }, "expected": false },
+    { "id": "CLAIM-PREWARM-EXPLICIT", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/shared_prewarm_requires", "value": "explicit_operation" }, "expected": true },
+    { "id": "CLAIM-PREWARM-TYPED", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/shared_prewarm_requires", "value": "shared_context_envelope" }, "expected": true },
+    { "id": "CLAIM-PROTOCOL-PRECEDES-MUTATION", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/protocol1_validation/validation_precedes", "value": "graph_ownership_mutation" }, "expected": true },
+    { "id": "CLAIM-IMPLICIT-PREWARM-FALSE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/implicit_shared_work_from_private_edit" }, "expected": false },
+    { "id": "CLAIM-HMR-MONITOR-COALESCED", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/monitor_scope" }, "expected": "one_coalesced_monitor_per_active_session" },
+    { "id": "CLAIM-HMR-OFFLINE-DEADLINE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/durable_offline_close_all_deadline_seconds" }, "expected": 5 },
+    { "id": "CLAIM-P2L-STABLE-BINDING", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-PRIVATE-TO-LIMITED", "pointer": "/result/show_access/share_binding/share_id" }, "expected": "stable-custom" },
+    { "id": "CLAIM-P2L-LOCAL-MEMBER", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/fixtures/0/result/show_access/emails", "value": "bob@example.com" }, "expected": true },
+    { "id": "CLAIM-P2L-NO-EXTERNAL", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-PRIVATE-TO-LIMITED", "pointer": "/external_service_calls" }, "expected": 0 },
+    { "id": "CLAIM-RETIRE-NO-MIGRATION", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/migration_allowed" }, "expected": false },
+    { "id": "CLAIM-RETIRE-NO-BRIDGE", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/compatibility_bridge_allowed" }, "expected": false },
+    { "id": "CLAIM-HOSTED-FIXTURE-ABSENT", "source": { "kind": "path_exists", "path": "docs/plans/show-access-contracts/fixtures/hosted-operations.json" }, "expected": false },
+    { "id": "CLAIM-MIGRATION-FIXTURE-ABSENT", "source": { "kind": "path_exists", "path": "docs/plans/show-access-contracts/fixtures/migrations.json" }, "expected": false },
+    { "id": "CLAIM-RETIRE-SOURCE", "source": { "kind": "contains", "document": "retirement.json", "pointer": "/retired_surfaces/3/component", "value": "show_page_email" }, "expected": true },
+    { "id": "CLAIM-CRASH-OLD-BEFORE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "sequences", "id": "SEQUENCE-LOCAL-CRASH-IDEMPOTENT-RETRY", "pointer": "/steps/0/state/audience_revision" }, "expected": 70 },
+    { "id": "CLAIM-CRASH-NEW-AFTER", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "sequences", "id": "SEQUENCE-LOCAL-CRASH-IDEMPOTENT-RETRY", "pointer": "/steps/1/state/audience_revision" }, "expected": 71 },
+    { "id": "CLAIM-CRASH-RETRY-STABLE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "sequences", "id": "SEQUENCE-LOCAL-CRASH-IDEMPOTENT-RETRY", "pointer": "/steps/2/state/audience_revision" }, "expected": 71 },
+    { "id": "CLAIM-L2PRIVATE-MODE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-LIMITED-TO-PRIVATE", "pointer": "/result/show_access/access_mode" }, "expected": "private" },
+    { "id": "CLAIM-L2PRIVATE-BINDING-RETAINED", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-LIMITED-TO-PRIVATE", "pointer": "/result/show_access/share_binding/share_id" }, "expected": "retained-disabled" },
+    { "id": "CLAIM-PRIVATE-P-DENY", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "private", "request_kind": "trusted_top_level_navigation", "resource_authority": "editor", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "deny" },
+    { "id": "CLAIM-LISTED-SHOW-DENY", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "none", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "deny" },
+    { "id": "CLAIM-HANDLE-CAPTURED-ONLY", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_namespace_confinement/handle/path_swap_existing_handle" }, "expected": "serve_captured_response_only" },
+    { "id": "CLAIM-HANDLE-NEW-DENY", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_namespace_confinement/handle/new_admission_after_unsafe_path_swap" }, "expected": "deny_before_allocation" },
+    { "id": "CLAIM-STALE-REVISION-REJECT", "source": { "kind": "algebra", "point": { "availability": "active", "source_mode": "private", "target_mode": "public", "source_binding": "none", "share_intent": "preserve_or_allocate", "binding_relation": "different", "email_relation": "same", "expected_revision": "stale", "mutation_status": "new" }, "field": "decision" }, "expected": "revision_conflict" },
+    { "id": "CLAIM-MUTATION-CONFLICT-REJECT", "source": { "kind": "algebra", "point": { "availability": "active", "source_mode": "limited", "target_mode": "private", "source_binding": "bound", "share_intent": "preserve_or_allocate", "binding_relation": "same", "email_relation": "different", "expected_revision": "current", "mutation_status": "different_payload" }, "field": "decision" }, "expected": "mutation_conflict" },
+    { "id": "CLAIM-SAME-SET-NO-CHANGE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-LIMITED-SAME-SET", "pointer": "/result/outcome" }, "expected": "no_change" },
+    { "id": "CLAIM-SAME-SET-REVISION", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-LIMITED-SAME-SET", "pointer": "/result/show_access/audience_revision" }, "expected": 20 },
+    { "id": "CLAIM-NAMESPACE-HARD-LIFETIME", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/namespace_lifetime/absolute_lifetime_seconds" }, "expected": 7200 },
+    { "id": "CLAIM-NAMESPACE-NONRENEWABLE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/namespace_lifetime/absolute_lifetime_renewable" }, "expected": false },
+    { "id": "CLAIM-NAMESPACE-RECLAIM-WHOLE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/namespace_lifetime/reclaim_unit" }, "expected": "whole_namespace" },
+    { "id": "CLAIM-BUDGET-PROCESS", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/resource_governance/budget_scope" }, "expected": "one_per_runtime_process" },
+    { "id": "CLAIM-BUDGET-PER-SESSION", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/resource_governance/per_session_bounds" }, "expected": true },
+    { "id": "CLAIM-BUDGET-PRIVATE-RESERVE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/resource_governance/shared_may_consume_private_reserve" }, "expected": false },
+    { "id": "CLAIM-BUDGET-SANITIZED", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/resource_governance/shared_overload_outcome" }, "expected": "bounded_sanitized_retryable_unavailable" },
+    { "id": "CLAIM-L2P-MEMBERSHIP-EMPTY", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/fixtures/1/result/show_access/emails", "value": "viewer@example.com" }, "expected": false },
+    { "id": "CLAIM-HEADERLESS-BASE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/legacy_base_header" }, "expected": "x-vibe-show-base" },
+    { "id": "CLAIM-HEADERLESS-KEYED-FALSE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/keyed_context_enabled" }, "expected": false },
+    { "id": "CLAIM-UNKNOWN-PROTOCOL-REJECT", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/request_protocol_cases/2/outcome" }, "expected": "reject" },
+    { "id": "CLAIM-OFFLINE-STAYS-OFFLINE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-OFFLINE-FUTURE-PUBLIC", "pointer": "/result/show_access/availability" }, "expected": "offline" },
+    { "id": "CLAIM-OFFLINE-NEW-BINDING", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-OFFLINE-FUTURE-PUBLIC", "pointer": "/result/show_access/share_binding/share_id" }, "expected": "offline-after" },
+    { "id": "CLAIM-OFFLINE-P-DENY", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "offline", "access_mode": "public", "request_kind": "other", "resource_authority": "none", "identity_state": "unverified", "page_membership": "absent", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "deny" },
+    { "id": "CLAIM-FRESH-LOCAL-LOOKUP", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/local_handshake/membership_lookup" }, "expected": "fresh_local_page_email_lookup_on_every_limited_request" },
+    { "id": "CLAIM-INSTANCE-CONTEXT-FALSE", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/instance_access_context_created" }, "expected": false },
+    { "id": "CLAIM-INSTANCE-ROLE-FALSE", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/instance_role_derived" }, "expected": false },
+    { "id": "CLAIM-BACKEND-MEMBERSHIP-FALSE", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/page_membership_decided" }, "expected": false },
+    { "id": "CLAIM-CUSTOM-PRESERVED", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-PRIVATE-TO-LIMITED", "pointer": "/source_show_access/share_binding/share_id" }, "expected": "stable-custom" },
+    { "id": "CLAIM-SETTINGS-LOCAL-SOURCE", "source": { "kind": "object", "document": "fixtures/owner-settings.json", "collection": "allowed_cases", "id": "SETTINGS-LIMITED-OWNER-LOCAL", "pointer": "/result/storage_source" }, "expected": "local_authoritative_transactional_store" },
+    { "id": "CLAIM-SETTINGS-PRIVATE-NOSTORE", "source": { "kind": "object", "document": "fixtures/owner-settings.json", "collection": "allowed_cases", "id": "SETTINGS-LIMITED-OWNER-LOCAL", "pointer": "/result/cache_control" }, "expected": "private, no-store" },
+    { "id": "CLAIM-SETTINGS-LOCAL-EMAIL", "source": { "kind": "contains", "document": "fixtures/owner-settings.json", "pointer": "/allowed_cases/0/result/show_access/emails", "value": "bob@example.com" }, "expected": true },
+    { "id": "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/forbidden_claims", "value": "show_page_email" }, "expected": true },
+    { "id": "CLAIM-IDENTITY-LISTED-SHARED", "source": { "kind": "object", "document": "identity-auth.json", "collection": "cases", "id": "IDENTITY-LISTED-CURRENT", "pointer": "/outcome" }, "expected": "serve_shared" },
+    { "id": "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "source": { "kind": "object", "document": "identity-auth.json", "collection": "cases", "id": "IDENTITY-LISTED-CURRENT", "pointer": "/instance_access" }, "expected": false },
+    { "id": "CLAIM-SHARE-RERESOLVE", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/local_handshake/callback_checks", "value": "share_reresolves_before_membership_check" }, "expected": true },
+    { "id": "CLAIM-REDIRECT-PRIVATE-NOSTORE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_proxy_policy/editor_redirect_cache_control" }, "expected": "private, no-store" },
+    { "id": "CLAIM-OFFLINE-DURABLE-SOURCE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/durable_offline_source" }, "expected": "ShowPageStore" },
+    { "id": "CLAIM-RETIRE-STORAGE-ACTION", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/retired_surfaces/0/future_action" }, "expected": "delete_storage" },
+    { "id": "CLAIM-RETIRE-ENDPOINT-ACTION", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/retired_surfaces/1/future_action" }, "expected": "delete_endpoints" },
+    { "id": "CLAIM-RETIRE-CLIENT-ACTION", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/retired_surfaces/2/future_action" }, "expected": "delete_clients" },
+    { "id": "CLAIM-RETIRE-AUTH-ACTION", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/retired_surfaces/3/future_action" }, "expected": "delete_authorization_source" },
+    { "id": "CLAIM-STALE-NO-WRITE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "boundary_cases", "id": "BOUNDARY-STALE-REVISION", "pointer": "/result/effects/store_write" }, "expected": false },
+    { "id": "CLAIM-MUTATION-NO-WRITE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "boundary_cases", "id": "BOUNDARY-MUTATION-CONFLICT", "pointer": "/result/effects/store_write" }, "expected": false },
+    { "id": "CLAIM-SAME-SET-BINDING", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-LIMITED-SAME-SET", "pointer": "/result/show_access/share_binding/share_id" }, "expected": "same-set-link" },
+    { "id": "CLAIM-EXPIRED-RELOAD", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/namespace_lifetime/expired_read_outcome" }, "expected": "fixed_stale_document_reload_required" },
+    { "id": "CLAIM-OFFLINE-SHOW-DENY", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "offline", "access_mode": "public", "request_kind": "other", "resource_authority": "editor", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "deny" },
+    { "id": "CLAIM-FORBIDDEN-WHITELIST", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/forbidden_claims", "value": "whitelist" }, "expected": true },
+    { "id": "CLAIM-IDEMPOTENCY-PAGE-MUTATION-KEY", "source": { "kind": "pointer", "document": "apply-transition-algebra.json", "pointer": "/idempotency/key_fields/1" }, "expected": "mutation_id" },
+    { "id": "CLAIM-IDEMPOTENCY-SURVIVES-LATER-APPLY", "source": { "kind": "pointer", "document": "apply-transition-algebra.json", "pointer": "/idempotency/survives_later_apply" }, "expected": true },
+    { "id": "CLAIM-IDEMPOTENCY-BEFORE-CAS", "source": { "kind": "pointer", "document": "apply-transition-algebra.json", "pointer": "/idempotency/lookup_order" }, "expected": "before_expected_revision_cas" },
+    { "id": "CLAIM-IDEMPOTENCY-ATOMIC", "source": { "kind": "pointer", "document": "apply-transition-algebra.json", "pointer": "/idempotency/atomic_with_effective_or_no_change_apply" }, "expected": true },
+    { "id": "CLAIM-UNLISTED-MEMBER-ABSENT", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/cases/1/current_local_emails", "value": "mallory@example.com" }, "expected": false },
+    { "id": "CLAIM-APPLY-ATOMIC-MEMBERSHIP", "source": { "kind": "contains", "document": "apply-transition-algebra.json", "pointer": "/transition_effects/changed/atomic_fields", "value": "emails" }, "expected": true },
+    { "id": "CLAIM-P2L-NORMALIZED-EMAILS", "source": { "kind": "canonical_emails", "document": "fixtures/apply-mutations.json", "pointer": "/fixtures/0/request/target/emails" }, "expected": "alice@example.com,bob@example.com" },
+    { "id": "CLAIM-SAME-SET-NORMALIZED", "source": { "kind": "canonical_emails", "document": "fixtures/apply-mutations.json", "pointer": "/fixtures/3/request/target/emails" }, "expected": "a@example.com,b@example.com" },
+    { "id": "CLAIM-OFFLINE-NEW-MODE", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-OFFLINE-FUTURE-PUBLIC", "pointer": "/result/show_access/access_mode" }, "expected": "public" },
+    { "id": "CLAIM-OFFLINE-NEW-MEMBERSHIP-EMPTY", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/fixtures/5/result/show_access/emails", "value": "future@example.com" }, "expected": false },
+    { "id": "CLAIM-SHOW-VIEWER-CURRENT-MEMBER-READ", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "viewer", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "serve_private" },
+    { "id": "CLAIM-LISTED-SHOW-HMR-DENY", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "none", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" }, "field": "hmr" }, "expected": false },
+    { "id": "CLAIM-LEGACY-RAW-SANITIZED", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_response_cases/3/outcome" }, "expected": "fixed_path_free_unavailable" },
+    { "id": "CLAIM-HEADERLESS-ENTRY", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/legacy_base_propagation", "value": "entry_http" }, "expected": true },
+    { "id": "CLAIM-HEADERLESS-MODULE", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/legacy_base_propagation", "value": "module_http" }, "expected": true },
+    { "id": "CLAIM-HEADERLESS-FALLBACK", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/legacy_base_propagation", "value": "spa_fallback_http" }, "expected": true },
+    { "id": "CLAIM-HEADERLESS-STARTUP-PREWARM", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/legacy_base_propagation", "value": "startup_reconciliation_prewarm" }, "expected": true },
+    { "id": "CLAIM-HEADERLESS-UPDATE-PREWARM", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/legacy_base_propagation", "value": "show_update_prewarm" }, "expected": true },
+    { "id": "CLAIM-CRASH-NEW-EMAIL", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/sequences/1/steps/1/state/emails", "value": "new@example.com" }, "expected": true },
+    { "id": "CLAIM-SETTINGS-NORMALIZED-EMAILS", "source": { "kind": "canonical_emails", "document": "fixtures/owner-settings.json", "pointer": "/allowed_cases/0/result/show_access/emails" }, "expected": "alice@example.com,bob@example.com" },
+    { "id": "CLAIM-IDENTITY-INSTANCE-BOUND", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/required_signed_claims", "value": "instance_id" }, "expected": true },
+    { "id": "CLAIM-IDENTITY-VERIFIED-EMAIL", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/required_signed_claims", "value": "verified_email" }, "expected": true }
+  ],
   "bindings": [
-    {
-      "scenario_id": "SHOW-LIVE-001",
-      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-EDITOR-SUPPORTED", "runtime-context.json#/route_invariants/editor_redirect"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-002",
-      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL", "capability-matrix.json#INVARIANT-P-NO-HMR"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-003",
-      "anchors": [
-        "capability-matrix.json#MATRIX-P-LIMITED-ANONYMOUS",
-        "capability-matrix.json#MATRIX-P-LIMITED-REAUTHORIZATION-FAILED",
-        "capability-matrix.json#/limited_read_authorization",
-        "mirror-registry.json#C23"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-004",
-      "anchors": ["fixtures/apply-mutations.json#APPLY-LIMITED-TO-PUBLIC-CLEANUP", "capability-matrix.json#MATRIX-P-PUBLIC-VIEWER"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-005",
-      "anchors": ["capability-matrix.json#MATRIX-SHOW-OWNER-EDITOR", "runtime-context.json#/runtime_graph_ownership", "mirror-registry.json#C21"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-006",
-      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-ANONYMOUS", "capability-matrix.json#MATRIX-P-PUBLIC-VIEWER"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-007",
-      "anchors": [
-        "capability-matrix.json#MATRIX-SHOW-RESOURCE-VIEWER",
-        "capability-matrix.json#INVARIANT-SHOW-HMR-EDITOR",
-        "runtime-context.json#/avibe_private_hmr_monitor",
-        "mirror-registry.json#C22"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-008",
-      "anchors": [
-        "fixtures/show-access.json#STATE-ACTIVE-LIMITED-OPEN",
-        "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL",
-        "capability-matrix.json#INVARIANT-PAGE-GRANT-REVISION-CURRENT",
-        "capability-matrix.json#/limited_read_authorization"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-009",
-      "anchors": ["capability-matrix.json#INVARIANT-P-NO-HMR", "runtime-context.json#/route_invariants/shared_route"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-010",
-      "anchors": ["runtime-context.json#/route_invariants", "runtime-context.json#/release_gate"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-011",
-      "anchors": ["capability-matrix.json#MATRIX-P-PUBLIC-VIEWER", "runtime-context.json#/route_invariants/shared_route"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-012",
-      "anchors": ["capability-matrix.json#MATRIX-SHOW-RESOURCE-VIEWER", "capability-matrix.json#INVARIANT-SHOW-HMR-EDITOR"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-013",
-      "anchors": [
-        "capability-matrix.json#INVARIANT-P-NO-PRIVATE-CONTEXT",
-        "runtime-context.json#/route_invariants/editor_redirect",
-        "runtime-context.json#/shared_proxy_policy"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-014",
-      "anchors": ["runtime-context.json#/negotiation_cases/1", "capability-matrix.json#MATRIX-P-LIMITED-EDITOR-COMPAT"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-015",
-      "anchors": ["runtime-context.json#/negotiation_cases/2", "runtime-context.json#/capability_cache", "capability-matrix.json#MATRIX-P-PUBLIC-EDITOR-COMPAT"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-016",
-      "anchors": ["runtime-context.json#/shared_namespace_confinement", "mirror-registry.json#C21"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-017",
-      "anchors": ["runtime-context.json#/protocol1_validation", "runtime-context.json#/loopback_request_boundary", "mirror-registry.json#C20"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-018",
-      "anchors": [
-        "capability-matrix.json#MATRIX-OFFLINE-DENY",
-        "fixtures/show-access.json#STATE-OFFLINE-FUTURE-PUBLIC",
-        "runtime-context.json#/avibe_private_hmr_monitor",
-        "mirror-registry.json#C22"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-019",
-      "anchors": ["fixtures/apply-mutations.json#APPLY-PUBLIC-TO-LIMITED-PENDING", "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-020",
-      "anchors": ["fixtures/migrations.json#MIG-LEGACY-PUBLIC", "fixtures/migrations.json#MIG-LEGACY-OFFLINE", "fixtures/migrations.json#MIG-PRIVATE-GRANTS-DISCONNECTED"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-021",
-      "anchors": ["fixtures/hosted-operations.json#HOSTED-LOST-COMMIT-RESPONSE", "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-022",
-      "anchors": ["capability-matrix.json#INVARIANT-PAGE-EMAIL-NOT-SHOW", "capability-matrix.json#MATRIX-SHOW-NO-RESOURCE"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-023",
-      "anchors": ["runtime-context.json#/shared_response_cases/2", "runtime-context.json#/shared_response_cases/3", "mirror-registry.json#C15"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-024",
-      "anchors": ["runtime-context.json#/shared_namespace_confinement", "mirror-registry.json#C21"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-025",
-      "anchors": ["fixtures/migrations.json#MIG-NEWER-REVISION-CANCELS", "capability-matrix.json#MATRIX-P-PRIVATE-DISABLED"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-026",
-      "anchors": [
-        "fixtures/apply-mutations.json#APPLY-SAME-SET-NO-CHANGE",
-        "fixtures/apply-mutations.json#APPLY-PUBLIC-TO-LIMITED-HOSTED-NO-CHANGE",
-        "fixtures/apply-mutations.json#APPLY-PRIVATE-TO-LIMITED-HOSTED-NO-CHANGE",
-        "fixtures/hosted-operations.json#HOSTED-SAME-SET-NO-CHANGE"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-027",
-      "anchors": ["runtime-context.json#/namespace_lifetime", "mirror-registry.json#C21"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-028",
-      "anchors": ["runtime-context.json#/resource_governance", "mirror-registry.json#C21"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-029",
-      "anchors": ["fixtures/apply-mutations.json#APPLY-LIMITED-TO-PUBLIC-CLEANUP", "fixtures/show-access.json#STATE-PUBLIC-CLEANUP-PENDING"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-030",
-      "anchors": ["runtime-context.json#/request_protocol_cases/0", "runtime-context.json#/loopback_request_boundary"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-031",
-      "anchors": [
-        "fixtures/hosted-operations.json#HOSTED-EXPIRED-UNCOMMITTED",
-        "fixtures/hosted-operations.json#HOSTED-COMMITTED-RESULT-EXPIRED",
-        "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-032",
-      "anchors": [
-        "fixtures/apply-mutations.json#APPLY-OFFLINE-TO-PRIVATE",
-        "fixtures/apply-mutations.json#APPLY-OFFLINE-CLEANUP-THEN-FUTURE-PUBLIC",
-        "capability-matrix.json#MATRIX-OFFLINE-DENY"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-033",
-      "anchors": [
-        "fixtures/show-access.json#STATE-ACTIVE-LIMITED-OPEN",
-        "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL",
-        "capability-matrix.json#INVARIANT-PAGE-GRANT-REVISION-CURRENT",
-        "capability-matrix.json#/limited_read_authorization"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-034",
-      "anchors": [
-        "fixtures/apply-mutations.json#APPLY-PUBLIC-TO-LIMITED-PENDING",
-        "fixtures/hosted-operations.json#HOSTED-LOST-COMMIT-RESPONSE",
-        "fixtures/hosted-operations.json#HOSTED-EXPIRED-UNCOMMITTED",
-        "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-035",
-      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-EDITOR-COMPAT", "runtime-context.json#/negotiation_cases/1"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-036",
-      "anchors": ["show-access.schema.json#/$defs/grant_commitment", "fixtures/hosted-operations.json#HOSTED-LOST-COMMIT-RESPONSE"]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-037",
-      "anchors": [
-        "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL",
-        "capability-matrix.json#MATRIX-P-LIMITED-REAUTHORIZATION-FAILED",
-        "capability-matrix.json#/limited_read_authorization",
-        "mirror-registry.json#C23"
-      ]
-    },
-    {
-      "scenario_id": "SHOW-LIVE-038",
-      "anchors": ["capability-matrix.json#INVARIANT-PAGE-EMAIL-NOT-SHOW", "capability-matrix.json#MATRIX-SHOW-NO-RESOURCE"]
-    }
+    { "scenario_id": "SHOW-LIVE-001", "expected_evidence": "Trusted top-level navigation redirects to canonical `/show/`; resource editor receives HMR and annotations only on `/show/`; React Fast Refresh preservation remains a future browser check", "clauses": [
+      { "text": "Trusted top-level navigation redirects to canonical `/show/`", "claim_ids": ["CLAIM-EDITOR-P-REDIRECT"] },
+      { "text": "resource editor receives HMR and annotations only on `/show/`", "claim_ids": ["CLAIM-SHOW-EDITOR-HMR", "CLAIM-SHOW-EDITOR-ANNOTATIONS", "CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] },
+      { "text": "React Fast Refresh preservation remains a future browser check", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-002", "expected_evidence": "Current local membership serves shared `/p/`; `/p/` has no HMR or annotations; new content appears only after a later refresh", "clauses": [
+      { "text": "Current local membership serves shared `/p/`", "claim_ids": ["CLAIM-LIMITED-MEMBER-SHARED"] },
+      { "text": "`/p/` has no HMR or annotations", "claim_ids": ["CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] },
+      { "text": "new content appears only after a later refresh", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-003", "expected_evidence": "Signed state returns only to the resolved share; current local membership is absent; one generic denial returns no page bytes and does not loop", "clauses": [
+      { "text": "Signed state returns only to the resolved share", "claim_ids": ["CLAIM-SAFE-RETURN-BOUND"] },
+      { "text": "current local membership is absent", "claim_ids": ["CLAIM-UNLISTED-MEMBER-ABSENT", "CLAIM-UNLISTED-DENY"] },
+      { "text": "one generic denial returns no page bytes and does not loop", "claim_ids": ["CLAIM-UNLISTED-NO-BYTES-OR-LOOP"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-004", "expected_evidence": "Local Apply preserves the binding and advances audience revision once; anonymous `/p/` becomes readable; shared readers still have no HMR or annotations", "clauses": [
+      { "text": "Local Apply preserves the binding and advances audience revision once", "claim_ids": ["CLAIM-LIMITED-PUBLIC-BINDING", "CLAIM-LIMITED-PUBLIC-REVISION"] },
+      { "text": "anonymous `/p/` becomes readable", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED"] },
+      { "text": "shared readers still have no HMR or annotations", "claim_ids": ["CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-005", "expected_evidence": "Runtime graphs are keyed by Session and context; shared lifecycle cannot rebase or close private HMR; both `/p/` audiences remain shared", "clauses": [
+      { "text": "Runtime graphs are keyed by Session and context", "claim_ids": ["CLAIM-GRAPH-KEY-SESSION", "CLAIM-GRAPH-KEY-CONTEXT"] },
+      { "text": "shared lifecycle cannot rebase or close private HMR", "claim_ids": ["CLAIM-SHARED-DOES-NOT-CLOSE-PRIVATE"] },
+      { "text": "both `/p/` audiences remain shared", "claim_ids": ["CLAIM-LIMITED-MEMBER-SHARED", "CLAIM-PUBLIC-ANONYMOUS-SHARED"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-006", "expected_evidence": "Public `/p/` remains readable; limited `/p/` fails closed; neither outcome selects HMR", "clauses": [
+      { "text": "Public `/p/` remains readable", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED"] },
+      { "text": "limited `/p/` fails closed", "claim_ids": ["CLAIM-LIMITED-LOGIN-REQUIRED"] },
+      { "text": "neither outcome selects HMR", "claim_ids": ["CLAIM-P-NO-HMR"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-007", "expected_evidence": "Existing unauthorized HMR sockets close; remaining resource viewer can still read private modules; page membership does not affect the result", "clauses": [
+      { "text": "Existing unauthorized HMR sockets close", "claim_ids": ["CLAIM-HMR-REVOCATION-ACTION"] },
+      { "text": "remaining resource viewer can still read private modules", "claim_ids": ["CLAIM-SHOW-VIEWER-READ"] },
+      { "text": "page membership does not affect the result", "claim_ids": ["CLAIM-SHOW-VIEWER-READ", "CLAIM-SHOW-VIEWER-CURRENT-MEMBER-READ", "CLAIM-SHOW-VIEWER-NO-HMR"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-008", "expected_evidence": "One local transaction replaces the membership set; the next request is denied without Backend access; an already loaded guest tab is not actively closed", "clauses": [
+      { "text": "One local transaction replaces the membership set", "claim_ids": ["CLAIM-REMOVED-EMAIL-ABSENT", "CLAIM-APPLY-ATOMIC-MEMBERSHIP"] },
+      { "text": "the next request is denied without Backend access", "claim_ids": ["CLAIM-REMOVED-NEXT-REQUEST-DENY", "CLAIM-P2L-NO-EXTERNAL"] },
+      { "text": "an already loaded guest tab is not actively closed", "claim_ids": ["CLAIM-NO-ACTIVE-GUEST-CLOSURE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-009", "expected_evidence": "The shared HMR endpoint is absent; cookies and membership cannot enable it", "clauses": [
+      { "text": "The shared HMR endpoint is absent", "claim_ids": ["CLAIM-SHARED-ROUTE-HMR-FALSE"] },
+      { "text": "cookies and membership cannot enable it", "claim_ids": ["CLAIM-P-NO-HMR"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-010", "expected_evidence": "Private HMR graph identity stays stable; repeated edits create or rebase no shared graph; context and namespace resources stay bounded", "clauses": [
+      { "text": "Private HMR graph identity stays stable", "claim_ids": ["CLAIM-EDIT-PRIVATE-IDENTITY-STABLE"] },
+      { "text": "repeated edits create or rebase no shared graph", "claim_ids": ["CLAIM-EDIT-NO-SHARED-CREATE", "CLAIM-EDIT-NO-SHARED-REBASE", "CLAIM-EDIT-NO-SHARED-BUILD"] },
+      { "text": "context and namespace resources stay bounded", "claim_ids": ["CLAIM-EDIT-RESOURCE-BOUND", "CLAIM-BUDGET-PER-SESSION"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-011", "expected_evidence": "Entry and modules remain on the shared representation selected for that request chain; no private Session path or mixed graph appears", "clauses": [
+      { "text": "Entry and modules remain on the shared representation selected for that request chain", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED", "CLAIM-LIMITED-MEMBER-SHARED"] },
+      { "text": "no private Session path or mixed graph appears", "claim_ids": ["CLAIM-SHARED-NO-PRIVATE-BYTES", "CLAIM-NAMESPACE-NO-ESCAPE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-012", "expected_evidence": "Complete private modules are readable; HMR and annotations remain editor-only", "clauses": [
+      { "text": "Complete private modules are readable", "claim_ids": ["CLAIM-SHOW-VIEWER-READ"] },
+      { "text": "HMR and annotations remain editor-only", "claim_ids": ["CLAIM-SHOW-VIEWER-NO-HMR", "CLAIM-SHOW-EDITOR-HMR", "CLAIM-SHOW-EDITOR-ANNOTATIONS"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-013", "expected_evidence": "Shared worker scope cannot include `/show/`; no private bytes are served at `/p/`; redirect responses are private and preserve safe suffix and query", "clauses": [
+      { "text": "Shared worker scope cannot include `/show/`", "claim_ids": ["CLAIM-SW-SCOPE"] },
+      { "text": "no private bytes are served at `/p/`", "claim_ids": ["CLAIM-SHARED-NO-PRIVATE-BYTES"] },
+      { "text": "redirect responses are private and preserve safe suffix and query", "claim_ids": ["CLAIM-REDIRECT-PRIVATE-NOSTORE", "CLAIM-REDIRECT-SUFFIX", "CLAIM-REDIRECT-QUERY"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-014", "expected_evidence": "Shared viewers use the explicit legacy singleton compatibility path; HMR stays disabled on `/p/`; compatibility is not advertised as isolation", "clauses": [
+      { "text": "Shared viewers use the explicit legacy singleton compatibility path", "claim_ids": ["CLAIM-LEGACY-OUTCOME", "CLAIM-LEGACY-HEADERLESS-SINGLETON"] },
+      { "text": "HMR stays disabled on `/p/`", "claim_ids": ["CLAIM-P-NO-HMR"] },
+      { "text": "compatibility is not advertised as isolation", "claim_ids": ["CLAIM-HEADERLESS-KEYED-FALSE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-015", "expected_evidence": "Current request remains shared; retry delay is bounded; Runtime process identity change clears all cached outcomes", "clauses": [
+      { "text": "Current request remains shared", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED"] },
+      { "text": "retry delay is bounded", "claim_ids": ["CLAIM-PROBE-RETRY-BOUND"] },
+      { "text": "Runtime process identity change clears all cached outcomes", "claim_ids": ["CLAIM-PROBE-CACHE-RESET"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-016", "expected_evidence": "Recursive dependencies stay in one immutable opaque namespace; handles never reopen paths or escape namespaces; diagnostics and host paths are sanitized", "clauses": [
+      { "text": "Recursive dependencies stay in one immutable opaque namespace", "claim_ids": ["CLAIM-NAMESPACE-SAME"] },
+      { "text": "handles never reopen paths or escape namespaces", "claim_ids": ["CLAIM-HANDLE-NO-REOPEN", "CLAIM-NAMESPACE-NO-ESCAPE"] },
+      { "text": "diagnostics and host paths are sanitized", "claim_ids": ["CLAIM-LEGACY-SANITIZED", "CLAIM-LEGACY-NO-HOST-PATH"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-017", "expected_evidence": "Every prewarm carries a typed server envelope; protocol validation occurs before graph mutation; ordinary editor edits never implicitly prewarm shared context", "clauses": [
+      { "text": "Every prewarm carries a typed server envelope", "claim_ids": ["CLAIM-PREWARM-EXPLICIT", "CLAIM-PREWARM-TYPED"] },
+      { "text": "protocol validation occurs before graph mutation", "claim_ids": ["CLAIM-PROTOCOL-PRECEDES-MUTATION"] },
+      { "text": "ordinary editor edits never implicitly prewarm shared context", "claim_ids": ["CLAIM-IMPLICIT-PREWARM-FALSE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-018", "expected_evidence": "One coalesced monitor observes durable state; every Session socket closes within five seconds; no in-process event is required", "clauses": [
+      { "text": "One coalesced monitor observes durable state", "claim_ids": ["CLAIM-HMR-MONITOR-COALESCED"] },
+      { "text": "every Session socket closes within five seconds", "claim_ids": ["CLAIM-HMR-OFFLINE-DEADLINE"] },
+      { "text": "no in-process event is required", "claim_ids": ["CLAIM-OFFLINE-DURABLE-SOURCE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-019", "expected_evidence": "One local transaction preserves the stable binding and installs normalized membership; anonymous access stops immediately; Backend availability is irrelevant to Apply", "clauses": [
+      { "text": "One local transaction preserves the stable binding and installs normalized membership", "claim_ids": ["CLAIM-P2L-STABLE-BINDING", "CLAIM-P2L-LOCAL-MEMBER", "CLAIM-P2L-NORMALIZED-EMAILS", "CLAIM-APPLY-ATOMIC-MEMBERSHIP"] },
+      { "text": "anonymous access stops immediately", "claim_ids": ["CLAIM-LIMITED-LOGIN-REQUIRED"] },
+      { "text": "Backend availability is irrelevant to Apply", "claim_ids": ["CLAIM-P2L-NO-EXTERNAL"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-020", "expected_evidence": "Backend table and authorized-email endpoints are deleted; Avibe hosted-email clients are deleted; no migration or compatibility bridge exists", "clauses": [
+      { "text": "Backend table and authorized-email endpoints are deleted", "claim_ids": ["CLAIM-RETIRE-STORAGE-ACTION", "CLAIM-RETIRE-ENDPOINT-ACTION"] },
+      { "text": "Avibe hosted-email clients are deleted", "claim_ids": ["CLAIM-RETIRE-CLIENT-ACTION", "CLAIM-RETIRE-AUTH-ACTION", "CLAIM-RETIRE-SOURCE"] },
+      { "text": "no migration or compatibility bridge exists", "claim_ids": ["CLAIM-RETIRE-NO-MIGRATION", "CLAIM-RETIRE-NO-BRIDGE", "CLAIM-MIGRATION-FIXTURE-ABSENT"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-021", "expected_evidence": "Before-transaction crash leaves the old aggregate; after-commit crash leaves the complete new aggregate; same-mutation retry returns one terminal result without a cloud coordinator", "clauses": [
+      { "text": "Before-transaction crash leaves the old aggregate", "claim_ids": ["CLAIM-CRASH-OLD-BEFORE"] },
+      { "text": "after-commit crash leaves the complete new aggregate", "claim_ids": ["CLAIM-CRASH-NEW-AFTER", "CLAIM-CRASH-NEW-EMAIL"] },
+      { "text": "same-mutation retry returns one terminal result without a cloud coordinator", "claim_ids": ["CLAIM-CRASH-RETRY-STABLE", "CLAIM-IDEMPOTENCY-PAGE-MUTATION-KEY", "CLAIM-IDEMPOTENCY-SURVIVES-LATER-APPLY", "CLAIM-IDEMPOTENCY-ATOMIC", "CLAIM-P2L-NO-EXTERNAL", "CLAIM-HOSTED-FIXTURE-ABSENT"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-022", "expected_evidence": "Private commits locally and disables `/p/`; the stable binding is retained but inactive; listed-only identity still cannot use `/show/`", "clauses": [
+      { "text": "Private commits locally and disables `/p/`", "claim_ids": ["CLAIM-L2PRIVATE-MODE", "CLAIM-PRIVATE-P-DENY"] },
+      { "text": "the stable binding is retained but inactive", "claim_ids": ["CLAIM-L2PRIVATE-BINDING-RETAINED", "CLAIM-PRIVATE-P-DENY"] },
+      { "text": "listed-only identity still cannot use `/show/`", "claim_ids": ["CLAIM-LISTED-SHOW-DENY"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-023", "expected_evidence": "Both responses use fixed path-free output; no host path or development diagnostic reaches the browser", "clauses": [
+      { "text": "Both responses use fixed path-free output", "claim_ids": ["CLAIM-LEGACY-SANITIZED", "CLAIM-LEGACY-RAW-SANITIZED"] },
+      { "text": "no host path or development diagnostic reaches the browser", "claim_ids": ["CLAIM-LEGACY-NO-HOST-PATH"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-024", "expected_evidence": "Existing handle serves immutable captured bytes; handle reads do not reopen the path; unsafe replacement cannot receive new admission", "clauses": [
+      { "text": "Existing handle serves immutable captured bytes", "claim_ids": ["CLAIM-HANDLE-CAPTURED-ONLY"] },
+      { "text": "handle reads do not reopen the path", "claim_ids": ["CLAIM-HANDLE-NO-REOPEN"] },
+      { "text": "unsafe replacement cannot receive new admission", "claim_ids": ["CLAIM-HANDLE-NEW-DENY"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-025", "expected_evidence": "Stale expected audience revision rejects before write; conflicting payload reuse rejects before write; neither changes the local aggregate", "clauses": [
+      { "text": "Stale expected audience revision rejects before write", "claim_ids": ["CLAIM-STALE-REVISION-REJECT"] },
+      { "text": "conflicting payload reuse rejects before write", "claim_ids": ["CLAIM-MUTATION-CONFLICT-REJECT", "CLAIM-IDEMPOTENCY-BEFORE-CAS"] },
+      { "text": "neither changes the local aggregate", "claim_ids": ["CLAIM-STALE-NO-WRITE", "CLAIM-MUTATION-NO-WRITE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-026", "expected_evidence": "Normalization produces the same set; Apply returns no change; audience revision and stable binding remain unchanged", "clauses": [
+      { "text": "Normalization produces the same set", "claim_ids": ["CLAIM-SAME-SET-NORMALIZED"] },
+      { "text": "Apply returns no change", "claim_ids": ["CLAIM-SAME-SET-NO-CHANGE"] },
+      { "text": "audience revision and stable binding remain unchanged", "claim_ids": ["CLAIM-SAME-SET-REVISION", "CLAIM-SAME-SET-BINDING"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-027", "expected_evidence": "Absolute lifetime remains non-renewable; whole namespace and snapshot bytes are reclaimed; stale document must reload", "clauses": [
+      { "text": "Absolute lifetime remains non-renewable", "claim_ids": ["CLAIM-NAMESPACE-HARD-LIFETIME", "CLAIM-NAMESPACE-NONRENEWABLE"] },
+      { "text": "whole namespace and snapshot bytes are reclaimed", "claim_ids": ["CLAIM-NAMESPACE-RECLAIM-WHOLE"] },
+      { "text": "stale document must reload", "claim_ids": ["CLAIM-EXPIRED-RELOAD"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-028", "expected_evidence": "Process and per-Session bounds hold; private reserve cannot be consumed by shared traffic; excess shared admission is sanitized", "clauses": [
+      { "text": "Process and per-Session bounds hold", "claim_ids": ["CLAIM-BUDGET-PROCESS", "CLAIM-BUDGET-PER-SESSION"] },
+      { "text": "private reserve cannot be consumed by shared traffic", "claim_ids": ["CLAIM-BUDGET-PRIVATE-RESERVE"] },
+      { "text": "excess shared admission is sanitized", "claim_ids": ["CLAIM-BUDGET-SANITIZED"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-029", "expected_evidence": "Local Apply preserves the binding; membership becomes empty; anonymous reads begin from the same slug immediately", "clauses": [
+      { "text": "Local Apply preserves the binding", "claim_ids": ["CLAIM-LIMITED-PUBLIC-BINDING"] },
+      { "text": "membership becomes empty", "claim_ids": ["CLAIM-L2P-MEMBERSHIP-EMPTY"] },
+      { "text": "anonymous reads begin from the same slug immediately", "claim_ids": ["CLAIM-PUBLIC-ANONYMOUS-SHARED", "CLAIM-LIMITED-PUBLIC-BINDING"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-030", "expected_evidence": "Entry module fallback and prewarm retain singleton propagation; keyed context remains disabled; unknown protocol still rejects safely", "clauses": [
+      { "text": "Entry module fallback and prewarm retain singleton propagation", "claim_ids": ["CLAIM-HEADERLESS-BASE", "CLAIM-LEGACY-HEADERLESS-SINGLETON", "CLAIM-HEADERLESS-ENTRY", "CLAIM-HEADERLESS-MODULE", "CLAIM-HEADERLESS-FALLBACK", "CLAIM-HEADERLESS-STARTUP-PREWARM", "CLAIM-HEADERLESS-UPDATE-PREWARM"] },
+      { "text": "keyed context remains disabled", "claim_ids": ["CLAIM-HEADERLESS-KEYED-FALSE"] },
+      { "text": "unknown protocol still rejects safely", "claim_ids": ["CLAIM-UNKNOWN-PROTOCOL-REJECT"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-031", "expected_evidence": "There is no partially authoritative aggregate; retry is idempotent; no hosted operation cleanup or reconciliation exists", "clauses": [
+      { "text": "There is no partially authoritative aggregate", "claim_ids": ["CLAIM-CRASH-OLD-BEFORE", "CLAIM-CRASH-NEW-AFTER", "CLAIM-CRASH-NEW-EMAIL"] },
+      { "text": "retry is idempotent", "claim_ids": ["CLAIM-CRASH-RETRY-STABLE", "CLAIM-IDEMPOTENCY-PAGE-MUTATION-KEY", "CLAIM-IDEMPOTENCY-SURVIVES-LATER-APPLY", "CLAIM-IDEMPOTENCY-ATOMIC"] },
+      { "text": "no hosted operation cleanup or reconciliation exists", "claim_ids": ["CLAIM-HOSTED-FIXTURE-ABSENT", "CLAIM-RETIRE-NO-BRIDGE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-032", "expected_evidence": "Availability stays offline; mode binding and membership commit atomically; neither surface is admitted until explicit activation", "clauses": [
+      { "text": "Availability stays offline", "claim_ids": ["CLAIM-OFFLINE-STAYS-OFFLINE"] },
+      { "text": "mode binding and membership commit atomically", "claim_ids": ["CLAIM-OFFLINE-NEW-MODE", "CLAIM-OFFLINE-NEW-BINDING", "CLAIM-OFFLINE-NEW-MEMBERSHIP-EMPTY", "CLAIM-APPLY-ATOMIC-MEMBERSHIP"] },
+      { "text": "neither surface is admitted until explicit activation", "claim_ids": ["CLAIM-OFFLINE-P-DENY", "CLAIM-OFFLINE-SHOW-DENY"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-033", "expected_evidence": "Local membership is evaluated fresh on every limited request; Instance revision cannot add or remove membership; membership never becomes Instance access", "clauses": [
+      { "text": "Local membership is evaluated fresh on every limited request", "claim_ids": ["CLAIM-FRESH-LOCAL-LOOKUP"] },
+      { "text": "Instance revision cannot add or remove membership", "claim_ids": ["CLAIM-BACKEND-MEMBERSHIP-FALSE"] },
+      { "text": "membership never becomes Instance access", "claim_ids": ["CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-034", "expected_evidence": "The exact custom binding is preserved; normalized local membership installs atomically; listed shared reads and anonymous denial use the same slug", "clauses": [
+      { "text": "The exact custom binding is preserved", "claim_ids": ["CLAIM-CUSTOM-PRESERVED", "CLAIM-P2L-STABLE-BINDING"] },
+      { "text": "normalized local membership installs atomically", "claim_ids": ["CLAIM-P2L-LOCAL-MEMBER", "CLAIM-P2L-NORMALIZED-EMAILS", "CLAIM-APPLY-ATOMIC-MEMBERSHIP"] },
+      { "text": "listed shared reads and anonymous denial use the same slug", "claim_ids": ["CLAIM-CUSTOM-PRESERVED", "CLAIM-P2L-STABLE-BINDING", "CLAIM-LIMITED-MEMBER-SHARED", "CLAIM-LIMITED-LOGIN-REQUIRED"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-035", "expected_evidence": "Both trusted top-level requests redirect to canonical `/show/`; viewer remains read-only; editor HMR remains on the private canonical surface", "clauses": [
+      { "text": "Both trusted top-level requests redirect to canonical `/show/`", "claim_ids": ["CLAIM-VIEWER-P-REDIRECT", "CLAIM-EDITOR-P-REDIRECT"] },
+      { "text": "viewer remains read-only", "claim_ids": ["CLAIM-SHOW-VIEWER-READ", "CLAIM-SHOW-VIEWER-NO-HMR"] },
+      { "text": "editor HMR remains on the private canonical surface", "claim_ids": ["CLAIM-SHOW-EDITOR-HMR"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-036", "expected_evidence": "Exact normalized emails come only from local storage; response is private and no-store; Backend receives no whitelist data", "clauses": [
+      { "text": "Exact normalized emails come only from local storage", "claim_ids": ["CLAIM-SETTINGS-LOCAL-SOURCE", "CLAIM-SETTINGS-LOCAL-EMAIL", "CLAIM-SETTINGS-NORMALIZED-EMAILS"] },
+      { "text": "response is private and no-store", "claim_ids": ["CLAIM-SETTINGS-PRIVATE-NOSTORE"] },
+      { "text": "Backend receives no whitelist data", "claim_ids": ["CLAIM-BACKEND-MEMBERSHIP-FALSE", "CLAIM-FORBIDDEN-WHITELIST"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-037", "expected_evidence": "Backend assertion proves verified instance-bound identity only; Avibe re-resolves the share and current local membership; guest receives only shared `/p/`", "clauses": [
+      { "text": "Backend assertion proves verified instance-bound identity only", "claim_ids": ["CLAIM-IDENTITY-INSTANCE-BOUND", "CLAIM-IDENTITY-VERIFIED-EMAIL", "CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL"] },
+      { "text": "Avibe re-resolves the share and current local membership", "claim_ids": ["CLAIM-SHARE-RERESOLVE", "CLAIM-FRESH-LOCAL-LOOKUP"] },
+      { "text": "guest receives only shared `/p/`", "claim_ids": ["CLAIM-IDENTITY-LISTED-SHARED", "CLAIM-IDENTITY-LISTED-NO-INSTANCE"] }
+    ] },
+    { "scenario_id": "SHOW-LIVE-038", "expected_evidence": "Current membership positively serves limited `/p/`; canonical document module API and HMR remain denied; membership creates no Instance role or editor capability", "clauses": [
+      { "text": "Current membership positively serves limited `/p/`", "claim_ids": ["CLAIM-LIMITED-MEMBER-SHARED"] },
+      { "text": "canonical document module API and HMR remain denied", "claim_ids": ["CLAIM-LISTED-SHOW-DENY", "CLAIM-LISTED-SHOW-HMR-DENY"] },
+      { "text": "membership creates no Instance role or editor capability", "claim_ids": ["CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-IDENTITY-LISTED-NO-INSTANCE"] }
+    ] }
   ]
 }

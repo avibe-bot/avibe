@@ -1,110 +1,94 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "fixtures": [
     {
-      "id": "STATE-ACTIVE-PRIVATE",
+      "id": "STATE-ACTIVE-PRIVATE-RETAINED-BINDING",
       "scenario_ids": ["SHOW-LIVE-022"],
       "show_access": {
-        "schema_version": 1,
-        "page_id": "ses_contract_private",
+        "schema_version": 2,
+        "page_id": "ses_private_retained",
+        "availability": "active",
+        "access_mode": "private",
+        "share_binding": { "share_id": "stable-disabled" },
+        "audience_revision": 7,
+        "emails": [],
+        "last_mutation": {
+          "mutation_id": "mut_private_retained_0001",
+          "canonical_request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "result_audience_revision": 7
+        }
+      },
+      "shared_route_admitted": false
+    },
+    {
+      "id": "STATE-ACTIVE-PRIVATE-NEVER-SHARED",
+      "scenario_ids": ["SHOW-LIVE-025"],
+      "show_access": {
+        "schema_version": 2,
+        "page_id": "ses_private_new",
         "availability": "active",
         "access_mode": "private",
         "share_binding": null,
-        "audience_revision": 3,
-        "grant_revision": null,
-        "grant_commitment": null,
-        "share_admission_gate": "open",
-        "coordinator": { "state": "idle" }
+        "audience_revision": 0,
+        "emails": [],
+        "last_mutation": null
       },
       "shared_route_admitted": false
     },
     {
-      "id": "STATE-ACTIVE-LIMITED-OPEN",
-      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-008", "SHOW-LIVE-033"],
+      "id": "STATE-ACTIVE-LIMITED-LOCAL",
+      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-008", "SHOW-LIVE-033", "SHOW-LIVE-037", "SHOW-LIVE-038"],
       "show_access": {
-        "schema_version": 1,
-        "page_id": "ses_contract_limited",
+        "schema_version": 2,
+        "page_id": "ses_limited_local",
         "availability": "active",
         "access_mode": "limited",
-        "share_binding": { "share_id": "contract-limited" },
-        "audience_revision": 8,
-        "grant_revision": 12,
-        "grant_commitment": "1111111111111111111111111111111111111111111111111111111111111111",
-        "share_admission_gate": "open",
-        "coordinator": { "state": "idle" }
+        "share_binding": { "share_id": "stable-limited" },
+        "audience_revision": 12,
+        "emails": ["alice@example.com", "bob@example.com"],
+        "last_mutation": {
+          "mutation_id": "mut_limited_local_0001",
+          "canonical_request_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "result_audience_revision": 12
+        }
       },
       "shared_route_admitted": true
     },
     {
-      "id": "STATE-ACTIVE-LIMITED-CLOSED",
-      "scenario_ids": ["SHOW-LIVE-019", "SHOW-LIVE-021", "SHOW-LIVE-031", "SHOW-LIVE-034"],
+      "id": "STATE-ACTIVE-PUBLIC-STABLE",
+      "scenario_ids": ["SHOW-LIVE-004", "SHOW-LIVE-029"],
       "show_access": {
-        "schema_version": 1,
-        "page_id": "ses_contract_pending",
-        "availability": "active",
-        "access_mode": "limited",
-        "share_binding": { "share_id": "preserved-custom" },
-        "audience_revision": 9,
-        "grant_revision": 12,
-        "grant_commitment": "1111111111111111111111111111111111111111111111111111111111111111",
-        "share_admission_gate": "closed_pending",
-        "coordinator": {
-          "state": "pending",
-          "kind": "grant_change",
-          "phase": "commit_unknown",
-          "mutation_id": "mut_contract_pending_0001",
-          "source_audience_revision": 8,
-          "source_grant_revision": 12,
-          "target_access_mode": "limited",
-          "target_share_binding": { "share_id": "preserved-custom" },
-          "operation_id": "op_contract_pending_0001",
-          "target_grant_commitment": "2222222222222222222222222222222222222222222222222222222222222222"
-        }
-      },
-      "shared_route_admitted": false
-    },
-    {
-      "id": "STATE-PUBLIC-CLEANUP-PENDING",
-      "scenario_ids": ["SHOW-LIVE-029"],
-      "show_access": {
-        "schema_version": 1,
-        "page_id": "ses_contract_public",
+        "schema_version": 2,
+        "page_id": "ses_public_stable",
         "availability": "active",
         "access_mode": "public",
-        "share_binding": { "share_id": "public-custom" },
-        "audience_revision": 10,
-        "grant_revision": 13,
-        "grant_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
-        "share_admission_gate": "open",
-        "coordinator": {
-          "state": "pending",
-          "kind": "grant_cleanup",
-          "phase": "cleanup_pending",
-          "mutation_id": "mut_contract_cleanup_001",
-          "source_audience_revision": 9,
-          "source_grant_revision": 13,
-          "target_access_mode": "public",
-          "target_share_binding": { "share_id": "public-custom" },
-          "operation_id": null,
-          "target_grant_commitment": null
+        "share_binding": { "share_id": "stable-public" },
+        "audience_revision": 5,
+        "emails": [],
+        "last_mutation": {
+          "mutation_id": "mut_public_stable_0001",
+          "canonical_request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "result_audience_revision": 5
         }
       },
       "shared_route_admitted": true
     },
     {
-      "id": "STATE-OFFLINE-FUTURE-PUBLIC",
-      "scenario_ids": ["SHOW-LIVE-032"],
+      "id": "STATE-OFFLINE-LIMITED-RETAINED",
+      "scenario_ids": ["SHOW-LIVE-018", "SHOW-LIVE-032"],
       "show_access": {
-        "schema_version": 1,
-        "page_id": "ses_contract_offline",
+        "schema_version": 2,
+        "page_id": "ses_offline_limited",
         "availability": "offline",
-        "access_mode": "public",
-        "share_binding": { "share_id": "future-public" },
-        "audience_revision": 11,
-        "grant_revision": 14,
-        "grant_commitment": "3333333333333333333333333333333333333333333333333333333333333333",
-        "share_admission_gate": "open",
-        "coordinator": { "state": "idle" }
+        "access_mode": "limited",
+        "share_binding": { "share_id": "future-limited" },
+        "audience_revision": 9,
+        "emails": ["future@example.com"],
+        "last_mutation": {
+          "mutation_id": "mut_offline_limited_001",
+          "canonical_request_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "result_audience_revision": 9
+        }
       },
       "shared_route_admitted": false
     }

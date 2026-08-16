@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "authority_issue": "https://github.com/avibe-bot/avibe/issues/1498",
+  "production_exact_email_data_exists": false,
+  "strategy": "direct_retirement",
+  "migration_allowed": false,
+  "compatibility_bridge_allowed": false,
+  "dual_write_allowed": false,
+  "retired_surfaces": [
+    {
+      "repository": "avibe-backend",
+      "component": "remote_access_show_page_email_grants",
+      "future_action": "delete_storage"
+    },
+    {
+      "repository": "avibe-backend",
+      "component": "show_page_authorized_email_crud_and_grant_operations",
+      "future_action": "delete_endpoints"
+    },
+    {
+      "repository": "avibe",
+      "component": "hosted_show_page_authorized_email_clients",
+      "future_action": "delete_clients"
+    },
+    {
+      "repository": "avibe-backend",
+      "component": "show_page_email_instance_access_source_and_oidc_claims",
+      "future_action": "delete_authorization_source"
+    }
+  ],
+  "forbidden_successor_concepts": [
+    "hosted_email_grant_revision",
+    "hosted_email_grant_commitment",
+    "hosted_email_prepare_commit",
+    "hosted_email_cleanup_reconciliation",
+    "hosted_email_rollout_compatibility",
+    "hosted_email_migration_or_import"
+  ],
+  "obsolete_route_outcome": "absent_or_terminal_removed",
+  "development_and_regression_rows": "discard_allowed",
+  "scenario_ids": ["SHOW-LIVE-020"]
+}

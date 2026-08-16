@@ -1,500 +1,147 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "axes": {
     "surface": ["/p", "/show"],
     "availability": ["active", "offline"],
     "access_mode": ["private", "limited", "public"],
-    "share_admission_gate": ["open", "closed_pending"],
     "request_kind": ["trusted_top_level_navigation", "other"],
-    "limited_reauthorization_state": [
-      "not_attempted",
-      "attempted_without_current_page_grant"
-    ],
-    "principal": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"],
+    "resource_authority": ["none", "viewer", "editor"],
+    "identity_state": ["unverified", "verified"],
+    "page_membership": ["absent", "current"],
     "keyed_context": ["supported", "unsupported", "transient-unknown"]
   },
-  "limited_read_authorization": {
-    "id": "LIMITED-READ-PAGE-BOUND-AUTHORIZATION",
-    "server_resolved_binding": [
-      "page_id",
-      "share_id",
-      "active_limited_mode",
-      "open_admission_gate"
-    ],
-    "handshake_correlation": {
-      "required_carriers": [
-        "signed_oauth_state",
-        "browser_bound_cookie",
-        "single_use_server_side_fallback"
-      ],
-      "bound_fields": ["page_id", "share_id", "safe_public_return_target"]
-    },
-    "generic_session_behavior": "one_page_specific_reauthorization",
-    "callback_requires": [
-      "signed_state_and_cookie_or_fallback_match",
-      "server_binding_reresolves_to_same_active_limited_page",
-      "claim_page_matches_resolved_page",
-      "claim_source_is_show_page_email",
-      "claim_grant_revision_equals_authenticated_local_current_grant_revision"
-    ],
-    "local_grant_revision_sources": [
-      "authenticated_current_grant_result",
-      "authenticated_committed_operation_result"
-    ],
-    "claim_revision_cases": [
-      {
-        "id": "current_page_grant",
-        "claim_grant_revision": 22,
-        "authenticated_local_grant_revision": 22,
-        "outcome": "page_email_viewer"
-      },
-      {
-        "id": "stale_page_grant",
-        "claim_grant_revision": 21,
-        "authenticated_local_grant_revision": 22,
-        "outcome": "generic_deny"
-      }
-    ],
-    "failure_outcome": "generic_deny_without_page_bytes",
-    "attempt_marker": {
-      "authority": "negative_only",
-      "maximum_uses": 1,
-      "effect": "suppress_repeat_reauthorization",
-      "removed_from_safe_return_url": true,
-      "positive_authority": false
-    }
+  "authority_axes": {
+    "resource_authority_source": "existing_instance_and_resource_authorization",
+    "page_membership_source": "fresh_local_show_access_email_lookup",
+    "independent": true,
+    "page_membership_creates_instance_access_context": false,
+    "page_membership_creates_instance_role": false,
+    "editor_capability_source": "resource_editor_only"
   },
+  "global_invariants": [
+    {
+      "id": "INVARIANT-P-ALWAYS-SHARED-OR-NO-BYTES",
+      "assertion": "served_p_never_selects_private_context_hmr_or_annotations",
+      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-009", "SHOW-LIVE-011", "SHOW-LIVE-038"]
+    },
+    {
+      "id": "INVARIANT-MEMBERSHIP-NOT-INSTANCE-AUTHORITY",
+      "assertion": "page_membership_never_changes_show_workbench_api_or_editor_authority",
+      "scenario_ids": ["SHOW-LIVE-022", "SHOW-LIVE-033", "SHOW-LIVE-038"]
+    },
+    {
+      "id": "INVARIANT-RESOURCE-AXIS-ORTHOGONAL",
+      "assertion": "resource_redirect_and_show_access_do_not_require_page_membership",
+      "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-012", "SHOW-LIVE-035"]
+    },
+    {
+      "id": "INVARIANT-OFFLINE-DENIES-BOTH-SURFACES",
+      "assertion": "offline_never_serves_or_redirects",
+      "scenario_ids": ["SHOW-LIVE-018", "SHOW-LIVE-032"]
+    }
+  ],
   "rules": [
     {
       "id": "MATRIX-OFFLINE-DENY",
-      "selector": {
-        "surface": "*",
-        "availability": "offline",
-        "access_mode": "*",
-        "share_admission_gate": "*",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "*",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "deny",
-        "show_editor_capability": false,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
+      "selector": { "surface": "*", "availability": "offline", "access_mode": "*", "request_kind": "*", "resource_authority": "*", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
       "scenario_ids": ["SHOW-LIVE-018", "SHOW-LIVE-032"]
     },
     {
-      "id": "MATRIX-SHOW-NO-RESOURCE",
-      "selector": {
-        "surface": "/show",
-        "availability": "active",
-        "access_mode": "*",
-        "share_admission_gate": "*",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": ["anonymous", "page_email_viewer"],
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "deny",
-        "show_editor_capability": false,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
+      "id": "MATRIX-P-PRIVATE-DISABLED",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "private", "request_kind": "*", "resource_authority": "*", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-022"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-RESOURCE-VIEWER-REDIRECT",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "trusted_top_level_navigation", "resource_authority": "viewer", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "redirect_private", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": true, "redirect_role": "viewer" },
+      "scenario_ids": ["SHOW-LIVE-012", "SHOW-LIVE-035"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-RESOURCE-EDITOR-REDIRECT",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "trusted_top_level_navigation", "resource_authority": "editor", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "redirect_private", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": true, "redirect_role": "editor" },
+      "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-035"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-CURRENT-MEMBER-NO-RESOURCE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "*", "resource_authority": "none", "identity_state": "verified", "page_membership": "current", "keyed_context": "*" },
+      "decision": { "read_decision": "serve_shared", "runtime_context": "shared", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-008", "SHOW-LIVE-037", "SHOW-LIVE-038"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-CURRENT-MEMBER-NONTOP-RESOURCE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "verified", "page_membership": "current", "keyed_context": "*" },
+      "decision": { "read_decision": "serve_shared", "runtime_context": "shared", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-011", "SHOW-LIVE-033"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-LOGIN-NO-RESOURCE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "*", "resource_authority": "none", "identity_state": "unverified", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "login_required", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-006", "SHOW-LIVE-037"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-LOGIN-NONTOP-RESOURCE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "unverified", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "login_required", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-006"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-UNLISTED-NO-RESOURCE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "*", "resource_authority": "none", "identity_state": "verified", "page_membership": "absent", "keyed_context": "*" },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-008", "SHOW-LIVE-033"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-UNLISTED-NONTOP-RESOURCE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "verified", "page_membership": "absent", "keyed_context": "*" },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-033"]
+    },
+    {
+      "id": "MATRIX-P-PUBLIC-RESOURCE-VIEWER-REDIRECT",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "trusted_top_level_navigation", "resource_authority": "viewer", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "redirect_private", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": true, "redirect_role": "viewer" },
+      "scenario_ids": ["SHOW-LIVE-035"]
+    },
+    {
+      "id": "MATRIX-P-PUBLIC-RESOURCE-EDITOR-REDIRECT",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "trusted_top_level_navigation", "resource_authority": "editor", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "redirect_private", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": true, "redirect_role": "editor" },
+      "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-035"]
+    },
+    {
+      "id": "MATRIX-P-PUBLIC-SHARED-NO-RESOURCE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "*", "resource_authority": "none", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "serve_shared", "runtime_context": "shared", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-004", "SHOW-LIVE-006", "SHOW-LIVE-011", "SHOW-LIVE-029"]
+    },
+    {
+      "id": "MATRIX-P-PUBLIC-SHARED-NONTOP-RESOURCE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "serve_shared", "runtime_context": "shared", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-011"]
+    },
+    {
+      "id": "MATRIX-SHOW-NO-RESOURCE-DENY",
+      "selector": { "surface": "/show", "availability": "active", "access_mode": "*", "request_kind": "*", "resource_authority": "none", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
       "scenario_ids": ["SHOW-LIVE-022", "SHOW-LIVE-038"]
     },
     {
       "id": "MATRIX-SHOW-RESOURCE-VIEWER",
-      "selector": {
-        "surface": "/show",
-        "availability": "active",
-        "access_mode": "*",
-        "share_admission_gate": "*",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "resource_viewer",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "serve_private",
-        "show_editor_capability": false,
-        "runtime_context": "private",
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-007", "SHOW-LIVE-012", "SHOW-LIVE-022"]
+      "selector": { "surface": "/show", "availability": "active", "access_mode": "*", "request_kind": "*", "resource_authority": "viewer", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "serve_private", "runtime_context": "private", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-007", "SHOW-LIVE-012", "SHOW-LIVE-035"]
     },
     {
-      "id": "MATRIX-SHOW-OWNER-EDITOR",
-      "selector": {
-        "surface": "/show",
-        "availability": "active",
-        "access_mode": "*",
-        "share_admission_gate": "*",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "owner_editor",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "serve_private",
-        "show_editor_capability": true,
-        "runtime_context": "private",
-        "annotations": true,
-        "hmr": true,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-005", "SHOW-LIVE-007", "SHOW-LIVE-018"]
-    },
-    {
-      "id": "MATRIX-P-CLOSED-PENDING-DENY",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "*",
-        "share_admission_gate": "closed_pending",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "*",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "deny",
-        "show_editor_capability": false,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-019", "SHOW-LIVE-021", "SHOW-LIVE-031", "SHOW-LIVE-034"]
-    },
-    {
-      "id": "MATRIX-P-PRIVATE-DISABLED",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "private",
-        "share_admission_gate": "open",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "*",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "deny",
-        "show_editor_capability": false,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-022", "SHOW-LIVE-025"]
-    },
-    {
-      "id": "MATRIX-P-LIMITED-ANONYMOUS",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "limited",
-        "share_admission_gate": "open",
-        "request_kind": "*",
-        "limited_reauthorization_state": "not_attempted",
-        "principal": "anonymous",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "login_required",
-        "show_editor_capability": false,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-006"]
-    },
-    {
-      "id": "MATRIX-P-LIMITED-REAUTHORIZATION-FAILED",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "limited",
-        "share_admission_gate": "open",
-        "request_kind": "*",
-        "limited_reauthorization_state": "attempted_without_current_page_grant",
-        "principal": "anonymous",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "deny",
-        "show_editor_capability": false,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-037"]
-    },
-    {
-      "id": "MATRIX-P-LIMITED-PAGE-EMAIL",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "limited",
-        "share_admission_gate": "open",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "page_email_viewer",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "serve_shared",
-        "show_editor_capability": false,
-        "runtime_context": "shared",
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": [
-        "SHOW-LIVE-002",
-        "SHOW-LIVE-008",
-        "SHOW-LIVE-033",
-        "SHOW-LIVE-037"
-      ]
-    },
-    {
-      "id": "MATRIX-P-LIMITED-RESOURCE-ONLY",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "limited",
-        "share_admission_gate": "open",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "resource_viewer",
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "deny",
-        "show_editor_capability": false,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-006"]
-    },
-    {
-      "id": "MATRIX-P-LIMITED-EDITOR-SUPPORTED",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "limited",
-        "share_admission_gate": "open",
-        "request_kind": "trusted_top_level_navigation",
-        "limited_reauthorization_state": "*",
-        "principal": "owner_editor",
-        "keyed_context": "supported"
-      },
-      "decision": {
-        "read_decision": "redirect_private",
-        "show_editor_capability": true,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": true
-      },
-      "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-005"]
-    },
-    {
-      "id": "MATRIX-P-LIMITED-EDITOR-SUPPORTED-NONREDIRECT",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "limited",
-        "share_admission_gate": "open",
-        "request_kind": "other",
-        "limited_reauthorization_state": "*",
-        "principal": "owner_editor",
-        "keyed_context": "supported"
-      },
-      "decision": {
-        "read_decision": "serve_shared",
-        "show_editor_capability": true,
-        "runtime_context": "shared",
-        "annotations": true,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-011", "SHOW-LIVE-017"]
-    },
-    {
-      "id": "MATRIX-P-LIMITED-EDITOR-COMPAT",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "limited",
-        "share_admission_gate": "open",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "owner_editor",
-        "keyed_context": ["unsupported", "transient-unknown"]
-      },
-      "decision": {
-        "read_decision": "serve_shared",
-        "show_editor_capability": true,
-        "runtime_context": "shared",
-        "annotations": true,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-014", "SHOW-LIVE-015", "SHOW-LIVE-035"]
-    },
-    {
-      "id": "MATRIX-P-PUBLIC-VIEWER",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "public",
-        "share_admission_gate": "open",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": ["anonymous", "page_email_viewer", "resource_viewer"],
-        "keyed_context": "*"
-      },
-      "decision": {
-        "read_decision": "serve_shared",
-        "show_editor_capability": false,
-        "runtime_context": "shared",
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-004", "SHOW-LIVE-006", "SHOW-LIVE-011", "SHOW-LIVE-029"]
-    },
-    {
-      "id": "MATRIX-P-PUBLIC-EDITOR-SUPPORTED",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "public",
-        "share_admission_gate": "open",
-        "request_kind": "trusted_top_level_navigation",
-        "limited_reauthorization_state": "*",
-        "principal": "owner_editor",
-        "keyed_context": "supported"
-      },
-      "decision": {
-        "read_decision": "redirect_private",
-        "show_editor_capability": true,
-        "runtime_context": null,
-        "annotations": false,
-        "hmr": false,
-        "top_level_editor_redirect": true
-      },
-      "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-005", "SHOW-LIVE-013"]
-    },
-    {
-      "id": "MATRIX-P-PUBLIC-EDITOR-SUPPORTED-NONREDIRECT",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "public",
-        "share_admission_gate": "open",
-        "request_kind": "other",
-        "limited_reauthorization_state": "*",
-        "principal": "owner_editor",
-        "keyed_context": "supported"
-      },
-      "decision": {
-        "read_decision": "serve_shared",
-        "show_editor_capability": true,
-        "runtime_context": "shared",
-        "annotations": true,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-011", "SHOW-LIVE-017"]
-    },
-    {
-      "id": "MATRIX-P-PUBLIC-EDITOR-COMPAT",
-      "selector": {
-        "surface": "/p",
-        "availability": "active",
-        "access_mode": "public",
-        "share_admission_gate": "open",
-        "request_kind": "*",
-        "limited_reauthorization_state": "*",
-        "principal": "owner_editor",
-        "keyed_context": ["unsupported", "transient-unknown"]
-      },
-      "decision": {
-        "read_decision": "serve_shared",
-        "show_editor_capability": true,
-        "runtime_context": "shared",
-        "annotations": true,
-        "hmr": false,
-        "top_level_editor_redirect": false
-      },
-      "scenario_ids": ["SHOW-LIVE-014", "SHOW-LIVE-015", "SHOW-LIVE-035"]
-    }
-  ],
-  "global_invariants": [
-    {
-      "id": "INVARIANT-PAGE-EMAIL-NOT-EDITOR",
-      "assertion": "page_email_never_editor",
-      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-038"]
-    },
-    {
-      "id": "INVARIANT-PAGE-EMAIL-NOT-SHOW",
-      "assertion": "page_email_never_canonical_show",
-      "scenario_ids": ["SHOW-LIVE-022", "SHOW-LIVE-038"]
-    },
-    {
-      "id": "INVARIANT-PAGE-GRANT-REVISION-CURRENT",
-      "assertion": "page_email_claim_revision_must_equal_current_page_grant_revision",
-      "scenario_ids": ["SHOW-LIVE-008", "SHOW-LIVE-033", "SHOW-LIVE-037"]
-    },
-    {
-      "id": "INVARIANT-REAUTHORIZATION-MARKER-NEGATIVE-ONLY",
-      "assertion": "reauthorization_marker_never_grants_authority",
-      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-037"]
-    },
-    {
-      "id": "INVARIANT-P-NO-HMR",
-      "assertion": "shared_route_never_hmr",
-      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-009"]
-    },
-    {
-      "id": "INVARIANT-P-NO-PRIVATE-CONTEXT",
-      "assertion": "shared_route_never_private_context",
-      "scenario_ids": ["SHOW-LIVE-005", "SHOW-LIVE-011", "SHOW-LIVE-013"]
-    },
-    {
-      "id": "INVARIANT-NON-TOP-LEVEL-NO-REDIRECT",
-      "assertion": "non_top_level_never_redirects",
-      "scenario_ids": ["SHOW-LIVE-011", "SHOW-LIVE-017"]
-    },
-    {
-      "id": "INVARIANT-OFFLINE-NO-ROUTE",
-      "assertion": "offline_never_serves",
-      "scenario_ids": ["SHOW-LIVE-018", "SHOW-LIVE-032"]
-    },
-    {
-      "id": "INVARIANT-CLOSED-PENDING-NO-SHARED-ROUTE",
-      "assertion": "closed_pending_shared_route_never_serves",
-      "scenario_ids": ["SHOW-LIVE-019", "SHOW-LIVE-021", "SHOW-LIVE-031", "SHOW-LIVE-034"]
-    },
-    {
-      "id": "INVARIANT-SHOW-HMR-EDITOR",
-      "assertion": "show_hmr_requires_editor",
-      "scenario_ids": ["SHOW-LIVE-007", "SHOW-LIVE-012"]
+      "id": "MATRIX-SHOW-RESOURCE-EDITOR",
+      "selector": { "surface": "/show", "availability": "active", "access_mode": "*", "request_kind": "*", "resource_authority": "editor", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "decision": { "read_decision": "serve_private", "runtime_context": "private", "show_editor_capability": true, "hmr": true, "annotations": true, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-001", "SHOW-LIVE-005", "SHOW-LIVE-007", "SHOW-LIVE-035"]
     }
   ]
 }

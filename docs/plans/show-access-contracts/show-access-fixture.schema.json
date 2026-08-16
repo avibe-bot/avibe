@@ -1,15 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contracts.avibe.bot/show-access/v1/show-access-fixture.schema.json",
-  "title": "ShowAccess state examples v1",
+  "$id": "https://contracts.avibe.bot/show-access/v2/show-access-fixture.schema.json",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "fixtures"],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "fixtures": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 5,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -23,7 +22,7 @@
             "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
           },
           "show_access": {
-            "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json"
+            "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json"
           },
           "shared_route_admitted": { "type": "boolean" }
         }

@@ -1,27 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contracts.avibe.bot/show-access/v1/mirror-registry.schema.json",
-  "title": "Show access producer/consumer mirror registry v1",
+  "$id": "https://contracts.avibe.bot/show-access/v2/mirror-registry.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "contract_version",
-    "authority",
-    "repositories",
-    "process_ownership",
-    "interfaces",
-    "release_gates"
-  ],
+  "required": ["contract_version", "authority", "repositories", "process_ownership", "interfaces", "release_gates"],
   "properties": {
-    "contract_version": { "const": 1 },
+    "contract_version": { "const": 2 },
     "authority": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "path", "source_design", "source_sha", "source_design_blob_sha"],
+      "required": ["source_issue", "source_issue_updated_at", "source_design_path", "source_ref_kind", "source_sha", "source_design_blob_sha"],
       "properties": {
-        "repository": { "const": "avibe" },
-        "path": { "const": "docs/plans/show-access-contracts" },
-        "source_design": { "const": "docs/plans/public-show-live-update.md" },
+        "source_issue": { "const": "https://github.com/avibe-bot/avibe/issues/1498" },
+        "source_issue_updated_at": { "type": "string", "format": "date-time" },
+        "source_design_path": { "const": "docs/plans/public-show-live-update.md" },
+        "source_ref_kind": { "const": "git_blob" },
         "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "source_design_blob_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
       }
@@ -33,105 +26,53 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "remote"],
+        "required": ["id", "repository", "contract_location"],
         "properties": {
-          "id": { "$ref": "#/$defs/repository" },
-          "remote": { "type": "string", "format": "uri" }
+          "id": { "enum": ["avibe", "avibe-backend", "vibe-show-runtime"] },
+          "repository": { "type": "string", "format": "uri" },
+          "contract_location": { "type": "string" }
         }
       }
     },
     "process_ownership": {
-      "const": {
-        "stable_writer_lease": "ShowAccessCoordinator.stable_writer_lease",
-        "serialization_owner": "controller_process.ShowAccessCoordinator",
-        "store_write_owner": "controller_process.ShowAccessCoordinator",
-        "ui_process_coordinator_allowed": false,
-        "serialized_operations": ["apply", "recovery", "migration_reconciliation", "grant_cleanup"]
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stable_writer_lease", "serialization_owner", "store_write_owner", "apply_receipt_store", "ui_process_coordinator_allowed", "atomic_fields", "serialized_operations"],
+      "properties": {
+        "stable_writer_lease": { "type": "string" },
+        "serialization_owner": { "type": "string" },
+        "store_write_owner": { "type": "string" },
+        "apply_receipt_store": { "type": "string" },
+        "ui_process_coordinator_allowed": { "const": false },
+        "atomic_fields": { "type": "array", "minItems": 5, "uniqueItems": true, "items": { "type": "string" } },
+        "serialized_operations": { "const": ["apply"] }
       }
     },
     "interfaces": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 16,
+      "maxItems": 16,
       "items": { "$ref": "#/$defs/interface" }
     },
     "release_gates": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["hosted_grant_rollout", "runtime_feature_advertisement"],
+      "required": ["local_access_contract", "runtime_feature_advertisement"],
       "properties": {
-        "hosted_grant_rollout": { "const": "rollout.json" },
+        "local_access_contract": { "type": "string" },
         "runtime_feature_advertisement": { "const": "runtime-context.json#/release_gate" }
       }
     }
   },
   "$defs": {
-    "repository": { "enum": ["avibe", "avibe-backend", "vibe-show-runtime"] },
     "endpoint": {
       "type": "object",
       "additionalProperties": false,
       "required": ["repository", "path", "symbol"],
       "properties": {
-        "repository": { "$ref": "#/$defs/repository" },
+        "repository": { "enum": ["avibe", "avibe-backend", "vibe-show-runtime"] },
         "path": { "type": "string", "minLength": 1 },
         "symbol": { "type": "string", "minLength": 1 }
-      }
-    },
-    "signature": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema", "request", "result", "covered_fields"],
-      "properties": {
-        "schema": { "type": "string", "minLength": 1 },
-        "request": { "type": "string", "minLength": 1 },
-        "result": { "type": "string", "minLength": 1 },
-        "covered_fields": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
-        }
-      }
-    },
-    "delivery": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["mechanism", "route_or_channel", "authentication", "version"],
-      "properties": {
-        "mechanism": {
-          "enum": [
-            "sqlite_row",
-            "local_http_json",
-            "internal_socket_json",
-            "hosted_http_json",
-            "authorization_handshake",
-            "signed_session_claim",
-            "in_process_value",
-            "loopback_http_headers",
-            "loopback_http_response",
-            "migration_transaction",
-            "reviewed_release_manifest",
-            "reviewed_contract_mirror"
-          ]
-        },
-        "route_or_channel": { "type": "string", "minLength": 1 },
-        "authentication": {
-          "enum": [
-            "owner_resource_authority",
-            "owner_or_sharing_control_resource_authority",
-            "device_secret",
-            "signed_oidc_session",
-            "server_owned_facts",
-            "loopback_only",
-            "process_shared_lease",
-            "controller_internal_socket_peer",
-            "browser_untrusted_replaced_by_server_envelope",
-            "existing_resource_broker_and_durable_state",
-            "signed_state_cookie_or_device_fallback",
-            "reviewed_ci_head"
-          ]
-        },
-        "serialization_owner": { "type": "string", "minLength": 1 },
-        "version": { "const": 1 }
       }
     },
     "interface": {
@@ -141,13 +82,30 @@
       "properties": {
         "id": { "type": "string", "pattern": "^C[0-9]{2}$" },
         "producer": { "$ref": "#/$defs/endpoint" },
-        "consumers": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/endpoint" }
+        "consumers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/endpoint" } },
+        "signature": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "request", "result", "covered_fields"],
+          "properties": {
+            "schema": { "type": "string", "minLength": 3 },
+            "request": { "type": "string", "minLength": 3 },
+            "result": { "type": "string", "minLength": 3 },
+            "covered_fields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+          }
         },
-        "signature": { "$ref": "#/$defs/signature" },
-        "delivery": { "$ref": "#/$defs/delivery" }
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mechanism", "route_or_channel", "authentication", "serialization_owner", "version"],
+          "properties": {
+            "mechanism": { "type": "string", "minLength": 3 },
+            "route_or_channel": { "type": "string", "minLength": 3 },
+            "authentication": { "type": "string", "minLength": 3 },
+            "serialization_owner": { "type": "string", "minLength": 3 },
+            "version": { "type": "integer", "minimum": 1 }
+          }
+        }
       }
     }
   }

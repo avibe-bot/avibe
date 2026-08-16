@@ -1,262 +1,85 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contracts.avibe.bot/show-access/v1/capability-matrix.schema.json",
-  "title": "Closed Show read/editor capability matrix v1",
+  "$id": "https://contracts.avibe.bot/show-access/v2/capability-matrix.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "axes",
-    "limited_read_authorization",
-    "rules",
-    "global_invariants"
-  ],
+  "required": ["schema_version", "axes", "authority_axes", "global_invariants", "rules"],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "axes": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "surface",
-        "availability",
-        "access_mode",
-        "share_admission_gate",
-        "request_kind",
-        "limited_reauthorization_state",
-        "principal",
-        "keyed_context"
-      ],
+      "required": ["surface", "availability", "access_mode", "request_kind", "resource_authority", "identity_state", "page_membership", "keyed_context"],
       "properties": {
         "surface": { "const": ["/p", "/show"] },
         "availability": { "const": ["active", "offline"] },
         "access_mode": { "const": ["private", "limited", "public"] },
-        "share_admission_gate": { "const": ["open", "closed_pending"] },
         "request_kind": { "const": ["trusted_top_level_navigation", "other"] },
-        "limited_reauthorization_state": {
-          "const": ["not_attempted", "attempted_without_current_page_grant"]
-        },
-        "principal": {
-          "const": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"]
-        },
+        "resource_authority": { "const": ["none", "viewer", "editor"] },
+        "identity_state": { "const": ["unverified", "verified"] },
+        "page_membership": { "const": ["absent", "current"] },
         "keyed_context": { "const": ["supported", "unsupported", "transient-unknown"] }
       }
     },
-    "limited_read_authorization": {
-      "const": {
-        "id": "LIMITED-READ-PAGE-BOUND-AUTHORIZATION",
-        "server_resolved_binding": [
-          "page_id",
-          "share_id",
-          "active_limited_mode",
-          "open_admission_gate"
-        ],
-        "handshake_correlation": {
-          "required_carriers": [
-            "signed_oauth_state",
-            "browser_bound_cookie",
-            "single_use_server_side_fallback"
-          ],
-          "bound_fields": ["page_id", "share_id", "safe_public_return_target"]
-        },
-        "generic_session_behavior": "one_page_specific_reauthorization",
-        "callback_requires": [
-          "signed_state_and_cookie_or_fallback_match",
-          "server_binding_reresolves_to_same_active_limited_page",
-          "claim_page_matches_resolved_page",
-          "claim_source_is_show_page_email",
-          "claim_grant_revision_equals_authenticated_local_current_grant_revision"
-        ],
-        "local_grant_revision_sources": [
-          "authenticated_current_grant_result",
-          "authenticated_committed_operation_result"
-        ],
-        "claim_revision_cases": [
-          {
-            "id": "current_page_grant",
-            "claim_grant_revision": 22,
-            "authenticated_local_grant_revision": 22,
-            "outcome": "page_email_viewer"
-          },
-          {
-            "id": "stale_page_grant",
-            "claim_grant_revision": 21,
-            "authenticated_local_grant_revision": 22,
-            "outcome": "generic_deny"
-          }
-        ],
-        "failure_outcome": "generic_deny_without_page_bytes",
-        "attempt_marker": {
-          "authority": "negative_only",
-          "maximum_uses": 1,
-          "effect": "suppress_repeat_reauthorization",
-          "removed_from_safe_return_url": true,
-          "positive_authority": false
-        }
+    "authority_axes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource_authority_source", "page_membership_source", "independent", "page_membership_creates_instance_access_context", "page_membership_creates_instance_role", "editor_capability_source"],
+      "properties": {
+        "resource_authority_source": { "const": "existing_instance_and_resource_authorization" },
+        "page_membership_source": { "const": "fresh_local_show_access_email_lookup" },
+        "independent": { "const": true },
+        "page_membership_creates_instance_access_context": { "const": false },
+        "page_membership_creates_instance_role": { "const": false },
+        "editor_capability_source": { "const": "resource_editor_only" }
       }
-    },
-    "rules": {
-      "type": "array",
-      "minItems": 1,
-      "items": { "$ref": "#/$defs/rule" }
     },
     "global_invariants": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 4,
       "items": { "$ref": "#/$defs/invariant" }
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 17,
+      "items": { "$ref": "#/$defs/rule" }
     }
   },
   "$defs": {
     "scenario_ids": {
       "type": "array",
+      "minItems": 1,
       "uniqueItems": true,
       "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
     },
-    "surface_selector": {
+    "selector_value": {
       "oneOf": [
-        { "const": "*" },
-        { "enum": ["/p", "/show"] },
-        {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["/p", "/show"] }
-        }
+        { "type": "string" },
+        { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
       ]
     },
-    "availability_selector": {
-      "oneOf": [
-        { "const": "*" },
-        { "enum": ["active", "offline"] },
-        {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["active", "offline"] }
-        }
-      ]
-    },
-    "mode_selector": {
-      "oneOf": [
-        { "const": "*" },
-        { "enum": ["private", "limited", "public"] },
-        {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["private", "limited", "public"] }
-        }
-      ]
-    },
-    "principal_selector": {
-      "oneOf": [
-        { "const": "*" },
-        { "enum": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"] },
-        {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "enum": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"]
-          }
-        }
-      ]
-    },
-    "request_kind_selector": {
-      "oneOf": [
-        { "const": "*" },
-        { "enum": ["trusted_top_level_navigation", "other"] },
-        {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["trusted_top_level_navigation", "other"] }
-        }
-      ]
-    },
-    "limited_reauthorization_selector": {
-      "oneOf": [
-        { "const": "*" },
-        { "enum": ["not_attempted", "attempted_without_current_page_grant"] },
-        {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["not_attempted", "attempted_without_current_page_grant"] }
-        }
-      ]
-    },
-    "gate_selector": {
-      "oneOf": [
-        { "const": "*" },
-        { "enum": ["open", "closed_pending"] },
-        {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["open", "closed_pending"] }
-        }
-      ]
-    },
-    "keyed_selector": {
-      "oneOf": [
-        { "const": "*" },
-        { "enum": ["supported", "unsupported", "transient-unknown"] },
-        {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["supported", "unsupported", "transient-unknown"] }
-        }
-      ]
-    },
-    "selector": {
+    "invariant": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "surface",
-        "availability",
-        "access_mode",
-        "share_admission_gate",
-        "request_kind",
-        "limited_reauthorization_state",
-        "principal",
-        "keyed_context"
-      ],
+      "required": ["id", "assertion", "scenario_ids"],
       "properties": {
-        "surface": { "$ref": "#/$defs/surface_selector" },
-        "availability": { "$ref": "#/$defs/availability_selector" },
-        "access_mode": { "$ref": "#/$defs/mode_selector" },
-        "share_admission_gate": { "$ref": "#/$defs/gate_selector" },
-        "request_kind": { "$ref": "#/$defs/request_kind_selector" },
-        "limited_reauthorization_state": {
-          "$ref": "#/$defs/limited_reauthorization_selector"
-        },
-        "principal": { "$ref": "#/$defs/principal_selector" },
-        "keyed_context": { "$ref": "#/$defs/keyed_selector" }
+        "id": { "type": "string", "pattern": "^INVARIANT-[A-Z0-9-]+$" },
+        "assertion": { "type": "string", "minLength": 3 },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" }
       }
     },
     "decision": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "read_decision",
-        "show_editor_capability",
-        "runtime_context",
-        "annotations",
-        "hmr",
-        "top_level_editor_redirect"
-      ],
+      "required": ["read_decision", "runtime_context", "show_editor_capability", "hmr", "annotations", "top_level_redirect", "redirect_role"],
       "properties": {
-        "read_decision": {
-          "enum": ["deny", "login_required", "serve_shared", "serve_private", "redirect_private"]
-        },
+        "read_decision": { "enum": ["deny", "login_required", "serve_shared", "redirect_private", "serve_private"] },
+        "runtime_context": { "oneOf": [{ "enum": ["private", "shared"] }, { "type": "null" }] },
         "show_editor_capability": { "type": "boolean" },
-        "runtime_context": {
-          "oneOf": [{ "enum": ["private", "shared"] }, { "type": "null" }]
-        },
-        "annotations": { "type": "boolean" },
         "hmr": { "type": "boolean" },
-        "top_level_editor_redirect": { "type": "boolean" }
+        "annotations": { "type": "boolean" },
+        "top_level_redirect": { "type": "boolean" },
+        "redirect_role": { "oneOf": [{ "enum": ["viewer", "editor"] }, { "type": "null" }] }
       }
     },
     "rule": {
@@ -265,31 +88,22 @@
       "required": ["id", "selector", "decision", "scenario_ids"],
       "properties": {
         "id": { "type": "string", "pattern": "^MATRIX-[A-Z0-9-]+$" },
-        "selector": { "$ref": "#/$defs/selector" },
-        "decision": { "$ref": "#/$defs/decision" },
-        "scenario_ids": { "$ref": "#/$defs/scenario_ids" }
-      }
-    },
-    "invariant": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "assertion", "scenario_ids"],
-      "properties": {
-        "id": { "type": "string", "pattern": "^INVARIANT-[A-Z0-9-]+$" },
-        "assertion": {
-          "enum": [
-            "page_email_never_editor",
-            "page_email_never_canonical_show",
-            "page_email_claim_revision_must_equal_current_page_grant_revision",
-            "reauthorization_marker_never_grants_authority",
-            "shared_route_never_hmr",
-            "shared_route_never_private_context",
-            "non_top_level_never_redirects",
-            "offline_never_serves",
-            "closed_pending_shared_route_never_serves",
-            "show_hmr_requires_editor"
-          ]
+        "selector": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surface", "availability", "access_mode", "request_kind", "resource_authority", "identity_state", "page_membership", "keyed_context"],
+          "properties": {
+            "surface": { "$ref": "#/$defs/selector_value" },
+            "availability": { "$ref": "#/$defs/selector_value" },
+            "access_mode": { "$ref": "#/$defs/selector_value" },
+            "request_kind": { "$ref": "#/$defs/selector_value" },
+            "resource_authority": { "$ref": "#/$defs/selector_value" },
+            "identity_state": { "$ref": "#/$defs/selector_value" },
+            "page_membership": { "$ref": "#/$defs/selector_value" },
+            "keyed_context": { "$ref": "#/$defs/selector_value" }
+          }
         },
+        "decision": { "$ref": "#/$defs/decision" },
         "scenario_ids": { "$ref": "#/$defs/scenario_ids" }
       }
     }

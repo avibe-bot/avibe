@@ -1,22 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json",
-  "title": "ShowAccess v1",
-  "x-cross-field-invariants": [
-    {
-      "id": "CLEANUP-TARGET-EQUALS-COMMITTED-STATE",
-      "when": "coordinator.kind == grant_cleanup",
-      "relations": [
-        "coordinator.target_access_mode == access_mode",
-        "coordinator.target_share_binding == share_binding"
-      ]
-    },
-    {
-      "id": "CLEANUP-RECOVERY-EVIDENCE-PAIRED",
-      "when": "coordinator.kind == grant_cleanup",
-      "relation": "operation_id and target_grant_commitment are jointly null or jointly present"
-    }
-  ],
+  "$id": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json",
+  "title": "Local authoritative ShowAccess v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -26,136 +11,43 @@
     "access_mode",
     "share_binding",
     "audience_revision",
-    "grant_revision",
-    "grant_commitment",
-    "share_admission_gate",
-    "coordinator"
+    "emails",
+    "last_mutation"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "page_id": { "$ref": "#/$defs/page_id" },
     "availability": { "$ref": "#/$defs/availability" },
     "access_mode": { "$ref": "#/$defs/access_mode" },
     "share_binding": { "$ref": "#/$defs/share_binding" },
     "audience_revision": { "$ref": "#/$defs/revision" },
-    "grant_revision": {
-      "oneOf": [{ "$ref": "#/$defs/revision" }, { "type": "null" }]
-    },
-    "grant_commitment": {
-      "oneOf": [{ "$ref": "#/$defs/grant_commitment" }, { "type": "null" }]
-    },
-    "share_admission_gate": { "$ref": "#/$defs/share_admission_gate" },
-    "coordinator": { "$ref": "#/$defs/coordinator" }
+    "emails": { "$ref": "#/$defs/canonical_email_set" },
+    "last_mutation": {
+      "oneOf": [{ "$ref": "#/$defs/mutation_receipt" }, { "type": "null" }]
+    }
   },
   "allOf": [
     {
-      "if": { "properties": { "access_mode": { "const": "private" } } },
-      "then": { "properties": { "share_binding": { "type": "null" } } }
-    },
-    {
-      "if": {
-        "properties": { "access_mode": { "enum": ["limited", "public"] } }
-      },
-      "then": { "properties": { "share_binding": { "$ref": "#/$defs/bound_share" } } }
-    },
-    {
-      "if": { "properties": { "grant_revision": { "type": "null" } } },
-      "then": { "properties": { "grant_commitment": { "type": "null" } } },
-      "else": { "properties": { "grant_commitment": { "$ref": "#/$defs/grant_commitment" } } }
-    },
-    {
-      "if": { "properties": { "grant_commitment": { "type": "null" } } },
-      "then": { "properties": { "grant_revision": { "type": "null" } } },
-      "else": { "properties": { "grant_revision": { "$ref": "#/$defs/revision" } } }
-    },
-    {
-      "if": { "properties": { "share_admission_gate": { "const": "closed_pending" } } },
+      "if": { "properties": { "access_mode": { "const": "limited" } }, "required": ["access_mode"] },
       "then": {
         "properties": {
-          "access_mode": { "const": "limited" },
-          "coordinator": { "$ref": "#/$defs/grant_change_coordinator" }
+          "share_binding": { "$ref": "#/$defs/bound_share" },
+          "emails": { "$ref": "#/$defs/non_empty_canonical_email_set" }
         }
       }
     },
     {
-      "if": {
-        "properties": {
-          "access_mode": { "const": "limited" },
-          "share_admission_gate": { "const": "open" }
-        },
-        "required": ["access_mode", "share_admission_gate"]
-      },
+      "if": { "properties": { "access_mode": { "const": "public" } }, "required": ["access_mode"] },
       "then": {
         "properties": {
-          "grant_revision": { "$ref": "#/$defs/revision" },
-          "grant_commitment": { "$ref": "#/$defs/grant_commitment" },
-          "coordinator": { "$ref": "#/$defs/idle_coordinator" }
+          "share_binding": { "$ref": "#/$defs/bound_share" },
+          "emails": { "maxItems": 0 }
         }
       }
     },
     {
-      "if": { "properties": { "coordinator": { "$ref": "#/$defs/idle_coordinator" } } },
-      "then": { "properties": { "share_admission_gate": { "const": "open" } } }
-    },
-    {
-      "if": {
-        "properties": { "coordinator": { "$ref": "#/$defs/grant_change_coordinator" } }
-      },
-      "then": {
-        "properties": {
-          "access_mode": { "const": "limited" },
-          "share_admission_gate": { "const": "closed_pending" }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": { "coordinator": { "$ref": "#/$defs/grant_cleanup_coordinator" } }
-      },
-      "then": {
-        "properties": {
-          "access_mode": { "enum": ["private", "public"] },
-          "share_admission_gate": { "const": "open" }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "coordinator": {
-            "properties": {
-              "kind": { "const": "grant_cleanup" },
-              "target_access_mode": { "const": "private" }
-            },
-            "required": ["kind", "target_access_mode"]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "access_mode": { "const": "private" },
-          "share_binding": { "type": "null" }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "coordinator": {
-            "properties": {
-              "kind": { "const": "grant_cleanup" },
-              "target_access_mode": { "const": "public" }
-            },
-            "required": ["kind", "target_access_mode"]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "access_mode": { "const": "public" },
-          "share_binding": { "$ref": "#/$defs/bound_share" }
-        }
-      }
+      "if": { "properties": { "access_mode": { "const": "private" } }, "required": ["access_mode"] },
+      "then": { "properties": { "emails": { "maxItems": 0 } } }
     }
   ],
   "$defs": {
@@ -175,21 +67,27 @@
       "maxLength": 132,
       "pattern": "^mut_[A-Za-z0-9_-]{16,128}$"
     },
-    "operation_id": {
-      "type": "string",
-      "minLength": 19,
-      "maxLength": 131,
-      "pattern": "^op_[A-Za-z0-9_-]{16,128}$"
-    },
     "revision": { "type": "integer", "minimum": 0 },
-    "grant_commitment": {
-      "type": "string",
-      "description": "Opaque lowercase hexadecimal encoding of 32 random bytes.",
-      "pattern": "^[0-9a-f]{64}$"
-    },
     "availability": { "enum": ["active", "offline"] },
     "access_mode": { "enum": ["private", "limited", "public"] },
-    "share_admission_gate": { "enum": ["open", "closed_pending"] },
+    "normalized_email": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 254,
+      "pattern": "^[^@\\sA-Z]+@[^@\\sA-Z]+$"
+    },
+    "canonical_email_set": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/normalized_email" }
+    },
+    "non_empty_canonical_email_set": {
+      "allOf": [
+        { "$ref": "#/$defs/canonical_email_set" },
+        { "minItems": 1 }
+      ]
+    },
     "bound_share": {
       "type": "object",
       "additionalProperties": false,
@@ -199,104 +97,18 @@
     "share_binding": {
       "oneOf": [{ "$ref": "#/$defs/bound_share" }, { "type": "null" }]
     },
-    "idle_coordinator": {
+    "mutation_receipt": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state"],
-      "properties": { "state": { "const": "idle" } }
-    },
-    "grant_change_coordinator": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "state",
-        "kind",
-        "phase",
-        "mutation_id",
-        "source_audience_revision",
-        "source_grant_revision",
-        "target_access_mode",
-        "target_share_binding",
-        "operation_id",
-        "target_grant_commitment"
-      ],
+      "required": ["mutation_id", "canonical_request_sha256", "result_audience_revision"],
       "properties": {
-        "state": { "const": "pending" },
-        "kind": { "const": "grant_change" },
-        "phase": { "enum": ["commit_pending", "commit_unknown", "reconcile_pending"] },
         "mutation_id": { "$ref": "#/$defs/mutation_id" },
-        "source_audience_revision": { "$ref": "#/$defs/revision" },
-        "source_grant_revision": { "$ref": "#/$defs/revision" },
-        "target_access_mode": { "const": "limited" },
-        "target_share_binding": { "$ref": "#/$defs/bound_share" },
-        "operation_id": { "$ref": "#/$defs/operation_id" },
-        "target_grant_commitment": { "$ref": "#/$defs/grant_commitment" }
+        "canonical_request_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "result_audience_revision": { "$ref": "#/$defs/revision" }
       }
-    },
-    "grant_cleanup_coordinator": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "state",
-        "kind",
-        "phase",
-        "mutation_id",
-        "source_audience_revision",
-        "source_grant_revision",
-        "target_access_mode",
-        "target_share_binding",
-        "operation_id",
-        "target_grant_commitment"
-      ],
-      "properties": {
-        "state": { "const": "pending" },
-        "kind": { "const": "grant_cleanup" },
-        "phase": { "const": "cleanup_pending" },
-        "mutation_id": { "$ref": "#/$defs/mutation_id" },
-        "source_audience_revision": { "$ref": "#/$defs/revision" },
-        "source_grant_revision": { "$ref": "#/$defs/revision" },
-        "target_access_mode": { "enum": ["private", "public"] },
-        "target_share_binding": { "$ref": "#/$defs/share_binding" },
-        "operation_id": {
-          "oneOf": [{ "$ref": "#/$defs/operation_id" }, { "type": "null" }]
-        },
-        "target_grant_commitment": {
-          "oneOf": [{ "$ref": "#/$defs/grant_commitment" }, { "type": "null" }]
-        }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "target_access_mode": { "const": "private" } } },
-          "then": { "properties": { "target_share_binding": { "type": "null" } } }
-        },
-        {
-          "if": { "properties": { "target_access_mode": { "const": "public" } } },
-          "then": { "properties": { "target_share_binding": { "$ref": "#/$defs/bound_share" } } }
-        },
-        {
-          "oneOf": [
-            {
-              "properties": {
-                "operation_id": { "type": "null" },
-                "target_grant_commitment": { "type": "null" }
-              }
-            },
-            {
-              "properties": {
-                "operation_id": { "$ref": "#/$defs/operation_id" },
-                "target_grant_commitment": { "$ref": "#/$defs/grant_commitment" }
-              }
-            }
-          ]
-        }
-      ]
-    },
-    "coordinator": {
-      "oneOf": [
-        { "$ref": "#/$defs/idle_coordinator" },
-        { "$ref": "#/$defs/grant_change_coordinator" },
-        { "$ref": "#/$defs/grant_cleanup_coordinator" }
-      ]
     }
   }
 }

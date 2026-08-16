@@ -13,6 +13,7 @@
     "loopback_request_boundary",
     "protocol1_validation",
     "runtime_graph_ownership",
+    "operation_context_eligibility",
     "capability_cache",
     "shared_namespace_confinement",
     "namespace_lifetime",
@@ -148,6 +149,36 @@
         ],
         "shared_rebase_scope": "same_session_shared_graph_only",
         "shared_activity_closes_private_hmr": false
+      }
+    },
+    "operation_context_eligibility": {
+      "const": {
+        "id": "RUNTIME-EXPLICIT-OPERATION-CONTEXT-ELIGIBILITY",
+        "ordinary_editor_file_edit": {
+          "private_hmr_identity": "stable",
+          "shared_graph_create": false,
+          "shared_graph_rebase": false,
+          "shared_background_build": false,
+          "edit_count_input": "arbitrary_nonnegative_integer",
+          "resource_bound": "resource_governance"
+        },
+        "shared_demand_operations": [
+          "entry_http",
+          "module_http",
+          "spa_fallback_http",
+          "api_handler_http"
+        ],
+        "explicit_shared_prewarm_operations": [
+          "startup_reconciliation_prewarm",
+          "show_update_prewarm"
+        ],
+        "shared_prewarm_requires": [
+          "explicit_operation",
+          "shared_context_envelope",
+          "protocol1_validation",
+          "resource_budget_admission"
+        ],
+        "implicit_shared_work_from_private_edit": false
       }
     },
     "capability_cache": {
@@ -315,7 +346,7 @@
     "route_invariants": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["shared_route", "private_route", "editor_redirect"],
+      "required": ["shared_route", "private_route", "resource_redirect"],
       "properties": {
         "shared_route": {
           "type": "object",
@@ -340,7 +371,7 @@
             "hmr_requires": { "const": "show_editor_capability" }
           }
         },
-        "editor_redirect": {
+        "resource_redirect": {
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -362,8 +393,7 @@
             "requires": {
               "const": [
                 "active_share_binding",
-                "show_editor_capability",
-                "keyed_context_supported",
+                "resource_viewer_or_editor_authority",
                 "trusted_fetch_metadata"
               ]
             }
@@ -481,7 +511,7 @@
               "evidence": { "const": "definitive_legacy" },
               "outcome": { "const": "unsupported" },
               "process_cache": { "const": "permanent" },
-              "redirect_eligible": { "const": false }
+              "redirect_eligible": { "const": true }
             }
           }
         },
@@ -492,7 +522,7 @@
               "evidence": { "const": "transient_or_malformed" },
               "outcome": { "const": "transient-unknown" },
               "process_cache": { "const": "retry_deadline" },
-              "redirect_eligible": { "const": false }
+              "redirect_eligible": { "const": true }
             }
           }
         }

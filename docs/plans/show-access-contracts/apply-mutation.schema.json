@@ -1,116 +1,56 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json",
-  "title": "Unified owner ShowAccess Apply v1",
-  "x-boundary-invariants": [
-    {
-      "id": "APPLY-PAGE-IDENTITY",
-      "relation": "all_equal",
-      "fields": [
-        "route.page_id",
-        "request.page_id",
-        "result.page_id",
-        "result.show_access.page_id"
-      ],
-      "mismatch_outcome": "reject_before_coordinator"
-    },
-    {
-      "id": "APPLY-AUDIENCE-ONLY",
-      "request_may_change": ["access_mode", "share_binding", "emails"],
-      "request_may_not_change": ["availability"],
-      "result_availability_source": "authoritative_current_show_access"
-    }
-  ],
+  "$id": "https://contracts.avibe.bot/show-access/v2/apply-mutation.schema.json",
+  "title": "Local Show access Apply v2",
   "oneOf": [
     { "$ref": "#/$defs/apply_request" },
-    { "$ref": "#/$defs/apply_result" }
+    { "$ref": "#/$defs/terminal_result" },
+    { "$ref": "#/$defs/rejected_result" }
   ],
   "$defs": {
-    "email": {
+    "email_input": {
       "type": "string",
-      "format": "email",
+      "minLength": 3,
       "maxLength": 320,
-      "pattern": "^[^A-Z\\s]+$"
-    },
-    "share_binding_intent": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode"],
-          "properties": { "mode": { "const": "clear" } }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode"],
-          "properties": { "mode": { "const": "preserve_or_allocate" } }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode"],
-          "properties": { "mode": { "const": "rotate" } }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["mode", "share_id"],
-          "properties": {
-            "mode": { "const": "custom" },
-            "share_id": {
-              "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/share_id"
-            }
-          }
-        }
-      ]
+      "pattern": "^.*@.*$"
     },
     "target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["access_mode", "share_binding"],
+      "required": ["access_mode", "share_intent", "custom_share_id", "emails"],
       "properties": {
         "access_mode": {
-          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/access_mode"
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/access_mode"
         },
-        "share_binding": { "$ref": "#/$defs/share_binding_intent" },
+        "share_intent": { "enum": ["preserve_or_allocate", "rotate", "custom"] },
+        "custom_share_id": {
+          "oneOf": [
+            { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/share_id" },
+            { "type": "null" }
+          ]
+        },
         "emails": {
           "type": "array",
-          "minItems": 1,
-          "maxItems": 64,
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/email" }
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/email_input" }
         }
       },
       "allOf": [
         {
-          "if": { "properties": { "access_mode": { "const": "private" } } },
-          "then": {
-            "properties": { "share_binding": { "properties": { "mode": { "const": "clear" } } } },
-            "not": { "required": ["emails"] }
-          }
+          "if": { "properties": { "access_mode": { "const": "limited" } }, "required": ["access_mode"] },
+          "then": { "properties": { "emails": { "minItems": 1 } } },
+          "else": { "properties": { "emails": { "maxItems": 0 } } }
         },
         {
-          "if": { "properties": { "access_mode": { "const": "limited" } } },
+          "if": { "properties": { "share_intent": { "const": "custom" } }, "required": ["share_intent"] },
           "then": {
-            "required": ["emails"],
             "properties": {
-              "share_binding": {
-                "not": { "properties": { "mode": { "const": "clear" } } }
+              "custom_share_id": {
+                "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/share_id"
               }
             }
-          }
-        },
-        {
-          "if": { "properties": { "access_mode": { "const": "public" } } },
-          "then": {
-            "properties": {
-              "share_binding": {
-                "not": { "properties": { "mode": { "const": "clear" } } }
-              }
-            },
-            "not": { "required": ["emails"] }
-          }
+          },
+          "else": { "properties": { "custom_share_id": { "type": "null" } } }
         }
       ]
     },
@@ -123,79 +63,69 @@
         "page_id",
         "mutation_id",
         "expected_audience_revision",
-        "expected_grant_revision",
         "target"
       ],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "message_type": { "const": "apply_request" },
         "page_id": {
-          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/page_id"
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id"
         },
         "mutation_id": {
-          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/mutation_id"
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/mutation_id"
         },
         "expected_audience_revision": {
-          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/revision"
-        },
-        "expected_grant_revision": {
-          "oneOf": [
-            {
-              "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/revision"
-            },
-            { "type": "null" }
-          ]
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision"
         },
         "target": { "$ref": "#/$defs/target" }
       }
     },
-    "apply_result": {
+    "terminal_result": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "message_type",
-        "page_id",
-        "mutation_id",
-        "outcome",
-        "show_access"
-      ],
+      "required": ["schema_version", "message_type", "outcome", "page_id", "mutation_id", "show_access"],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "message_type": { "const": "apply_result" },
+        "outcome": { "enum": ["applied", "no_change", "idempotent_replay"] },
         "page_id": {
-          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/page_id"
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id"
         },
         "mutation_id": {
-          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/mutation_id"
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/mutation_id"
         },
-        "outcome": { "enum": ["applied", "no_change", "pending", "revision_conflict"] },
         "show_access": {
-          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json"
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json"
         }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "outcome": { "enum": ["applied", "no_change"] } } },
-          "then": {
-            "properties": {
-              "show_access": {
-                "properties": { "coordinator": { "properties": { "state": { "const": "idle" } } } }
-              }
-            }
-          }
+      }
+    },
+    "rejected_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "outcome", "page_id", "mutation_id", "effects"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "message_type": { "const": "apply_rejected" },
+        "outcome": {
+          "enum": ["revision_conflict", "mutation_conflict", "invalid_target", "page_mismatch", "unauthorized"]
         },
-        {
-          "if": { "properties": { "outcome": { "const": "pending" } } },
-          "then": {
-            "properties": {
-              "show_access": {
-                "properties": { "coordinator": { "properties": { "state": { "const": "pending" } } } }
-              }
-            }
+        "page_id": {
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id"
+        },
+        "mutation_id": {
+          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/mutation_id"
+        },
+        "effects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["controller_called", "store_write", "external_service_call"],
+          "properties": {
+            "controller_called": { "type": "boolean" },
+            "store_write": { "const": false },
+            "external_service_call": { "const": false }
           }
         }
-      ]
+      }
     }
   }
 }

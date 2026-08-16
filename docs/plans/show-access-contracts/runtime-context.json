@@ -50,7 +50,7 @@
       "evidence": "definitive_legacy",
       "outcome": "unsupported",
       "process_cache": "permanent",
-      "redirect_eligible": false,
+      "redirect_eligible": true,
       "request_before_next_probe": "shared"
     },
     {
@@ -58,7 +58,7 @@
       "evidence": "transient_or_malformed",
       "outcome": "transient-unknown",
       "process_cache": "retry_deadline",
-      "redirect_eligible": false,
+      "redirect_eligible": true,
       "request_before_next_probe": "shared"
     }
   ],
@@ -127,6 +127,34 @@
     ],
     "shared_rebase_scope": "same_session_shared_graph_only",
     "shared_activity_closes_private_hmr": false
+  },
+  "operation_context_eligibility": {
+    "id": "RUNTIME-EXPLICIT-OPERATION-CONTEXT-ELIGIBILITY",
+    "ordinary_editor_file_edit": {
+      "private_hmr_identity": "stable",
+      "shared_graph_create": false,
+      "shared_graph_rebase": false,
+      "shared_background_build": false,
+      "edit_count_input": "arbitrary_nonnegative_integer",
+      "resource_bound": "resource_governance"
+    },
+    "shared_demand_operations": [
+      "entry_http",
+      "module_http",
+      "spa_fallback_http",
+      "api_handler_http"
+    ],
+    "explicit_shared_prewarm_operations": [
+      "startup_reconciliation_prewarm",
+      "show_update_prewarm"
+    ],
+    "shared_prewarm_requires": [
+      "explicit_operation",
+      "shared_context_envelope",
+      "protocol1_validation",
+      "resource_budget_admission"
+    ],
+    "implicit_shared_work_from_private_edit": false
   },
   "capability_cache": {
     "id": "RUNTIME-PROCESS-CAPABILITY-CACHE",
@@ -290,7 +318,7 @@
       "context": "private",
       "hmr_requires": "show_editor_capability"
     },
-    "editor_redirect": {
+    "resource_redirect": {
       "source": "top_level_navigation",
       "destination": "/show/<session_id>/",
       "preserve_route_suffix": true,
@@ -299,8 +327,7 @@
       "vary": "Cookie",
       "requires": [
         "active_share_binding",
-        "show_editor_capability",
-        "keyed_context_supported",
+        "resource_viewer_or_editor_authority",
         "trusted_fetch_metadata"
       ]
     }
