@@ -62,6 +62,8 @@ Migrate every remaining direct writer to `update_config_fields`:
    controller write between load and save is overwritten); callers that
    pass a full snapshot rather than a partial payload are reclassified
    as snapshot overwrites and narrowed to the fields they own.
+   Read-decide-write callers (compare-then-assign) keep their decision
+   INSIDE the transaction mutator on the freshly loaded config.
 2. `core/handlers/model_hub/service.py` — model_hub section save.
 3. `vibe/api.py` codex auth save mirror + claude auth save mirror.
 4. `vibe/api.py` remove-key V2Config clear.
@@ -73,7 +75,18 @@ Migrate every remaining direct writer to `update_config_fields`:
    preserve both failure guarantees across an external-file write.
 6. `vibe/api.py:7047` agent install cli_path update,
    `vibe/api.py:7325` avault install cli_path update,
-   `vibe/api.py:11900` opencode default-provider clear.
+   `vibe/api.py:11900` opencode default-provider clear. The clear site
+   is read-decide-write (compare current default before clearing), so
+   its comparison AND assignment run on the freshly loaded config
+   inside the transaction mutator — not decisions outside, assignment
+   inside — otherwise a concurrent default switch to another provider
+   still gets cleared.
+7. First-run config creators: `vibe/runtime.py:149-151` and
+   `core/services/settings.py:83-87` both check-for-absence outside the
+   file lock then `default.save()`. Migrate to an atomic
+   create-if-absent transaction (load-or-default inside the lock, save
+   only when the file was absent) so a delayed first-run snapshot cannot
+   overwrite an initial settings save another process completed.
 
 Non-goals: no schema change, no file split, no new IPC, no guards.
 
