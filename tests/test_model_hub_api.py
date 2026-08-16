@@ -2237,10 +2237,7 @@ def test_models_live_api_calls_only_registered_server_routes():
     source = Path("ui/src/components/settings/models/modelsApi.ts").read_text(
         encoding="utf-8"
     )
-    live_api = source.split("const liveApi: ModelsApi = {", 1)[1].split(
-        "// ── Mock client",
-        1,
-    )[0]
+    live_api = source.split("export const modelsApi: ModelsApi = {", 1)[1]
     path_pattern = re.compile(
         r"'(?P<single>/api/models/[^']*)'|`(?P<template>/api/models/[^`]*)`"
     )
