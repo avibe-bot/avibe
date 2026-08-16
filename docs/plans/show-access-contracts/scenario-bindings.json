@@ -2,6 +2,7 @@
   "schema_version": 1,
   "design_source": "docs/plans/public-show-live-update.md",
   "design_sha": "38925dda50da6280ae63e323ba34a4ef601f5bc9",
+  "design_blob_sha": "6fc8fa580ef8eb35860e133b121cf82ce1eb3955",
   "bindings": [
     {
       "scenario_id": "SHOW-LIVE-001",

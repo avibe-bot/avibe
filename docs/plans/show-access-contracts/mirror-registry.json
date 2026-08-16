@@ -4,7 +4,8 @@
     "repository": "avibe",
     "path": "docs/plans/show-access-contracts",
     "source_design": "docs/plans/public-show-live-update.md",
-    "source_sha": "38925dda50da6280ae63e323ba34a4ef601f5bc9"
+    "source_sha": "38925dda50da6280ae63e323ba34a4ef601f5bc9",
+    "source_design_blob_sha": "6fc8fa580ef8eb35860e133b121cf82ce1eb3955"
   },
   "repositories": [
     { "id": "avibe", "remote": "https://github.com/avibe-bot/avibe" },

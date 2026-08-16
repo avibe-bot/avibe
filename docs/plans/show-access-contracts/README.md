@@ -6,7 +6,8 @@ authorization, routing, UI, migration execution, hosted endpoints, or Runtime
 behavior.
 
 The authority is `docs/plans/public-show-live-update.md` at Avibe commit
-`38925dda50da6280ae63e323ba34a4ef601f5bc9`. JSON Schema files use Draft 2020-12.
+`38925dda50da6280ae63e323ba34a4ef601f5bc9`; its Git blob OID also freezes the
+exact design bytes for shallow-checkout validation. JSON Schema files use Draft 2020-12.
 `mirror-registry.json` names every future producer and consumer; a lane that changes
 a field, endpoint, claim, header, or closed vocabulary must update this contract first.
 

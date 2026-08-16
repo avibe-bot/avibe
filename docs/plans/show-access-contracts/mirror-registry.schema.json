@@ -10,12 +10,13 @@
     "authority": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "path", "source_design", "source_sha"],
+      "required": ["repository", "path", "source_design", "source_sha", "source_design_blob_sha"],
       "properties": {
         "repository": { "const": "avibe" },
         "path": { "const": "docs/plans/show-access-contracts" },
         "source_design": { "const": "docs/plans/public-show-live-update.md" },
-        "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+        "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "source_design_blob_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
       }
     },
     "repositories": {

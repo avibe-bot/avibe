@@ -4,11 +4,12 @@
   "title": "SHOW-LIVE scenario bindings v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "design_source", "design_sha", "bindings"],
+  "required": ["schema_version", "design_source", "design_sha", "design_blob_sha", "bindings"],
   "properties": {
     "schema_version": { "const": 1 },
     "design_source": { "const": "docs/plans/public-show-live-update.md" },
     "design_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "design_blob_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "bindings": {
       "type": "array",
       "minItems": 1,

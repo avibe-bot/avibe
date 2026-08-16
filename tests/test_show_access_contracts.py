@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import itertools
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -540,13 +540,13 @@ def test_mirror_registry_names_every_repository_and_security_boundary() -> None:
 def test_every_design_scenario_is_bound_and_every_anchor_resolves() -> None:
     binding_document = _load("scenario-bindings.json")
     design_sha = binding_document["design_sha"]
-    assert design_sha == _load("mirror-registry.json")["authority"]["source_sha"]
-    pinned_design = subprocess.run(
-        ["git", "show", f"{design_sha}:{DESIGN.as_posix()}"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+    authority = _load("mirror-registry.json")["authority"]
+    assert design_sha == authority["source_sha"]
+    assert binding_document["design_blob_sha"] == authority["source_design_blob_sha"]
+    design_bytes = DESIGN.read_bytes()
+    git_blob = b"blob " + str(len(design_bytes)).encode("ascii") + b"\0" + design_bytes
+    assert hashlib.sha1(git_blob, usedforsecurity=False).hexdigest() == binding_document["design_blob_sha"]
+    pinned_design = design_bytes.decode("utf-8")
     design_ids = set(re.findall(r"`(SHOW-LIVE-[0-9]{3})`", pinned_design))
     bindings = binding_document["bindings"]
     binding_ids = [binding["scenario_id"] for binding in bindings]
