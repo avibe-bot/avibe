@@ -4,7 +4,14 @@
   "title": "Show access producer/consumer mirror registry v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract_version", "authority", "repositories", "interfaces", "release_gates"],
+  "required": [
+    "contract_version",
+    "authority",
+    "repositories",
+    "process_ownership",
+    "interfaces",
+    "release_gates"
+  ],
   "properties": {
     "contract_version": { "const": 1 },
     "authority": {
@@ -31,6 +38,15 @@
           "id": { "$ref": "#/$defs/repository" },
           "remote": { "type": "string", "format": "uri" }
         }
+      }
+    },
+    "process_ownership": {
+      "const": {
+        "stable_writer_lease": "ShowAccessCoordinator.stable_writer_lease",
+        "serialization_owner": "controller_process.ShowAccessCoordinator",
+        "store_write_owner": "controller_process.ShowAccessCoordinator",
+        "ui_process_coordinator_allowed": false,
+        "serialized_operations": ["apply", "recovery", "migration_reconciliation", "grant_cleanup"]
       }
     },
     "interfaces": {
@@ -85,27 +101,36 @@
           "enum": [
             "sqlite_row",
             "local_http_json",
+            "internal_socket_json",
             "hosted_http_json",
+            "authorization_handshake",
             "signed_session_claim",
             "in_process_value",
             "loopback_http_headers",
             "loopback_http_response",
             "migration_transaction",
-            "reviewed_release_manifest"
+            "reviewed_release_manifest",
+            "reviewed_contract_mirror"
           ]
         },
         "route_or_channel": { "type": "string", "minLength": 1 },
         "authentication": {
           "enum": [
             "owner_resource_authority",
+            "owner_or_sharing_control_resource_authority",
             "device_secret",
             "signed_oidc_session",
             "server_owned_facts",
             "loopback_only",
             "process_shared_lease",
+            "controller_internal_socket_peer",
+            "browser_untrusted_replaced_by_server_envelope",
+            "existing_resource_broker_and_durable_state",
+            "signed_state_cookie_or_device_fallback",
             "reviewed_ci_head"
           ]
         },
+        "serialization_owner": { "type": "string", "minLength": 1 },
         "version": { "const": 1 }
       }
     },

@@ -4,30 +4,159 @@
   "title": "Unified owner Apply examples v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "fixtures"],
+  "required": ["schema_version", "fixtures", "boundary_cases", "sequences"],
   "properties": {
     "schema_version": { "const": 1 },
     "fixtures": {
       "type": "array",
       "minItems": 1,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "scenario_ids", "request", "result"],
-        "properties": {
-          "id": { "type": "string", "pattern": "^APPLY-[A-Z0-9-]+$" },
-          "scenario_ids": {
-            "type": "array",
-            "minItems": 1,
-            "uniqueItems": true,
-            "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
-          },
-          "request": {
-            "$ref": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json#/$defs/apply_request"
-          },
-          "result": {
-            "$ref": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json#/$defs/apply_result"
-          }
+      "items": { "$ref": "#/$defs/fixture" }
+    },
+    "boundary_cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/boundary_case" }
+    },
+    "sequences": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/sequence" }
+    }
+  },
+  "$defs": {
+    "scenario_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
+    },
+    "apply_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_page_id", "request", "result"],
+      "properties": {
+        "route_page_id": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/page_id"
+        },
+        "request": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json#/$defs/apply_request"
+        },
+        "result": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json#/$defs/apply_result"
+        }
+      }
+    },
+    "terminal_recovery_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "show_access"],
+      "properties": {
+        "case": {
+          "enum": ["commit_response_received", "lost_response_reconciled", "expired_uncommitted_proven"]
+        },
+        "show_access": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json"
+        }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scenario_ids",
+        "route_page_id",
+        "source_show_access",
+        "request",
+        "result"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^APPLY-[A-Z0-9-]+$" },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
+        "route_page_id": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/page_id"
+        },
+        "source_show_access": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json"
+        },
+        "request": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json#/$defs/apply_request"
+        },
+        "hosted_prepare_result": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/hosted-operation.schema.json"
+        },
+        "result": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json#/$defs/apply_result"
+        },
+        "terminal_recovery_outcomes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/terminal_recovery_outcome" }
+        }
+      }
+    },
+    "boundary_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scenario_ids",
+        "route_page_id",
+        "request",
+        "outcome",
+        "coordinator_called",
+        "store_write_performed"
+      ],
+      "properties": {
+        "id": { "const": "APPLY-PAGE-ID-MISMATCH" },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
+        "route_page_id": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/page_id"
+        },
+        "request": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json#/$defs/apply_request"
+        },
+        "outcome": { "const": "reject_before_coordinator" },
+        "coordinator_called": { "const": false },
+        "store_write_performed": { "const": false }
+      }
+    },
+    "sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scenario_ids",
+        "initial_show_access",
+        "first_apply",
+        "cleanup_current_grant",
+        "cleanup_terminal_show_access",
+        "second_apply",
+        "assertions"
+      ],
+      "properties": {
+        "id": { "const": "APPLY-OFFLINE-CLEANUP-THEN-FUTURE-PUBLIC" },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
+        "initial_show_access": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json"
+        },
+        "first_apply": { "$ref": "#/$defs/apply_pair" },
+        "cleanup_current_grant": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/hosted-operation.schema.json#/$defs/current_grant_result"
+        },
+        "cleanup_terminal_show_access": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json"
+        },
+        "second_apply": { "$ref": "#/$defs/apply_pair" },
+        "assertions": {
+          "const": [
+            "single_coordinator_serializes_cleanup_before_second_apply",
+            "cleanup_not_overwritten_or_lost",
+            "availability_remains_offline",
+            "shared_route_never_admitted",
+            "future_public_custom_slug_commits"
+          ]
         }
       }
     }

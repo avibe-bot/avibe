@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v1/owner-settings.schema.json",
+  "title": "Owner Show access settings read v1",
+  "x-cross-field-invariants": [
+    {
+      "id": "OWNER-SETTINGS-PAGE-IDENTITY",
+      "relation": "all_equal",
+      "fields": [
+        "route.page_id",
+        "request.page_id",
+        "result.page_id",
+        "result.show_access.page_id",
+        "result.hosted_current_grant.page_id"
+      ]
+    },
+    {
+      "id": "OWNER-SETTINGS-GRANT-EVIDENCE",
+      "relations": [
+        "result.show_access.grant_revision == result.hosted_current_grant.grant_revision",
+        "result.show_access.grant_commitment == result.hosted_current_grant.grant_commitment"
+      ]
+    }
+  ],
+  "oneOf": [
+    { "$ref": "#/$defs/settings_read_request" },
+    { "$ref": "#/$defs/settings_read_result" }
+  ],
+  "$defs": {
+    "settings_read_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "page_id"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "message_type": { "const": "owner_settings_read_request" },
+        "page_id": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/page_id"
+        }
+      }
+    },
+    "settings_read_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "message_type",
+        "page_id",
+        "show_access",
+        "hosted_current_grant",
+        "storage_policy",
+        "cache_control"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "message_type": { "const": "owner_settings_read_result" },
+        "page_id": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/page_id"
+        },
+        "show_access": {
+          "allOf": [
+            { "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json" },
+            { "properties": { "access_mode": { "const": "limited" } } }
+          ]
+        },
+        "hosted_current_grant": {
+          "$ref": "https://contracts.avibe.bot/show-access/v1/hosted-operation.schema.json#/$defs/current_grant_result"
+        },
+        "storage_policy": { "const": "request_scoped_transient_no_store" },
+        "cache_control": { "const": "private, no-store" }
+      }
+    }
+  }
+}

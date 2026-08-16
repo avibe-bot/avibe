@@ -92,7 +92,12 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["state", "source_audience_revision", "provisional_share_binding"],
+          "required": [
+            "state",
+            "source_audience_revision",
+            "provisional_share_binding",
+            "pending_action"
+          ],
           "properties": {
             "state": { "const": "pending" },
             "source_audience_revision": {
@@ -100,6 +105,9 @@
             },
             "provisional_share_binding": {
               "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/share_binding"
+            },
+            "pending_action": {
+              "enum": ["reconcile_legacy_grants", "cleanup_unknown_legacy_grants"]
             }
           }
         }
@@ -143,7 +151,13 @@
         },
         "expected_migration": { "$ref": "#/$defs/migration_state" },
         "expected_reconciliation_outcome": {
-          "enum": ["completed", "pending_fail_closed", "discarded_newer_revision"]
+          "enum": [
+            "completed",
+            "pending_fail_closed",
+            "pending_public_cleanup",
+            "pending_offline_cleanup",
+            "discarded_newer_revision"
+          ]
         },
         "shared_route_admitted": { "type": "boolean" }
       }

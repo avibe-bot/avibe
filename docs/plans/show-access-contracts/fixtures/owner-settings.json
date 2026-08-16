@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "SETTINGS-LIMITED-OWNER-READ",
+      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-038"],
+      "route_page_id": "ses_settings_limited",
+      "authority": "owner",
+      "request": {
+        "schema_version": 1,
+        "message_type": "owner_settings_read_request",
+        "page_id": "ses_settings_limited"
+      },
+      "result": {
+        "schema_version": 1,
+        "message_type": "owner_settings_read_result",
+        "page_id": "ses_settings_limited",
+        "show_access": {
+          "schema_version": 1,
+          "page_id": "ses_settings_limited",
+          "availability": "active",
+          "access_mode": "limited",
+          "share_binding": { "share_id": "settings-limited-link" },
+          "audience_revision": 14,
+          "grant_revision": 22,
+          "grant_commitment": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "share_admission_gate": "open",
+          "coordinator": { "state": "idle" }
+        },
+        "hosted_current_grant": {
+          "schema_version": 1,
+          "message_type": "current_grant_result",
+          "page_id": "ses_settings_limited",
+          "authenticated_result": true,
+          "legacy_write_policy": "disabled",
+          "grant_revision": 22,
+          "grant_commitment": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "emails": ["owner-visible@example.com"]
+        },
+        "storage_policy": "request_scoped_transient_no_store",
+        "cache_control": "private, no-store"
+      }
+    }
+  ],
+  "denied_cases": [
+    {
+      "id": "SETTINGS-PAGE-EMAIL-DENIED",
+      "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-038"],
+      "authority": "page_email_only",
+      "outcome": "generic_deny",
+      "hosted_current_grant_requested": false,
+      "settings_returned": false
+    }
+  ]
+}

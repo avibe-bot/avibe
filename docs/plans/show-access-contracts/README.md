@@ -17,6 +17,7 @@ a field, endpoint, claim, header, or closed vocabulary must update this contract
 | --- | --- |
 | `show-access.schema.json` | Durable non-PII `ShowAccess`, gate, and coordinator state. |
 | `apply-mutation.schema.json` | The only owner-facing access mutation request/result. |
+| `owner-settings.schema.json` | Owner-authorized transient limited-email settings read. |
 | `hosted-operation.schema.json` | Prepare, commit, status, current-grant, and acknowledgement messages. |
 | `capability-matrix.json` | Closed `/p` and `/show` read/editor decisions. |
 | `runtime-context.json` | Protocol 1 headers, negotiation, route/context invariants, and release gate. |
@@ -34,7 +35,8 @@ Fixture field `shared_route_admitted` always means admission of `/p`; canonical
 
 | Boundary | Method and route | Request | Result | Idempotency owner |
 | --- | --- | --- | --- | --- |
-| Local owner Apply | `POST /api/show-pages/{page_id}/access:apply` | `apply_request` | `apply_result` | Avibe, keyed by `page_id + mutation_id`; expected audience and grant revisions are compare-and-swap inputs. |
+| Local owner Apply | `POST /api/show-pages/{page_id}/access:apply` | audience-only `apply_request` | `apply_result` | Avibe, keyed by `page_id + mutation_id`; expected audience and grant revisions are compare-and-swap inputs. Availability comes only from authoritative current state. |
+| Local owner settings | `GET /api/show-pages/{page_id}/access/settings` | `owner_settings_read_request` | `owner_settings_read_result` | Owner/sharing-control authority; exact emails remain nested authenticated hosted output and are request-scoped, private/no-store. |
 | Hosted prepare | `POST /api/v1/instances/{instance_id}/show-pages/{page_id}/grant-operations/prepare` | `prepare_request` | `prepare_result` | Backend, keyed by `page_id + mutation_id`; a canonical same set returns `no_change` and creates no operation. |
 | Hosted commit | `POST .../grant-operations/{operation_id}/commit` | `commit_request` | `commit_result` | Backend, keyed by the bound page, mutation, and operation; retries return `already_committed` with the same revision and commitment. |
 | Hosted operation status | `GET .../grant-operations/{operation_id}` | `operation_status_request` | `operation_status_result` | Backend retains terminal non-PII operation evidence. |
@@ -51,6 +53,11 @@ The abbreviated `...` in the table expands to
 `/api/v1/instances/{instance_id}/show-pages/{page_id}`. Exact route files and symbols
 are in `mirror-registry.json`.
 
+Browser HTTP terminates in the UI process. Apply and settings reads then cross the
+controller internal socket; only the controller's `ShowAccessCoordinator`, under the
+stable writer lease, serializes recovery and writes the store. The UI process never
+owns a second coordinator.
+
 ## State invariants
 
 - `availability` is orthogonal to `access_mode`; offline pages serve no route but may
@@ -65,6 +72,8 @@ are in `mirror-registry.json`.
   coordinator record. Every `/p` read and editor redirect is denied while closed.
 - Leaving limited commits private/public locally with an open gate. Cleanup may stay
   pending, but cannot restore page-email authority or close an already-public route.
+- Cleanup target mode and share binding equal the committed `ShowAccess` state;
+  cleanup operation ID and target commitment are jointly absent or jointly present.
 - `audience_revision` is device-local. `grant_revision` is backend-issued and scoped
   to one Show Page. The Instance authorization revision cannot substitute for either.
 - Durable local state and coordinator records contain no exact email. Exact addresses
@@ -77,7 +86,7 @@ Prepare has three closed outcomes:
 | Outcome | Meaning |
 | --- | --- |
 | `no_change` | Canonical target equals the current set. Return the current revision/commitment; create no operation and do not close an open gate. |
-| `prepared` | A fresh 256-bit target commitment and opaque operation ID exist for at most 24 non-renewable hours. Grant authority is unchanged. |
+| `prepared` | Server-issued `prepared_at` and `expires_at` bound a fresh 256-bit target commitment and opaque operation ID to at most 24 non-renewable hours. Grant authority is unchanged. |
 | `revision_conflict` | Expected page grant revision is stale. The authenticated current grant is returned for reconciliation. |
 
 Commit is `committed | already_committed | expired_uncommitted |
@@ -118,7 +127,7 @@ cannot write around the gate.
 ## Capability boundary
 
 `capability-matrix.json` is a compressed closed matrix. Tests expand all
-`2 surfaces x 2 availability values x 3 modes x 2 admission-gate states x 2 request kinds x 4 principals x 3 Runtime outcomes`
+`2 surfaces x 2 availability values x 3 modes x 2 admission-gate states x 2 request kinds x 2 reauthorization states x 4 principals x 3 Runtime outcomes`
 and require exactly one matching rule per combination.
 
 - `/p` is shared and has no HMR for every viewer. A supported Runtime may redirect an
@@ -143,6 +152,35 @@ The hosted signature covers `vibe_show_page_id`,
 `vibe_show_page_grant_revision`, and
 `vibe_instance_access_source=show_page_email` together. Browser input supplies none
 of them.
+
+The limited-read authorization owner binds signed OAuth state, the browser cookie,
+and the single-use server fallback to the server-resolved page, share, and safe
+return target. A generic session gets one page-specific reauthorization. Callback
+re-resolves the binding and accepts a page-email claim only when its page, source,
+and grant revision match authenticated current local evidence. A failed callback
+consumes one negative-only marker, returns a generic denial, and cannot loop or
+install authority.
+
+## Runtime safety owners
+
+`runtime-context.json` names executable properties rather than status anchors:
+
+- every graph is keyed by `(session_id, context)` and private/shared lifecycles are
+  independent;
+- protocol-1 validation precedes Session resolution and every graph lookup, create,
+  rebase, ownership mutation, prewarm, or HMR connection;
+- recursive TSX, CSS, raw-loader, and worker dependencies remain immutable inside
+  one opaque namespace; handle reads never reopen paths and unsafe path swaps deny
+  new admission;
+- namespaces have a 30-minute idle deadline and non-renewable two-hour maximum, and
+  one process-wide weighted budget enforces per-Session limits, private reserve,
+  reclaim order, in-flight pinning, and sanitized shared overload;
+- the Avibe proxy strips browser context headers, sends exactly one server-owned
+  envelope, confines Service Worker scope, preserves redirect suffix/query, and
+  makes shared entries and redirects private/no-store with `Vary: Cookie`;
+- Avibe, not Runtime, owns one coalesced private-HMR revocation monitor per active
+  Session. Authorization loss closes existing unauthorized sockets; durable offline
+  polling and close-all are bounded to five seconds.
 
 ## Runtime release gate
 

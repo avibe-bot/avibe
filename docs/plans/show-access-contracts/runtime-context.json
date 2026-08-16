@@ -12,7 +12,16 @@
       "id": "released_headerless",
       "protocol_header": "absent",
       "context_header": "ignored",
-      "outcome": "legacy_singleton"
+      "outcome": "legacy_singleton",
+      "legacy_base_header": "x-vibe-show-base",
+      "legacy_base_propagation": [
+        "entry_http",
+        "module_http",
+        "spa_fallback_http",
+        "startup_reconciliation_prewarm",
+        "show_update_prewarm"
+      ],
+      "keyed_context_enabled": false
     },
     {
       "id": "declared_v1",
@@ -62,6 +71,161 @@
     "startup_reconciliation_prewarm",
     "show_update_prewarm"
   ],
+  "loopback_request_boundary": {
+    "id": "RUNTIME-TRUSTED-LOOPBACK-ENVELOPE",
+    "browser_supplied_headers_removed": [
+      "X-Avibe-Show-Protocol",
+      "X-Avibe-Show-Context"
+    ],
+    "server_owned_envelope_count": 1,
+    "server_owned_envelope_source": "show_capability_decision",
+    "applies_to_operations": [
+      "entry_http",
+      "module_http",
+      "spa_fallback_http",
+      "api_handler_http",
+      "private_hmr_websocket",
+      "startup_reconciliation_prewarm",
+      "show_update_prewarm"
+    ]
+  },
+  "protocol1_validation": {
+    "id": "RUNTIME-PROTOCOL1-PRE-MUTATION-VALIDATION",
+    "valid_protocol": "1",
+    "required_contexts": ["private", "shared"],
+    "applies_to_operations": [
+      "entry_http",
+      "module_http",
+      "spa_fallback_http",
+      "api_handler_http",
+      "private_hmr_websocket",
+      "startup_reconciliation_prewarm",
+      "show_update_prewarm"
+    ],
+    "validation_precedes": [
+      "session_resolution",
+      "graph_lookup",
+      "graph_create",
+      "graph_rebase",
+      "graph_ownership_mutation",
+      "hmr_connection"
+    ],
+    "invalid_context_outcome": "reject_without_graph_side_effects",
+    "unknown_protocol_outcome": "reject_without_graph_side_effects"
+  },
+  "runtime_graph_ownership": {
+    "id": "RUNTIME-SESSION-CONTEXT-GRAPH-OWNERSHIP",
+    "graph_key": ["session_id", "context"],
+    "context_values": ["private", "shared"],
+    "maximum_contexts_per_session": 2,
+    "private_lifecycle_independent_of": [
+      "same_session_shared_startup",
+      "same_session_shared_failure",
+      "same_session_shared_traffic",
+      "same_session_shared_rotation",
+      "other_session_activity"
+    ],
+    "shared_rebase_scope": "same_session_shared_graph_only",
+    "shared_activity_closes_private_hmr": false
+  },
+  "capability_cache": {
+    "id": "RUNTIME-PROCESS-CAPABILITY-CACHE",
+    "permanent_outcomes": ["supported", "unsupported"],
+    "transient_outcome": "transient-unknown",
+    "transient_retry": "jittered_exponential_backoff",
+    "maximum_retry_delay_seconds": 5,
+    "identity_inputs": ["runtime_process_identity", "runtime_base_url"],
+    "identity_change_clears": ["all_outcomes", "retry_deadline"]
+  },
+  "shared_namespace_confinement": {
+    "id": "RUNTIME-IMMUTABLE-OPAQUE-NAMESPACE",
+    "capture": {
+      "root_descriptor_confined": true,
+      "descriptor_verified_before_and_after_copy": true,
+      "snapshot_bytes_immutable": true,
+      "transform_identity_fields": [
+        "resolved_pathname",
+        "query_loader_mode",
+        "importer_identity",
+        "representation_type"
+      ]
+    },
+    "recursive_dependency_closure": {
+      "dependency_kinds": ["tsx", "css", "raw_loader", "worker"],
+      "namespace_relation": "same_opaque_namespace",
+      "provenance": "immutable_captured",
+      "nested_fs_path_allowed": false,
+      "mutable_source_fallback_allowed": false,
+      "cross_namespace_escape_allowed": false
+    },
+    "handle": {
+      "opaque": true,
+      "reveals_path_bytes": false,
+      "source_path_reopen": "forbidden",
+      "path_swap_existing_handle": "serve_captured_response_only",
+      "new_admission_after_unsafe_path_swap": "deny_before_allocation"
+    }
+  },
+  "namespace_lifetime": {
+    "id": "RUNTIME-NON-RENEWABLE-NAMESPACE-LIFETIME",
+    "idle_deadline_seconds": 1800,
+    "absolute_lifetime_seconds": 7200,
+    "successful_read_refreshes": "idle_deadline_only",
+    "absolute_lifetime_renewable": false,
+    "reclaim_unit": "whole_namespace",
+    "expired_read_outcome": "fixed_stale_document_reload_required"
+  },
+  "resource_governance": {
+    "id": "RUNTIME-PROCESS-WIDE-WEIGHTED-BUDGET",
+    "budget_scope": "one_per_runtime_process",
+    "weighted_resources": [
+      "private_vite_contexts",
+      "shared_vite_contexts",
+      "opaque_namespaces",
+      "opaque_handles",
+      "snapshot_bytes"
+    ],
+    "hard_limit_dimensions": ["context_count", "weighted_memory_cost"],
+    "runtime_and_per_session_limits": "finite",
+    "per_session_bounds": true,
+    "private_editor_reserve": "finite_nonzero",
+    "private_editor_reserve_relation": "0 < reserve < process_wide_budget",
+    "shared_may_consume_private_reserve": false,
+    "reclaim_order": [
+      "expired_namespaces",
+      "oldest_shared_bundle_without_in_flight_request"
+    ],
+    "private_admission_reclaim": "any_shared_bundle_without_in_flight_request",
+    "in_flight_pinning": "until_response_finishes_only",
+    "shared_overload_outcome": "bounded_sanitized_retryable_unavailable"
+  },
+  "shared_proxy_policy": {
+    "id": "AVIBE-SHARED-PROXY-CONFINEMENT",
+    "service_worker_allowed_header": "strip",
+    "maximum_service_worker_scope": "/p/<share_id>/",
+    "shared_entry_cache_control": "private, no-store",
+    "editor_redirect_cache_control": "private, no-store",
+    "limited_response_cache_control": "private, no-store",
+    "limited_response_surfaces": ["entry", "module", "spa_fallback", "api_handler"],
+    "identity_vary_header": "Cookie",
+    "cross_principal_response_reuse": false
+  },
+  "avibe_private_hmr_monitor": {
+    "id": "AVIBE-PRIVATE-HMR-REVOCATION-MONITOR",
+    "implementation_owner": "avibe",
+    "runtime_implementation_owner": false,
+    "monitor_scope": "one_coalesced_monitor_per_active_session",
+    "authorization_triggers": [
+      "editor_capability_loss",
+      "resource_access_revocation",
+      "authorization_revision_change"
+    ],
+    "authorization_trigger_action": "reevaluate_and_close_unauthorized_existing_sockets",
+    "durable_offline_source": "ShowPageStore",
+    "durable_offline_poll_max_seconds": 5,
+    "durable_offline_close_all_deadline_seconds": 5,
+    "share_mode_or_binding_change_closes_private_hmr_when_editor_access_remains": false
+  },
   "shared_response_cases": [
     {
       "id": "keyed_immutable_graph_success",
@@ -117,7 +281,9 @@
       "path": "/p/<share_id>/",
       "context": "shared",
       "hmr": false,
-      "private_bytes": false
+      "private_bytes": false,
+      "cache_control": "private, no-store",
+      "vary": "Cookie"
     },
     "private_route": {
       "path": "/show/<session_id>/",
@@ -127,6 +293,10 @@
     "editor_redirect": {
       "source": "top_level_navigation",
       "destination": "/show/<session_id>/",
+      "preserve_route_suffix": true,
+      "preserve_query": true,
+      "cache_control": "private, no-store",
+      "vary": "Cookie",
       "requires": [
         "active_share_binding",
         "show_editor_capability",

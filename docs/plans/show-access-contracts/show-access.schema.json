@@ -2,6 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json",
   "title": "ShowAccess v1",
+  "x-cross-field-invariants": [
+    {
+      "id": "CLEANUP-TARGET-EQUALS-COMMITTED-STATE",
+      "when": "coordinator.kind == grant_cleanup",
+      "relations": [
+        "coordinator.target_access_mode == access_mode",
+        "coordinator.target_share_binding == share_binding"
+      ]
+    },
+    {
+      "id": "CLEANUP-RECOVERY-EVIDENCE-PAIRED",
+      "when": "coordinator.kind == grant_cleanup",
+      "relation": "operation_id and target_grant_commitment are jointly null or jointly present"
+    }
+  ],
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -101,6 +116,44 @@
         "properties": {
           "access_mode": { "enum": ["private", "public"] },
           "share_admission_gate": { "const": "open" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "coordinator": {
+            "properties": {
+              "kind": { "const": "grant_cleanup" },
+              "target_access_mode": { "const": "private" }
+            },
+            "required": ["kind", "target_access_mode"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "access_mode": { "const": "private" },
+          "share_binding": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "coordinator": {
+            "properties": {
+              "kind": { "const": "grant_cleanup" },
+              "target_access_mode": { "const": "public" }
+            },
+            "required": ["kind", "target_access_mode"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "access_mode": { "const": "public" },
+          "share_binding": { "$ref": "#/$defs/bound_share" }
         }
       }
     }
@@ -219,6 +272,22 @@
         {
           "if": { "properties": { "target_access_mode": { "const": "public" } } },
           "then": { "properties": { "target_share_binding": { "$ref": "#/$defs/bound_share" } } }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "operation_id": { "type": "null" },
+                "target_grant_commitment": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "operation_id": { "$ref": "#/$defs/operation_id" },
+                "target_grant_commitment": { "$ref": "#/$defs/grant_commitment" }
+              }
+            }
+          ]
         }
       ]
     },

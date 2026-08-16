@@ -12,20 +12,22 @@
     { "id": "avibe-backend", "remote": "https://github.com/avibe-bot/avibe-backend" },
     { "id": "vibe-show-runtime", "remote": "https://github.com/avibe-bot/vibe-show-runtime" }
   ],
+  "process_ownership": {
+    "stable_writer_lease": "ShowAccessCoordinator.stable_writer_lease",
+    "serialization_owner": "controller_process.ShowAccessCoordinator",
+    "store_write_owner": "controller_process.ShowAccessCoordinator",
+    "ui_process_coordinator_allowed": false,
+    "serialized_operations": ["apply", "recovery", "migration_reconciliation", "grant_cleanup"]
+  },
   "interfaces": [
     {
       "id": "C01",
       "producer": {
         "repository": "avibe",
-        "path": "core/show_access.py",
-        "symbol": "ShowAccessCoordinator.read"
+        "path": "vibe/ui_server.py",
+        "symbol": "show_page_access_get"
       },
       "consumers": [
-        {
-          "repository": "avibe",
-          "path": "vibe/ui_server.py",
-          "symbol": "show_page_access_get"
-        },
         {
           "repository": "avibe",
           "path": "ui/src/lib/showPageAccess.ts",
@@ -48,9 +50,10 @@
         ]
       },
       "delivery": {
-        "mechanism": "sqlite_row",
-        "route_or_channel": "show_pages plus show_access_coordinator state",
-        "authentication": "process_shared_lease",
+        "mechanism": "local_http_json",
+        "route_or_channel": "GET /api/show-pages/{page_id}/access",
+        "authentication": "owner_or_sharing_control_resource_authority",
+        "serialization_owner": "controller_process.ShowAccessCoordinator",
         "version": 1
       }
     },
@@ -66,11 +69,6 @@
           "repository": "avibe",
           "path": "vibe/ui_server.py",
           "symbol": "show_page_access_apply"
-        },
-        {
-          "repository": "avibe",
-          "path": "core/show_access.py",
-          "symbol": "ShowAccessCoordinator.apply"
         }
       ],
       "signature": {
@@ -88,6 +86,7 @@
         "mechanism": "local_http_json",
         "route_or_channel": "POST /api/show-pages/{page_id}/access:apply",
         "authentication": "owner_resource_authority",
+        "serialization_owner": "controller_process.ShowAccessCoordinator",
         "version": 1
       }
     },
@@ -556,6 +555,283 @@
         "mechanism": "loopback_http_response",
         "route_or_channel": "shared-context Runtime HTTP response to the /p proxy",
         "authentication": "loopback_only",
+        "version": 1
+      }
+    },
+    {
+      "id": "C16",
+      "producer": {
+        "repository": "avibe",
+        "path": "vibe/ui_server.py",
+        "symbol": "show_page_access_apply"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/internal_server.py",
+          "symbol": "show_page_access_apply"
+        }
+      ],
+      "signature": {
+        "schema": "apply-mutation.schema.json",
+        "request": "apply_request after route/request page identity validation",
+        "result": "apply_result with matching page identity",
+        "covered_fields": [
+          "page_id",
+          "mutation_id",
+          "expected_audience_revision",
+          "expected_grant_revision",
+          "target",
+          "show_access"
+        ]
+      },
+      "delivery": {
+        "mechanism": "internal_socket_json",
+        "route_or_channel": "controller internal socket show-page access Apply",
+        "authentication": "controller_internal_socket_peer",
+        "serialization_owner": "controller_process.ShowAccessCoordinator under stable_writer_lease",
+        "version": 1
+      }
+    },
+    {
+      "id": "C17",
+      "producer": {
+        "repository": "avibe",
+        "path": "vibe/ui_server.py",
+        "symbol": "show_page_access_get"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/internal_server.py",
+          "symbol": "show_page_access_read"
+        }
+      ],
+      "signature": {
+        "schema": "show-access.schema.json",
+        "request": "page_id after owner or sharing-control authorization",
+        "result": "authoritative ShowAccess snapshot",
+        "covered_fields": ["page_id", "availability", "access_mode", "audience_revision", "coordinator"]
+      },
+      "delivery": {
+        "mechanism": "internal_socket_json",
+        "route_or_channel": "controller internal socket show-page access read",
+        "authentication": "controller_internal_socket_peer",
+        "serialization_owner": "controller_process.ShowAccessCoordinator under stable_writer_lease",
+        "version": 1
+      }
+    },
+    {
+      "id": "C18",
+      "producer": {
+        "repository": "avibe",
+        "path": "ui/src/lib/showPageAccess.ts",
+        "symbol": "OwnerShowAccessSettingsRequest"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "show_page_owner_settings_get"
+        }
+      ],
+      "signature": {
+        "schema": "owner-settings.schema.json",
+        "request": "owner_settings_read_request",
+        "result": "owner_settings_read_result with transient authenticated hosted current grant",
+        "covered_fields": [
+          "page_id",
+          "show_access",
+          "hosted_current_grant",
+          "storage_policy",
+          "cache_control"
+        ]
+      },
+      "delivery": {
+        "mechanism": "local_http_json",
+        "route_or_channel": "GET /api/show-pages/{page_id}/access/settings",
+        "authentication": "owner_or_sharing_control_resource_authority",
+        "serialization_owner": "controller_process.ShowAccessCoordinator",
+        "version": 1
+      }
+    },
+    {
+      "id": "C19",
+      "producer": {
+        "repository": "avibe",
+        "path": "vibe/ui_server.py",
+        "symbol": "show_page_owner_settings_get"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/internal_server.py",
+          "symbol": "show_page_owner_settings_read"
+        }
+      ],
+      "signature": {
+        "schema": "owner-settings.schema.json",
+        "request": "owner_settings_read_request plus authorized principal context",
+        "result": "request-scoped ShowAccess plus authenticated current-grant result",
+        "covered_fields": [
+          "page_id",
+          "grant_revision",
+          "grant_commitment",
+          "emails",
+          "request_scoped_transient_no_store"
+        ]
+      },
+      "delivery": {
+        "mechanism": "internal_socket_json",
+        "route_or_channel": "controller internal socket owner settings read",
+        "authentication": "controller_internal_socket_peer",
+        "serialization_owner": "controller_process.ShowAccessCoordinator under stable_writer_lease",
+        "version": 1
+      }
+    },
+    {
+      "id": "C20",
+      "producer": {
+        "repository": "avibe",
+        "path": "vibe/ui_server.py",
+        "symbol": "build_show_runtime_request"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "core/show_runtime.py",
+          "symbol": "ShowRuntimeProtocolEnvelope"
+        }
+      ],
+      "signature": {
+        "schema": "runtime-context.json#/loopback_request_boundary",
+        "request": "untrusted browser request plus server capability decision",
+        "result": "exactly one server-owned protocol/context envelope",
+        "covered_fields": [
+          "browser_supplied_headers_removed",
+          "server_owned_envelope_count",
+          "server_owned_envelope_source",
+          "applies_to_operations"
+        ]
+      },
+      "delivery": {
+        "mechanism": "in_process_value",
+        "route_or_channel": "browser-to-loopback proxy boundary",
+        "authentication": "browser_untrusted_replaced_by_server_envelope",
+        "serialization_owner": "core.show_runtime.ShowRuntimeManager",
+        "version": 1
+      }
+    },
+    {
+      "id": "C21",
+      "producer": {
+        "repository": "avibe",
+        "path": "docs/plans/show-access-contracts/runtime-context.json",
+        "symbol": "RuntimeSafetyOwner"
+      },
+      "consumers": [
+        {
+          "repository": "vibe-show-runtime",
+          "path": "packages/runtime/src/runtime.ts",
+          "symbol": "RuntimeContextRegistry"
+        },
+        {
+          "repository": "vibe-show-runtime",
+          "path": "packages/runtime/src/server.ts",
+          "symbol": "routeRequest"
+        }
+      ],
+      "signature": {
+        "schema": "runtime-context.schema.json",
+        "request": "validated Session plus context graph operation",
+        "result": "isolated graph and immutable bounded shared namespace",
+        "covered_fields": [
+          "protocol1_validation",
+          "runtime_graph_ownership",
+          "shared_namespace_confinement",
+          "namespace_lifetime",
+          "resource_governance",
+          "shared_proxy_policy"
+        ]
+      },
+      "delivery": {
+        "mechanism": "reviewed_contract_mirror",
+        "route_or_channel": "vibe-show-runtime exact reviewed implementation head",
+        "authentication": "reviewed_ci_head",
+        "serialization_owner": "vibe-show-runtime.RuntimeContextRegistry",
+        "version": 1
+      }
+    },
+    {
+      "id": "C22",
+      "producer": {
+        "repository": "avibe",
+        "path": "core/show_access.py",
+        "symbol": "PrivateHmrRevocationMonitor"
+      },
+      "consumers": [
+        {
+          "repository": "avibe",
+          "path": "vibe/ui_server.py",
+          "symbol": "show_runtime_hmr_websocket"
+        }
+      ],
+      "signature": {
+        "schema": "runtime-context.json#/avibe_private_hmr_monitor",
+        "request": "active Session sockets plus authorization and durable ShowAccess state",
+        "result": "reevaluated sockets with unauthorized or offline sockets closed",
+        "covered_fields": [
+          "monitor_scope",
+          "authorization_triggers",
+          "durable_offline_source",
+          "durable_offline_poll_max_seconds",
+          "durable_offline_close_all_deadline_seconds"
+        ]
+      },
+      "delivery": {
+        "mechanism": "in_process_value",
+        "route_or_channel": "one coalesced private-HMR monitor per active Session",
+        "authentication": "existing_resource_broker_and_durable_state",
+        "serialization_owner": "avibe.PrivateHmrRevocationMonitor",
+        "version": 1
+      }
+    },
+    {
+      "id": "C23",
+      "producer": {
+        "repository": "avibe",
+        "path": "vibe/ui_server.py",
+        "symbol": "start_limited_page_authorization"
+      },
+      "consumers": [
+        {
+          "repository": "avibe-backend",
+          "path": "app/api/v1/oauth/authorize/route.ts",
+          "symbol": "GET"
+        },
+        {
+          "repository": "avibe-backend",
+          "path": "lib/oidc/authorization-context.ts",
+          "symbol": "resolveShowPageEmailGrant"
+        }
+      ],
+      "signature": {
+        "schema": "capability-matrix.json#/limited_read_authorization",
+        "request": "server-resolved page/share-bound signed handshake",
+        "result": "page-scoped signed claim or one-shot generic denial",
+        "covered_fields": [
+          "page_id",
+          "share_id",
+          "safe_public_return_target",
+          "vibe_show_page_grant_revision",
+          "attempt_marker"
+        ]
+      },
+      "delivery": {
+        "mechanism": "authorization_handshake",
+        "route_or_channel": "signed OAuth state plus cookie or device-bound fallback",
+        "authentication": "signed_state_cookie_or_device_fallback",
+        "serialization_owner": "single_use_page_authorization_handshake",
         "version": 1
       }
     }

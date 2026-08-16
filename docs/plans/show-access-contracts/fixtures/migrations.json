@@ -10,7 +10,7 @@
         "has_exact_email_grants": "unknown",
         "audience_revision": 4
       },
-      "events": ["upgrade_started"],
+      "events": ["upgrade_started", "hosted_read_unavailable"],
       "hosted_observation": { "status": "unavailable" },
       "expected_show_access": {
         "schema_version": 1,
@@ -24,8 +24,13 @@
         "share_admission_gate": "open",
         "coordinator": { "state": "idle" }
       },
-      "expected_migration": { "state": "none" },
-      "expected_reconciliation_outcome": "completed",
+      "expected_migration": {
+        "state": "pending",
+        "source_audience_revision": 4,
+        "provisional_share_binding": { "share_id": "legacy-public" },
+        "pending_action": "cleanup_unknown_legacy_grants"
+      },
+      "expected_reconciliation_outcome": "pending_public_cleanup",
       "shared_route_admitted": true
     },
     {
@@ -70,7 +75,7 @@
         "has_exact_email_grants": "unknown",
         "audience_revision": 6
       },
-      "events": ["upgrade_started"],
+      "events": ["upgrade_started", "hosted_read_unavailable"],
       "hosted_observation": { "status": "unavailable" },
       "expected_show_access": {
         "schema_version": 1,
@@ -84,8 +89,13 @@
         "share_admission_gate": "open",
         "coordinator": { "state": "idle" }
       },
-      "expected_migration": { "state": "none" },
-      "expected_reconciliation_outcome": "completed",
+      "expected_migration": {
+        "state": "pending",
+        "source_audience_revision": 6,
+        "provisional_share_binding": { "share_id": "untrusted-offline" },
+        "pending_action": "cleanup_unknown_legacy_grants"
+      },
+      "expected_reconciliation_outcome": "pending_offline_cleanup",
       "shared_route_admitted": false
     },
     {
@@ -147,7 +157,8 @@
       "expected_migration": {
         "state": "pending",
         "source_audience_revision": 8,
-        "provisional_share_binding": { "share_id": "dormant-pending" }
+        "provisional_share_binding": { "share_id": "dormant-pending" },
+        "pending_action": "reconcile_legacy_grants"
       },
       "expected_reconciliation_outcome": "pending_fail_closed",
       "shared_route_admitted": false

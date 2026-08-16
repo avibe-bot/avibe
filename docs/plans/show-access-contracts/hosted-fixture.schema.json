@@ -39,6 +39,7 @@
                 "same_set_no_operation",
                 "prepare_changes_no_authority",
                 "prepare_retry_returns_same_operation",
+                "prepared_lifetime_non_renewable_max_24h",
                 "revision_advances_once",
                 "lost_response_reconciles",
                 "expired_commit_is_terminal",

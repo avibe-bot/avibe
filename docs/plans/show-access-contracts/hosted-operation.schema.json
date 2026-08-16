@@ -2,6 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.avibe.bot/show-access/v1/hosted-operation.schema.json",
   "title": "Hosted Show Page grant operation v1",
+  "x-temporal-invariants": [
+    {
+      "id": "PREPARED-OPERATION-NON-RENEWABLE-LIFETIME",
+      "applies_to": ["prepare_result:prepared", "operation_status_result:prepared"],
+      "server_issued_fields": ["prepared_at", "expires_at"],
+      "relation": "0 < expires_at - prepared_at <= 24 hours",
+      "renewable": false,
+      "pii_cleanup_deadline": "expires_at or earlier acknowledgement"
+    }
+  ],
   "oneOf": [
     { "$ref": "#/$defs/prepare_request" },
     { "$ref": "#/$defs/prepare_no_change" },
@@ -106,6 +116,7 @@
         "operation_id",
         "expected_grant_revision",
         "target_grant_commitment",
+        "prepared_at",
         "expires_at"
       ],
       "properties": {
@@ -117,6 +128,7 @@
         "operation_id": { "$ref": "#/$defs/operation_id" },
         "expected_grant_revision": { "$ref": "#/$defs/revision" },
         "target_grant_commitment": { "$ref": "#/$defs/commitment" },
+        "prepared_at": { "type": "string", "format": "date-time" },
         "expires_at": { "type": "string", "format": "date-time" }
       }
     },
@@ -269,6 +281,7 @@
         "operation_id",
         "source_grant_revision",
         "target_grant_commitment",
+        "prepared_at",
         "expires_at"
       ],
       "properties": {
@@ -280,6 +293,7 @@
         "operation_id": { "$ref": "#/$defs/operation_id" },
         "source_grant_revision": { "$ref": "#/$defs/revision" },
         "target_grant_commitment": { "$ref": "#/$defs/commitment" },
+        "prepared_at": { "type": "string", "format": "date-time" },
         "expires_at": { "type": "string", "format": "date-time" }
       }
     },

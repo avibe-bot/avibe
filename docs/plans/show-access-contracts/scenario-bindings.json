@@ -14,7 +14,12 @@
     },
     {
       "scenario_id": "SHOW-LIVE-003",
-      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-ANONYMOUS", "mirror-registry.json#C08"]
+      "anchors": [
+        "capability-matrix.json#MATRIX-P-LIMITED-ANONYMOUS",
+        "capability-matrix.json#MATRIX-P-LIMITED-REAUTHORIZATION-FAILED",
+        "capability-matrix.json#/limited_read_authorization",
+        "mirror-registry.json#C23"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-004",
@@ -22,7 +27,7 @@
     },
     {
       "scenario_id": "SHOW-LIVE-005",
-      "anchors": ["capability-matrix.json#MATRIX-SHOW-OWNER-EDITOR", "runtime-context.json#/route_invariants"]
+      "anchors": ["capability-matrix.json#MATRIX-SHOW-OWNER-EDITOR", "runtime-context.json#/runtime_graph_ownership", "mirror-registry.json#C21"]
     },
     {
       "scenario_id": "SHOW-LIVE-006",
@@ -30,11 +35,21 @@
     },
     {
       "scenario_id": "SHOW-LIVE-007",
-      "anchors": ["capability-matrix.json#MATRIX-SHOW-RESOURCE-VIEWER", "capability-matrix.json#INVARIANT-SHOW-HMR-EDITOR"]
+      "anchors": [
+        "capability-matrix.json#MATRIX-SHOW-RESOURCE-VIEWER",
+        "capability-matrix.json#INVARIANT-SHOW-HMR-EDITOR",
+        "runtime-context.json#/avibe_private_hmr_monitor",
+        "mirror-registry.json#C22"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-008",
-      "anchors": ["fixtures/show-access.json#STATE-ACTIVE-LIMITED-OPEN", "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL"]
+      "anchors": [
+        "fixtures/show-access.json#STATE-ACTIVE-LIMITED-OPEN",
+        "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL",
+        "capability-matrix.json#INVARIANT-PAGE-GRANT-REVISION-CURRENT",
+        "capability-matrix.json#/limited_read_authorization"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-009",
@@ -54,7 +69,11 @@
     },
     {
       "scenario_id": "SHOW-LIVE-013",
-      "anchors": ["capability-matrix.json#INVARIANT-P-NO-PRIVATE-CONTEXT", "runtime-context.json#/route_invariants/editor_redirect"]
+      "anchors": [
+        "capability-matrix.json#INVARIANT-P-NO-PRIVATE-CONTEXT",
+        "runtime-context.json#/route_invariants/editor_redirect",
+        "runtime-context.json#/shared_proxy_policy"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-014",
@@ -62,23 +81,24 @@
     },
     {
       "scenario_id": "SHOW-LIVE-015",
-      "anchors": ["runtime-context.json#/negotiation_cases/2", "capability-matrix.json#MATRIX-P-PUBLIC-EDITOR-COMPAT"]
+      "anchors": ["runtime-context.json#/negotiation_cases/2", "runtime-context.json#/capability_cache", "capability-matrix.json#MATRIX-P-PUBLIC-EDITOR-COMPAT"]
     },
     {
       "scenario_id": "SHOW-LIVE-016",
-      "anchors": [
-        "runtime-context.json#/shared_response_cases/0",
-        "runtime-context.json#/shared_response_cases/1",
-        "mirror-registry.json#C15"
-      ]
+      "anchors": ["runtime-context.json#/shared_namespace_confinement", "mirror-registry.json#C21"]
     },
     {
       "scenario_id": "SHOW-LIVE-017",
-      "anchors": ["runtime-context.json#/app_graph_operations", "mirror-registry.json#C10"]
+      "anchors": ["runtime-context.json#/protocol1_validation", "runtime-context.json#/loopback_request_boundary", "mirror-registry.json#C20"]
     },
     {
       "scenario_id": "SHOW-LIVE-018",
-      "anchors": ["capability-matrix.json#MATRIX-OFFLINE-DENY", "fixtures/show-access.json#STATE-OFFLINE-FUTURE-PUBLIC"]
+      "anchors": [
+        "capability-matrix.json#MATRIX-OFFLINE-DENY",
+        "fixtures/show-access.json#STATE-OFFLINE-FUTURE-PUBLIC",
+        "runtime-context.json#/avibe_private_hmr_monitor",
+        "mirror-registry.json#C22"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-019",
@@ -86,7 +106,7 @@
     },
     {
       "scenario_id": "SHOW-LIVE-020",
-      "anchors": ["fixtures/migrations.json#MIG-LEGACY-PUBLIC", "fixtures/migrations.json#MIG-PRIVATE-GRANTS-DISCONNECTED"]
+      "anchors": ["fixtures/migrations.json#MIG-LEGACY-PUBLIC", "fixtures/migrations.json#MIG-LEGACY-OFFLINE", "fixtures/migrations.json#MIG-PRIVATE-GRANTS-DISCONNECTED"]
     },
     {
       "scenario_id": "SHOW-LIVE-021",
@@ -98,15 +118,11 @@
     },
     {
       "scenario_id": "SHOW-LIVE-023",
-      "anchors": [
-        "runtime-context.json#/shared_response_cases/2",
-        "runtime-context.json#/shared_response_cases/3",
-        "mirror-registry.json#C15"
-      ]
+      "anchors": ["runtime-context.json#/shared_response_cases/2", "runtime-context.json#/shared_response_cases/3", "mirror-registry.json#C15"]
     },
     {
       "scenario_id": "SHOW-LIVE-024",
-      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+      "anchors": ["runtime-context.json#/shared_namespace_confinement", "mirror-registry.json#C21"]
     },
     {
       "scenario_id": "SHOW-LIVE-025",
@@ -114,15 +130,20 @@
     },
     {
       "scenario_id": "SHOW-LIVE-026",
-      "anchors": ["fixtures/apply-mutations.json#APPLY-SAME-SET-NO-CHANGE", "fixtures/hosted-operations.json#HOSTED-SAME-SET-NO-CHANGE"]
+      "anchors": [
+        "fixtures/apply-mutations.json#APPLY-SAME-SET-NO-CHANGE",
+        "fixtures/apply-mutations.json#APPLY-PUBLIC-TO-LIMITED-HOSTED-NO-CHANGE",
+        "fixtures/apply-mutations.json#APPLY-PRIVATE-TO-LIMITED-HOSTED-NO-CHANGE",
+        "fixtures/hosted-operations.json#HOSTED-SAME-SET-NO-CHANGE"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-027",
-      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+      "anchors": ["runtime-context.json#/namespace_lifetime", "mirror-registry.json#C21"]
     },
     {
       "scenario_id": "SHOW-LIVE-028",
-      "anchors": ["runtime-context.json#/release_gate/delivery_item_9"]
+      "anchors": ["runtime-context.json#/resource_governance", "mirror-registry.json#C21"]
     },
     {
       "scenario_id": "SHOW-LIVE-029",
@@ -130,23 +151,41 @@
     },
     {
       "scenario_id": "SHOW-LIVE-030",
-      "anchors": ["runtime-context.json#/protocol", "runtime-context.json#/negotiation_cases/1"]
+      "anchors": ["runtime-context.json#/request_protocol_cases/0", "runtime-context.json#/loopback_request_boundary"]
     },
     {
       "scenario_id": "SHOW-LIVE-031",
-      "anchors": ["fixtures/hosted-operations.json#HOSTED-EXPIRED-UNCOMMITTED", "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"]
+      "anchors": [
+        "fixtures/hosted-operations.json#HOSTED-EXPIRED-UNCOMMITTED",
+        "fixtures/hosted-operations.json#HOSTED-COMMITTED-RESULT-EXPIRED",
+        "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-032",
-      "anchors": ["fixtures/apply-mutations.json#APPLY-OFFLINE-TO-PRIVATE", "capability-matrix.json#MATRIX-OFFLINE-DENY"]
+      "anchors": [
+        "fixtures/apply-mutations.json#APPLY-OFFLINE-TO-PRIVATE",
+        "fixtures/apply-mutations.json#APPLY-OFFLINE-CLEANUP-THEN-FUTURE-PUBLIC",
+        "capability-matrix.json#MATRIX-OFFLINE-DENY"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-033",
-      "anchors": ["fixtures/show-access.json#STATE-ACTIVE-LIMITED-OPEN", "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL"]
+      "anchors": [
+        "fixtures/show-access.json#STATE-ACTIVE-LIMITED-OPEN",
+        "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL",
+        "capability-matrix.json#INVARIANT-PAGE-GRANT-REVISION-CURRENT",
+        "capability-matrix.json#/limited_read_authorization"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-034",
-      "anchors": ["fixtures/apply-mutations.json#APPLY-PUBLIC-TO-LIMITED-PENDING", "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"]
+      "anchors": [
+        "fixtures/apply-mutations.json#APPLY-PUBLIC-TO-LIMITED-PENDING",
+        "fixtures/hosted-operations.json#HOSTED-LOST-COMMIT-RESPONSE",
+        "fixtures/hosted-operations.json#HOSTED-EXPIRED-UNCOMMITTED",
+        "capability-matrix.json#MATRIX-P-CLOSED-PENDING-DENY"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-035",
@@ -158,7 +197,12 @@
     },
     {
       "scenario_id": "SHOW-LIVE-037",
-      "anchors": ["capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL", "mirror-registry.json#C08"]
+      "anchors": [
+        "capability-matrix.json#MATRIX-P-LIMITED-PAGE-EMAIL",
+        "capability-matrix.json#MATRIX-P-LIMITED-REAUTHORIZATION-FAILED",
+        "capability-matrix.json#/limited_read_authorization",
+        "mirror-registry.json#C23"
+      ]
     },
     {
       "scenario_id": "SHOW-LIVE-038",

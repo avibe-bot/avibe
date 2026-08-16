@@ -6,8 +6,63 @@
     "access_mode": ["private", "limited", "public"],
     "share_admission_gate": ["open", "closed_pending"],
     "request_kind": ["trusted_top_level_navigation", "other"],
+    "limited_reauthorization_state": [
+      "not_attempted",
+      "attempted_without_current_page_grant"
+    ],
     "principal": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"],
     "keyed_context": ["supported", "unsupported", "transient-unknown"]
+  },
+  "limited_read_authorization": {
+    "id": "LIMITED-READ-PAGE-BOUND-AUTHORIZATION",
+    "server_resolved_binding": [
+      "page_id",
+      "share_id",
+      "active_limited_mode",
+      "open_admission_gate"
+    ],
+    "handshake_correlation": {
+      "required_carriers": [
+        "signed_oauth_state",
+        "browser_bound_cookie",
+        "single_use_server_side_fallback"
+      ],
+      "bound_fields": ["page_id", "share_id", "safe_public_return_target"]
+    },
+    "generic_session_behavior": "one_page_specific_reauthorization",
+    "callback_requires": [
+      "signed_state_and_cookie_or_fallback_match",
+      "server_binding_reresolves_to_same_active_limited_page",
+      "claim_page_matches_resolved_page",
+      "claim_source_is_show_page_email",
+      "claim_grant_revision_equals_authenticated_local_current_grant_revision"
+    ],
+    "local_grant_revision_sources": [
+      "authenticated_current_grant_result",
+      "authenticated_committed_operation_result"
+    ],
+    "claim_revision_cases": [
+      {
+        "id": "current_page_grant",
+        "claim_grant_revision": 22,
+        "authenticated_local_grant_revision": 22,
+        "outcome": "page_email_viewer"
+      },
+      {
+        "id": "stale_page_grant",
+        "claim_grant_revision": 21,
+        "authenticated_local_grant_revision": 22,
+        "outcome": "generic_deny"
+      }
+    ],
+    "failure_outcome": "generic_deny_without_page_bytes",
+    "attempt_marker": {
+      "authority": "negative_only",
+      "maximum_uses": 1,
+      "effect": "suppress_repeat_reauthorization",
+      "removed_from_safe_return_url": true,
+      "positive_authority": false
+    }
   },
   "rules": [
     {
@@ -18,6 +73,7 @@
         "access_mode": "*",
         "share_admission_gate": "*",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "*",
         "keyed_context": "*"
       },
@@ -39,6 +95,7 @@
         "access_mode": "*",
         "share_admission_gate": "*",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": ["anonymous", "page_email_viewer"],
         "keyed_context": "*"
       },
@@ -60,6 +117,7 @@
         "access_mode": "*",
         "share_admission_gate": "*",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "resource_viewer",
         "keyed_context": "*"
       },
@@ -81,6 +139,7 @@
         "access_mode": "*",
         "share_admission_gate": "*",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "owner_editor",
         "keyed_context": "*"
       },
@@ -102,6 +161,7 @@
         "access_mode": "*",
         "share_admission_gate": "closed_pending",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "*",
         "keyed_context": "*"
       },
@@ -123,6 +183,7 @@
         "access_mode": "private",
         "share_admission_gate": "open",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "*",
         "keyed_context": "*"
       },
@@ -144,6 +205,7 @@
         "access_mode": "limited",
         "share_admission_gate": "open",
         "request_kind": "*",
+        "limited_reauthorization_state": "not_attempted",
         "principal": "anonymous",
         "keyed_context": "*"
       },
@@ -158,6 +220,28 @@
       "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-006"]
     },
     {
+      "id": "MATRIX-P-LIMITED-REAUTHORIZATION-FAILED",
+      "selector": {
+        "surface": "/p",
+        "availability": "active",
+        "access_mode": "limited",
+        "share_admission_gate": "open",
+        "request_kind": "*",
+        "limited_reauthorization_state": "attempted_without_current_page_grant",
+        "principal": "anonymous",
+        "keyed_context": "*"
+      },
+      "decision": {
+        "read_decision": "deny",
+        "show_editor_capability": false,
+        "runtime_context": null,
+        "annotations": false,
+        "hmr": false,
+        "top_level_editor_redirect": false
+      },
+      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-037"]
+    },
+    {
       "id": "MATRIX-P-LIMITED-PAGE-EMAIL",
       "selector": {
         "surface": "/p",
@@ -165,6 +249,7 @@
         "access_mode": "limited",
         "share_admission_gate": "open",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "page_email_viewer",
         "keyed_context": "*"
       },
@@ -191,6 +276,7 @@
         "access_mode": "limited",
         "share_admission_gate": "open",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "resource_viewer",
         "keyed_context": "*"
       },
@@ -212,6 +298,7 @@
         "access_mode": "limited",
         "share_admission_gate": "open",
         "request_kind": "trusted_top_level_navigation",
+        "limited_reauthorization_state": "*",
         "principal": "owner_editor",
         "keyed_context": "supported"
       },
@@ -233,6 +320,7 @@
         "access_mode": "limited",
         "share_admission_gate": "open",
         "request_kind": "other",
+        "limited_reauthorization_state": "*",
         "principal": "owner_editor",
         "keyed_context": "supported"
       },
@@ -254,6 +342,7 @@
         "access_mode": "limited",
         "share_admission_gate": "open",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "owner_editor",
         "keyed_context": ["unsupported", "transient-unknown"]
       },
@@ -275,6 +364,7 @@
         "access_mode": "public",
         "share_admission_gate": "open",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": ["anonymous", "page_email_viewer", "resource_viewer"],
         "keyed_context": "*"
       },
@@ -296,6 +386,7 @@
         "access_mode": "public",
         "share_admission_gate": "open",
         "request_kind": "trusted_top_level_navigation",
+        "limited_reauthorization_state": "*",
         "principal": "owner_editor",
         "keyed_context": "supported"
       },
@@ -317,6 +408,7 @@
         "access_mode": "public",
         "share_admission_gate": "open",
         "request_kind": "other",
+        "limited_reauthorization_state": "*",
         "principal": "owner_editor",
         "keyed_context": "supported"
       },
@@ -338,6 +430,7 @@
         "access_mode": "public",
         "share_admission_gate": "open",
         "request_kind": "*",
+        "limited_reauthorization_state": "*",
         "principal": "owner_editor",
         "keyed_context": ["unsupported", "transient-unknown"]
       },
@@ -362,6 +455,16 @@
       "id": "INVARIANT-PAGE-EMAIL-NOT-SHOW",
       "assertion": "page_email_never_canonical_show",
       "scenario_ids": ["SHOW-LIVE-022", "SHOW-LIVE-038"]
+    },
+    {
+      "id": "INVARIANT-PAGE-GRANT-REVISION-CURRENT",
+      "assertion": "page_email_claim_revision_must_equal_current_page_grant_revision",
+      "scenario_ids": ["SHOW-LIVE-008", "SHOW-LIVE-033", "SHOW-LIVE-037"]
+    },
+    {
+      "id": "INVARIANT-REAUTHORIZATION-MARKER-NEGATIVE-ONLY",
+      "assertion": "reauthorization_marker_never_grants_authority",
+      "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-037"]
     },
     {
       "id": "INVARIANT-P-NO-HMR",

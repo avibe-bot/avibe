@@ -4,7 +4,13 @@
   "title": "Closed Show read/editor capability matrix v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "axes", "rules", "global_invariants"],
+  "required": [
+    "schema_version",
+    "axes",
+    "limited_read_authorization",
+    "rules",
+    "global_invariants"
+  ],
   "properties": {
     "schema_version": { "const": 1 },
     "axes": {
@@ -16,6 +22,7 @@
         "access_mode",
         "share_admission_gate",
         "request_kind",
+        "limited_reauthorization_state",
         "principal",
         "keyed_context"
       ],
@@ -25,10 +32,66 @@
         "access_mode": { "const": ["private", "limited", "public"] },
         "share_admission_gate": { "const": ["open", "closed_pending"] },
         "request_kind": { "const": ["trusted_top_level_navigation", "other"] },
+        "limited_reauthorization_state": {
+          "const": ["not_attempted", "attempted_without_current_page_grant"]
+        },
         "principal": {
           "const": ["anonymous", "page_email_viewer", "resource_viewer", "owner_editor"]
         },
         "keyed_context": { "const": ["supported", "unsupported", "transient-unknown"] }
+      }
+    },
+    "limited_read_authorization": {
+      "const": {
+        "id": "LIMITED-READ-PAGE-BOUND-AUTHORIZATION",
+        "server_resolved_binding": [
+          "page_id",
+          "share_id",
+          "active_limited_mode",
+          "open_admission_gate"
+        ],
+        "handshake_correlation": {
+          "required_carriers": [
+            "signed_oauth_state",
+            "browser_bound_cookie",
+            "single_use_server_side_fallback"
+          ],
+          "bound_fields": ["page_id", "share_id", "safe_public_return_target"]
+        },
+        "generic_session_behavior": "one_page_specific_reauthorization",
+        "callback_requires": [
+          "signed_state_and_cookie_or_fallback_match",
+          "server_binding_reresolves_to_same_active_limited_page",
+          "claim_page_matches_resolved_page",
+          "claim_source_is_show_page_email",
+          "claim_grant_revision_equals_authenticated_local_current_grant_revision"
+        ],
+        "local_grant_revision_sources": [
+          "authenticated_current_grant_result",
+          "authenticated_committed_operation_result"
+        ],
+        "claim_revision_cases": [
+          {
+            "id": "current_page_grant",
+            "claim_grant_revision": 22,
+            "authenticated_local_grant_revision": 22,
+            "outcome": "page_email_viewer"
+          },
+          {
+            "id": "stale_page_grant",
+            "claim_grant_revision": 21,
+            "authenticated_local_grant_revision": 22,
+            "outcome": "generic_deny"
+          }
+        ],
+        "failure_outcome": "generic_deny_without_page_bytes",
+        "attempt_marker": {
+          "authority": "negative_only",
+          "maximum_uses": 1,
+          "effect": "suppress_repeat_reauthorization",
+          "removed_from_safe_return_url": true,
+          "positive_authority": false
+        }
       }
     },
     "rules": {
@@ -110,6 +173,18 @@
         }
       ]
     },
+    "limited_reauthorization_selector": {
+      "oneOf": [
+        { "const": "*" },
+        { "enum": ["not_attempted", "attempted_without_current_page_grant"] },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["not_attempted", "attempted_without_current_page_grant"] }
+        }
+      ]
+    },
     "gate_selector": {
       "oneOf": [
         { "const": "*" },
@@ -143,6 +218,7 @@
         "access_mode",
         "share_admission_gate",
         "request_kind",
+        "limited_reauthorization_state",
         "principal",
         "keyed_context"
       ],
@@ -152,6 +228,9 @@
         "access_mode": { "$ref": "#/$defs/mode_selector" },
         "share_admission_gate": { "$ref": "#/$defs/gate_selector" },
         "request_kind": { "$ref": "#/$defs/request_kind_selector" },
+        "limited_reauthorization_state": {
+          "$ref": "#/$defs/limited_reauthorization_selector"
+        },
         "principal": { "$ref": "#/$defs/principal_selector" },
         "keyed_context": { "$ref": "#/$defs/keyed_selector" }
       }
@@ -201,6 +280,8 @@
           "enum": [
             "page_email_never_editor",
             "page_email_never_canonical_show",
+            "page_email_claim_revision_must_equal_current_page_grant_revision",
+            "reauthorization_marker_never_grants_authority",
             "shared_route_never_hmr",
             "shared_route_never_private_context",
             "non_top_level_never_redirects",

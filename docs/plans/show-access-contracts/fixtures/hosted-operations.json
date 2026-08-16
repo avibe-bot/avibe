@@ -59,6 +59,7 @@
           "operation_id": "op_hosted_lost_resp_01",
           "expected_grant_revision": 12,
           "target_grant_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+          "prepared_at": "2026-08-16T12:00:00Z",
           "expires_at": "2026-08-17T12:00:00Z"
         },
         {
@@ -78,6 +79,7 @@
           "operation_id": "op_hosted_lost_resp_01",
           "expected_grant_revision": 12,
           "target_grant_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+          "prepared_at": "2026-08-16T12:00:00Z",
           "expires_at": "2026-08-17T12:00:00Z"
         },
         {
@@ -141,6 +143,7 @@
       "assertions": [
         "prepare_changes_no_authority",
         "prepare_retry_returns_same_operation",
+        "prepared_lifetime_non_renewable_max_24h",
         "revision_advances_once",
         "lost_response_reconciles",
         "acknowledgement_removes_pii_copy"

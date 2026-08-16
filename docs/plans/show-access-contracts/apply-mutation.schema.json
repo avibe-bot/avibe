@@ -2,6 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.avibe.bot/show-access/v1/apply-mutation.schema.json",
   "title": "Unified owner ShowAccess Apply v1",
+  "x-boundary-invariants": [
+    {
+      "id": "APPLY-PAGE-IDENTITY",
+      "relation": "all_equal",
+      "fields": [
+        "route.page_id",
+        "request.page_id",
+        "result.page_id",
+        "result.show_access.page_id"
+      ],
+      "mismatch_outcome": "reject_before_coordinator"
+    },
+    {
+      "id": "APPLY-AUDIENCE-ONLY",
+      "request_may_change": ["access_mode", "share_binding", "emails"],
+      "request_may_not_change": ["availability"],
+      "result_availability_source": "authoritative_current_show_access"
+    }
+  ],
   "oneOf": [
     { "$ref": "#/$defs/apply_request" },
     { "$ref": "#/$defs/apply_result" }
@@ -49,11 +68,8 @@
     "target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["availability", "access_mode", "share_binding"],
+      "required": ["access_mode", "share_binding"],
       "properties": {
-        "availability": {
-          "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/availability"
-        },
         "access_mode": {
           "$ref": "https://contracts.avibe.bot/show-access/v1/show-access.schema.json#/$defs/access_mode"
         },
