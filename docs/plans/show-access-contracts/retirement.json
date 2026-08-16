@@ -6,6 +6,12 @@
   "migration_allowed": false,
   "compatibility_bridge_allowed": false,
   "dual_write_allowed": false,
+  "release_dependency": {
+    "application_deployment": "stop_all_legacy_table_and_show_page_id_column_selects_and_writes",
+    "ddl_deployment": "drop_legacy_column_and_table",
+    "ddl_requires_application_deployment_complete": true,
+    "data_bridge_backfill_or_import": false
+  },
   "retired_surfaces": [
     {
       "repository": "avibe-backend",

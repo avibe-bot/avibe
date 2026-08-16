@@ -3,7 +3,7 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/apply-fixture.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "fixtures", "boundary_cases", "sequences"],
+  "required": ["schema_version", "fixtures", "boundary_cases", "concurrency_cases", "receipt_sequences", "sequences"],
   "properties": {
     "schema_version": { "const": 2 },
     "fixtures": {
@@ -13,8 +13,18 @@
     },
     "boundary_cases": {
       "type": "array",
-      "minItems": 4,
+      "minItems": 5,
       "items": { "$ref": "#/$defs/boundary_case" }
+    },
+    "concurrency_cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/concurrency_case" }
+    },
+    "receipt_sequences": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/receipt_sequence" }
     },
     "sequences": {
       "type": "array",
@@ -81,6 +91,62 @@
         "result": {
           "$ref": "https://contracts.avibe.bot/show-access/v2/apply-mutation.schema.json#/$defs/rejected_result"
         }
+      }
+    },
+    "concurrency_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scenario_ids", "custom_share_id", "contenders", "assertions"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^CONCURRENCY-[A-Z0-9-]+$" },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
+        "custom_share_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/share_id" },
+        "contenders": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["page_id", "mutation_id", "outcome", "store_write"],
+            "properties": {
+              "page_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id" },
+              "mutation_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/mutation_id" },
+              "outcome": { "enum": ["applied", "share_id_taken"] },
+              "store_write": { "type": "boolean" }
+            }
+          }
+        },
+        "assertions": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "receipt_sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scenario_ids", "steps", "assertions"],
+      "properties": {
+        "id": { "const": "RECEIPT-SEQUENCE-A-B-REPLAY-A" },
+        "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
+        "steps": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["event", "mutation_id", "outcome", "current_audience_revision", "returned_audience_revision", "returned_mutation_id", "store_write"],
+            "properties": {
+              "event": { "enum": ["apply_a", "apply_b", "replay_a_after_b"] },
+              "mutation_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/mutation_id" },
+              "outcome": { "enum": ["applied", "idempotent_replay"] },
+              "current_audience_revision": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision" },
+              "returned_audience_revision": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision" },
+              "returned_mutation_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/mutation_id" },
+              "store_write": { "type": "boolean" }
+            }
+          }
+        },
+        "assertions": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "type": "string" } }
       }
     },
     "sequence": {

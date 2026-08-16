@@ -246,6 +246,13 @@ scenarios:
     layer: scenario
     backend: show_page_email
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::ShowPageEmailAccessScenarioTests::test_exact_email_login_is_confined_to_its_signed_show_page
+  - id: AUTH-SETUP-404
+    name: Limited Show identity closes signed-state callback and fresh-membership loop
+    status: covered
+    kind: happy_path_and_security_boundary
+    layer: scenario
+    backend: avibe-backend
+    test: tests/scenarios/auth_setup/test_show_identity_contract.py::test_limited_show_identity_contract_closes_signed_state_callback_and_membership_loop
   - id: AUTH-SETUP-402
     name: Personal remote activity slides past the original identity deadline without another authorization prompt
     status: covered

@@ -67,6 +67,7 @@
     "module_http",
     "spa_fallback_http",
     "api_handler_http",
+    "shared_capture_admission",
     "private_hmr_websocket",
     "startup_reconciliation_prewarm",
     "show_update_prewarm"
@@ -84,6 +85,7 @@
       "module_http",
       "spa_fallback_http",
       "api_handler_http",
+      "shared_capture_admission",
       "private_hmr_websocket",
       "startup_reconciliation_prewarm",
       "show_update_prewarm"
@@ -98,6 +100,7 @@
       "module_http",
       "spa_fallback_http",
       "api_handler_http",
+      "shared_capture_admission",
       "private_hmr_websocket",
       "startup_reconciliation_prewarm",
       "show_update_prewarm"
@@ -127,6 +130,19 @@
     ],
     "shared_rebase_scope": "same_session_shared_graph_only",
     "shared_activity_closes_private_hmr": false
+  },
+  "shared_capture_admission": {
+    "id": "RUNTIME-INTERNAL-SHARED-CAPTURE-ADMISSION",
+    "request_source": "trusted_avibe_server_envelope_only",
+    "request_fields": ["session_id", "instance_id", "page_id", "share_id", "audience_revision", "context"],
+    "required_context": "shared",
+    "authorization_precedes_request": true,
+    "browser_request_allowed": false,
+    "browser_supplied_context_allowed": false,
+    "result_fields": ["namespace_handle", "document_handle", "expires_at"],
+    "result_reveals_session_or_path": false,
+    "lifetime_owner": "namespace_lifetime",
+    "failure_outcomes": ["fixed_sanitized_not_found", "bounded_sanitized_retryable_unavailable", "fixed_sanitized_expired"]
   },
   "operation_context_eligibility": {
     "id": "RUNTIME-EXPLICIT-OPERATION-CONTEXT-ELIGIBILITY",
@@ -231,11 +247,27 @@
     "id": "AVIBE-SHARED-PROXY-CONFINEMENT",
     "service_worker_allowed_header": "strip",
     "maximum_service_worker_scope": "/p/<share_id>/",
-    "shared_entry_cache_control": "private, no-store",
     "editor_redirect_cache_control": "private, no-store",
-    "limited_response_cache_control": "private, no-store",
-    "limited_response_surfaces": ["entry", "module", "spa_fallback", "api_handler"],
-    "identity_vary_header": "Cookie",
+    "response_policy_matrix": {
+      "axes": {
+        "audience_mode": ["public", "limited"],
+        "surface": ["shell", "entry", "document", "module", "spa_fallback", "api_handler", "redirect", "error"]
+      },
+      "rules": [
+        {
+          "audience_mode": "public",
+          "surface": "*",
+          "cache_control": "private, no-store",
+          "vary": null
+        },
+        {
+          "audience_mode": "limited",
+          "surface": "*",
+          "cache_control": "private, no-store",
+          "vary": "Cookie"
+        }
+      ]
+    },
     "cross_principal_response_reuse": false
   },
   "avibe_private_hmr_monitor": {
@@ -337,9 +369,12 @@
     "reviewed_runtime_pr": "https://github.com/avibe-bot/vibe-show-runtime/pull/59",
     "smoke_tested_runtime_sha": null,
     "bundled_runtime_sha": null,
-    "delivery_item_6": "not_implemented",
-    "delivery_item_9": "not_implemented",
+    "required_property_owners": {
+      "runtime_context_isolation": "not_implemented",
+      "opaque_shared_capture_admission": "not_implemented"
+    },
     "smoke_test": "not_run",
+    "manifest_source_policy": "exact_reviewed_sha_only_no_dynamic_main",
     "feature_advertisement_allowed": false
   }
 }

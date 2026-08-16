@@ -33,10 +33,12 @@ DOCUMENT_SCHEMAS = {
     "fixtures/owner-settings.json": "owner-settings-fixture.schema.json",
     "fixtures/show-access.json": "show-access-fixture.schema.json",
     "identity-auth.json": "identity-auth.schema.json",
+    "local-legacy-mapping.json": "local-legacy-mapping.schema.json",
     "mirror-registry.json": "mirror-registry.schema.json",
     "retirement.json": "retirement.schema.json",
     "runtime-context.json": "runtime-context.schema.json",
     "scenario-bindings.json": "scenario-bindings.schema.json",
+    "shared-browser-containment.json": "shared-browser-containment.schema.json",
 }
 
 
@@ -86,6 +88,11 @@ def _find_object(document: dict[str, Any], collection: str, object_id: str) -> d
 
 def _canonical_emails(emails: list[str]) -> list[str]:
     return sorted({email.strip().lower() for email in emails})
+
+
+def _validate_show_access_invariants(state: dict[str, Any]) -> None:
+    if state["emails"] != _canonical_emails(state["emails"]):
+        raise ValueError("ShowAccess emails must be canonical, unique, and lexicographically sorted")
 
 
 def _matrix_decision(point: dict[str, str]) -> dict[str, Any]:
@@ -138,6 +145,20 @@ def _evaluate_algebra(point: dict[str, str]) -> dict[str, Any]:
         result.update(decision="invalid_target", outcome="invalid_target")
         return result
 
+    candidate_status = point.get("share_candidate_status")
+    if candidate_status is None:
+        candidate_status = "available" if binding_rule["candidate_required"] else "not_required"
+    if binding_rule["candidate_required"]:
+        if candidate_status == "owned_by_other_page":
+            result.update(decision="share_id_taken", outcome="share_id_taken", store_write=False)
+            return result
+        if candidate_status != "available":
+            result.update(decision="invalid_target", outcome="invalid_target")
+            return result
+    elif candidate_status != "not_required":
+        result.update(decision="invalid_target", outcome="invalid_target")
+        return result
+
     changed = (
         point["source_mode"] != point["target_mode"]
         or point["binding_relation"] == "different"
@@ -170,6 +191,86 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
         return ",".join(_canonical_emails(emails))
     if kind == "path_exists":
         return Path(source["path"]).exists()
+    if kind == "semantic":
+        document = _load(source["document"])
+        check = source["check"]
+        if check == "identity_closed_loop":
+            loop = document["closed_loop_scenario"]
+            start, callback, request = loop["start"], loop["callback"], loop["protected_request"]
+            return (
+                callback["http_method"] == "POST"
+                and callback["delivery"] == "form_post"
+                and callback["assertion_location"] == "form_body"
+                and callback["callback_url"].endswith("/auth/show-identity/callback")
+                and "?" not in callback["callback_url"]
+                and "#" not in callback["callback_url"]
+                and callback["callback_url"].split("/", 3)[2] in start["allowed_callback_hostnames"]
+                and start["instance_id"] == callback["instance_id"] == request["credential_binding"]["instance_id"]
+                and start["page_id"] == callback["resolved_page_id"] == request["credential_binding"]["page_id"]
+                and start["share_id"] == callback["resolved_share_id"] == request["credential_binding"]["share_id"]
+                and start["nonce"] == callback["nonce"]
+                and start["correlation_cookie"] == callback["correlation_cookie"]
+                and callback["verified_email"] in callback["current_local_emails"]
+                and callback["resolved_audience_revision"] == request["credential_binding"]["audience_revision"]
+                and request["membership_rechecked"] is True
+            )
+        if check == "shared_response_matrix":
+            matrix = document["shared_proxy_policy"]["response_policy_matrix"]
+            points = list(itertools.product(matrix["axes"]["audience_mode"], matrix["axes"]["surface"]))
+            return all(
+                len(
+                    matches := [
+                        rule
+                        for rule in matrix["rules"]
+                        if _matches(rule["audience_mode"], mode) and _matches(rule["surface"], surface)
+                    ]
+                )
+                == 1
+                and matches[0]["cache_control"] == "private, no-store"
+                and matches[0]["vary"] == ("Cookie" if mode == "limited" else None)
+                for mode, surface in points
+            )
+        if check == "canonical_email_storage":
+            states = [fixture["show_access"] for fixture in document["fixtures"]]
+            return all(state["emails"] == _canonical_emails(state["emails"]) for state in states)
+        if check == "share_collision_atomic":
+            boundary = _find_object(document, "boundary_cases", "BOUNDARY-SHARE-ID-TAKEN")["result"]
+            contenders = document["concurrency_cases"][0]["contenders"]
+            return (
+                boundary["outcome"] == "share_id_taken"
+                and boundary["effects"]["store_write"] is False
+                and sum(item["store_write"] for item in contenders) == 1
+                and {item["outcome"] for item in contenders} == {"applied", "share_id_taken"}
+            )
+        if check == "receipt_a_b_a":
+            a, b, replay_a = document["receipt_sequences"][0]["steps"]
+            return (
+                a["mutation_id"] != b["mutation_id"]
+                and replay_a["returned_mutation_id"] == a["mutation_id"]
+                and replay_a["returned_audience_revision"] == a["returned_audience_revision"]
+                and replay_a["current_audience_revision"] == b["current_audience_revision"]
+                and replay_a["store_write"] is False
+            )
+        if check == "settings_projection_excludes_receipts":
+            invariant = document["x-avibe-projection-invariants"]
+            return invariant["authoritative_aggregate_embedded"] is False and {
+                "last_mutation",
+                "canonical_request_sha256",
+                "apply_receipt",
+            } <= set(invariant["forbidden_fields"])
+        if check == "sibling_isolation":
+            isolation = document["cross_share_isolation"]
+            cases = {case["id"]: case for case in document["cases"]}
+            sibling = [case for case in cases.values() if case["actor"] == "public_sibling_page_code"]
+            return (
+                isolation["trusted_shell_current_member_can_load"] is True
+                and all(value is False for key, value in isolation.items() if key.startswith("public_sibling_"))
+                and {case["attempt"] for case in sibling}
+                == {"fetch_limited_share", "frame_limited_share", "open_and_read_limited_share"}
+                and all(case["outcome"] == "generic_deny_without_page_bytes" for case in sibling)
+                and cases["CONTAINMENT-TRUSTED-SHELL-CURRENT-MEMBER"]["outcome"] == "serve_shared"
+            )
+        raise AssertionError(f"unknown semantic claim: {check}")
     raise AssertionError(f"unknown claim source: {kind}")
 
 
@@ -186,10 +287,13 @@ def _mutate_scalar(value: Any) -> Any:
 def _assert_runtime_release_gate(release_gate: dict[str, Any]) -> None:
     if not release_gate["feature_advertisement_allowed"]:
         return
-    assert release_gate["delivery_item_6"] == "implemented"
-    assert release_gate["delivery_item_9"] == "implemented"
+    assert release_gate["required_property_owners"] == {
+        "runtime_context_isolation": "implemented",
+        "opaque_shared_capture_admission": "implemented",
+    }
     assert release_gate["smoke_test"] == "passed"
     assert release_gate["reviewed_runtime_pr"] is not None
+    assert release_gate["manifest_source_policy"] == "exact_reviewed_sha_only_no_dynamic_main"
     assert (
         len(
             {
@@ -240,6 +344,7 @@ def test_local_show_access_state_is_closed_canonical_and_route_safe() -> None:
     fixtures = _load("fixtures/show-access.json")["fixtures"]
     for fixture in fixtures:
         state = fixture["show_access"]
+        _validate_show_access_invariants(state)
         assert state["emails"] == _canonical_emails(state["emails"])
         if state["access_mode"] == "limited":
             assert state["emails"] and state["share_binding"] is not None
@@ -260,6 +365,22 @@ def test_local_show_access_state_is_closed_canonical_and_route_safe() -> None:
     invalid["emails"] = []
     with pytest.raises(ValidationError):
         _validator("show-access.schema.json").validate(invalid)
+
+    unsorted = copy.deepcopy(
+        _find_object({"fixtures": fixtures}, "fixtures", "STATE-ACTIVE-LIMITED-LOCAL")["show_access"]
+    )
+    unsorted["emails"] = list(reversed(unsorted["emails"]))
+    _validator("show-access.schema.json").validate(unsorted)
+    with pytest.raises(ValueError, match="canonical"):
+        _validate_show_access_invariants(unsorted)
+    invariant = schema["x-avibe-invariants"]["canonical_email_set"]
+    assert invariant["applies_before"] == [
+        "request_digest",
+        "equality_comparison",
+        "persistence",
+        "result_serialization",
+    ]
+    assert invariant["reject_noncanonical_persisted_or_result"] is True
 
 
 def test_apply_invocation_allows_both_sharing_authorities_and_denies_early() -> None:
@@ -319,6 +440,15 @@ def test_apply_fixtures_are_local_atomic_page_bound_and_idempotent() -> None:
     assert replay["result"]["outcome"] == "idempotent_replay"
     assert replay["source_show_access"] == replay["result"]["show_access"]
 
+    taken = _find_object(document, "boundary_cases", "BOUNDARY-SHARE-ID-TAKEN")
+    assert taken["result"]["outcome"] == "share_id_taken"
+    assert taken["result"]["effects"]["store_write"] is False
+
+    collision = document["concurrency_cases"][0]
+    assert collision["custom_share_id"] == "concurrent-custom-share"
+    assert [item["outcome"] for item in collision["contenders"]] == ["applied", "share_id_taken"]
+    assert [item["store_write"] for item in collision["contenders"]] == [True, False]
+
 
 def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
     algebra = _load("apply-transition-algebra.json")
@@ -334,6 +464,7 @@ def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
             "mutation_conflict",
             "revision_conflict",
             "invalid_target",
+            "share_id_taken",
             "local_transition",
         }
         assert result["availability"] == point["availability"]
@@ -348,12 +479,18 @@ def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
             assert result["outcome"] == ("applied" if changed else "no_change")
             assert result["audience_revision_delta"] == (1 if changed else 0)
 
-    assert evaluated == 2 * 3 * 3 * 2 * 3 * 2 * 3 * 2 * 3
+    assert evaluated == 2 * 3 * 3 * 2 * 3 * 2 * 3 * 3 * 2 * 3
     assert valid_transitions > 0
     assert algebra["normalization"] == {
-        "steps": ["trim_ascii_surrounding_whitespace", "lowercase", "deduplicate", "sort"],
+        "steps": [
+            "trim_ascii_surrounding_whitespace",
+            "lowercase",
+            "deduplicate",
+            "unicode_codepoint_lexicographic_sort",
+        ],
         "provider_specific_alias_normalization": False,
         "canonical_set_comparison": "exact",
+        "reject_noncanonical_persisted_or_result": True,
     }
     assert algebra["idempotency"] == {
         "store_owner": "controller_process.ShowAccessStore",
@@ -365,6 +502,12 @@ def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
         "survives_later_apply": True,
         "atomic_with_effective_or_no_change_apply": True,
         "exposed_by_owner_settings_read": False,
+        "retention": {
+            "lifetime": "page_lifetime",
+            "time_eviction_allowed": False,
+            "count_eviction_allowed": False,
+            "cascade_delete_with_page": True,
+        },
     }
 
     rotate = {
@@ -374,6 +517,7 @@ def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
         "source_binding": "bound",
         "share_intent": "rotate",
         "binding_relation": "different",
+        "share_candidate_status": "available",
         "email_relation": "same",
         "expected_revision": "current",
         "mutation_status": "new",
@@ -402,6 +546,29 @@ def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
     }
     assert _evaluate_algebra(impossible_private_to_limited_same_emails)["decision"] == "invalid_target"
 
+    taken_custom = {
+        **rotate,
+        "share_intent": "custom",
+        "share_candidate_status": "owned_by_other_page",
+    }
+    assert _evaluate_algebra(taken_custom) == {
+        "decision": "share_id_taken",
+        "availability": "active",
+        "external_service_calls": 0,
+        "binding_outcome": "custom",
+        "outcome": "share_id_taken",
+        "store_write": False,
+    }
+    assert algebra["share_binding_allocator"] == {
+        "owner": "controller_process.ShowAccessStore",
+        "uniqueness_scope": "all_show_pages",
+        "check_and_binding_write": "same_stable_writer_transaction",
+        "same_page_existing_binding_allowed": True,
+        "collision_outcome": "share_id_taken",
+        "collision_store_write": False,
+        "concurrent_collision_winners": 1,
+    }
+
 
 def test_local_removal_and_crash_traces_need_no_backend_or_reconciliation() -> None:
     sequences = {item["id"]: item for item in _load("fixtures/apply-mutations.json")["sequences"]}
@@ -423,6 +590,46 @@ def test_local_removal_and_crash_traces_need_no_backend_or_reconciliation() -> N
         "no_external_coordinator_or_reconciliation",
     ]
 
+    receipt = _load("fixtures/apply-mutations.json")["receipt_sequences"][0]
+    apply_a, apply_b, replay_a = receipt["steps"]
+    assert (apply_a["mutation_id"], apply_a["returned_audience_revision"]) == (
+        "mut_receipt_sequence_a_0001",
+        81,
+    )
+    assert (apply_b["mutation_id"], apply_b["current_audience_revision"]) == (
+        "mut_receipt_sequence_b_0001",
+        82,
+    )
+    assert replay_a["outcome"] == "idempotent_replay"
+    assert replay_a["current_audience_revision"] == 82
+    assert replay_a["returned_audience_revision"] == 81
+    assert replay_a["returned_mutation_id"] == apply_a["mutation_id"]
+    assert replay_a["store_write"] is False
+
+
+def test_local_legacy_sqlite_mapping_is_deterministic_and_fail_closed() -> None:
+    contract = _load("local-legacy-mapping.json")
+    assert contract["scope"] == "local_sqlite_schema_migration_only"
+    assert contract["initial_audience_revision"] == 0
+    assert contract["email_initialization"] == "empty"
+    assert contract["hosted_import_allowed"] is contract["dual_write_allowed"] is False
+    cases = {case["source"]["legacy_visibility"]: case for case in contract["cases"]}
+    expected = {
+        "private": ("active", "private", False),
+        "public": ("active", "public", True),
+        "offline": ("offline", "private", False),
+    }
+    for legacy_visibility, (availability, access_mode, admitted) in expected.items():
+        case = cases[legacy_visibility]
+        result = case["result"]
+        assert result["page_id"] == case["source"]["page_id"]
+        assert (result["availability"], result["access_mode"]) == (availability, access_mode)
+        assert result["share_binding"]["share_id"] == case["source"]["share_id"]
+        assert result["audience_revision"] == 0
+        assert result["emails"] == []
+        assert result["last_mutation"] is None
+        assert case["shared_route_admitted"] is admitted
+
 
 def test_owner_settings_reads_exact_emails_only_from_local_authorized_state() -> None:
     settings = _load("fixtures/owner-settings.json")
@@ -434,6 +641,11 @@ def test_owner_settings_reads_exact_emails_only_from_local_authorized_state() ->
         assert result["storage_source"] == "local_authoritative_transactional_store"
         assert result["cache_control"] == "private, no-store"
         assert result["show_access"]["emails"]
+        assert "last_mutation" not in result["show_access"]
+    invalid_projection = copy.deepcopy(settings["allowed_cases"][0]["result"])
+    invalid_projection["show_access"]["last_mutation"] = None
+    with pytest.raises(ValidationError):
+        _validator("owner-settings.schema.json").validate(invalid_projection)
     for case in settings["denied_cases"]:
         assert case["authority"] in {"resource_viewer", "page_member_only", "anonymous"}
         assert case["result"]["store_read"] is case["result"]["settings_returned"] is False
@@ -442,6 +654,19 @@ def test_owner_settings_reads_exact_emails_only_from_local_authorized_state() ->
 def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fresh() -> None:
     contract = _load("identity-auth.json")
     assertion = contract["backend_assertion"]
+    assert assertion["format"] == "short_lived_signed_identity_assertion"
+    assert assertion["authorize_endpoint"] == {
+        "method": "GET",
+        "path_template": "/api/v1/instances/{instanceId}/show-identity/authorize",
+    }
+    assert assertion["request_inputs"]["required"] == ["state", "nonce", "redirect_uri"]
+    assert assertion["request_inputs"]["additional_allowed"] is False
+    assert assertion["delivery"] == {
+        "response_mode": "form_post",
+        "fixed_callback_path": "/auth/show-identity/callback",
+        "assertion_parameter": "assertion",
+        "forbidden_assertion_locations": ["url_query", "url_fragment", "browser_history", "referrer"],
+    }
     assert assertion["required_signed_claims"] == [
         "iss",
         "aud",
@@ -453,7 +678,26 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "instance_id",
         "verified_email",
     ]
-    assert assertion["maximum_lifetime_seconds"] <= 600
+    assert assertion["audience_derivation"] == "avibe-show-identity:<oauthClientId>"
+    assert assertion["ttl_seconds"] == 300
+    assert assertion["maximum_lifetime_seconds"] == 600
+    assert assertion["verifier_clock_skew_seconds"] == 60
+    assert assertion["signing_keys"]["minimum_overlap_seconds"] >= (
+        assertion["maximum_lifetime_seconds"] + assertion["verifier_clock_skew_seconds"]
+    )
+    assert assertion["verified_email_source"] == {
+        "lookup": "fresh_backend_identity_provider_or_user_lookup",
+        "explicit_verification_required": True,
+        "browser_input_allowed": False,
+        "stale_cookie_field_allowed": False,
+    }
+    assert assertion["jti_unique"] is True
+    assert {item["code"] for item in assertion["terminal_errors"]} == {
+        "identity_not_verified",
+        "identity_unavailable",
+    }
+    assert all(item["cache_control"] == "no-store" for item in assertion["terminal_errors"])
+    assert all(item["assertion_returned"] is False for item in assertion["terminal_errors"])
     assert {"page_id", "share_id", "instance_role", "instance_access_source", "show_page_email"} <= set(
         assertion["forbidden_claims"]
     )
@@ -475,6 +719,112 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
             case[field] is False
             for field in ("instance_access", "canonical_show_access", "hmr", "annotations", "agents")
         )
+
+    closed_loop = contract["closed_loop_scenario"]
+    assert closed_loop["callback"]["assertion_format"] == "short_lived_signed_identity_assertion"
+    assert closed_loop["callback"]["http_method"] == "POST"
+    assert closed_loop["callback"]["delivery"] == "form_post"
+    assert closed_loop["start"]["instance_id"] == closed_loop["callback"]["instance_id"]
+    assert closed_loop["start"]["nonce"] == closed_loop["callback"]["nonce"]
+    assert closed_loop["start"]["correlation_cookie"] == closed_loop["callback"]["correlation_cookie"]
+    assert closed_loop["start"]["page_id"] == closed_loop["callback"]["resolved_page_id"]
+    assert closed_loop["start"]["share_id"] == closed_loop["callback"]["resolved_share_id"]
+    assert closed_loop["callback"]["verified_email"] in closed_loop["callback"]["current_local_emails"]
+    assert closed_loop["protected_request"]["membership_rechecked"] is True
+    assert {case["mutation"] for case in closed_loop["negative_callbacks"]} == {
+        "reuse_consumed_nonce",
+        "replace_assertion_instance_id",
+        "replace_signed_return_share",
+        "replace_correlation_cookie",
+        "add_callback_query",
+        "add_callback_fragment",
+        "place_assertion_in_browser_history",
+        "place_assertion_in_referrer",
+        "replace_callback_hostname",
+        "add_page_authorization_claim",
+        "identity_not_verified",
+        "identity_unavailable",
+    }
+
+
+def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requests() -> None:
+    contract = _load("shared-browser-containment.json")
+    shell = contract["trusted_shell"]
+    assert contract["canonical_public_url"] == "/p/<share_id>/"
+    assert shell["arbitrary_page_code_location"] == "sandboxed_opaque_origin_iframe"
+    assert shell["iframe_sandbox_tokens"] == ["allow-scripts"]
+    assert shell["allow_same_origin"] is False
+    assert all(value is False for value in shell["page_code_access"].values())
+
+    credential = contract["share_browsing_credential"]
+    assert credential["binding_fields"] == [
+        "instance_id",
+        "page_id",
+        "share_id",
+        "audience_revision",
+        "namespace_handle",
+        "document_handle",
+    ]
+    assert credential["entropy_bits"] == 256
+    assert credential["derived_from_binding_or_path"] is False
+    assert credential["required_surfaces"] == ["document", "module", "spa_fallback", "api_handler"]
+    assert credential["browser_cookie"] is credential["instance_access_context"] is False
+
+    capture = contract["runtime_capture_admission"]
+    assert capture["authorization_precedes_capture"] is True
+    assert capture["browser_supplied_context_allowed"] is False
+    assert capture["browser_visible_session_or_path_fields"] is False
+    assert capture["result_fields"] == ["namespace_handle", "document_handle", "expires_at"]
+
+    for shape in contract["browser_request_shapes"]:
+        assert {"session_id", "workspace_path", "source_path", "runtime_context"} <= set(shape["forbidden_inputs"])
+    protected_shapes = contract["browser_request_shapes"][1:]
+    assert all("capability" in shape["required_inputs"] for shape in protected_shapes)
+
+    cors = contract["credentialless_cors"]
+    assert cors["access_control_allow_origin"] == "*"
+    assert cors["access_control_allow_credentials"] is False
+    assert cors["set_cookie_allowed"] is False
+    assert contract["vendor_assets"] == {
+        "representation": "namespace_scoped",
+        "global_hashed_public_assets_allowed": False,
+        "capability_required": True,
+        "cross_namespace_reuse": False,
+    }
+    isolation = contract["cross_share_isolation"]
+    assert isolation["trusted_shell_current_member_can_load"] is True
+    assert all(value is False for key, value in isolation.items() if key.startswith("public_sibling_"))
+    assert {case["kind"] for case in contract["dependency_cases"]} == {
+        "history_navigation",
+        "worker_import",
+        "api_request",
+        "css_import",
+        "raw_import",
+    }
+    assert all(case["capability_required"] and case["same_namespace"] for case in contract["dependency_cases"])
+    assert all(not case["page_bytes"] and not case["path_bytes"] for case in contract["failure_responses"])
+    assert contract["residual_evidence"] == {
+        "browser_sandbox_cors": "future_local_incus_real_browser",
+        "contract_proof_is_browser_conformance": False,
+    }
+
+    cases = {case["id"]: case for case in contract["cases"]}
+    assert cases["CONTAINMENT-TRUSTED-SHELL-CURRENT-MEMBER"]["outcome"] == "serve_shared"
+    attacks = {
+        "fetch_limited_share",
+        "frame_limited_share",
+        "open_and_read_limited_share",
+    }
+    sibling_cases = [case for case in cases.values() if case["actor"] == "public_sibling_page_code"]
+    assert {case["attempt"] for case in sibling_cases} == attacks
+    assert all(case["credential"] == "unavailable" for case in sibling_cases)
+    assert all(case["outcome"] == "generic_deny_without_page_bytes" for case in sibling_cases)
+    assert cases["CONTAINMENT-STALE-REVISION-PROOF"]["outcome"] == "generic_deny_without_page_bytes"
+
+    matrix_precondition = _load("capability-matrix.json")["limited_shared_admission_precondition"]
+    assert matrix_precondition["contract"] == "shared-browser-containment.json"
+    assert matrix_precondition["matrix_input_stage"] == "after_valid_share_bound_request_proof"
+    assert matrix_precondition["raw_browser_requests_evaluated_directly"] is False
 
 
 def test_capability_matrix_is_closed_and_resource_membership_axes_are_orthogonal() -> None:
@@ -553,6 +903,12 @@ def test_direct_retirement_has_no_migration_bridge_or_hosted_protocol_artifacts(
     assert contract["migration_allowed"] is False
     assert contract["compatibility_bridge_allowed"] is False
     assert contract["dual_write_allowed"] is False
+    assert contract["release_dependency"] == {
+        "application_deployment": "stop_all_legacy_table_and_show_page_id_column_selects_and_writes",
+        "ddl_deployment": "drop_legacy_column_and_table",
+        "ddl_requires_application_deployment_complete": True,
+        "data_bridge_backfill_or_import": False,
+    }
     assert {item["future_action"] for item in contract["retired_surfaces"]} == {
         "delete_storage",
         "delete_endpoints",
@@ -616,6 +972,11 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
     ownership = contract["runtime_graph_ownership"]
     assert ownership["graph_key"] == ["session_id", "context"]
     assert ownership["shared_activity_closes_private_hmr"] is False
+    capture = contract["shared_capture_admission"]
+    assert capture["request_source"] == "trusted_avibe_server_envelope_only"
+    assert capture["authorization_precedes_request"] is True
+    assert capture["browser_request_allowed"] is capture["browser_supplied_context_allowed"] is False
+    assert capture["result_reveals_session_or_path"] is False
     edits = contract["operation_context_eligibility"]["ordinary_editor_file_edit"]
     assert edits == {
         "private_hmr_identity": "stable",
@@ -651,6 +1012,24 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
     assert contract["resource_governance"]["per_session_bounds"] is True
     assert contract["resource_governance"]["shared_may_consume_private_reserve"] is False
 
+    response_policy = contract["shared_proxy_policy"]["response_policy_matrix"]
+    response_points = list(
+        itertools.product(
+            response_policy["axes"]["audience_mode"],
+            response_policy["axes"]["surface"],
+        )
+    )
+    assert len(response_points) == 2 * 8
+    for audience_mode, surface in response_points:
+        matches = [
+            rule
+            for rule in response_policy["rules"]
+            if _matches(rule["audience_mode"], audience_mode) and _matches(rule["surface"], surface)
+        ]
+        assert len(matches) == 1, (audience_mode, surface)
+        assert matches[0]["cache_control"] == "private, no-store"
+        assert matches[0]["vary"] == ("Cookie" if audience_mode == "limited" else None)
+
     redirect = contract["route_invariants"]["resource_redirect"]
     assert redirect["requires"] == [
         "active_share_binding",
@@ -682,8 +1061,10 @@ def test_runtime_release_advertisement_is_pinned_to_one_reviewed_smoked_sha() ->
             "reviewed_runtime_pr": "https://github.com/avibe-bot/vibe-show-runtime/pull/999",
             "smoke_tested_runtime_sha": candidate_sha,
             "bundled_runtime_sha": candidate_sha,
-            "delivery_item_6": "implemented",
-            "delivery_item_9": "implemented",
+            "required_property_owners": {
+                "runtime_context_isolation": "implemented",
+                "opaque_shared_capture_admission": "implemented",
+            },
             "smoke_test": "passed",
             "feature_advertisement_allowed": True,
         }
@@ -705,13 +1086,17 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "vibe-show-runtime",
     }
     interfaces = {item["id"]: item for item in registry["interfaces"]}
-    assert set(interfaces) == {f"C{index:02d}" for index in range(1, 17)}
+    assert set(interfaces) == {f"C{index:02d}" for index in range(1, 20)}
     assert len(interfaces) == len(registry["interfaces"])
     assert registry["process_ownership"] == {
         "stable_writer_lease": "ShowAccessService.stable_writer_lease",
         "serialization_owner": "controller_process.ShowAccessService",
         "store_write_owner": "controller_process.ShowAccessStore.replace_transactionally",
         "apply_receipt_store": "controller_process.ShowAccessStore keyed by page_id plus mutation_id",
+        "apply_receipt_retention": "page_lifetime with page cascade and no time or count eviction",
+        "canonical_email_set_owner": "controller_process.ShowAccessCanonicalizer",
+        "share_binding_allocator": "controller_process.ShowAccessStore under stable_writer_lease",
+        "settings_projection_owner": "controller_process.ShowAccessService.project_owner_settings",
         "ui_process_coordinator_allowed": False,
         "atomic_fields": [
             "access_mode",
@@ -748,6 +1133,13 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
     ]
     assert interfaces["C15"]["signature"]["schema"] == "retirement.schema.json"
     assert interfaces["C16"]["delivery"]["mechanism"] == "reviewed_release_manifest"
+    assert interfaces["C17"]["signature"]["schema"] == ("shared-browser-containment.json#/runtime_capture_admission")
+    assert interfaces["C17"]["delivery"]["mechanism"] == "loopback_internal_capture_protocol"
+    assert interfaces["C18"]["signature"]["schema"] == "shared-browser-containment.schema.json"
+    assert interfaces["C18"]["delivery"]["authentication"] == (
+        "local_share_browsing_credential_after_current_membership"
+    )
+    assert interfaces["C19"]["signature"]["schema"] == "local-legacy-mapping.schema.json"
     for interface in interfaces.values():
         assert interface["delivery"]["authentication"]
         assert interface["delivery"]["serialization_owner"]
@@ -771,7 +1163,7 @@ def test_design_blob_and_every_scenario_clause_have_sensitive_executable_claims(
     for line in design_bytes.decode("utf-8").splitlines():
         if match := pattern.match(line):
             scenario_rows[match.group(1)] = match.group(2)
-    expected_ids = {f"SHOW-LIVE-{index:03d}" for index in range(1, 39)}
+    expected_ids = {f"SHOW-LIVE-{index:03d}" for index in range(1, 40)}
     assert set(scenario_rows) == expected_ids
 
     claims = {claim["id"]: claim for claim in document["claims"]}
@@ -797,7 +1189,7 @@ def test_design_blob_and_every_scenario_clause_have_sensitive_executable_claims(
 
 
 def test_all_scenario_references_use_the_closed_catalog() -> None:
-    expected_ids = {f"SHOW-LIVE-{index:03d}" for index in range(1, 39)}
+    expected_ids = {f"SHOW-LIVE-{index:03d}" for index in range(1, 40)}
     for path in sorted(CONTRACTS.rglob("*.json")):
         if path.name.endswith(SCHEMA_SUFFIX) or path.name == "scenario-bindings.json":
             continue

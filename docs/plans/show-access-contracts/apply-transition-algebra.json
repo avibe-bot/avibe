@@ -8,6 +8,7 @@
     "source_binding": ["none", "bound"],
     "share_intent": ["preserve_or_allocate", "rotate", "custom"],
     "binding_relation": ["same", "different"],
+    "share_candidate_status": ["not_required", "available", "owned_by_other_page"],
     "email_relation": ["same", "different", "invalid_for_target"],
     "expected_revision": ["current", "stale"],
     "mutation_status": ["new", "same_payload", "different_payload"]
@@ -56,7 +57,22 @@
     "different_payload_action": "reject_without_write",
     "survives_later_apply": true,
     "atomic_with_effective_or_no_change_apply": true,
-    "exposed_by_owner_settings_read": false
+    "exposed_by_owner_settings_read": false,
+    "retention": {
+      "lifetime": "page_lifetime",
+      "time_eviction_allowed": false,
+      "count_eviction_allowed": false,
+      "cascade_delete_with_page": true
+    }
+  },
+  "share_binding_allocator": {
+    "owner": "controller_process.ShowAccessStore",
+    "uniqueness_scope": "all_show_pages",
+    "check_and_binding_write": "same_stable_writer_transaction",
+    "same_page_existing_binding_allowed": true,
+    "collision_outcome": "share_id_taken",
+    "collision_store_write": false,
+    "concurrent_collision_winners": 1
   },
   "binding_semantics": [
     {
@@ -67,6 +83,7 @@
         "share_intent": "preserve_or_allocate"
       },
       "allowed_relation": ["same"],
+      "candidate_required": false,
       "outcome": "preserved"
     },
     {
@@ -77,6 +94,7 @@
         "share_intent": "preserve_or_allocate"
       },
       "allowed_relation": ["same"],
+      "candidate_required": false,
       "outcome": "none"
     },
     {
@@ -87,6 +105,7 @@
         "share_intent": "preserve_or_allocate"
       },
       "allowed_relation": ["different"],
+      "candidate_required": true,
       "outcome": "allocated"
     },
     {
@@ -97,6 +116,7 @@
         "share_intent": "rotate"
       },
       "allowed_relation": ["different"],
+      "candidate_required": true,
       "outcome": "rotated"
     },
     {
@@ -107,6 +127,7 @@
         "share_intent": "custom"
       },
       "allowed_relation": ["different"],
+      "candidate_required": true,
       "outcome": "custom"
     },
     {
@@ -117,6 +138,7 @@
         "share_intent": "custom"
       },
       "allowed_relation": ["same", "different"],
+      "candidate_required": true,
       "outcome": "custom"
     }
   ],
@@ -165,8 +187,9 @@
     }
   },
   "normalization": {
-    "steps": ["trim_ascii_surrounding_whitespace", "lowercase", "deduplicate", "sort"],
+    "steps": ["trim_ascii_surrounding_whitespace", "lowercase", "deduplicate", "unicode_codepoint_lexicographic_sort"],
     "provider_specific_alias_normalization": false,
-    "canonical_set_comparison": "exact"
+    "canonical_set_comparison": "exact",
+    "reject_noncanonical_persisted_or_result": true
   }
 }

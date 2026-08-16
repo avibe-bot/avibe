@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.avibe.bot/show-access/v2/shared-browser-containment.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "owner", "canonical_public_url", "trusted_shell", "runtime_capture_admission", "share_browsing_credential", "browser_request_shapes", "credentialless_cors", "vendor_assets", "cross_share_isolation", "expiry_reclamation", "failure_responses", "dependency_cases", "residual_evidence", "cases"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "owner": { "const": "SharedViewerBrowserContainment" },
+    "canonical_public_url": { "const": "/p/<share_id>/" },
+    "trusted_shell": {
+      "const": {
+        "implementation_owner": "avibe",
+        "arbitrary_page_code_location": "sandboxed_opaque_origin_iframe",
+        "iframe_sandbox_tokens": ["allow-scripts"],
+        "allow_same_origin": false,
+        "frame_ancestor": "trusted_platform_shell_only",
+        "bootstrap_forbidden_fields": ["identity", "session_id", "workspace_path", "source_path", "annotations", "hmr", "runtime_context"],
+        "page_code_access": {
+          "other_share_dom": false,
+          "platform_cookies": false,
+          "cross_share_cors": false,
+          "platform_service_worker": false,
+          "opener": false,
+          "ambient_identity_credential": false
+        }
+      }
+    },
+    "runtime_capture_admission": {
+      "const": {
+        "request_trust": "internal_avibe_server_only",
+        "request_fields": ["session_id", "instance_id", "page_id", "share_id", "audience_revision", "validated_shared_context"],
+        "authorization_precedes_capture": true,
+        "result_fields": ["namespace_handle", "document_handle", "expires_at"],
+        "result_values_opaque": true,
+        "browser_supplied_context_allowed": false,
+        "browser_visible_session_or_path_fields": false
+      }
+    },
+    "share_browsing_credential": {
+      "const": {
+        "issuer": "local_avibe_after_current_membership_check",
+        "binding_fields": ["instance_id", "page_id", "share_id", "audience_revision", "namespace_handle", "document_handle"],
+        "entropy_bits": 256,
+        "derived_from_binding_or_path": false,
+        "lifetime": "short_lived_nonrenewable",
+        "storage": "ephemeral_trusted_shell_only",
+        "browser_cookie": false,
+        "backend_identity_assertion": false,
+        "instance_access_context": false,
+        "instance_role": false,
+        "editor_capability": false,
+        "required_surfaces": ["document", "module", "spa_fallback", "api_handler"],
+        "revision_mismatch_outcome": "reresolve_share_and_membership_before_new_credential"
+      }
+    },
+    "browser_request_shapes": {
+      "const": [
+        {
+          "id": "SHARED-BROWSER-SHELL",
+          "route": "/p/<share_id>/",
+          "required_inputs": ["share_id"],
+          "forbidden_inputs": ["session_id", "workspace_path", "source_path", "runtime_context"]
+        },
+        {
+          "id": "SHARED-BROWSER-DOCUMENT",
+          "route": "/p/<share_id>/__shared/document/<namespace_handle>/<document_handle>",
+          "required_inputs": ["share_id", "namespace_handle", "document_handle", "capability"],
+          "forbidden_inputs": ["session_id", "workspace_path", "source_path", "runtime_context"]
+        },
+        {
+          "id": "SHARED-BROWSER-RESOURCE",
+          "route": "/p/<share_id>/__shared/resource/<namespace_handle>/<document_handle>",
+          "required_inputs": ["share_id", "namespace_handle", "document_handle", "capability"],
+          "forbidden_inputs": ["session_id", "workspace_path", "source_path", "runtime_context"]
+        },
+        {
+          "id": "SHARED-BROWSER-API",
+          "route": "/p/<share_id>/__shared/api/<namespace_handle>/<document_handle>",
+          "required_inputs": ["share_id", "namespace_handle", "document_handle", "capability"],
+          "forbidden_inputs": ["session_id", "workspace_path", "source_path", "runtime_context"]
+        }
+      ]
+    },
+    "credentialless_cors": {
+      "const": {
+        "surfaces": ["document", "module", "spa_fallback", "api_handler"],
+        "access_control_allow_origin": "*",
+        "access_control_allow_credentials": false,
+        "set_cookie_allowed": false
+      }
+    },
+    "vendor_assets": {
+      "const": {
+        "representation": "namespace_scoped",
+        "global_hashed_public_assets_allowed": false,
+        "capability_required": true,
+        "cross_namespace_reuse": false
+      }
+    },
+    "cross_share_isolation": {
+      "const": {
+        "public_sibling_can_obtain_limited_shell_bootstrap": false,
+        "public_sibling_can_obtain_namespace_handle": false,
+        "public_sibling_can_obtain_capability": false,
+        "public_sibling_can_read_platform_cookies": false,
+        "public_sibling_can_read_limited_dom": false,
+        "public_sibling_can_read_protected_cors_response": false,
+        "public_sibling_can_expand_service_worker_scope": false,
+        "public_sibling_can_retain_readable_opener": false,
+        "public_sibling_can_read_protected_bytes": false,
+        "trusted_shell_current_member_can_load": true
+      }
+    },
+    "expiry_reclamation": {
+      "const": {
+        "lifetime_owner": "runtime-context.json#/namespace_lifetime",
+        "capability_expires_no_later_than_namespace": true,
+        "reclaim_unit": "namespace_handles_and_capabilities",
+        "expired_outcome": "fixed_sanitized_expired"
+      }
+    },
+    "failure_responses": {
+      "const": [
+        { "condition": "not_found", "outcome": "fixed_sanitized_not_found", "page_bytes": false, "path_bytes": false },
+        { "condition": "overload", "outcome": "bounded_sanitized_retryable_unavailable", "page_bytes": false, "path_bytes": false },
+        { "condition": "expired", "outcome": "fixed_sanitized_expired", "page_bytes": false, "path_bytes": false }
+      ]
+    },
+    "dependency_cases": {
+      "const": [
+        { "kind": "history_navigation", "surface": "document", "capability_required": true, "same_namespace": true },
+        { "kind": "worker_import", "surface": "module", "capability_required": true, "same_namespace": true },
+        { "kind": "api_request", "surface": "api_handler", "capability_required": true, "same_namespace": true },
+        { "kind": "css_import", "surface": "module", "capability_required": true, "same_namespace": true },
+        { "kind": "raw_import", "surface": "module", "capability_required": true, "same_namespace": true }
+      ]
+    },
+    "residual_evidence": {
+      "const": {
+        "browser_sandbox_cors": "future_local_incus_real_browser",
+        "contract_proof_is_browser_conformance": false
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "scenario_ids", "actor", "attempt", "credential", "membership", "outcome"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^CONTAINMENT-[A-Z0-9-]+$" },
+          "scenario_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
+          },
+          "actor": { "enum": ["trusted_platform_shell", "public_sibling_page_code"] },
+          "attempt": { "enum": ["load_protected_shared_document", "fetch_limited_share", "frame_limited_share", "open_and_read_limited_share"] },
+          "credential": { "enum": ["valid_matching_binding", "unavailable", "stale_audience_revision"] },
+          "membership": { "enum": ["current", "removed", "not_evaluated"] },
+          "outcome": { "enum": ["serve_shared", "generic_deny_without_page_bytes"] }
+        }
+      }
+    }
+  }
+}

@@ -9,6 +9,7 @@
     "axes",
     "precondition_rules",
     "idempotency",
+    "share_binding_allocator",
     "binding_semantics",
     "email_semantics",
     "transition_effects",
@@ -27,6 +28,7 @@
         "source_binding",
         "share_intent",
         "binding_relation",
+        "share_candidate_status",
         "email_relation",
         "expected_revision",
         "mutation_status"
@@ -38,6 +40,7 @@
         "source_binding": { "const": ["none", "bound"] },
         "share_intent": { "const": ["preserve_or_allocate", "rotate", "custom"] },
         "binding_relation": { "const": ["same", "different"] },
+        "share_candidate_status": { "const": ["not_required", "available", "owned_by_other_page"] },
         "email_relation": { "const": ["same", "different", "invalid_for_target"] },
         "expected_revision": { "const": ["current", "stale"] },
         "mutation_status": { "const": ["new", "same_payload", "different_payload"] }
@@ -51,7 +54,7 @@
     "idempotency": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["store_owner", "key_fields", "value_fields", "lookup_order", "same_payload_action", "different_payload_action", "survives_later_apply", "atomic_with_effective_or_no_change_apply", "exposed_by_owner_settings_read"],
+      "required": ["store_owner", "key_fields", "value_fields", "lookup_order", "same_payload_action", "different_payload_action", "survives_later_apply", "atomic_with_effective_or_no_change_apply", "exposed_by_owner_settings_read", "retention"],
       "properties": {
         "store_owner": { "const": "controller_process.ShowAccessStore" },
         "key_fields": { "const": ["page_id", "mutation_id"] },
@@ -61,7 +64,26 @@
         "different_payload_action": { "const": "reject_without_write" },
         "survives_later_apply": { "const": true },
         "atomic_with_effective_or_no_change_apply": { "const": true },
-        "exposed_by_owner_settings_read": { "const": false }
+        "exposed_by_owner_settings_read": { "const": false },
+        "retention": {
+          "const": {
+            "lifetime": "page_lifetime",
+            "time_eviction_allowed": false,
+            "count_eviction_allowed": false,
+            "cascade_delete_with_page": true
+          }
+        }
+      }
+    },
+    "share_binding_allocator": {
+      "const": {
+        "owner": "controller_process.ShowAccessStore",
+        "uniqueness_scope": "all_show_pages",
+        "check_and_binding_write": "same_stable_writer_transaction",
+        "same_page_existing_binding_allowed": true,
+        "collision_outcome": "share_id_taken",
+        "collision_store_write": false,
+        "concurrent_collision_winners": 1
       }
     },
     "binding_semantics": {
@@ -78,13 +100,14 @@
     "normalization": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["steps", "provider_specific_alias_normalization", "canonical_set_comparison"],
+      "required": ["steps", "provider_specific_alias_normalization", "canonical_set_comparison", "reject_noncanonical_persisted_or_result"],
       "properties": {
         "steps": {
-          "const": ["trim_ascii_surrounding_whitespace", "lowercase", "deduplicate", "sort"]
+          "const": ["trim_ascii_surrounding_whitespace", "lowercase", "deduplicate", "unicode_codepoint_lexicographic_sort"]
         },
         "provider_specific_alias_normalization": { "const": false },
-        "canonical_set_comparison": { "const": "exact" }
+        "canonical_set_comparison": { "const": "exact" },
+        "reject_noncanonical_persisted_or_result": { "const": true }
       }
     }
   },
@@ -125,7 +148,7 @@
     "binding_rule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "selector", "allowed_relation", "outcome"],
+      "required": ["id", "selector", "allowed_relation", "candidate_required", "outcome"],
       "properties": {
         "id": { "type": "string", "pattern": "^BINDING-[A-Z0-9-]+$" },
         "selector": {
@@ -144,6 +167,7 @@
           "uniqueItems": true,
           "items": { "enum": ["same", "different"] }
         },
+        "candidate_required": { "type": "boolean" },
         "outcome": { "enum": ["preserved", "none", "allocated", "rotated", "custom"] }
       }
     },

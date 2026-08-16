@@ -2,10 +2,52 @@
   "schema_version": 2,
   "owner": "LimitedPageIdentityOnlyAuthorization",
   "backend_assertion": {
-    "format": "short_lived_signed_identity_assertion_or_code",
+    "format": "short_lived_signed_identity_assertion",
+    "authorize_endpoint": {
+      "method": "GET",
+      "path_template": "/api/v1/instances/{instanceId}/show-identity/authorize"
+    },
+    "request_inputs": {
+      "required": ["state", "nonce", "redirect_uri"],
+      "additional_allowed": false,
+      "forbidden": ["sub", "email", "aud", "page_id", "share_id", "instance_role", "instance_access_source", "page_membership"]
+    },
+    "delivery": {
+      "response_mode": "form_post",
+      "fixed_callback_path": "/auth/show-identity/callback",
+      "assertion_parameter": "assertion",
+      "forbidden_assertion_locations": ["url_query", "url_fragment", "browser_history", "referrer"]
+    },
+    "callback_uri_policy": {
+      "scheme": "https",
+      "query_allowed": false,
+      "fragment_allowed": false,
+      "path": "/auth/show-identity/callback",
+      "hostname_source": ["active_instance_hostname", "active_custom_hostname"]
+    },
     "required_signed_claims": ["iss", "aud", "sub", "iat", "exp", "jti", "nonce", "instance_id", "verified_email"],
+    "audience_derivation": "avibe-show-identity:<oauthClientId>",
+    "ttl_seconds": 300,
     "maximum_lifetime_seconds": 600,
+    "verifier_clock_skew_seconds": 60,
     "verified_email_normalization": ["trim_ascii_surrounding_whitespace", "lowercase"],
+    "verified_email_source": {
+      "lookup": "fresh_backend_identity_provider_or_user_lookup",
+      "explicit_verification_required": true,
+      "browser_input_allowed": false,
+      "stale_cookie_field_allowed": false
+    },
+    "signing_keys": {
+      "issuer": "current_signing_key_only",
+      "jwks_public_keys": ["current", "previous_during_overlap"],
+      "minimum_overlap_seconds": 660
+    },
+    "terminal_errors": [
+      { "code": "identity_not_verified", "cache_control": "no-store", "assertion_returned": false },
+      { "code": "identity_unavailable", "cache_control": "no-store", "assertion_returned": false }
+    ],
+    "missing_login_session_action": "redirect_to_login_with_safe_next_only",
+    "jti_unique": true,
     "forbidden_claims": [
       "page_id",
       "share_id",
@@ -29,8 +71,9 @@
     "signed_state_fields": ["instance_id", "share_id", "safe_public_return_target", "nonce", "issued_at", "expires_at"],
     "callback_checks": [
       "assertion_signature_issuer_audience_and_expiry",
-      "nonce_matches_and_is_single_use",
+      "nonce_and_jti_match_and_are_single_use",
       "assertion_instance_matches_paired_instance",
+      "form_post_targets_fixed_https_callback_without_query_or_fragment",
       "return_target_matches_signed_same_share_target",
       "share_reresolves_before_membership_check"
     ],
@@ -38,6 +81,110 @@
     "identity_session_is_authorization": false,
     "unlisted_outcome": "generic_deny_without_page_bytes_or_login_loop",
     "removed_member_active_tab_policy": "no_active_closure_future_requests_only"
+  },
+  "closed_loop_scenario": {
+    "id": "IDENTITY-CLOSED-LOOP-LISTED",
+    "scenario_ids": ["SHOW-LIVE-003", "SHOW-LIVE-037"],
+    "start": {
+      "instance_id": "ins_identity_contract",
+      "page_id": "ses_identity_contract",
+      "share_id": "identity-contract-share",
+      "safe_public_return_target": "/p/identity-contract-share/",
+      "allowed_callback_hostnames": ["alice.example.test", "show.example.test"],
+      "nonce": "nonce_identity_contract_0001",
+      "signed_state_valid": true,
+      "correlation_cookie": "cookie_identity_contract_0001"
+    },
+    "callback": {
+      "http_method": "POST",
+      "delivery": "form_post",
+      "assertion_location": "form_body",
+      "callback_url": "https://alice.example.test/auth/show-identity/callback",
+      "assertion_format": "short_lived_signed_identity_assertion",
+      "assertion_valid": true,
+      "instance_id": "ins_identity_contract",
+      "nonce": "nonce_identity_contract_0001",
+      "jti": "jti_identity_contract_0001",
+      "correlation_cookie": "cookie_identity_contract_0001",
+      "verified_email": "bob@example.com",
+      "resolved_page_id": "ses_identity_contract",
+      "resolved_share_id": "identity-contract-share",
+      "resolved_audience_revision": 12,
+      "current_local_emails": ["bob@example.com"],
+      "outcome": "issue_share_bound_browsing_credential"
+    },
+    "protected_request": {
+      "credential_binding": {
+        "instance_id": "ins_identity_contract",
+        "page_id": "ses_identity_contract",
+        "share_id": "identity-contract-share",
+        "audience_revision": 12
+      },
+      "membership_rechecked": true,
+      "outcome": "serve_shared"
+    },
+    "negative_callbacks": [
+      {
+        "id": "IDENTITY-CALLBACK-NONCE-REPLAY",
+        "mutation": "reuse_consumed_nonce",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-INSTANCE-MISMATCH",
+        "mutation": "replace_assertion_instance_id",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-SHARE-MISMATCH",
+        "mutation": "replace_signed_return_share",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-COOKIE-MISMATCH",
+        "mutation": "replace_correlation_cookie",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-URL-QUERY",
+        "mutation": "add_callback_query",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-URL-FRAGMENT",
+        "mutation": "add_callback_fragment",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-HISTORY-LEAK",
+        "mutation": "place_assertion_in_browser_history",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-REFERRER-LEAK",
+        "mutation": "place_assertion_in_referrer",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-UNTRUSTED-HOST",
+        "mutation": "replace_callback_hostname",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-FORBIDDEN-CLAIM",
+        "mutation": "add_page_authorization_claim",
+        "outcome": "reject_without_credential_or_page_bytes"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-NOT-VERIFIED",
+        "mutation": "identity_not_verified",
+        "outcome": "identity_not_verified_no_store_without_assertion"
+      },
+      {
+        "id": "IDENTITY-CALLBACK-IDENTITY-UNAVAILABLE",
+        "mutation": "identity_unavailable",
+        "outcome": "identity_unavailable_no_store_without_assertion"
+      }
+    ]
   },
   "cases": [
     {

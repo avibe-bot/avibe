@@ -16,7 +16,9 @@ Local Avibe is the only authority and persistence location for `access_mode`, th
 stable share binding, `audience_revision`, and normalized exact-email membership.
 The controller process owns one transactional writer under a stable cross-process
 lease. That transaction also records a durable receipt keyed by page and mutation,
-so replay remains deterministic after later Apply operations. The UI process
+so replay remains deterministic after later Apply operations. Receipts live for the
+page lifetime, are never evicted by time or count, and cascade-delete with the page.
+The UI process
 authorizes and forwards; it never coordinates or writes.
 
 Avibe Backend authenticates identity only. Its signed assertion is instance-bound
@@ -38,7 +40,9 @@ clients, and Instance authorization source are direct deletion targets.
 | `fixtures/apply-mutations.json` | Canonical transitions, crash/idempotency trace, next-request revocation |
 | `owner-settings.schema.json` | Local authorized exact-email settings read with `private, no-store` |
 | `identity-auth.json` | Backend identity assertion and local signed-state/callback ownership |
+| `local-legacy-mapping.json` | Deterministic local SQLite private/public/offline mapping with offline fail-closed |
 | `capability-matrix.json` | Closed `/p` and `/show` decision over independent resource and membership axes |
+| `shared-browser-containment.json` | Trusted shell, opaque Runtime capture, protected browser requests, sibling isolation |
 | `retirement.json` | Direct removal inventory with migration and compatibility forbidden |
 | `runtime-context.json` | Protocol, trusted envelope, isolated graphs, demand-only shared work, confinement and budgets |
 | `mirror-registry.json` | Exact future producer, consumer, signature, delivery and serialization owner |
@@ -53,12 +57,19 @@ clients, and Instance authorization source are direct deletion targets.
   canonical no-op does not.
 - Same mutation and payload replays its stored terminal result even after later
   Apply operations; different payload reuse and stale revision reject before write.
+- Receipts remain for the page lifetime with no time/count eviction and are removed
+  only by the page cascade.
+- Legacy local offline maps to offline/private; private/public map active in their
+  matching mode; any existing stable binding remains and no hosted data is imported.
 - Listed-only identity can read current limited `/p` and nothing privileged.
 - Resource viewer/editor authority is independent. Trusted top-level `/p`
   navigation redirects to canonical `/show`; only editor authority enables HMR and
   annotations there.
 - `/p` always selects shared Runtime and never exposes HMR, annotations, private
   context, Session internals, Workbench, APIs, or Agents.
+- Arbitrary shared code runs in an opaque-origin sandbox and cannot obtain or reuse
+  another share's bootstrap, handle, capability, cookie, DOM, CORS response, worker
+  scope, opener, or protected bytes.
 - Membership removal affects the next request without Backend. Loaded guest tabs are
   not actively closed.
 - Ordinary editor file edits never create, rebase, or background-build a shared

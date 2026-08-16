@@ -22,8 +22,7 @@
           "access_mode": "limited",
           "share_binding": { "share_id": "settings-local" },
           "audience_revision": 14,
-          "emails": ["alice@example.com", "bob@example.com"],
-          "last_mutation": null
+          "emails": ["alice@example.com", "bob@example.com"]
         },
         "storage_source": "local_authoritative_transactional_store",
         "cache_control": "private, no-store"
@@ -50,8 +49,7 @@
           "access_mode": "limited",
           "share_binding": { "share_id": "settings-control" },
           "audience_revision": 15,
-          "emails": ["viewer@example.com"],
-          "last_mutation": null
+          "emails": ["viewer@example.com"]
         },
         "storage_source": "local_authoritative_transactional_store",
         "cache_control": "private, no-store"

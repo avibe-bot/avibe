@@ -37,12 +37,16 @@
     "process_ownership": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stable_writer_lease", "serialization_owner", "store_write_owner", "apply_receipt_store", "ui_process_coordinator_allowed", "atomic_fields", "serialized_operations"],
+      "required": ["stable_writer_lease", "serialization_owner", "store_write_owner", "apply_receipt_store", "apply_receipt_retention", "canonical_email_set_owner", "share_binding_allocator", "settings_projection_owner", "ui_process_coordinator_allowed", "atomic_fields", "serialized_operations"],
       "properties": {
         "stable_writer_lease": { "type": "string" },
         "serialization_owner": { "type": "string" },
         "store_write_owner": { "type": "string" },
         "apply_receipt_store": { "type": "string" },
+        "apply_receipt_retention": { "const": "page_lifetime with page cascade and no time or count eviction" },
+        "canonical_email_set_owner": { "type": "string" },
+        "share_binding_allocator": { "type": "string" },
+        "settings_projection_owner": { "type": "string" },
         "ui_process_coordinator_allowed": { "const": false },
         "atomic_fields": { "type": "array", "minItems": 5, "uniqueItems": true, "items": { "type": "string" } },
         "serialized_operations": { "const": ["apply"] }
@@ -50,8 +54,8 @@
     },
     "interfaces": {
       "type": "array",
-      "minItems": 16,
-      "maxItems": 16,
+      "minItems": 19,
+      "maxItems": 19,
       "items": { "$ref": "#/$defs/interface" }
     },
     "release_gates": {

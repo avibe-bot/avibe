@@ -95,11 +95,18 @@ The durable ownership rules are:
   result before CAS evaluation, including after later Apply operations;
 - any retained same `mutation_id` with a different canonical payload rejects before
   CAS evaluation or a write;
+- page-scoped receipts remain for the page lifetime, have no time/count eviction,
+  and cascade-delete with the page;
 - a stale expected revision rejects before a write;
 - availability is copied from the authoritative source and cannot be supplied by
   Apply;
 - route page ID, request page ID, result page ID, and result aggregate page ID are
-  equal.
+  equal;
+- canonical emails are rejected before digest, comparison, persistence, or result
+  serialization unless they are lowercase, unique, and lexicographically sorted;
+- a new or replacement share binding is checked for global uniqueness and written
+  inside the same stable-writer transaction; a binding owned by another page returns
+  `share_id_taken` without a write, including under concurrent custom-slug Apply.
 
 Apply is fully local. It has no hosted prepare, commit, current-grant, operation,
 acknowledgement, cleanup, reconciliation, commitment, or cloud-availability phase.
@@ -111,7 +118,8 @@ Only the owner or existing sharing-control resource authority may read exact-ema
 settings or invoke Apply. Page membership alone and ordinary resource read authority
 are insufficient. Authorization failure occurs before controller IPC, store access,
 or any identity-provider call. Settings responses are `private, no-store` and return
-the local aggregate, including exact emails, only to an authorized settings caller.
+a user-facing projection of the local aggregate, including exact emails but excluding
+`last_mutation`, request digests, and Apply receipts, only to an authorized caller.
 
 ### Orthogonal authorization
 
@@ -154,12 +162,27 @@ Limited login starts only after Avibe resolves the current share binding. Local
 Avibe owns signed state, the safe same-share return target, nonce and single-use
 handling, callback correlation, and final share re-resolution.
 
-Avibe Backend returns a short-lived signed identity assertion or authorization code.
+Avibe Backend returns one short-lived signed identity assertion. Authorization-code
+exchange is not part of this contract.
+The browser calls
+`GET /api/v1/instances/{instanceId}/show-identity/authorize` with exactly signed
+`state`, `nonce`, and an HTTPS `redirect_uri` on the active instance/custom hostname
+at `/auth/show-identity/callback`. The Backend delivers the assertion only by
+`form_post` to that fixed callback. No assertion appears in a URL, query, fragment,
+history entry, or referrer.
 The signed assertion contains only:
 
 - issuer, audience, subject, issue/expiry times, nonce, and unique token ID;
 - the paired `instance_id`;
 - one verified normalized email.
+
+Its audience is `avibe-show-identity:<oauthClientId>`, normal lifetime is 300
+seconds, hard maximum is 600 seconds, and verifier skew is 60 seconds. The email is
+ASCII-trimmed and lowercased from a fresh verified Backend identity lookup. Only the
+current key signs; JWKS keeps current plus previous public keys for at least the hard
+maximum plus skew. `identity_not_verified` and `identity_unavailable` are no-store,
+assertion-free terminal errors. Backend issues unique `jti`; local Avibe consumes
+the nonce and `jti` once.
 
 It contains no `page_id`, `share_id`, membership result, page authorization,
 Instance role, `InstanceAccessSource`, audience revision, grant revision, or
@@ -174,7 +197,39 @@ unlisted identity receives one generic denial with no page bytes and no login lo
 Removal from the list takes effect on the next request without Backend access; an
 already loaded guest tab is not actively closed.
 
+### Shared viewer browser containment
+
+The visible URL remains `/p/<share_id>/`. Avibe serves a trusted platform shell at
+that URL and runs arbitrary shared page code only inside a sandboxed opaque-origin
+iframe with `allow-scripts` and without `allow-same-origin`. Only the trusted shell
+may frame the shared document. Shared page code has no DOM, cookie, CORS, Service
+Worker, opener, or ambient-identity path to another share's bytes.
+
+After current local membership succeeds, Avibe authorizes an internal Runtime capture
+request. Runtime returns only an opaque namespace handle, document handle, and expiry.
+Avibe then issues an entropy-backed browsing capability; browser routes accept only
+the opaque handles and capability, never a Session ID, workspace/source path, or
+browser-supplied Runtime context. The browsing capability is bound to
+`(instance_id, page_id, share_id, audience_revision,
+namespace_handle, document_handle)`. The trusted shell holds it ephemerally and every
+protected shared document, module, fallback, and API request presents it. Those
+responses are credentialless CORS (`Access-Control-Allow-Origin: *`, never credentials
+or `Set-Cookie`). Vendor assets stay namespace-scoped and capability-required. The
+capability is neither the Backend identity assertion nor a browser cookie, Instance
+role, resource authority, or editor capability. A binding or revision mismatch
+re-resolves the share and current membership before any new credential or page bytes.
+Consequently, code on a sibling public page cannot fetch, frame, open and read, or
+reuse ambient credentials for a limited page.
+
 ### Direct retirement of the unused hosted model
+
+The local SQLite schema migration is intentionally separate from hosted retirement.
+Existing active private/public values map to `availability=active` with the matching
+mode. Legacy offline cannot recover its historical audience mode, so it maps fail
+closed to `availability=offline` and `access_mode=private`. Any existing `share_id`
+is retained as an inactive stable binding, emails initialize empty, and
+`audience_revision` initializes deterministically to zero. This local migration has
+no hosted import, bridge, or double write.
 
 The owner confirmed there is no production exact-email data. There is no migration,
 snapshot import, compatibility bridge, dual-write phase, legacy writer window, or
@@ -194,6 +249,11 @@ After retirement, any obsolete authorized-emails route is absent or returns a
 terminal removed response. It cannot reopen authority. Development and regression
 rows may be discarded. The retirement contract proves absence; it does not model a
 migration state machine.
+
+Backend logical deletion and destructive DDL are separate deployments. Application
+code must first stop every legacy table and `show_page_id` column select or write;
+only then may a later deployment drop the column and table. This ordering is a release
+dependency, not a data bridge, backfill, import, or compatibility phase.
 
 ### Runtime negotiation and isolation
 
@@ -220,10 +280,12 @@ reopen source paths or cross namespaces. Namespace lifetime is non-renewable, me
 uses one process-wide weighted budget with per-Session bounds and private reserve,
 and sanitized overload is the only shared admission failure.
 
-Shared responses are private/no-store, vary on cookie-sensitive identity, strip
-unsafe URL and Service Worker scope headers, and cannot be reused across principals.
-Redirects preserve safe route suffix and query while remaining outside shared worker
-scope. `/p/<share_id>/__vite_hmr` never exists.
+Every public and limited shared response is `private, no-store`: shell, entry,
+document, module, SPA fallback, API handler, redirect, and error. Limited responses
+also vary on cookie-sensitive identity. Shared responses strip unsafe URL and Service
+Worker scope headers and cannot be reused across principals or after an audience-mode
+change. Redirects preserve safe route suffix and query while remaining outside shared
+worker scope. `/p/<share_id>/__vite_hmr` never exists.
 
 Canonical `/show/` HMR revalidates origin, resource access, editor capability, and
 authorization revision. Existing sockets close on editor loss, resource revocation,
@@ -237,9 +299,11 @@ editor authority remains.
 The reviewed Runtime baseline remains exact head
 `ee3b0b490ad8b4afafb59cf37e2d57a20325208a` from Runtime PR #59. It does not
 implement keyed context, so `show-context-key-v1` advertisement remains forbidden.
-Advertisement may become true only when delivery items 6 and 9 are implemented and
-the same exact reviewed Runtime SHA is smoke-tested and pinned by the bundled
-manifest. Contract tests require all three SHAs to match.
+Advertisement may become true only when the named Runtime context-isolation and
+opaque shared capture/admission property owners are implemented and the same exact
+reviewed Runtime SHA is smoke-tested and pinned by the bundled manifest. Workflows
+may not resolve Runtime `main` dynamically after advertisement. Contract tests require
+the reviewed, smoke-tested, and bundled SHAs to match.
 
 ## Architecture
 
@@ -255,9 +319,11 @@ The access flow has one owner at each boundary:
 5. Backend authenticates identity only and signs the instance-bound assertion.
 6. Local Avibe re-resolves the share and evaluates current membership plus independent
    resource authority.
-7. Avibe selects redirect, private, shared, login, or deny and constructs the trusted
-   Runtime envelope.
-8. Runtime owns isolated, bounded private/shared graph behavior.
+7. Avibe selects redirect, private, shared, login, or deny. Shared admission produces
+   the trusted `/p/` shell and, for limited viewers, a binding-scoped browsing
+   credential for the opaque-origin iframe.
+8. Avibe constructs the trusted Runtime envelope; Runtime owns isolated, bounded
+   private/shared graph behavior.
 
 No step sends the local email set to Backend. No Backend response contains page
 membership or an Instance role derived from it.
@@ -271,7 +337,8 @@ membership or an Instance role derived from it.
 3. Implement the identity-only Backend assertion and local login/callback flow.
 4. Retire hosted table/endpoints/clients and remove `show_page_email` Instance
    authorization.
-5. Implement the closed route/capability decision and trusted Runtime envelope.
+5. Implement the closed route/capability decision, trusted shared shell, opaque-origin
+   containment, browsing credential, and trusted Runtime envelope.
 6. Implement Runtime keyed-context isolation and recursive shared confinement.
 7. Implement capability probe/release gating and private HMR revocation.
 8. Build the three-mode UI and complete local Incus/browser acceptance.
@@ -292,6 +359,13 @@ Contract tests must:
   does not promise active tab closure;
 - prove identity assertions cannot carry page authority, membership, Instance roles,
   or privileged surface capability;
+- execute the signed-state, correlation-cookie, single-use nonce, instance binding,
+  safe return, share re-resolution, and current-membership login loop;
+- prove the trusted `/p/` shell can load a current limited member while arbitrary
+  sibling page code cannot fetch, frame, open/read, or use ambient credentials for it;
+- exhaust public/limited shared response surfaces and require `private, no-store`;
+- reject noncanonical stored/result emails, globally contended share bindings, and a
+  latest-only receipt implementation using Apply A, Apply B, then replay A;
 - exhaust the orthogonal resource/membership capability matrix;
 - prove stable binding retention and explicit rotation in every audience mode;
 - prove direct retirement contains no migration or compatibility phase;
@@ -310,8 +384,8 @@ browser, Backend, Runtime, or local Incus evidence.
 | ID | Scenario | Expected evidence |
 | --- | --- | --- |
 | `SHOW-LIVE-001` | Resource editor opens `/p/<share>/` and the Agent edits | Trusted top-level navigation redirects to canonical `/show/`; resource editor receives HMR and annotations only on `/show/`; React Fast Refresh preservation remains a future browser check |
-| `SHOW-LIVE-002` | Listed-only guest opens limited `/p/` and the Agent edits | Current local membership serves shared `/p/`; `/p/` has no HMR or annotations; new content appears only after a later refresh |
-| `SHOW-LIVE-003` | Unlisted identity completes limited login and retries | Signed state returns only to the resolved share; current local membership is absent; one generic denial returns no page bytes and does not loop |
+| `SHOW-LIVE-002` | Listed-only guest opens limited `/p/` and the Agent edits | Trusted shell plus a current binding-scoped credential serves the opaque-origin shared page; sibling page code cannot fetch frame or open/read it; `/p/` has no HMR or annotations; new content appears only after a later refresh |
+| `SHOW-LIVE-003` | Unlisted identity completes limited login and retries | Signed state cookie nonce assertion and instance binding close one callback loop; signed state returns only to the resolved share; current local membership is absent; one generic denial returns no page bytes and does not loop |
 | `SHOW-LIVE-004` | The same stable link changes from limited to fully public | Local Apply preserves the binding and advances audience revision once; anonymous `/p/` becomes readable; shared readers still have no HMR or annotations |
 | `SHOW-LIVE-005` | Private `/show/` and shared `/p/` traffic run together | Runtime graphs are keyed by Session and context; shared lifecycle cannot rebase or close private HMR; both `/p/` audiences remain shared |
 | `SHOW-LIVE-006` | Identity resolution fails for public and limited requests | Public `/p/` remains readable; limited `/p/` fails closed; neither outcome selects HMR |
@@ -319,7 +393,7 @@ browser, Backend, Runtime, or local Incus evidence.
 | `SHOW-LIVE-008` | A listed email is removed while its limited page is open | One local transaction replaces the membership set; the next request is denied without Backend access; an already loaded guest tab is not actively closed |
 | `SHOW-LIVE-009` | A viewer connects directly to `/p/<share>/__vite_hmr` | The shared HMR endpoint is absent; cookies and membership cannot enable it |
 | `SHOW-LIVE-010` | Editor and shared viewers remain open through repeated edits | Private HMR graph identity stays stable; repeated edits create or rebase no shared graph; context and namespace resources stay bounded |
-| `SHOW-LIVE-011` | Identity changes while a shared document loads modules | Entry and modules remain on the shared representation selected for that request chain; no private Session path or mixed graph appears |
+| `SHOW-LIVE-011` | Identity changes while a shared document loads modules | Entry and modules remain on the shared representation selected for that request chain; all shared surfaces are private and no-store; opaque-origin code cannot cross into a sibling share; no private Session path or mixed graph appears |
 | `SHOW-LIVE-012` | Independent resource viewer opens canonical `/show/` | Complete private modules are readable; HMR and annotations remain editor-only |
 | `SHOW-LIVE-013` | Shared content registers a Service Worker before an editor opens the link | Shared worker scope cannot include `/show/`; no private bytes are served at `/p/`; redirect responses are private and preserve safe suffix and query |
 | `SHOW-LIVE-014` | Avibe runs against Runtime without keyed-context support | Shared viewers use the explicit legacy singleton compatibility path; HMR stays disabled on `/p/`; compatibility is not advertised as isolation |
@@ -328,25 +402,26 @@ browser, Backend, Runtime, or local Incus evidence.
 | `SHOW-LIVE-017` | Startup and show-update explicitly prewarm graphs | Every prewarm carries a typed server envelope; protocol validation occurs before graph mutation; ordinary editor edits never implicitly prewarm shared context |
 | `SHOW-LIVE-018` | Direct CLI changes an active page to offline with HMR connected | One coalesced monitor observes durable state; every Session socket closes within five seconds; no in-process event is required |
 | `SHOW-LIVE-019` | Public changes to limited while Backend is unavailable | One local transaction preserves the stable binding and installs normalized membership; anonymous access stops immediately; Backend availability is irrelevant to Apply |
-| `SHOW-LIVE-020` | The unused hosted exact-email model is retired | Backend table and authorized-email endpoints are deleted; Avibe hosted-email clients are deleted; no migration or compatibility bridge exists |
-| `SHOW-LIVE-021` | Process crashes around a limited-list replacement and retries | Before-transaction crash leaves the old aggregate; after-commit crash leaves the complete new aggregate; same-mutation retry returns one terminal result without a cloud coordinator |
+| `SHOW-LIVE-020` | The unused hosted exact-email model is retired | Backend table and authorized-email endpoints are deleted; Avibe hosted-email clients are deleted; application reads stop before destructive DDL; no migration or compatibility bridge exists |
+| `SHOW-LIVE-021` | Process crashes around a limited-list replacement and retries | Before-transaction crash leaves the old aggregate; after-commit crash leaves the complete new aggregate; Apply A then B then replay A returns A's original terminal result; no cloud coordinator exists |
 | `SHOW-LIVE-022` | Limited changes to private while Backend is unavailable | Private commits locally and disables `/p/`; the stable binding is retained but inactive; listed-only identity still cannot use `/show/` |
 | `SHOW-LIVE-023` | Legacy Runtime returns an unsafe transform error and nested raw path | Both responses use fixed path-free output; no host path or development diagnostic reaches the browser |
 | `SHOW-LIVE-024` | Source path changes after an opaque handle is issued | Existing handle serves immutable captured bytes; handle reads do not reopen the path; unsafe replacement cannot receive new admission |
-| `SHOW-LIVE-025` | Apply uses stale revision or reuses a mutation ID with different payload | Stale expected audience revision rejects before write; conflicting payload reuse rejects before write; neither changes the local aggregate |
-| `SHOW-LIVE-026` | Owner applies a canonically identical limited email set | Normalization produces the same set; Apply returns no change; audience revision and stable binding remain unchanged |
+| `SHOW-LIVE-025` | Apply uses stale revision reuses a mutation ID or contends for a custom slug | Stale expected audience revision rejects before write; conflicting payload reuse rejects before write; an atomically detected binding collision returns share_id_taken without write; none changes the local aggregate |
+| `SHOW-LIVE-026` | Owner applies a canonically identical limited email set | Normalization produces one lowercase unique lexicographically sorted set; noncanonical persisted or result order rejects; Apply returns no change; audience revision and stable binding remain unchanged |
 | `SHOW-LIVE-027` | Anonymous reads touch superseded namespaces before idle deadlines | Absolute lifetime remains non-renewable; whole namespace and snapshot bytes are reclaimed; stale document must reload |
 | `SHOW-LIVE-028` | Shared traffic exceeds the Runtime-wide budget | Process and per-Session bounds hold; private reserve cannot be consumed by shared traffic; excess shared admission is sanitized |
 | `SHOW-LIVE-029` | Limited changes to public without rotating its link | Local Apply preserves the binding; membership becomes empty; anonymous reads begin from the same slug immediately |
 | `SHOW-LIVE-030` | Released headerless Avibe client sends only legacy base | Entry module fallback and prewarm retain singleton propagation; keyed context remains disabled; unknown protocol still rejects safely |
-| `SHOW-LIVE-031` | Apply crashes at every local transaction boundary | There is no partially authoritative aggregate; retry is idempotent; no hosted operation cleanup or reconciliation exists |
+| `SHOW-LIVE-031` | Apply crashes at every local transaction boundary | There is no partially authoritative aggregate; durable page-plus-mutation receipts survive later Apply and replay the original result; no hosted operation cleanup or reconciliation exists |
 | `SHOW-LIVE-032` | Offline page changes future audience and rotates its custom link | Availability stays offline; mode binding and membership commit atomically; neither surface is admitted until explicit activation |
 | `SHOW-LIVE-033` | Instance ACL revision changes while local membership is unchanged | Local membership is evaluated fresh on every limited request; Instance revision cannot add or remove membership; membership never becomes Instance access |
 | `SHOW-LIVE-034` | Custom-slug public page changes to limited | The exact custom binding is preserved; normalized local membership installs atomically; listed shared reads and anonymous denial use the same slug |
 | `SHOW-LIVE-035` | Resource viewer and editor open `/p/` with a legacy Runtime | Both trusted top-level requests redirect to canonical `/show/`; viewer remains read-only; editor HMR remains on the private canonical surface |
-| `SHOW-LIVE-036` | Authorized owner reads limited settings | Exact normalized emails come only from local storage; response is private and no-store; Backend receives no whitelist data |
-| `SHOW-LIVE-037` | Listed guest completes identity-only login | Backend assertion proves verified instance-bound identity only; Avibe re-resolves the share and current local membership; guest receives only shared `/p/` |
-| `SHOW-LIVE-038` | Listed-only guest copies page ID and requests canonical `/show/` | Current membership positively serves limited `/p/`; canonical document module API and HMR remain denied; membership creates no Instance role or editor capability |
+| `SHOW-LIVE-036` | Authorized owner reads limited settings | Exact normalized emails come only from local storage; response projection excludes mutation receipts and is private and no-store; Backend receives no whitelist data |
+| `SHOW-LIVE-037` | Listed guest completes identity-only login | Backend returns only one signed verified instance-bound identity assertion; Avibe closes signed-state cookie nonce callback correlation and re-resolves current membership; a binding-scoped credential serves only the opaque-origin shared `/p/` page |
+| `SHOW-LIVE-038` | Listed-only guest copies page ID and requests canonical `/show/` | Current membership plus a binding-scoped credential positively serves limited `/p/`; canonical document module API and HMR remain denied; membership and browsing credential create no Instance role or editor capability |
+| `SHOW-LIVE-039` | Malicious code on a public sibling page targets a limited share | Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker scope opener or protected bytes; every forged or ambient request is denied; trusted shell plus current membership remains the positive path |
 
 ## Acceptance Gate
 
@@ -354,6 +429,10 @@ The design is ready for implementation lanes only when:
 
 - one local transactional writer owns mode, stable binding, audience revision,
   canonical membership replacement, and page-scoped idempotency receipts;
+- receipts remain durable for the page lifetime without time/count eviction and
+  cascade-delete only with the page;
+- local legacy private/public/offline rows map deterministically, with offline
+  failing closed to private and no hosted bridge;
 - the complete Apply product selects exactly one transition or reject for every
   closed input point;
 - local removal denies the next limited request without Backend and no contract
@@ -366,6 +445,8 @@ The design is ready for implementation lanes only when:
   concepts are direct-retirement targets, not compatibility states;
 - `/p/` always stays shared and capability-poor while canonical `/show/` remains the
   only private HMR and annotation surface;
+- malicious sibling page code cannot obtain or use another share's bootstrap,
+  opaque capability, browser authority, or protected bytes;
 - Runtime protocol, graph isolation, immutable shared confinement, budgets, proxy
   sanitation, and release provenance remain frozen;
 - every SHOW-LIVE Expected evidence clause has executable scalar contract proof;

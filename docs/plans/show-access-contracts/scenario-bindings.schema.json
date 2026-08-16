@@ -28,8 +28,8 @@
     },
     "bindings": {
       "type": "array",
-      "minItems": 38,
-      "maxItems": 38,
+      "minItems": 39,
+      "maxItems": 39,
       "items": { "$ref": "#/$defs/binding" }
     }
   },
@@ -121,6 +121,26 @@
         "path": { "type": "string", "pattern": "^docs/plans/show-access-contracts/" }
       }
     },
+    "semantic_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "document", "check"],
+      "properties": {
+        "kind": { "const": "semantic" },
+        "document": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.json$" },
+        "check": {
+          "enum": [
+            "identity_closed_loop",
+            "shared_response_matrix",
+            "canonical_email_storage",
+            "share_collision_atomic",
+            "receipt_a_b_a",
+            "settings_projection_excludes_receipts",
+            "sibling_isolation"
+          ]
+        }
+      }
+    },
     "claim": {
       "type": "object",
       "additionalProperties": false,
@@ -135,7 +155,8 @@
             { "$ref": "#/$defs/algebra_source" },
             { "$ref": "#/$defs/contains_source" },
             { "$ref": "#/$defs/canonical_emails_source" },
-            { "$ref": "#/$defs/path_source" }
+            { "$ref": "#/$defs/path_source" },
+            { "$ref": "#/$defs/semantic_source" }
           ]
         },
         "expected": { "$ref": "#/$defs/scalar" }

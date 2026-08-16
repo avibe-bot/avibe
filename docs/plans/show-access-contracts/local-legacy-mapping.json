@@ -1,0 +1,62 @@
+{
+  "schema_version": 2,
+  "owner": "LocalLegacyShowAccessMapper",
+  "scope": "local_sqlite_schema_migration_only",
+  "initial_audience_revision": 0,
+  "email_initialization": "empty",
+  "hosted_import_allowed": false,
+  "dual_write_allowed": false,
+  "mapping_rules": {
+    "private": { "availability": "active", "access_mode": "private" },
+    "public": { "availability": "active", "access_mode": "public" },
+    "offline": { "availability": "offline", "access_mode": "private" },
+    "share_binding": "retain_existing_share_id_as_stable_binding_even_when_inactive"
+  },
+  "cases": [
+    {
+      "id": "LOCAL-LEGACY-PRIVATE",
+      "source": { "page_id": "ses_legacy_private", "legacy_visibility": "private", "share_id": "retained-private-link" },
+      "result": {
+        "schema_version": 2,
+        "page_id": "ses_legacy_private",
+        "availability": "active",
+        "access_mode": "private",
+        "share_binding": { "share_id": "retained-private-link" },
+        "audience_revision": 0,
+        "emails": [],
+        "last_mutation": null
+      },
+      "shared_route_admitted": false
+    },
+    {
+      "id": "LOCAL-LEGACY-PUBLIC",
+      "source": { "page_id": "ses_legacy_public", "legacy_visibility": "public", "share_id": "retained-public-link" },
+      "result": {
+        "schema_version": 2,
+        "page_id": "ses_legacy_public",
+        "availability": "active",
+        "access_mode": "public",
+        "share_binding": { "share_id": "retained-public-link" },
+        "audience_revision": 0,
+        "emails": [],
+        "last_mutation": null
+      },
+      "shared_route_admitted": true
+    },
+    {
+      "id": "LOCAL-LEGACY-OFFLINE-FAIL-CLOSED",
+      "source": { "page_id": "ses_legacy_offline", "legacy_visibility": "offline", "share_id": "retained-offline-link" },
+      "result": {
+        "schema_version": 2,
+        "page_id": "ses_legacy_offline",
+        "availability": "offline",
+        "access_mode": "private",
+        "share_binding": { "share_id": "retained-offline-link" },
+        "audience_revision": 0,
+        "emails": [],
+        "last_mutation": null
+      },
+      "shared_route_admitted": false
+    }
+  ]
+}

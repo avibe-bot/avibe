@@ -2,6 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json",
   "title": "Local authoritative ShowAccess v2",
+  "x-avibe-invariants": {
+    "canonical_email_set": {
+      "validation_owner": "controller_process.ShowAccessCanonicalizer",
+      "normalization_steps": ["trim_ascii_surrounding_whitespace", "lowercase", "deduplicate", "unicode_codepoint_lexicographic_sort"],
+      "applies_before": ["request_digest", "equality_comparison", "persistence", "result_serialization"],
+      "reject_noncanonical_persisted_or_result": true
+    }
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [

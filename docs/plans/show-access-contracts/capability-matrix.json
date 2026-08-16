@@ -18,6 +18,12 @@
     "page_membership_creates_instance_role": false,
     "editor_capability_source": "resource_editor_only"
   },
+  "limited_shared_admission_precondition": {
+    "owner": "SharedViewerBrowserContainment",
+    "contract": "shared-browser-containment.json",
+    "matrix_input_stage": "after_valid_share_bound_request_proof",
+    "raw_browser_requests_evaluated_directly": false
+  },
   "global_invariants": [
     {
       "id": "INVARIANT-P-ALWAYS-SHARED-OR-NO-BYTES",

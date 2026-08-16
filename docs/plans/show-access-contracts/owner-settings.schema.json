@@ -2,6 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json",
   "title": "Local owner Show access settings read v2",
+  "x-avibe-projection-invariants": {
+    "authoritative_aggregate_embedded": false,
+    "forbidden_fields": ["last_mutation", "canonical_request_sha256", "apply_receipt"]
+  },
   "oneOf": [
     { "$ref": "#/$defs/settings_read_request" },
     { "$ref": "#/$defs/settings_read_result" },
@@ -31,11 +35,40 @@
           "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id"
         },
         "show_access": {
-          "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json"
+          "$ref": "#/$defs/settings_projection"
         },
         "storage_source": { "const": "local_authoritative_transactional_store" },
         "cache_control": { "const": "private, no-store" }
       }
+    },
+    "settings_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "page_id", "availability", "access_mode", "share_binding", "audience_revision", "emails"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "page_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id" },
+        "availability": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/availability" },
+        "access_mode": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/access_mode" },
+        "share_binding": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/share_binding" },
+        "audience_revision": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision" },
+        "emails": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/canonical_email_set" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "access_mode": { "const": "limited" } }, "required": ["access_mode"] },
+          "then": {
+            "properties": {
+              "share_binding": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/bound_share" },
+              "emails": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/non_empty_canonical_email_set" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "access_mode": { "enum": ["private", "public"] } }, "required": ["access_mode"] },
+          "then": { "properties": { "emails": { "maxItems": 0 } } }
+        }
+      ]
     },
     "settings_read_denied": {
       "type": "object",

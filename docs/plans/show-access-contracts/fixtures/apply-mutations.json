@@ -444,6 +444,94 @@
         "mutation_id": "mut_boundary_member_denied",
         "effects": { "controller_called": false, "store_write": false, "external_service_call": false }
       }
+    },
+    {
+      "id": "BOUNDARY-SHARE-ID-TAKEN",
+      "scenario_ids": ["SHOW-LIVE-025", "SHOW-LIVE-034"],
+      "route_page_id": "ses_boundary_share_contender",
+      "request": {
+        "schema_version": 2,
+        "message_type": "apply_request",
+        "page_id": "ses_boundary_share_contender",
+        "mutation_id": "mut_boundary_share_taken_01",
+        "expected_audience_revision": 3,
+        "target": { "access_mode": "public", "share_intent": "custom", "custom_share_id": "already-owned-share", "emails": [] }
+      },
+      "authority": "owner",
+      "result": {
+        "schema_version": 2,
+        "message_type": "apply_rejected",
+        "outcome": "share_id_taken",
+        "page_id": "ses_boundary_share_contender",
+        "mutation_id": "mut_boundary_share_taken_01",
+        "effects": { "controller_called": true, "store_write": false, "external_service_call": false }
+      }
+    }
+  ],
+  "concurrency_cases": [
+    {
+      "id": "CONCURRENCY-SAME-CUSTOM-SHARE-ID",
+      "scenario_ids": ["SHOW-LIVE-025", "SHOW-LIVE-034"],
+      "custom_share_id": "concurrent-custom-share",
+      "contenders": [
+        {
+          "page_id": "ses_concurrent_winner",
+          "mutation_id": "mut_concurrent_winner_0001",
+          "outcome": "applied",
+          "store_write": true
+        },
+        {
+          "page_id": "ses_concurrent_loser",
+          "mutation_id": "mut_concurrent_loser_00001",
+          "outcome": "share_id_taken",
+          "store_write": false
+        }
+      ],
+      "assertions": [
+        "uniqueness_check_and_binding_write_share_one_stable_writer_transaction",
+        "exactly_one_page_owns_the_custom_share_id",
+        "loser_receives_terminal_no_write_rejection"
+      ]
+    }
+  ],
+  "receipt_sequences": [
+    {
+      "id": "RECEIPT-SEQUENCE-A-B-REPLAY-A",
+      "scenario_ids": ["SHOW-LIVE-021", "SHOW-LIVE-031"],
+      "steps": [
+        {
+          "event": "apply_a",
+          "mutation_id": "mut_receipt_sequence_a_0001",
+          "outcome": "applied",
+          "current_audience_revision": 81,
+          "returned_audience_revision": 81,
+          "returned_mutation_id": "mut_receipt_sequence_a_0001",
+          "store_write": true
+        },
+        {
+          "event": "apply_b",
+          "mutation_id": "mut_receipt_sequence_b_0001",
+          "outcome": "applied",
+          "current_audience_revision": 82,
+          "returned_audience_revision": 82,
+          "returned_mutation_id": "mut_receipt_sequence_b_0001",
+          "store_write": true
+        },
+        {
+          "event": "replay_a_after_b",
+          "mutation_id": "mut_receipt_sequence_a_0001",
+          "outcome": "idempotent_replay",
+          "current_audience_revision": 82,
+          "returned_audience_revision": 81,
+          "returned_mutation_id": "mut_receipt_sequence_a_0001",
+          "store_write": false
+        }
+      ],
+      "assertions": [
+        "receipt_lookup_is_page_id_plus_mutation_id_not_latest_only",
+        "replay_a_returns_as_original_terminal_result_after_b",
+        "replay_does_not_replace_current_aggregate"
+      ]
     }
   ],
   "sequences": [

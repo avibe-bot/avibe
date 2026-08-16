@@ -3,7 +3,7 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/capability-matrix.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "axes", "authority_axes", "global_invariants", "rules"],
+  "required": ["schema_version", "axes", "authority_axes", "limited_shared_admission_precondition", "global_invariants", "rules"],
   "properties": {
     "schema_version": { "const": 2 },
     "axes": {
@@ -32,6 +32,14 @@
         "page_membership_creates_instance_access_context": { "const": false },
         "page_membership_creates_instance_role": { "const": false },
         "editor_capability_source": { "const": "resource_editor_only" }
+      }
+    },
+    "limited_shared_admission_precondition": {
+      "const": {
+        "owner": "SharedViewerBrowserContainment",
+        "contract": "shared-browser-containment.json",
+        "matrix_input_stage": "after_valid_share_bound_request_proof",
+        "raw_browser_requests_evaluated_directly": false
       }
     },
     "global_invariants": {

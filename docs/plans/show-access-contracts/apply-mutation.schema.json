@@ -107,7 +107,7 @@
         "schema_version": { "const": 2 },
         "message_type": { "const": "apply_rejected" },
         "outcome": {
-          "enum": ["revision_conflict", "mutation_conflict", "invalid_target", "page_mismatch", "unauthorized"]
+          "enum": ["revision_conflict", "mutation_conflict", "invalid_target", "share_id_taken", "page_mismatch", "unauthorized"]
         },
         "page_id": {
           "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id"
