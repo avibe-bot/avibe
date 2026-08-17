@@ -14994,7 +14994,8 @@ async def complete_show_identity_login():
             if fields["error"] not in {"identity_not_verified", "identity_unavailable"}:
                 raise show_identity.ShowIdentityError("invalid_callback")
             return _show_identity_error_response(fields["error"], 403)
-        identity = show_identity.verify_show_identity_assertion(
+        identity = await asyncio.to_thread(
+            show_identity.verify_show_identity_assertion,
             config,
             fields.get("assertion"),
             expected_nonce=state.nonce,
@@ -15088,7 +15089,7 @@ async def serve_public_show_page(share_id, asset_path):
         if page is None:
             return _show_page_not_found_response()
         limited_guest = lease is not None and lease.page_id == page.session_id
-        if not limited_guest and page.visibility == "offline":
+        if page.visibility == "offline":
             return _show_page_offline_response()
         if not limited_guest and page.visibility == "limited":
             if request.method != "GET" or not _is_show_page_spa_route_request(

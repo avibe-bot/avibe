@@ -529,13 +529,24 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             },
         },
     )
+    verification_was_offloaded: list[bool] = []
+
+    def verify_identity(*_args, **_kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            verification_was_offloaded.append(True)
+        else:
+            verification_was_offloaded.append(False)
+        return show_identity.VerifiedShowIdentity(
+            subject="viewer-1",
+            normalized_email="viewer@example.com",
+        )
+
     monkeypatch.setattr(
         show_identity,
         "verify_show_identity_assertion",
-        lambda *_args, **_kwargs: show_identity.VerifiedShowIdentity(
-            subject="viewer-1",
-            normalized_email="viewer@example.com",
-        ),
+        verify_identity,
     )
     set_show_runtime_manager_for_tests(manager)
     try:
@@ -558,6 +569,7 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             follow_redirects=False,
         )
         assert callback.status_code == 303
+        assert verification_was_offloaded == [True]
         assert callback.headers["Location"] == f"/p/{share_id}/"
         set_cookie = callback.headers["Set-Cookie"]
         assert "HttpOnly" in set_cookie
@@ -657,6 +669,19 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             headers={"Accept": "text/html"},
         )
         assert new_visit.status_code == 404
+
+        store = ShowPageStore()
+        try:
+            offline = store.update_visibility("ses123", "offline")
+            assert offline.visibility == "offline"
+        finally:
+            store.close()
+        stopped = client.get(
+            f"/p/{share_id}/app.js",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert stopped.status_code == 401
     finally:
         set_show_runtime_manager_for_tests(None)
 
