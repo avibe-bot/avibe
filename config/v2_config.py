@@ -2039,6 +2039,13 @@ class RuntimeConfig:
     # arrived as an answer to a question nobody in the channel could see. Off means
     # today's behavior (result only).
     harness_prompt_echo: bool = True
+    # Bounded retention for internal agent trace events (``agent_events`` rows
+    # with ``event_type='tool_call'`` and ``visibility='trace'``). These are
+    # debug/diagnostic material, never chat messages; without a bound an active
+    # installation grows ``vibe.sqlite`` without limit. ``enabled=False`` is an
+    # explicit opt-out; days below 1 clamp to 1 at the retention service.
+    agent_events_trace_retention_enabled: bool = True
+    agent_events_trace_retention_days: int = 30
 
 
 @dataclass
@@ -3579,6 +3586,8 @@ class V2Config:
                 "harness_run_queued_ttl_seconds": self.runtime.harness_run_queued_ttl_seconds,
                 "harness_run_hold_ttl_seconds": self.runtime.harness_run_hold_ttl_seconds,
                 "harness_prompt_echo": self.runtime.harness_prompt_echo,
+                "agent_events_trace_retention_enabled": self.runtime.agent_events_trace_retention_enabled,
+                "agent_events_trace_retention_days": self.runtime.agent_events_trace_retention_days,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,

@@ -468,6 +468,14 @@ agent_events = Table(
     Index("ix_agent_events_session_type_created_id", "session_id", "event_type", "created_at", "id"),
     Index("ix_agent_events_scope_created_id", "scope_id", "created_at", "id"),
     Index("ix_agent_events_turn_sequence_id", "turn_id", "sequence", "id"),
+    # Retention scan index: bounded age scan over the only rows the retention
+    # service may ever delete (storage/agent_events_retention.py owns the
+    # matching predicate; keep the two in sync).
+    Index(
+        "ix_agent_events_trace_retention",
+        "created_at",
+        sqlite_where=text("event_type = 'tool_call' and visibility = 'trace'"),
+    ),
 )
 
 # Platform-agnostic chat message store. Every IM adapter (Slack, Discord,

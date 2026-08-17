@@ -353,6 +353,7 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        self.trace_retention_task: Optional[asyncio.Task] = None
         self._memory_reconcile_task: Optional[asyncio.Task] = None
         self._memory_replacement_gate = asyncio.Lock()
         self._memory_factory_reset_task: Optional[asyncio.Task[dict[str, Any]]] = None
@@ -1521,6 +1522,8 @@ class Controller:
             self.cleanup_task is None or self.cleanup_task.done()
         ):
             self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
+        if self.trace_retention_task is None or self.trace_retention_task.done():
+            self.trace_retention_task = asyncio.create_task(self._agent_events_retention_loop())
 
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
@@ -3090,6 +3093,51 @@ class Controller:
         )
         return claude_timeout, codex_timeout
 
+    _AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS = 3600
+
+    async def _agent_events_retention_loop(self) -> None:
+        """Bounded retention for internal agent trace events (avibe#1506).
+
+        Checks hourly but does real work at most once per day — the storage
+        marker inside ``agent_events_retention.run_once`` owns the cadence —
+        so this loop never sits in a user request path and stays cheap when
+        disabled via config.
+        """
+        from storage import agent_events_retention
+        from storage.db import get_cached_sqlite_engine
+
+        logger.info(
+            "Agent trace-event retention loop started (check interval=%ss)",
+            self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS,
+        )
+        while True:
+            await asyncio.sleep(self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS)
+            try:
+                runtime_cfg = getattr(self.config, "runtime", None)
+                if not bool(getattr(runtime_cfg, "agent_events_trace_retention_enabled", True)):
+                    continue
+                days = int(
+                    getattr(runtime_cfg, "agent_events_trace_retention_days", None)
+                    or agent_events_retention.DEFAULT_RETENTION_DAYS
+                )
+                engine = get_cached_sqlite_engine()
+                summary = await asyncio.to_thread(
+                    agent_events_retention.run_once, engine, retention_days=days
+                )
+                status = str(summary.get("status") or "unknown")
+                if status == "not_due":
+                    continue
+                logger.info(
+                    "Agent trace-event retention %s: deleted=%s compaction=%s",
+                    status,
+                    summary.get("deleted_rows"),
+                    (summary.get("compaction") or {}).get("status"),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error("Agent trace-event retention failed", exc_info=True)
+
     async def periodic_cleanup(self):
         """Sweep idle backend runtime state without interrupting active work."""
         claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
@@ -3173,6 +3221,15 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_trace_retention_task() -> None:
+            if self.trace_retention_task and not self.trace_retention_task.done():
+                self.trace_retention_task.cancel()
+                try:
+                    await self.trace_retention_task
+                except asyncio.CancelledError:
+                    pass
+            self.trace_retention_task = None
+
         async def _cancel_internal_server_task() -> None:
             task = getattr(self, "_internal_server_task", None)
             if task is not None and not task.done():
@@ -3210,6 +3267,7 @@ class Controller:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
+        _stop_loop_coroutine(_cancel_trace_retention_task(), "Agent trace retention task")
         _stop_loop_coroutine(
             self._join_runtime_work_stack_shutdown(),
             "Runtime work stack",

@@ -6658,6 +6658,110 @@ def cmd_runs_cancel(args):
     return 0
 
 
+def _format_byte_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PiB"
+
+
+def cmd_data_retention(args):
+    from storage import agent_events_retention
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    try:
+        ensure_sqlite_state()
+        engine = create_sqlite_engine()
+        language = _configured_cli_language()
+        days_override = getattr(args, "days", None)
+        # The configured window is the default; --days overrides for this call.
+        retention_days = agent_events_retention.DEFAULT_RETENTION_DAYS
+        try:
+            config = V2Config.load()
+            runtime_cfg = getattr(config, "runtime", None)
+            retention_days = int(
+                getattr(runtime_cfg, "agent_events_trace_retention_days", None)
+                or agent_events_retention.DEFAULT_RETENTION_DAYS
+            )
+            enabled = bool(getattr(runtime_cfg, "agent_events_trace_retention_enabled", True))
+        except Exception:
+            enabled = True
+        if days_override is not None:
+            retention_days = int(days_override)
+
+        if getattr(args, "run", False):
+            payload = agent_events_retention.run_once(
+                engine,
+                retention_days=retention_days,
+                force=True,
+                compact=not bool(getattr(args, "no_compact", False)),
+            )
+        else:
+            payload = {"mode": "plan", "enabled": enabled, **agent_events_retention.retention_status(engine, retention_days=retention_days)}
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            _print_data_retention_human(payload, language)
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"Trace retention command failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _print_data_retention_human(payload: dict, language: str) -> None:
+    from storage import agent_events_retention as _retention
+
+    mode = str(payload.get("mode") or "run")
+    if mode == "plan":
+        plan = payload.get("plan") or {}
+        print(
+            i18n_t(
+                "data.retention.plan",
+                language,
+                count=int(plan.get("eligible_count") or 0),
+                size=_format_byte_size(int(plan.get("eligible_logical_bytes") or 0)),
+                days=int(plan.get("retention_days") or _retention.DEFAULT_RETENTION_DAYS),
+            )
+        )
+        last = payload.get("last_run") or {}
+        if last:
+            print(i18n_t("data.retention.lastRun", language, at=str(last.get("finished_at")), rows=int(last.get("deleted_rows") or 0)))
+        else:
+            print(i18n_t("data.retention.neverRun", language))
+        if payload.get("enabled") is False:
+            print(i18n_t("data.retention.disabled", language))
+        compaction = payload.get("compaction") or {}
+        print(
+            i18n_t(
+                "data.retention.compaction",
+                language,
+                size=_format_byte_size(int(compaction.get("reclaimable_bytes") or 0)),
+            )
+        )
+        return
+    status = str(payload.get("status") or "unknown")
+    if status == "ok":
+        print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
+        compaction = payload.get("compaction") or {}
+        compaction_status = str(compaction.get("status") or "not_attempted")
+        if compaction_status == "vacuumed":
+            print(i18n_t("data.retention.compacted", language, size=_format_byte_size(int(compaction.get("reclaimed_bytes") or 0))))
+        elif compaction_status == "deferred":
+            print(i18n_t("data.retention.compactionDeferred", language, reason=str(compaction.get("reason") or "")))
+        elif compaction_status == "skipped":
+            print(i18n_t("data.retention.compactionSkipped", language))
+    elif status == "not_due":
+        print(i18n_t("data.retention.notDue", language))
+    elif status == "busy":
+        print(i18n_t("data.retention.busy", language))
+    else:
+        print(f"retention status: {status}")
+
+
 def cmd_data_query(args):
     try:
         sql = getattr(args, "sql", None)
@@ -15236,7 +15340,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )
-    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query}")
+    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,retention}")
     data_subparsers.required = True
     data_query_parser = data_subparsers.add_parser(
         "query",
@@ -15250,6 +15354,34 @@ def build_parser():
     sql_group.add_argument("--sql-file", help="Read SQL from a UTF-8 file, or '-' for stdin.")
     _add_pagination_args(data_query_parser, help_command="vibe data query --help")
     _add_json_noop(data_query_parser)
+    data_retention_parser = data_subparsers.add_parser(
+        "retention",
+        help="Show or run bounded retention for internal agent trace events",
+        description=(
+            "Status and manual control for the agent_events trace retention policy: "
+            "tool_call trace rows older than the retention window are deleted; "
+            "messages, non-trace events, and newer traces are never touched."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe data retention --help",
+    )
+    data_retention_parser.add_argument(
+        "--run",
+        action="store_true",
+        help="Run one retention pass now (bypasses the daily cadence gate, still respects the lease).",
+    )
+    data_retention_parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Retention window override in days (default: the configured value, currently 30).",
+    )
+    data_retention_parser.add_argument(
+        "--no-compact",
+        action="store_true",
+        help="Skip the physical compaction preflight/VACUUM step of --run.",
+    )
+    _add_json_noop(data_retention_parser)
 
     show_path_parser = show_subparsers.add_parser(
         "path",
@@ -16105,6 +16237,8 @@ def main():
     if args.command == "data":
         if args.data_command == "query":
             sys.exit(cmd_data_query(args))
+        if args.data_command == "retention":
+            sys.exit(cmd_data_retention(args))
         parser.error("data command is required")
     if args.command == "task":
         if args.task_command == "add":
