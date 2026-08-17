@@ -276,6 +276,65 @@ def test_opencode_title_provider_uses_xdg_data_home(tmp_path: Path, monkeypatch)
     assert title.title == "Use XDG data home"
 
 
+def test_opencode_title_provider_derives_from_first_user_message(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table session (id text primary key, directory text, title text)")
+        conn.execute(
+            "insert into session (id, directory, title) values (?, ?, ?)",
+            ("ses_default", "/repo", "New session - 2026-06-02T07:35:03.127Z"),
+        )
+        conn.execute(
+            "insert into session (id, directory, title) values (?, ?, ?)",
+            ("ses_untitled", "/repo", ""),
+        )
+        conn.execute(
+            "insert into session (id, directory, title) values (?, ?, ?)",
+            ("ses_title", "/repo", "Implement session titles"),
+        )
+
+    provider = OpenCodeNativeSessionProvider(db_path=str(db_path))
+
+    for session_id in ("ses_default", "ses_untitled", "ses_missing_row"):
+        title = provider.get_title(
+            native_session_id=session_id,
+            working_path="/repo",
+            first_user_message="帮我修一下登录页面的报错",
+        )
+        assert title is not None
+        assert title.title == "帮我修一下登录页面的"
+        assert title.source == "derived_first_prompt"
+        assert title.confidence == "low"
+
+    backend_title = provider.get_title(
+        native_session_id="ses_title",
+        working_path="/repo",
+        first_user_message="帮我修一下登录页面的报错",
+    )
+    assert backend_title is not None
+    assert backend_title.title == "Implement session titles"
+    assert backend_title.source == "backend"
+    assert backend_title.confidence == "high"
+
+
+def test_opencode_title_provider_derives_without_db(tmp_path: Path) -> None:
+    provider = OpenCodeNativeSessionProvider(db_path=str(tmp_path / "missing.db"))
+
+    title = provider.get_title(
+        native_session_id="ses_any",
+        working_path="/repo",
+        first_user_message="排查标题回填",
+    )
+    assert title is not None
+    assert title.title == "排查标题回填"
+    assert title.source == "derived_first_prompt"
+
+    assert (
+        provider.get_title(native_session_id="ses_any", working_path="/repo", first_user_message="")
+        is None
+    )
+
+
 def test_codex_title_provider_reads_thread_title(tmp_path: Path) -> None:
     db_path = tmp_path / "state_5.sqlite"
     with sqlite3.connect(db_path) as conn:

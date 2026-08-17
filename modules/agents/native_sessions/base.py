@@ -51,6 +51,15 @@ def normalize_title_text(text: str, *, limit: int | None = None) -> str:
     return cleaned[:limit] if limit is not None else cleaned
 
 
+def derive_first_prompt_title(first_user_message: str, *, limit: int = 10) -> BackendSessionTitle | None:
+    """Derive a low-confidence backfill title from the first user message."""
+
+    title = normalize_title_text(first_user_message, limit=limit)
+    if not title:
+        return None
+    return BackendSessionTitle(title=title, source="derived_first_prompt", confidence="low")
+
+
 def normalize_multiline_preview_text(
     text: str,
     *,
