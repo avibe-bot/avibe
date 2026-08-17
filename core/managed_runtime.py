@@ -397,15 +397,17 @@ class ManagedRuntimeManager:
             # Cross-process installs hold flock on .install.lock. Probing with
             # LOCK_EX|LOCK_NB on an existing file is read-only (no create, no
             # truncate); failure to take it means another process is active.
+            # fcntl is POSIX-only: on Windows there is no read-only probe, so
+            # the preview proceeds (no cross-process installs of this runtime
+            # exist on Windows today; the in-process check still applies).
             try:
-                lock_stat = self._install_file_lock_path.stat()
-            except FileNotFoundError:
+                import fcntl
+            except ImportError:
                 return None
+            try:
+                self._install_file_lock_path.stat()
             except OSError:
                 return None
-            del lock_stat
-            import fcntl
-
             fd = os.open(self._install_file_lock_path, os.O_RDONLY)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

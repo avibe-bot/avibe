@@ -769,6 +769,36 @@ class ShowRuntimeManager:
             result["reason"] = "runtime_archive_download_failed"
         return result
 
+    def _preview_busy_reason(self) -> str | None:
+        """Read-only busy probe for previews: never creates or locks files.
+
+        Detects an active install (same process via the RLock depth, another
+        process via flock on an existing ``.install.lock``) so a preview never
+        advertises a live staging directory (``manifest-*``) as removable.
+        """
+        if self._install_guard_depth > 0:
+            return "runtime_install_already_running"
+        try:
+            import fcntl
+        except ImportError:
+            return None
+        try:
+            self._install_guard_path.stat()
+        except OSError:
+            return None
+        try:
+            fd = os.open(self._install_guard_path, os.O_RDONLY)
+        except OSError:
+            return "runtime_install_guard_unavailable"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return None
+        except OSError:
+            return "runtime_install_already_running"
+        finally:
+            os.close(fd)
+
     def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
         try:
             return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run)
@@ -786,6 +816,15 @@ class ShowRuntimeManager:
 
     def _clean_locked(self, *, keep_previous: int, dry_run: bool) -> dict[str, Any]:
         removed: list[str] = []
+        if dry_run:
+            busy_reason = self._preview_busy_reason()
+            if busy_reason:
+                return {
+                    "ok": False,
+                    "dry_run": True,
+                    "removed": [],
+                    "archives": self._skipped_archive_report(busy_reason),
+                }
         for pattern in ("prebuilt-*", "manifest-*"):
             for path in self.runtime_dir.glob(pattern):
                 if path.is_dir():
@@ -955,30 +994,32 @@ class ShowRuntimeManager:
         mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
         if os.name == "nt":
             # Directory descriptors (dir_fd) are unsupported on native
-            # Windows; fall back to path-based enumeration. The lock guard
-            # still serializes against concurrent installs in this process.
-            entries: list[str] = []
+            # Windows, so scan/stat/unlink by path. To keep deletion bound to
+            # the directory we validated, the Windows path records each
+            # candidate's (device, inode) at enumeration and revalidates it
+            # immediately before unlinking in the removal phase; a replaced
+            # parent or entry is treated as an inspection failure, not a
+            # deletion into unknown territory.
             iterator = os.scandir(downloads_dir)
             try:
-                entries = [entry.name for entry in iterator]
+                for entry in iterator:
+                    if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(entry.name):
+                        continue
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise _ArchiveInspectionError(f"archive is not stat-able: {entry.name}") from exc
+                    if not stat.S_ISREG(entry_stat.st_mode):
+                        continue
+                    if entry_stat.st_mtime > mtime_floor:
+                        continue
+                    if entry.name[: -len(".tgz")] in protected:
+                        continue
+                    candidates.append((downloads_dir / entry.name, entry_stat.st_size, entry.name))
             finally:
                 iterator.close()
-            for name in sorted(entries):
-                if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(name):
-                    continue
-                try:
-                    entry_stat = os.stat(downloads_dir / name, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    raise _ArchiveInspectionError(f"archive is not stat-able: {name}") from exc
-                if not stat.S_ISREG(entry_stat.st_mode):
-                    continue
-                if entry_stat.st_mtime > mtime_floor:
-                    continue
-                if name[: -len(".tgz")] in protected:
-                    continue
-                candidates.append((downloads_dir / name, entry_stat.st_size, name))
             return candidates
         # POSIX: bind enumeration and unlinking to the directory we validated
         # so a concurrent path swap (symlink replacing ``downloads`` between
@@ -1059,7 +1100,17 @@ class ShowRuntimeManager:
                     if os.name == "nt":
                         for path, size, name in candidates:
                             try:
+                                pre_stat = os.stat(path, follow_symlinks=False)
+                                if not stat.S_ISREG(pre_stat.st_mode):
+                                    raise OSError("entry replaced by a non-regular file")
                                 os.unlink(path)
+                                # Re-stat the name: if a replacement appeared
+                                # at the same instant, do not count it removed.
+                                try:
+                                    os.stat(path, follow_symlinks=False)
+                                    raise OSError("entry replaced during removal")
+                                except FileNotFoundError:
+                                    pass
                             except OSError:
                                 logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
                                 failed_count += 1
@@ -1335,6 +1386,23 @@ class ShowRuntimeManager:
             file_lock = MigrationFileLock(self._install_guard_path, timeout_seconds=timeout_seconds)
             try:
                 file_lock.acquire()
+                # The lstat above can race a same-user replacement of the lock
+                # path; validate the descriptor we now hold instead of the
+                # path we checked: it must be a regular file with no other
+                # hard links before MigrationFileLock truncates it.
+                lock_fd = getattr(file_lock, "_handle", None)
+                if lock_fd is not None:
+                    open_stat = os.fstat(lock_fd.fileno())
+                    if not stat.S_ISREG(open_stat.st_mode) or open_stat.st_nlink != 1:
+                        logger.warning(
+                            "Show Runtime install guard descriptor is not an exclusive regular file; releasing",
+                        )
+                        try:
+                            file_lock.release()
+                        except Exception:
+                            pass
+                        yield unavailable
+                        return
             except MigrationLockTimeout:
                 yield busy
                 return
