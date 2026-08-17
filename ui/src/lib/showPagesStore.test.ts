@@ -9,6 +9,10 @@ import {
 const page = (overrides: Partial<ShowPage> = {}): ShowPage => ({
   session_id: 'session-1',
   visibility: 'private',
+  access_mode: 'private',
+  access_revision: 0,
+  can_manage: true,
+  can_publish_public: true,
   title: 'Dashboard',
   platform: null,
   agent: null,

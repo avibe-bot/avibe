@@ -11,12 +11,11 @@ import { ShowPageShareControl } from './ShowPageShareControl';
 const api = {
   ensureShowPage: vi.fn(),
   getShowPageAccess: vi.fn(),
-  getShowPageAuthorizedEmails: vi.fn(),
-  replaceShowPageAuthorizedEmails: vi.fn(),
+  getShowAccessSettings: vi.fn(),
+  applyShowAccess: vi.fn(),
   listOrganizationResources: vi.fn(),
   listOrganizationGroups: vi.fn(),
-  setShowPageVisibility: vi.fn(),
-  rotateShowPageShare: vi.fn(),
+  setShowPageAvailability: vi.fn(),
 };
 
 vi.mock('../../context/ApiContext', () => ({
@@ -107,7 +106,6 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_use: true,
       can_manage: false,
       can_publish_public: false,
-      public_link_enabled: false,
     });
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
@@ -141,7 +139,6 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_use: false,
       can_manage: true,
       can_publish_public: false,
-      public_link_enabled: false,
     });
 
     render(
@@ -173,7 +170,6 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_use: true,
       can_manage: true,
       can_publish_public: true,
-      public_link_enabled: false,
     });
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
@@ -195,7 +191,6 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
             can_use: true,
             can_manage: true,
             can_publish_public: true,
-            public_link_enabled: false,
           } as never}
         />
       </I18nextProvider>,
@@ -222,7 +217,6 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
           can_use: false,
           can_manage: true,
           can_publish_public: false,
-          public_link_enabled: false,
         });
       }),
     );

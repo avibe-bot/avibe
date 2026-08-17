@@ -5,6 +5,10 @@ import { replaceShowPageTitleIfCurrent, type ShowPage } from './useShowPages';
 const page = (title: string | null): ShowPage => ({
   session_id: 'session-1',
   visibility: 'private',
+  access_mode: 'private',
+  access_revision: 0,
+  can_manage: true,
+  can_publish_public: true,
   title,
   platform: null,
   agent: null,

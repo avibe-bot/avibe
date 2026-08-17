@@ -14,7 +14,9 @@ export type ShowPageLinkInfo = {
 // offline (or public without a share id), where there is no live route.
 export function localPath(page: ShowPageLinkInfo): string | null {
   if (page.visibility === 'private') return `/show/${encodeURIComponent(page.session_id)}/`;
-  if (page.visibility === 'public' && page.share_id) return `/p/${encodeURIComponent(page.share_id)}/`;
+  if ((page.visibility === 'limited' || page.visibility === 'public') && page.share_id) {
+    return `/p/${encodeURIComponent(page.share_id)}/`;
+  }
   return null;
 }
 
@@ -35,7 +37,7 @@ export function displayLink(page: ShowPageLinkInfo): string | null {
   return href ? href.replace(/^https?:\/\//, '') : null;
 }
 
-// Custom public link suffix (the /p/<share_id>/ segment). Mirrors the server
+// Custom share-link suffix (the /p/<share_id>/ segment). Mirrors the server
 // rule in core/show_pages.validate_share_id so the field can give instant
 // feedback before the request; the server stays the authority on uniqueness.
 export const SHARE_ID_MIN_LENGTH = 3;

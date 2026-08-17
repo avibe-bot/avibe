@@ -13,7 +13,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  RotateCw,
   TriangleAlert,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -25,28 +24,29 @@ import { useWindowManager } from '../context/WindowManagerContext';
 import { copyTextToClipboard } from '../lib/utils';
 import { internalPwaLinkTarget, openLinkInNewContext } from '../lib/pwaNavigation';
 import { copyHref, displayLink } from '../lib/showPageLinks';
-import type { ShowPageVisibilityResult } from '../lib/showPageAccess';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
 import { appTabHref, isAppleContextClick, tabModifierLabel, type LaunchModifiers } from '../apps/appLaunch';
 import { filterShowPages, type ShowPageFilter } from '../apps/appLibrary';
 import { SHARED_ACTION_ZONE } from '../apps/rowLayout';
 import { ShowPageAvatarTile } from '../apps/showPageAvatarTile';
-import { ShowPageShareIdField } from './workbench/ShowPageShareIdField';
+import { ShowPageSharingSettings } from './workbench/ShowPageSharingSettings';
 import { SearchField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Input } from './ui/input';
-import { SegmentedRadio, type SegmentedTone } from './ui/segmented';
+import { SegmentedRadio } from './ui/segmented';
+import { Switch } from './ui/switch';
 
 const LABEL = 'font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted';
 
 // Visibility → badge variant, active segmented tone, and status dot. The row
 // tile is now a letter avatar (hashed by session), so visibility reads from the
 // badge rather than a per-state icon.
-const STATUS: Record<Visibility, { badge: 'warning' | 'info' | 'secondary'; tone: SegmentedTone; dot: string }> = {
-  public: { badge: 'warning', tone: 'gold', dot: 'bg-gold' },
-  private: { badge: 'info', tone: 'cyan', dot: 'bg-cyan' },
-  offline: { badge: 'secondary', tone: 'muted', dot: 'bg-muted' },
+const STATUS: Record<Visibility, { badge: 'warning' | 'info' | 'secondary'; dot: string }> = {
+  public: { badge: 'warning', dot: 'bg-gold' },
+  limited: { badge: 'info', dot: 'bg-mint' },
+  private: { badge: 'info', dot: 'bg-cyan' },
+  offline: { badge: 'secondary', dot: 'bg-muted' },
 };
 
 interface RowProps {
@@ -62,10 +62,9 @@ interface RowProps {
   onToggleInstall: (next: boolean) => void;
   onRename: (title: string | null) => Promise<void>;
   onUploadIcon: (file: File) => Promise<void>;
-  onSetVisibility: (visibility: Visibility) => void;
-  onRotate: () => void;
+  onSetOffline: (offline: boolean) => void;
   onCopy: () => void;
-  onShareIdSaved: (payload: ShowPageVisibilityResult, sessionId: string) => void;
+  onReload: () => void;
 }
 
 function ShowPageRow({
@@ -80,10 +79,9 @@ function ShowPageRow({
   onToggleInstall,
   onRename,
   onUploadIcon,
-  onSetVisibility,
-  onRotate,
+  onSetOffline,
   onCopy,
-  onShareIdSaved,
+  onReload,
 }: RowProps) {
   const { t, i18n } = useTranslation();
   const status = STATUS[page.visibility];
@@ -215,23 +213,31 @@ function ShowPageRow({
                 <IconEditor page={page} disabled={busy} onUploadIcon={onUploadIcon} />
               </div>
 
-              <div className="flex flex-col gap-2">
-                <span className={LABEL}>{t('showPages.visibilityLabel')}</span>
-                <div className="max-w-[360px]">
-                  <SegmentedRadio<Visibility>
-                    value={page.visibility}
-                    tone={status.tone}
-                    disabled={busy}
-                    ariaLabel={t('showPages.visibilityLabel')}
-                    onChange={onSetVisibility}
-                    options={[
-                      { id: 'private', label: t('showPages.status.private') },
-                      { id: 'public', label: t('showPages.status.public') },
-                      { id: 'offline', label: t('showPages.visibilityOffline') },
-                    ]}
+              <div className="flex max-w-[420px] items-center justify-between gap-3">
+                <div>
+                  <span className={LABEL}>{t('chat.showPage.availability')}</span>
+                  <p className="mt-1 text-[11px] text-muted">
+                    {t(page.offline ? 'chat.showPage.availabilityOffline' : 'chat.showPage.availabilityOnline')}
+                  </p>
+                </div>
+                <Switch
+                  checked={page.offline}
+                  disabled={busy || (page.offline ? !page.can_publish_public : !page.can_manage)}
+                  onCheckedChange={onSetOffline}
+                  label={t('chat.showPage.offline')}
+                />
+              </div>
+
+              {page.can_publish_public ? (
+                <div className="max-w-[420px] border-t border-border pt-4">
+                  <ShowPageSharingSettings
+                    active={expanded}
+                    canManage
+                    sessionId={page.session_id}
+                    onApplied={onReload}
                   />
                 </div>
-              </div>
+              ) : null}
 
               {page.visibility === 'offline' ? (
                 <p className="text-[12px] text-muted">{t('showPages.offlineNoLink')}</p>
@@ -268,7 +274,7 @@ function ShowPageRow({
                       {t('showPages.open')}
                     </Button>
                   </div>
-                  {page.visibility === 'public' && !page.url_available ? (
+                  {(page.visibility === 'limited' || page.visibility === 'public') && !page.url_available ? (
                     <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                       <TriangleAlert size={13} className="text-gold-ink" />
                       <span className="text-muted">{t('showPages.cloudOff')}</span>
@@ -280,34 +286,9 @@ function ShowPageRow({
                 </div>
               )}
 
-              {page.visibility === 'public' ? (
-                <div className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-2">
-                    <span className={LABEL}>{t('showPages.shareId.label')}</span>
-                    <div className="max-w-[360px]">
-                      <ShowPageShareIdField
-                        sessionId={page.session_id}
-                        shareId={page.share_id}
-                        disabled={busy}
-                        onSaved={onShareIdSaved}
-                      />
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    <span className={LABEL}>{t('showPages.shareLink')}</span>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <Button type="button" variant="secondary" size="sm" onClick={onRotate} disabled={busy}>
-                        <RotateCw size={14} />
-                        {t('showPages.rotate')}
-                      </Button>
-                      <span className="text-[11px] text-muted">{t('showPages.rotateHint')}</span>
-                    </div>
-                  </div>
-                </div>
-              ) : null}
             </div>
 
-            <div className="flex flex-col gap-3 rounded-xl border border-border bg-foreground/[0.02] p-4">
+            <div className="flex flex-col gap-3 rounded-md border border-border bg-foreground/[0.02] p-4">
               <span className={LABEL}>{t('showPages.details')}</span>
               {([
                 { k: t('showPages.detail.session'), v: page.session_id, mono: true, to: `/chat/${page.session_id}` },
@@ -490,11 +471,9 @@ const IconEditor: React.FC<{
 export function ShowPagesView({
   pages,
   busyId,
-  setVisibility,
-  rotate,
+  setOffline,
   rename,
   uploadIcon,
-  onShareIdSaved,
   reload,
   onOpenApp,
 }: ShowPagesController & {
@@ -567,6 +546,7 @@ export function ShowPagesView({
           options={[
             { id: 'all', label: t('showPages.filter.all') },
             { id: 'public', label: t('showPages.filter.public') },
+            { id: 'limited', label: t('showPages.filter.limited') },
             { id: 'private', label: t('showPages.filter.private') },
             { id: 'offline', label: t('showPages.filter.offline') },
           ]}
@@ -593,10 +573,9 @@ export function ShowPagesView({
               onToggleInstall={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
               onRename={(title) => rename(page, title)}
               onUploadIcon={(file) => uploadIcon(page, file)}
-              onSetVisibility={(visibility) => setVisibility(page, visibility)}
-              onRotate={() => rotate(page)}
+              onSetOffline={(offline) => setOffline(page, offline)}
               onCopy={() => copy(page)}
-              onShareIdSaved={onShareIdSaved}
+              onReload={reload}
             />
           ))
         )}

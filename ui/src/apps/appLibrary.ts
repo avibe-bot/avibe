@@ -83,11 +83,11 @@ export function partitionByDock(rows: readonly AppRow[], order: readonly string[
   return { docked, undocked };
 }
 
-export type ShowPageFilter = 'all' | 'public' | 'private' | 'offline';
+export type ShowPageFilter = 'all' | 'public' | 'limited' | 'private' | 'offline';
 
 export interface FilterablePage {
   session_id: string;
-  visibility: 'public' | 'private' | 'offline';
+  visibility: 'public' | 'limited' | 'private' | 'offline';
   title: string | null;
 }
 

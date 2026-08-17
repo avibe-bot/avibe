@@ -177,7 +177,7 @@
   },
   "showPages": {
     "title": "Show Pages",
-    "subtitle": "Every agent session has a Show Page. Make it public, keep it private, or take it offline.",
+    "subtitle": "Manage Show Page access and availability.",
     "searchPlaceholder": "Search by title or session…",
     "allPages": "All pages",
     "sortedRecent": "Sorted by most recent",
@@ -186,11 +186,13 @@
       "all": "All",
       "online": "Online",
       "private": "Private",
+      "limited": "Limited",
       "public": "Public",
       "offline": "Offline"
     },
     "status": {
       "private": "Private",
+      "limited": "Limited",
       "public": "Public",
       "offline": "Offline"
     },
@@ -213,28 +215,17 @@
         "updated": "App icon updated"
       }
     },
-    "visibilityLabel": "Visibility",
-    "visibilityOffline": "Offline",
     "liveLink": "Live link",
     "offlineNoLink": "This page is offline — bring it back with the control above to get a live link.",
     "copy": "Copy",
     "copied": "Copied",
     "open": "Open",
     "openApp": "Open app",
-    "shareLink": "Share link",
-    "rotate": "Rotate link",
-    "rotateHint": "Generates a new link and disables the current one.",
     "shareId": {
       "label": "Custom link",
-      "hint": "3–64 letters, numbers, dash, or underscore. Must be unique.",
-      "placeholder": "my-page",
-      "toast": {
-        "saved": "Custom link updated"
-      },
       "errors": {
         "taken": "That custom link is already taken. Pick another.",
-        "invalid": "Use 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
-        "generic": "Couldn't update the custom link."
+        "invalid": "Use 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number."
       }
     },
     "cloudOff": "Avibe Cloud is off — this link only opens on this device.",
@@ -1636,7 +1627,6 @@
     "remote_access_unknown": "The operation did not finish. Refresh the status and try again; if it still fails, check the remote access runtime logs.",
     "editor_config_write_forbidden": "Only messaging preferences can be saved from this role.",
     "editor_config_write_invalid": "That messaging setting could not be saved.",
-    "show_page_email_access_transient": "Email access is temporarily unavailable. Try again.",
     "invalid_pairing_key": "This pairing key is invalid or expired. Create a new key at avibe.bot, then paste it here.",
     "missing_pairing_key": "Paste the pairing key first.",
     "invalid_pairing_backend_url": "The Avibe Cloud URL must be a valid HTTPS address.",
@@ -3553,12 +3543,30 @@
       "shareTitle": "Share this Show Page",
       "copyLink": "Copy link",
       "nativeShare": "Share…",
-      "rotateLink": "Replace public link",
       "access": "Access",
-      "visibilityPublic": "Public",
-      "visibilityPrivate": "Private",
-      "publicDesc": "Anyone with the link can view",
-      "privateDesc": "Only you can view",
+      "sharingAccess": "Link access",
+      "sharingAccessDesc": "Controls the shared /p link independently from Workspace access.",
+      "loadingSharingAccess": "Loading link access…",
+      "sharingModes": {
+        "private": "Private",
+        "limited": "Limited",
+        "public": "Fully public"
+      },
+      "sharingHelp": {
+        "private": "The shared link is disabled.",
+        "limited": "Only the listed signed-in email addresses can open the shared link.",
+        "public": "Anyone with the link can open the shared page."
+      },
+      "limitedEmails": "Limited access emails",
+      "limitedEmailRequired": "Add at least one email address.",
+      "sharingErrors": {
+        "conflict": "Link access changed elsewhere. The latest version has been loaded.",
+        "invalid": "Review the mode, link, and email list.",
+        "error": "Link access could not be loaded."
+      },
+      "applySharingAccess": "Apply",
+      "narrowSharingTitle": "Restrict link access?",
+      "narrowSharingBody": "People who lose access will be denied on their next page request.",
       "workspaceAccess": "Workspace access",
       "workspaceAccessDesc": "Who can open this page after signing in.",
       "workspaceLevels": {
@@ -3568,7 +3576,7 @@
       },
       "workspaceHelp": {
         "private": "Only the Show Page owner can open it through this access rule.",
-        "public": "Anyone with the Show Page link may open it when it is public.",
+        "public": "Any active Organization member may open it, subject to their Avibe and Project access.",
         "scope": "Only active members of the selected groups may open it, subject to their Avibe and Project access."
       },
       "selectedGroups": "Selected groups",
@@ -3592,27 +3600,15 @@
         "offline": "This Avibe is offline. The audience change will apply after it reconnects.",
         "error": "This Avibe could not apply the audience change."
       },
-      "emailAccess": "Specific emails",
-      "emailAccessDesc": "These signed-in email addresses can open only this Show Page.",
       "emailPlaceholder": "name@example.com",
       "addEmail": "Add email",
       "removeEmail": "Remove {{email}}",
       "emailInvalid": "Enter a valid email address.",
-      "emailAccessEmpty": "No additional email addresses have access.",
-      "emailAccessLimit": "Up to 64 email addresses",
-      "applyEmailAccess": "Apply",
-      "loadingEmailAccess": "Loading email access…",
-      "emailAccessUnavailable": "Email access requires an Avibe Cloud connection.",
-      "emailAccessError": "Email access could not be loaded.",
       "accessLoadError": "Access details could not be loaded. Sharing changes are disabled.",
-      "publicLink": "Public link",
-      "publicLinkOnDesc": "Anyone with the link can open this page without signing in.",
-      "publicLinkOffDesc": "Anonymous access is off. Signed-in access is controlled above.",
-      "publicLinkOwnerOnly": "Only the Show Page owner can replace, customize, or re-enable this link.",
-      "publicLinkOffline": "Public links cannot be changed while this Show Page is offline.",
-      "customLink": "Custom link",
-      "offlineNote": "This Show Page is offline and can't be shared right now.",
-      "publicUnavailable": "Connect Avibe Cloud to get a public link others can open.",
+      "availability": "Availability",
+      "offline": "Offline",
+      "availabilityOnline": "Online and serving its configured access mode.",
+      "availabilityOffline": "Offline for everyone; link access is retained.",
       "loadError": "Couldn't load this Show Page.",
       "pinToDock": "Pin to Dock",
       "pinToDockCaption": "Opens as an app from the Dock",

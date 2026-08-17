@@ -1058,19 +1058,35 @@ def test_startup_show_page_prewarm_targets_recent_non_offline(monkeypatch, tmp_p
     try:
         store.ensure("ses-old")
         store.update_visibility("ses-public", "public")
+        limited = store.ensure("ses-limited")
+        result = store.apply_access(
+            "ses-limited",
+            expected_revision=limited.access_revision,
+            target_access_mode="limited",
+            target_share_id=limited.share_id,
+            target_emails=["viewer@example.com"],
+        )
+        assert result.status == "applied"
         store.update_visibility("ses-offline", "offline")
         store.ensure("ses-new")
     finally:
         store.close()
 
-    out = api.startup_show_page_prewarm_targets(limit=2)
+    out = api.startup_show_page_prewarm_targets(limit=3)
 
-    assert out["limit"] == 2
-    assert [page["session_id"] for page in out["pages"]] == ["ses-new", "ses-public"]
+    assert out["limit"] == 3
+    assert [page["session_id"] for page in out["pages"]] == [
+        "ses-new",
+        "ses-limited",
+        "ses-public",
+    ]
     assert out["pages"][0]["context"] == "private"
-    assert out["pages"][1]["visibility"] == "public"
-    assert out["pages"][1]["context"] == "shared"
-    assert out["pages"][1]["base_path"].startswith("/p/")
+    assert out["pages"][1]["visibility"] == "limited"
+    assert out["pages"][1]["context"] == "private"
+    assert out["pages"][1]["base_path"] is None
+    assert out["pages"][2]["visibility"] == "public"
+    assert out["pages"][2]["context"] == "shared"
+    assert out["pages"][2]["base_path"].startswith("/p/")
 
 
 def test_startup_show_page_prewarm_limit_env(monkeypatch):

@@ -415,8 +415,7 @@ that the server can answer `409 session_archived`:**
 | `api.updateSession` (PATCH) | `patch` — title, agent re-route, model, pin, scope | `SessionArchivedError` → `_session_archived_response` | **API seam (r5)** |
 | `api.forkSession` | `askInNewSession` (Quote → Ask in a new session) | `_session_fork_error_response` | ~~**API seam (r5)**~~ **FALSE WHEN WRITTEN — flat body, code destroyed. Fixed r6.** |
 | `api.ensureShowPage` | `toggleShowPage` | `core/show_pages.ensure_active` | **API seam (r5)**, re-verified r6 |
-| `api.setShowPageVisibility` / `rotateShowPageShare` / `uploadShowPageIcon` (+ its `api.updateSession` rename) | `ShowPageShareControl` → `useShowPages` store | `core/show_pages` guards, `vibe/api.py:1235` | **API seam (r5)**, re-verified r6 |
-| `api.setShowPageShareId` | `ShowPageShareIdField` (inside the Share popover) | `core/show_pages` guard | **API seam (r5)**, re-verified r6 |
+| Show Page access / availability / icon mutations (+ the `api.updateSession` rename) | `ShowPageShareControl` and its inventory store | `core/show_pages` guards | **API seam (r5)**, re-verified r6; access mutations were later consolidated by the unified ShowAccess editor |
 | Show-event POST (annotation submit) | the annotation overlay **inside the Show Page iframe** | `core/show_session_events.py:165` | out of reach — see below |
 
 **The "converges via API seam" column was an assertion, not a verification** — see
@@ -620,9 +619,8 @@ returns (`vibe/ui_server.py`), then to a body assertion. Two rows were wrong:
 | `api.updateSession` | `_session_archived_response` → structured | held (r4b/r5) |
 | `api.forkSession` | `_session_fork_error_response` → **flat `{"error": "<sentence>", "code": …}`** | **WRONG — code destroyed. Fixed** |
 | `api.ensureShowPage` | `_show_page_error_response` → structured | held |
-| `api.setShowPageVisibility` | `_show_page_error_response` → structured | held |
-| `api.setShowPageShareId` | `_show_page_error_response` → structured | held |
-| `api.rotateShowPageShare` | `_show_page_error_response` → structured | held |
+| Show Page access Apply | `_show_page_error_response` → structured | held; later consolidated into revision-CAS Apply |
+| Show Page availability | `_show_page_error_response` → structured | held |
 | `api.uploadShowPageIcon` | `_show_page_icon_upload_error` → structured | held |
 | store rename (`useShowPages` → `api.updateSession`) | same as `updateSession` | held |
 | `api.cancelSession` / `removeQueuedMessage` / `sendQueuedNow` / `setSessionDraft` | no archive guard at all | held (not `session_archived`-capable) |

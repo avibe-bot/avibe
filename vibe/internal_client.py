@@ -1350,6 +1350,52 @@ async def end_running_agent(payload: dict[str, Any], *, socket_path: Optional[Pa
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def _show_access_request(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(10.0, connect=1.0),
+        ) as client:
+            resp = await client.post(path, json=payload)
+    except httpx.ReadTimeout as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
+async def show_access_settings_read(
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    return await _show_access_request(
+        "/internal/show-access/settings-read",
+        payload,
+        socket_path=socket_path,
+    )
+
+
+async def show_access_apply(
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    return await _show_access_request(
+        "/internal/show-access/apply",
+        payload,
+        socket_path=socket_path,
+    )
+
+
 async def send_now(
     session_id: str,
     *,
