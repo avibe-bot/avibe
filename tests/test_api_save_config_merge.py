@@ -1703,3 +1703,16 @@ def test_save_config_list_ops_merge_against_lock_fresh_base(monkeypatch, tmp_pat
 
     assert "discord" not in updated.platforms.enabled
     assert "lark" in updated.platforms.enabled
+
+
+def test_list_ops_enable_requires_credentials(monkeypatch, tmp_path):
+    """List-op additions are validated like explicit list saves: enabling
+    a platform without credentials through the verb is rejected (#1458
+    stage ③ list semantics)."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+
+    import pytest
+
+    with pytest.raises(ValueError, match="lark"):
+        api.save_config({"__avibe_list_ops": {"platforms.enabled": {"add": ["lark"]}}})

@@ -1016,8 +1016,15 @@ def save_config(
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
     # The list-operations verb is a merge instruction, never config
-    # state: pull it out before anything treats the payload as data.
+    # state: pull it out before anything treats the payload as data —
+    # but remember whether it touched the enabled list: credential
+    # validation and runtime reconciliation gate on a ``platforms``
+    # marker in the payload, and a bare operation payload must not
+    # bypass them.
     raw_list_ops = payload.pop(_LIST_OPS_PAYLOAD_KEY, None)
+    list_ops_touches_platforms = isinstance(raw_list_ops, dict) and any(
+        str(key) in ("platforms.enabled", "platforms.primary") for key in raw_list_ops
+    )
 
     # Serialize the WHOLE read-merge-write cycle across processes
     # (#1458 stage ③): the base load, merge, validation, and write all
@@ -1063,6 +1070,14 @@ def save_config(
                 merged_payload = _apply_list_ops(merged_payload, raw_list_ops)
         else:
             merged_payload = payload
+        if list_ops_touches_platforms and isinstance(merged_payload.get("platforms"), dict):
+            # Credential validation and runtime reconciliation gate on a
+            # ``platforms`` marker in the payload; surface the FINAL
+            # post-operation enabled list so a bare list-op payload is
+            # validated and reconciled exactly like an explicit list save.
+            final_platforms = dict(merged_payload["platforms"])
+            if "enabled" in final_platforms or "primary" in final_platforms:
+                payload["platforms"] = final_platforms
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)

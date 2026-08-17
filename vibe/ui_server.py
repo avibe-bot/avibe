@@ -1525,6 +1525,14 @@ def _platform_runtime_fields_changed(previous: V2Config | None, current: V2Confi
     if previous is None:
         return False
     platform_config_keys = {descriptor.config_key for descriptor in im_platform_descriptors()}
+    # The list-operations verb mutates the enabled list without carrying a
+    # literal ``platforms`` section — treat it as a platforms edit so
+    # enable/disable toggles still trigger the controller IPC
+    # reconciliation.
+    from vibe.api import _LIST_OPS_PAYLOAD_KEY
+
+    if _LIST_OPS_PAYLOAD_KEY in payload:
+        return True
     if "platforms" not in payload and "platform" not in payload and not any(key in payload for key in platform_config_keys):
         return False
     return (
@@ -7953,7 +7961,11 @@ async def wechat_qr_login_poll():
         user_id = result["user_id"]
 
         try:
-            _persist_wechat_qr_credentials(result)
+            # The persistence helper takes the cross-process config
+            # lock and does synchronous file/DB work — keep it off the
+            # ASGI event loop so other UI requests don't stall while it
+            # waits on the lock.
+            await asyncio.to_thread(_persist_wechat_qr_credentials, result)
         except Exception as exc:
             logger.error("Failed to persist WeChat QR credentials: %s", exc)
             return jsonify({"ok": False, "error": "failed_to_persist_wechat_credentials"}), 500
