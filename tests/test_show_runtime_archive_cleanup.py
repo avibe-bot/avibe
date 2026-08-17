@@ -637,7 +637,100 @@ def test_lock_fallback_enforces_manifest_node_requirement(tmp_path: Path, monkey
     assert command is None
 
 
-def test_dry_run_reports_inspection_failure_instead_of_raising(tmp_path: Path) -> None:
+def test_dry_run_planning_failure_returns_structured_report(tmp_path: Path, monkeypatch) -> None:
+    """A mid-scan install-dir failure must not abort the CLI dry run."""
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+
+    def _boom(*args, **kwargs):
+        raise OSError("install dir vanished during scan")
+
+    monkeypatch.setattr(manager, "_clean_manifest_install_dirs", _boom)
+    result = manager.clean(dry_run=True)
+
+    assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
+
+
+def test_skipped_archives_do_not_hide_other_cleanup_results(monkeypatch, capsys) -> None:
+    from vibe import cli as vibe_cli
+
+    parser = vibe_cli.build_parser()
+    args = parser.parse_args(["runtime", "clean"])
+
+    class FakeRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": ["show-install-1"],
+                "archives": {
+                    "outcome": "skipped",
+                    "skipped_reason": "runtime_install_already_running",
+                    "removed_count": 0,
+                },
+            }
+
+    monkeypatch.setattr(vibe_cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(
+        vibe_cli,
+        "_clean_git_runtime",
+        lambda *, keep_previous, dry_run=False: {"ok": True, "removed": ["git-old"]},
+    )
+
+    assert vibe_cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "runtime_install_already_running" in captured.err  # archive skip reason surfaced
+    assert "1" in captured.out  # Show Runtime install result still reported
+    assert "git" in captured.out.lower() or "Git" in captured.out  # Git result still reported
+
+
+def test_symlinked_downloads_directory_is_rejected(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    outside = tmp_path / "outside-downloads"
+    outside.mkdir()
+    (outside / f"{_sha(2)}.tgz").write_bytes(b"stale")
+    downloads_link = manager.runtime_dir / "downloads"
+    downloads_link.parent.mkdir(parents=True, exist_ok=True)
+    downloads_link.symlink_to(outside)
+
+    result = manager.clean()
+
+    assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
+    assert (outside / f"{_sha(2)}.tgz").exists()  # nothing traversed via the link
+
+
+def test_symlinked_install_lock_is_refused(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.runtime_dir.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious", encoding="utf-8")
+    (manager.runtime_dir / ".install.lock").symlink_to(victim)
+
+    with manager._install_guard_locked() as acquired:
+        assert acquired is False
+    assert victim.read_text(encoding="utf-8") == "precious"  # link never followed
+
+
+def test_versions_dir_stat_failure_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
+    rollback_archive = _write_archive(manager, _sha(8), b"rollback")
+
+    import errno
+
+    real_is_dir = Path.is_dir
+
+    def _is_dir_guard(self):
+        if self.name == "versions" and self.parent == manager.runtime_dir:
+            raise OSError(errno.EACCES, "permission denied")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", _is_dir_guard)
+    result = manager.clean()
+
+    assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
+    assert rollback_archive.exists()  # the rollback archive stays protected
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))
 
@@ -682,4 +775,7 @@ def test_cli_clean_reports_skipped_archives_without_zero_counts(monkeypatch, cap
     assert vibe_cli.cmd_runtime(args) == 0
     captured = capsys.readouterr()
     assert "runtime_install_already_running" in captured.err
-    assert "0" not in captured.out  # no placeholder zero-removal lines
+    # The archive skip is reported as a warning; Show/Git results still render
+    # (they may legitimately be zero here — the fake removed nothing).
+    assert "Removed 0 Show Runtime cache item(s)." in captured.out
+    assert "downloaded Show Runtime archive" not in captured.out  # no placeholder archive line

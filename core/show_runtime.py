@@ -769,6 +769,21 @@ class ShowRuntimeManager:
         return result
 
     def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
+        try:
+            return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run)
+        except Exception:
+            # A planning failure (e.g. an install dir disappearing mid-scan)
+            # must return the structured inspection-failure report, never an
+            # exception through the CLI or Doctor paths.
+            logger.warning("Show Runtime cache cleanup failed", exc_info=True)
+            return {
+                "ok": False,
+                "dry_run": dry_run,
+                "removed": [],
+                "archives": self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED),
+            }
+
+    def _clean_locked(self, *, keep_previous: int, dry_run: bool) -> dict[str, Any]:
         removed: list[str] = []
         for pattern in ("prebuilt-*", "manifest-*"):
             for path in self.runtime_dir.glob(pattern):
@@ -843,7 +858,15 @@ class ShowRuntimeManager:
         except Exception as exc:
             raise _ArchiveMetadataError("current.json is unreadable") from exc
         versions_dir = self.runtime_dir / "versions"
-        if versions_dir.is_dir():
+        if versions_dir.is_symlink():
+            raise _ArchiveMetadataError("versions directory is a symlink")
+        try:
+            versions_is_dir = versions_dir.is_dir()
+        except OSError as exc:
+            # Path.is_dir() suppresses stat errors and reads as "absent",
+            # which would silently unprotect every retained install.
+            raise _ArchiveInspectionError("versions directory cannot be inspected") from exc
+        if versions_is_dir:
             for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
                 for metadata_path in versions_dir.glob(pattern):
                     if _skipped(metadata_path):
@@ -871,8 +894,13 @@ class ShowRuntimeManager:
         """
         downloads_dir = self.runtime_dir / "downloads"
         candidates: list[tuple[Path, int]] = []
-        if not downloads_dir.is_dir():
+        if not downloads_dir.exists():
             return candidates
+        # A symlinked downloads directory would follow the link and unlink
+        # files outside Avibe's runtime state; fail as an inspection error
+        # rather than traverse it.
+        if downloads_dir.is_symlink() or not downloads_dir.is_dir():
+            raise _ArchiveInspectionError("downloads directory is a symlink or not a directory")
         mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
         for path in sorted(downloads_dir.iterdir()):
             if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(path.name):
@@ -1165,6 +1193,15 @@ class ShowRuntimeManager:
                     yield True
                 finally:
                     self._install_guard_depth -= 1
+                return
+            # A symlinked lock path would make the lock truncate/rewrite a
+            # file outside the runtime directory; refuse it outright.
+            if self._install_guard_path.is_symlink():
+                logger.warning(
+                    "Show Runtime install guard %s is a symlink; refusing to lock",
+                    self._install_guard_path,
+                )
+                yield False
                 return
             file_lock = MigrationFileLock(self._install_guard_path, timeout_seconds=timeout_seconds)
             try:

@@ -14135,11 +14135,14 @@ def cmd_runtime(args) -> int:
             archives = payload.get("archives") or {}
             skipped_reason = str(archives.get("skipped_reason") or "")
             outcome = str(archives.get("outcome") or "")
+            # Show/Git results are reported independently of the archive
+            # outcome: a skipped archive pass must not hide what the rest of
+            # the cleanup actually reclaimed (or would reclaim).
+            prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
+            removed = payload.get("removed") or []
+            print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
             is_partial_run = outcome == "partial" and not dry_run
             if is_partial_run:
-                # Some archives were removed, others were not: report both
-                # totals plus the failure count, never a bare skip line.
-                print(i18n_t("runtime.clean.removedItems", language, count=len(payload.get("removed") or [])))
                 print(
                     i18n_t(
                         "runtime.clean.removedArchives",
@@ -14153,13 +14156,10 @@ def cmd_runtime(args) -> int:
                     file=sys.stderr,
                 )
             elif skipped_reason:
-                # A skipped/failed cleanup is not a completed zero-removal
+                # A skipped/failed archive pass is not a completed zero-removal
                 # cleanup; say so instead of printing placeholder counts.
                 print(i18n_t("runtime.clean.skipped", language, reason=skipped_reason), file=sys.stderr)
             else:
-                prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
-                removed = payload.get("removed") or []
-                print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
                 archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
                 archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
                 print(
@@ -14170,10 +14170,10 @@ def cmd_runtime(args) -> int:
                         size=_format_byte_size(archive_bytes),
                     )
                 )
-                if git.get("ok") is False and git.get("reason"):
-                    print(i18n_t("runtime.clean.gitSkipped", language, reason=git["reason"]), file=sys.stderr)
-                else:
-                    print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
+            if git.get("ok") is False and git.get("reason"):
+                print(i18n_t("runtime.clean.gitSkipped", language, reason=git["reason"]), file=sys.stderr)
+            else:
+                print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
         return 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
