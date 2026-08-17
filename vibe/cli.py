@@ -10764,7 +10764,16 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         archive_cache = manager.archive_cache_status()
     except Exception:  # noqa: BLE001
         archive_cache = None
-    if archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
+    archive_skipped_reason = str((archive_cache or {}).get("skipped_reason") or "")
+    if archive_cache and archive_skipped_reason:
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("runtime.doctor.archiveCacheSkipped", _configured_cli_language(), reason=archive_skipped_reason),
+            i18n_t("runtime.doctor.archiveCacheSkippedAction", _configured_cli_language()),
+            code="show_runtime.archive_cache_skipped",
+        )
+    elif archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
         doctor_language = _configured_cli_language()
         _add_doctor_item(
             items,

@@ -1385,6 +1385,40 @@ def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monke
     assert next(item for item in items if item.get("code") == "show_runtime.archive_probe_skipped")["status"] == "pass"
 
 
+def test_show_runtime_doctor_reports_skipped_archive_inspection_as_warn(monkeypatch):
+    status = {
+        "provider": "manifest-cache",
+        "platform": "linux-x64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": {"runtime_version": "runtime-ref"},
+        "archive": {
+            "name": "vibe-show-runtime-node-linux-x64.tgz",
+            "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.5/vibe-show-runtime-node-linux-x64.tgz",
+        },
+        "installed": True,
+    }
+    manager = SimpleNamespace(
+        status=lambda: status,
+        probe_archive_reachability=lambda: (_ for _ in ()).throw(AssertionError("fast Doctor must not probe network")),
+        archive_cache_status=lambda: {
+            "candidate_count": 0,
+            "candidate_bytes": 0,
+            "skipped_reason": "runtime_install_already_running",
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=False)
+
+    skipped = next(item for item in items if item.get("code") == "show_runtime.archive_cache_skipped")
+    assert skipped["status"] == "warn"
+    clean = [item for item in items if item.get("code") == "show_runtime.archive_cache_clean"]
+    assert not clean  # an uninspected cache must not be reported as clean
+
+
 def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     offline_calls: list[bool] = []
 

@@ -907,7 +907,9 @@
     "doctor": {
       "archiveCacheReclaimable": "Show Runtime archive cache holds {count} reclaimable archive(s) ({size}); the current and rollback archives are kept.",
       "archiveCacheReclaimableAction": "Run `vibe runtime clean --dry-run` to preview, then `vibe runtime clean` to reclaim.",
-      "archiveCacheClean": "Show Runtime archive cache has no reclaimable archives"
+      "archiveCacheClean": "Show Runtime archive cache has no reclaimable archives",
+      "archiveCacheSkipped": "Show Runtime archive cache was not inspected ({reason}); it may still hold reclaimable archives.",
+      "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor."
     }
   }
 }
