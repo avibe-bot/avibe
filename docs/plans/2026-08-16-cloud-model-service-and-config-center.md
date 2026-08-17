@@ -193,8 +193,16 @@ scope per instance behind them.
 ### 6.2 Key custody
 
 - Slot API keys encrypted at rest with AES-256-GCM under a new env `MODEL_SERVICE_KEY_SECRET`;
-  decrypted only in the proxy call path. All read APIs return `has_api_key: true/false`, never the
-  value. Keys never enter logs, Sentry, or usage events.
+  decrypted only for a model call, a bounded save/explicit-verification probe, or the instance
+  status key-availability check. A save first encrypts the candidate, decrypts that managed
+  ciphertext, and uses only the decrypted value for any upstream probe; every enabled candidate
+  must complete the encrypt/decrypt round trip before persistence, including when `force: true`
+  skips the upstream probe. Status uses decrypt-validate-and-discard and never retains or returns
+  plaintext. This status-only read-path exception supersedes the earlier proxy-only wording.
+  All read APIs return `has_api_key: true/false`, never the value. Keys and ciphertext never enter
+  API responses, logs, Sentry, or usage events. Missing or invalid key-secret material is reported
+  as a high-priority Sentry event tagged by scope, capability, and instance, using only scrubbed
+  metadata.
 
 ### 6.3 APIs
 
@@ -266,9 +274,10 @@ scope per instance behind them.
   so unattributed-legacy usage can only ever be platform-scope in fact and invariant 2 holds.
   **Error mapping on legacy voice routes** (invariant 6): `model_service_not_configured` surfaces
   through the existing voice error vocabulary (`asr_not_configured` 503 family; a missing chat
-  slot degrades cleanup per §6.5-5); `model_quota_exhausted` (429) and `model_service_unavailable`
-  (503) pass through as new additive codes — released clients already treat unknown codes as
-  generic errors of their status class.
+  slot degrades cleanup per §6.5-5); `model_service_key_unavailable` (503),
+  `model_quota_exhausted` (429), and `model_service_unavailable` (503) pass through as new
+  additive codes — released clients already treat unknown codes as generic errors of their
+  status class.
 
 ### 6.4 Quota (platform scope only, v1)
 
@@ -441,7 +450,11 @@ required.
 `mode` ∈ `organization | platform`. `embedding_identity` is an opaque hash of the embedding slot's
 (base_url, model); it changes iff vector-space identity changes, and is `null` when the bound
 scope has no enabled embedding slot (e.g. a voice-only enterprise org) — the client then treats
-cloud memory as unavailable, matching `capabilities.embedding: false`.
+cloud memory as unavailable, matching `capabilities.embedding: false`. Before serializing a saved
+scope, the endpoint decrypt-validates every enabled slot and immediately discards the plaintext.
+An enabled slot whose key cannot be decrypted is reported as unavailable and the response adds a
+per-slot reason map, for example `"degraded": { "asr": "model_service_key_unavailable" }`;
+`degraded` is omitted when no slot is degraded.
 
 ### 8.3 Usage row
 
@@ -464,6 +477,10 @@ turns on.
 ### 8.4 Error codes (stable, machine-readable `code` field)
 
 - `model_service_not_configured` (503) — resolved scope lacks an enabled slot for the capability.
+- `model_service_key_unavailable` (503) — an enabled saved slot exists but its API key cannot be
+  decrypted with the deployed `MODEL_SERVICE_KEY_SECRET`. It never maps to
+  `model_service_not_configured`; no upstream call is made, status marks the affected capability
+  false with the same reason, and a scrubbed high-priority Sentry event is emitted.
 - `model_service_unavailable` (503) — quota **reservation** persistence failed on an
   enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
   never produces this error: the response is served and the un-settled reservation is reaped as a
@@ -487,9 +504,11 @@ turns on.
 2. An instance in an enterprise-configured org never consumes platform credentials or platform
    quota, for any capability; a misconfigured org yields `model_service_not_configured`, never a
    silent fallback.
-3. No API response, log line, usage event, or error message ever contains a slot API key; a `mak_`
-   key appears exactly once — in the body of its own mint/rotate response (shown once by design) —
-   and nowhere else; config reads expose only `has_api_key`.
+3. No API response, log line, Sentry event, usage event, or error message ever contains a slot API
+   key or its ciphertext; a `mak_` key appears exactly once — in the body of its own mint/rotate
+   response (shown once by design) — and nowhere else; config reads expose only `has_api_key`.
+   Every enabled saved slot is decrypt-valid before persistence, and status reflects current
+   decryptability rather than ciphertext presence.
 4. The upstream model invoked is always the configured slot's model, regardless of any
    client-supplied model string (documented exception: the legacy env cleanup chain, until a
    platform config is saved — each attempt's actual model is metered per §6.6).
