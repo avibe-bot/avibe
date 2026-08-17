@@ -77,6 +77,8 @@ from core.memory.types import (
 from config.v2_config import (
     AgentsConfig,
     MEMORY_RECOVERY_INTENTS,
+    MemoryCloudCapabilities,
+    MemoryCloudConfig,
     MemoryConfig,
     MemoryDiagnosticsConfig,
     MemoryEndpointConfig,
@@ -3656,6 +3658,72 @@ async def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings
     assert len(instances) == 2
     assert instances[0].stopped is True
     assert runtime.module._worker._provider is runtime._provider
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_cloud_capability_removal_pauses_claims_keeps_capture_and_resumes_same_identity(
+    memory_runtime_factory,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    cloud = MemoryCloudConfig(
+        scope="organization",
+        capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+        embedding_identity="emb-v1",
+        applied_embedding_identity="emb-v1",
+        model_access_key="mak_first",
+        proxy_base_url="https://backend.example.test/v1/model",
+        source_instance_id="instance-1",
+        organization_attached=True,
+    )
+    initial = MemoryConfig(enabled=True, mode="platform", cloud=cloud)
+    runtime = memory_runtime_factory(
+        initial,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+    )
+    assert (await runtime.reconcile(initial))["ok"] is True
+
+    removed = replace(
+        initial,
+        cloud=replace(
+            cloud,
+            capabilities=replace(cloud.capabilities, embedding=False),
+            embedding_identity=None,
+        ),
+    )
+    paused = await runtime.reconcile(removed)
+    assert paused == {
+        "ok": True,
+        "state": "paused",
+        "reason": "memory_capability_unavailable",
+    }
+    assert runtime.module._worker._claims_paused is True
+    assert factory.supervised[0].stopped is True
+
+    receipt = await runtime.module.capture(
+        CaptureRequest(
+            source_message_id="queued-during-capability-pause",
+            session_id="session-1",
+            principal_id=PRINCIPAL,
+            project_id=PROJECT,
+            provenance="user_input",
+            text="keep this queued",
+            occurred_at_ms=1_725_000_001_234,
+        )
+    )
+    assert isinstance(receipt, CaptureAccepted)
+
+    restored = replace(
+        removed,
+        cloud=replace(
+            removed.cloud,
+            capabilities=replace(removed.cloud.capabilities, embedding=True),
+            embedding_identity="emb-v1",
+        ),
+    )
+    assert (await runtime.reconcile(restored))["ok"] is True
+    assert runtime.module._worker._claims_paused is False
+    assert len(factory.supervised) == 2
     await memory_runtime_factory.close(runtime)
 
 

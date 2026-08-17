@@ -4,6 +4,7 @@ import ipaddress
 from http.cookies import SimpleCookie
 
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, V2Config
+from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
 from vibe import ui_server
 from vibe.ui_compat import TEST_REMOTE_ADDR_HEADER
 from vibe.ui_server import app, protect_mutating_ui_requests
@@ -527,3 +528,32 @@ def test_mutation_guard_exempts_e2e_simulation_endpoint(monkeypatch):
     monkeypatch.setenv("E2E_TEST_MODE", "true")
     with app.test_request_context("/e2e/simulate-interaction", method="POST"):
         assert protect_mutating_ui_requests() is None
+
+
+def test_model_service_refresh_ingress_requires_the_shared_cli_token(monkeypatch):
+    refreshes: list[bool] = []
+    monkeypatch.setattr(
+        "vibe.model_service.request_model_service_refresh",
+        lambda: refreshes.append(True),
+    )
+    client = app.test_client()
+
+    denied = client.post(
+        "/api/model-service/refresh",
+        base_url="http://127.0.0.1:15131",
+        json={},
+    )
+    accepted = client.post(
+        "/api/model-service/refresh",
+        base_url="http://127.0.0.1:15131",
+        headers={
+            "X-Vibe-Show-Client": "cli",
+            SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token(),
+        },
+        json={},
+    )
+
+    assert denied.status_code == 403
+    assert accepted.status_code == 200
+    assert accepted.get_json() == {"ok": True}
+    assert refreshes == [True]

@@ -953,7 +953,14 @@ class Controller:
     @staticmethod
     def _mark_factory_reset_intent() -> MemoryConfig:
         def mark(current: MemoryConfig) -> MemoryConfig:
-            return replace(current, recovery_intent="factory_reset")
+            return replace(
+                current,
+                recovery_intent="factory_reset",
+                cloud=replace(
+                    current.cloud,
+                    transition_rebuild_owned=False,
+                ),
+            )
 
         return atomic_update_memory(mark).memory
 

@@ -1039,7 +1039,23 @@ def save_config(
             pass
         persisted = load_config()
         _ensure_builtin_default_agents(persisted)
-        return persisted
+        model_service_pairing_changed = (
+            base_config.remote_access.vibe_cloud.runtime_credentials()
+            if base_config is not None
+            else None
+        ) != persisted.remote_access.vibe_cloud.runtime_credentials()
+
+    if model_service_pairing_changed:
+        try:
+            from vibe.model_service import request_model_service_refresh
+
+            request_model_service_refresh()
+        except Exception:
+            logger.warning(
+                "Cloud Model Service refresh could not be requested",
+                exc_info=True,
+            )
+    return persisted
 
 
 def save_memory_config(

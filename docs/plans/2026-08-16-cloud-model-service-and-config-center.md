@@ -114,6 +114,11 @@ For every model call, resolve the calling **instance**, then:
    capabilities gets exactly those capabilities; the rest stay off (the config UI's empty states
    say so).
 
+**UI banner visibility follows scope binding, not slot completeness.** Once an organization is
+enterprise-bound, its managed-model banner remains visible even when one or every slot is empty;
+an empty slot is an active-scope configuration error, not a reason to make the UI look platform-
+scoped. Before enterprise activation, the staging UI does not show that runtime-management banner.
+
 **Provisioning order (adjudicated 2026-08-16, PR #232)**: org config is **pre-stageable** — org
 owner/admin can read/write their org's config regardless of plan; runtime resolution ignores it
 until `plan='enterprise'`. One principle: **plan gates resolution; roles gate configuration.**
@@ -175,8 +180,9 @@ scope per instance behind them.
 - `model_access_keys`: `instance_id` (PK), `key_hash`, `created_at`, `rotated_at`, plus
   `previous_key_hash` + `previous_valid_until`. Opaque key (`mak_` prefix), shown once at mint,
   SHA-256 stored — same custody discipline as device secrets. **Rotation contract — three
-  properties; the mechanism (state machine + tests) is owned by the M2 implementation PR and
-  deliberately not prescribed here**: (1) *grace-safe* — after any rotation, the key the sidecar
+  properties; the mechanism (state machine + tests) is owned by the M2 backend implementation in
+  `avibe-bot-backend/lib/model-service/access-key.ts` plus its store transaction and route tests,
+  and deliberately not prescribed here**: (1) *grace-safe* — after any rotation, the key the sidecar
   is actually using keeps working long enough (≥ 24 h) for the managed settings ladder to apply
   the new one; (2) *retry-safe* — retrying a rotation whose response was lost, any number of
   times, can never invalidate a key still in use; (3) *on-demand only* — no scheduled rotation
@@ -207,18 +213,40 @@ scope per instance behind them.
   resolves as enterprise (**active scope**), `PUT` runs the same bounded probes inline against the
   changed slots and rejects on failure (`model_service_verification_failed`, 422) unless
   `force: true` — a live org's config change is never blindly activated (mirrors the local
-  settings ladder's probe-before-apply).
+  settings ladder's probe-before-apply). Both successful verify responses (200) and failed verify
+  responses (422) carry the scope's current `revision`, so a caller can settle its optimistic
+  snapshot without another read.
 - **Platform admin (user session; email ∈ `PLATFORM_ADMIN_EMAILS`, new env following the
   `ORGANIZATION_CREATION_ALLOWED_EMAILS` pattern)**:
   `GET/PUT /api/admin/model-service` (platform slots + limits), `GET /api/admin/model-service/usage`
   (global, per-instance, per-scope — **stays global with per-scope breakdown, never narrowed to
   platform-only**; the per-instance list is bounded top-N by usage with an explicit instance count
   and truncation marker, matching the approved design; cursor pagination is a recorded follow-up,
-  not v1 — both adjudicated 2026-08-16). Platform admin also gets the v1 lever to set
+  not v1 — both adjudicated 2026-08-16), and `POST /api/admin/model-service/verify`, with the same
+  bounded probes and 200/422 `revision` contract as organization verify. Platform admin also gets the v1 lever to set
   `organizations.plan` (`PUT /api/admin/organizations/{orgId}/plan`).
+- **Scope-generic verification and usage**: an active-scope `PUT` (organization or platform) probes
+  every changed enabled slot before save and rejects atomically on probe failure unless
+  `force: true`; route handlers do not reimplement scope-specific probe policy. Every usage summary
+  exposes the same `by_capability` aggregate alongside its scope-specific/global breakdowns, so
+  the shared console panel consumes one contract.
 - **Instance-facing (device-secret headers, existing `/api/v1` family)**:
   `GET /api/v1/instances/{instanceId}/model-service` → mode/capability/identity payload (§8.2);
-  `POST /api/v1/instances/{instanceId}/model-access-key` → mint/rotate `mak_` key.
+  `POST /api/v1/instances/{instanceId}/model-access-key` → mint/rotate `mak_` key. Mint and rotate
+  share one 200 response shape:
+
+  ```json
+  {
+    "key": "mak_...",
+    "created_at": "2026-08-17T00:00:00Z",
+    "rotated": false,
+    "previous_valid_until": null
+  }
+  ```
+
+  First mint returns `rotated: false` and `previous_valid_until: null`; rotation returns
+  `rotated: true` and the old key's grace deadline in `previous_valid_until`. `key` is shown only
+  in this response and is unrecoverable from every read surface.
 - **Proxy (bearer `mak_` key)**: `POST /v1/model/chat/completions`, `POST /v1/model/embeddings`,
   `POST /v1/model/mm/chat/completions` — OpenAI-compatible, SSE streaming passthrough on chat.
   The upstream `model` is **always taken from the resolved slot; client-supplied `model` is
@@ -358,7 +386,10 @@ shape is not extended for this.
   alike), no transition fires: an existing working `custom`
   configuration keeps running unchanged (the org has not provided a replacement model source), and
   the manual editor stays hidden only for *new* configuration; the transition applies when the org
-  later enables memory slots.
+  later enables memory slots. **Custom preservation is grandfathering only**, not a new-configuration
+  entitlement: a fresh install attached to an organization without the memory pair renders the
+  managed read-only state with Memory unavailable until the organization enables both slots — it
+  never exposes manual setup and never falls back to the platform scope (PM ruling 2026-08-17).
 - **Settings UI (Memory)**: three states per §5.3. Copy through `ui/src/i18n/{en,zh}.json`; show
   state, not mechanism; the enterprise state is one sentence, not a tour.
 - **Voice**: no changes.

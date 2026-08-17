@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from config.v2_config import MemoryConfig
+from config.v2_config import MemoryCloudConfig, MemoryConfig
 from core.controller import Controller
 from core.memory.operation_lock import MemoryOperationLease
 
@@ -58,6 +58,34 @@ def _assert_operation_lease_available(home: Path) -> None:
     lease = MemoryOperationLease(home)
     lease.acquire()
     lease.release()
+
+
+def test_factory_reset_intent_supersedes_transition_owned_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = MemoryConfig(
+        mode="custom",
+        recovery_intent="rebuild",
+        cloud=MemoryCloudConfig(
+            transition_notice_pending=True,
+            transition_rebuild_owned=True,
+        ),
+    )
+
+    def update(mark):
+        candidate = mark(current)
+        candidate.validate()
+        return SimpleNamespace(memory=candidate)
+
+    monkeypatch.setattr("core.controller.atomic_update_memory", update)
+
+    candidate = Controller._mark_factory_reset_intent()
+
+    assert candidate.recovery_intent == "factory_reset"
+    assert candidate.cloud.transition_notice_pending is True
+    assert candidate.cloud.transition_rebuild_owned is False
+    assert current.recovery_intent == "rebuild"
+    assert current.cloud.transition_rebuild_owned is True
 
 
 def test_delete_memory_roots_reports_lstat_failure_per_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

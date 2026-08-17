@@ -3545,8 +3545,10 @@ def start_runtime_monitoring(config: V2Config | None = None) -> None:
     start_status_heartbeat(config)
     start_authorization_revision_polling(config)
     from vibe.project_access_sync import start_project_access_sync
+    from vibe.model_service import start_model_service_polling
 
     start_project_access_sync(config)
+    start_model_service_polling(config)
     start_resource_acl_sync_polling(config)
 
 

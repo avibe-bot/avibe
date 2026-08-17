@@ -10,8 +10,10 @@ import pytest
 from config.v2_config import (
     AgentsConfig,
     CONFIG_LOCK,
+    MemoryCloudConfig,
     MemoryConfig,
     MemoryEndpointConfig,
+    MemoryRecoveryIntent,
     RuntimeConfig,
     SlackConfig,
     V2Config,
@@ -326,6 +328,311 @@ def test_memory_config_rejects_unknown_recovery_intent(intent: object) -> None:
 def test_memory_config_accepts_factory_reset_recovery_intent() -> None:
     config = V2Config.from_payload(_payload({"recovery_intent": "factory_reset"}))
     assert config.memory.recovery_intent == "factory_reset"
+
+
+@pytest.mark.parametrize(
+    ("initial", "expected", "armed"),
+    [
+        (None, "rebuild", True),
+        ("rebuild", "rebuild", False),
+        ("factory_reset", "factory_reset", False),
+    ],
+)
+def test_memory_rebuild_request_never_downgrades_recovery(
+    initial: MemoryRecoveryIntent | None,
+    expected: MemoryRecoveryIntent,
+    armed: bool,
+) -> None:
+    memory = MemoryConfig(recovery_intent=initial)
+
+    assert memory.arm_rebuild_if_idle() is armed
+    assert memory.recovery_intent == expected
+
+
+@pytest.mark.parametrize(
+    "cloud",
+    [
+        [],
+        {"capabilities": []},
+        {"scope": "unsupported"},
+        {"proxy_base_url": 7},
+        {"model_access_key": 7},
+        {"transition_rebuild_owned": True},
+    ],
+)
+@pytest.mark.parametrize(
+    ("mode", "recovery_intent", "runtime_source"),
+    [
+        ("custom", "factory_reset", "custom"),
+        ("platform", None, "unavailable"),
+    ],
+)
+def test_disk_load_recovers_only_a_malformed_memory_cloud_cache(
+    tmp_path,
+    cloud: object,
+    mode: str,
+    recovery_intent: MemoryRecoveryIntent | None,
+    runtime_source: str,
+) -> None:
+    config_path = tmp_path / "config.json"
+    memory = {
+        "enabled": True,
+        "mode": mode,
+        "recovery_intent": recovery_intent,
+        "processing": _complete_processing(),
+        "cloud": cloud,
+    }
+    payload = _payload(memory)
+
+    with pytest.raises((TypeError, ValueError)):
+        V2Config.from_payload(payload)
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.enabled is True
+    assert loaded.memory.mode == mode
+    assert loaded.memory.custom_processing_complete() is True
+    assert loaded.memory.processing.llm.api_key == "llm-key"
+    assert loaded.memory.processing.embedding.api_key == "embed-key"
+    assert loaded.memory.recovery_intent == (
+        recovery_intent
+        or (
+            "rebuild"
+            if mode == "platform" and not isinstance(cloud, dict)
+            else None
+        )
+    )
+    assert loaded.memory.cloud == MemoryCloudConfig()
+    assert loaded.memory.runtime_source() == runtime_source
+    assert loaded.memory.cloud_runtime_selected() is (mode == "platform")
+    assert loaded.memory.settings_mode() == mode
+    assert any("memory.cloud" in warning for warning in loaded.load_warnings)
+    assert json.loads(config_path.read_text(encoding="utf-8"))["memory"]["cloud"] == cloud
+
+
+def _acknowledged_organization_cloud() -> dict:
+    return {
+        "scope": "organization",
+        "capabilities": {
+            "asr": False,
+            "chat": True,
+            "embedding": True,
+            "multimodal": False,
+        },
+        "embedding_identity": "emb-org",
+        "revision": 4,
+        "quota_enforced": False,
+        "model_access_key": "mak_org",
+        "proxy_base_url": "https://backend.example.test/v1/model",
+        "source_instance_id": "instance-org",
+        "organization_attached": True,
+        "transition_notice_pending": False,
+        "transition_rebuild_owned": False,
+        "applied_embedding_identity": "emb-org",
+        "runtime_apply_pending": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("scope", "unsupported"),
+        ("capabilities", []),
+        ("embedding_identity", 7),
+        ("revision", "four"),
+        ("quota_enforced", []),
+        ("model_access_key", 7),
+        ("proxy_base_url", 7),
+        ("source_instance_id", 7),
+        ("organization_attached", []),
+        ("transition_notice_pending", []),
+        ("transition_rebuild_owned", []),
+        ("applied_embedding_identity", 7),
+        ("runtime_apply_pending", []),
+    ],
+)
+def test_disk_cloud_field_recovery_never_reactivates_custom_for_an_acknowledged_org(
+    tmp_path,
+    field: str,
+    invalid: object,
+) -> None:
+    config_path = tmp_path / "config.json"
+    cloud = _acknowledged_organization_cloud()
+    cloud[field] = invalid
+    payload = _payload(
+        {
+            "enabled": True,
+            "mode": "custom",
+            "processing": _complete_processing(),
+            "cloud": cloud,
+        }
+    )
+    payload["remote_access"] = {
+        "vibe_cloud": {
+            "enabled": True,
+            "instance_id": "instance-org",
+            "instance_secret": "device-secret",
+            "instance_kind": "organization",
+        }
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.custom_processing_complete() is True
+    assert loaded.memory.processing.llm.api_key == "llm-key"
+    assert loaded.memory.processing.embedding.api_key == "embed-key"
+    assert loaded.memory.settings_mode() == "organization"
+    assert loaded.memory.cloud_runtime_selected() is True
+    assert loaded.memory.runtime_source() != "custom"
+    assert any("memory.cloud" in warning for warning in loaded.load_warnings)
+
+
+@pytest.mark.parametrize("instance_kind", ["organization", ""])
+def test_disk_whole_cloud_recovery_fails_closed_for_managed_or_unknown_pairing(
+    tmp_path,
+    instance_kind: str,
+) -> None:
+    config_path = tmp_path / "config.json"
+    payload = _payload(
+        {
+            "enabled": False,
+            "mode": "custom",
+            "processing": _complete_processing(),
+            "cloud": [],
+        }
+    )
+    payload["remote_access"] = {
+        "vibe_cloud": {
+            "enabled": True,
+            "instance_id": "instance-org",
+            "instance_secret": "device-secret",
+            "instance_kind": instance_kind,
+        }
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.settings_mode() == "organization"
+    assert loaded.memory.runtime_source() == "unavailable"
+    assert loaded.memory.recovery_intent == "rebuild"
+    assert loaded.memory.enabled is False
+    assert loaded.memory.custom_processing_complete() is True
+
+
+def test_disk_whole_cloud_recovery_keeps_personal_custom_runtime(
+    tmp_path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    payload = _payload(
+        {
+            "enabled": True,
+            "mode": "custom",
+            "processing": _complete_processing(),
+            "cloud": [],
+        }
+    )
+    payload["remote_access"] = {
+        "vibe_cloud": {
+            "enabled": True,
+            "instance_id": "instance-personal",
+            "instance_secret": "device-secret",
+            "instance_kind": "personal",
+        }
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.settings_mode() == "custom"
+    assert loaded.memory.runtime_source() == "custom"
+    assert loaded.memory.recovery_intent is None
+
+
+def test_disk_cloud_field_recovery_preserves_proven_no_pair_org_grandfathering(
+    tmp_path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    payload = _payload(
+        {
+            "enabled": True,
+            "mode": "custom",
+            "processing": _complete_processing(),
+            "cloud": {
+                "scope": "organization",
+                "capabilities": {
+                    "asr": False,
+                    "chat": False,
+                    "embedding": False,
+                    "multimodal": False,
+                },
+                "revision": "unreadable",
+                "organization_attached": False,
+            },
+        }
+    )
+    payload["remote_access"] = {
+        "vibe_cloud": {
+            "enabled": True,
+            "instance_id": "instance-org",
+            "instance_secret": "device-secret",
+            "instance_kind": "organization",
+        }
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.settings_mode() == "custom"
+    assert loaded.memory.runtime_source() == "custom"
+    assert loaded.memory.recovery_intent is None
+    assert loaded.memory.custom_processing_complete() is True
+
+
+def test_memory_transition_rebuild_owner_round_trips(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config = V2Config.from_payload(
+        _payload(
+            {
+                "recovery_intent": "rebuild",
+                "cloud": {
+                    "transition_notice_pending": True,
+                    "transition_rebuild_owned": True,
+                },
+            }
+        )
+    )
+
+    config.save(config_path)
+
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    loaded = V2Config.load(config_path)
+    assert stored["memory"]["cloud"]["transition_rebuild_owned"] is True
+    assert loaded.memory.cloud.transition_rebuild_owned is True
+    assert loaded.memory.recovery_intent == "rebuild"
+
+
+@pytest.mark.parametrize(
+    "memory",
+    [
+        {
+            "recovery_intent": "rebuild",
+            "cloud": {"transition_rebuild_owned": True},
+        },
+        {
+            "recovery_intent": "factory_reset",
+            "cloud": {
+                "transition_notice_pending": True,
+                "transition_rebuild_owned": True,
+            },
+        },
+    ],
+)
+def test_memory_config_rejects_unowned_transition_rebuild_state(memory: dict) -> None:
+    with pytest.raises(ValueError, match="transition_rebuild_owned"):
+        V2Config.from_payload(_payload(memory))
 
 
 @pytest.mark.parametrize(
