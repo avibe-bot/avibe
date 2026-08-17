@@ -6,6 +6,55 @@ import zh from '../../../i18n/zh.json';
 const BUNDLES = { en, zh } as const;
 
 describe('Memory UI copy contracts', () => {
+  it('keeps the three-state model-source copy aligned with the approved frames', () => {
+    expect({
+      title: en.memory.settings.avibeCloudTitle,
+      price: en.memory.settings.avibeCloudFree,
+      included: en.memory.settings.avibeCloudIncluded,
+      description: en.memory.settings.avibeCloudDescription,
+      prompt: en.memory.settings.customPrompt,
+      customAction: en.memory.settings.useCustomEndpoints,
+      customTitle: en.memory.settings.customEndpointsTitle,
+      customDescription: en.memory.settings.customEndpointsDescription,
+      cloudAction: en.memory.settings.useAvibeCloud,
+      managed: en.memory.settings.organizationManaged,
+    }).toEqual({
+      title: 'Avibe Cloud',
+      price: 'Free',
+      included: 'Included with Avibe. Nothing to set up.',
+      description: "Memory works out of the box. Your messages are processed by Avibe's cloud models.",
+      prompt: 'Using your own provider instead?',
+      customAction: 'Use custom endpoints',
+      customTitle: 'Custom endpoints',
+      customDescription: 'Your own provider, models and keys.',
+      cloudAction: 'Use Avibe Cloud',
+      managed: 'Models are managed by your organization.',
+    });
+    expect({
+      title: zh.memory.settings.avibeCloudTitle,
+      price: zh.memory.settings.avibeCloudFree,
+      included: zh.memory.settings.avibeCloudIncluded,
+      description: zh.memory.settings.avibeCloudDescription,
+      prompt: zh.memory.settings.customPrompt,
+      customAction: zh.memory.settings.useCustomEndpoints,
+      customTitle: zh.memory.settings.customEndpointsTitle,
+      customDescription: zh.memory.settings.customEndpointsDescription,
+      cloudAction: zh.memory.settings.useAvibeCloud,
+      managed: zh.memory.settings.organizationManaged,
+    }).toEqual({
+      title: 'Avibe 云端',
+      price: '免费',
+      included: 'Avibe 自带，无需设置。',
+      description: '记忆功能开箱即用。你的消息由 Avibe 的云端模型处理。',
+      prompt: '想改用自己的服务商？',
+      customAction: '改用自定义接口',
+      customTitle: '自定义接口',
+      customDescription: '使用你自己的服务商、模型和密钥。',
+      cloudAction: '改用 Avibe 云端',
+      managed: '模型由你的组织统一管理。',
+    });
+  });
+
   it.each(['en', 'zh'] as const)('describes runtime capabilities beyond models in %s', (language) => {
     const text = BUNDLES[language].memory.processingRecord.runtime.capabilitiesHelp;
 

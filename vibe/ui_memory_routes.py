@@ -112,6 +112,18 @@ def _memory_settings_projection(memory: object) -> dict:
 
     payload = memory_config_to_payload(memory)
     payload.pop("diagnostics", None)
+    payload.pop("cloud", None)
+    payload["mode"] = memory.settings_mode()
+    payload["cloud_available"] = memory.cloud.memory_capability_available()
+    payload["managed"] = memory.settings_mode() == "organization"
+    payload["transition_notice_pending"] = (
+        memory.cloud.transition_notice_pending
+    )
+    payload["capability_paused"] = (
+        memory.enabled
+        and memory.cloud_runtime_selected()
+        and memory.runtime_source() == "unavailable"
+    )
     return payload
 
 
@@ -162,11 +174,21 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
     from config.v2_config import memory_config_to_payload
 
     if not isinstance(patch_payload, dict) or not set(patch_payload).issubset(
-        {"enabled", "processing", "confirm_rebuild"}
+        {
+            "enabled",
+            "processing",
+            "mode",
+            "acknowledge_transition",
+            "confirm_rebuild",
+        }
     ):
         raise ValueError("invalid_memory_patch")
     confirm_rebuild = patch_payload.get("confirm_rebuild", False)
     if not isinstance(confirm_rebuild, bool):
+        raise ValueError("invalid_memory_patch")
+    if "acknowledge_transition" in patch_payload and not set(
+        patch_payload
+    ).issubset({"acknowledge_transition", "confirm_rebuild"}):
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
     endpoints = ("llm", "embedding", "rerank", "multimodal")
@@ -177,8 +199,40 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
         if not isinstance(patch_payload["enabled"], bool):
             raise ValueError("invalid_memory_patch")
         target["enabled"] = patch_payload["enabled"]
+    if "mode" in patch_payload:
+        mode = patch_payload["mode"]
+        if (
+            mode not in {"platform", "custom"}
+            or current.memory.cloud.scope == "organization"
+        ):
+            raise ValueError("invalid_memory_patch")
+        if (
+            mode == "platform"
+            and not current.memory.cloud.memory_capability_available()
+        ):
+            raise ValueError("memory_cloud_unavailable")
+        target["mode"] = mode
+    if "acknowledge_transition" in patch_payload:
+        if (
+            patch_payload["acknowledge_transition"] is not True
+            or not current.memory.cloud.transition_notice_pending
+            or current.memory.cloud.scope != "organization"
+            or not current.memory.cloud.memory_capability_available()
+        ):
+            raise ValueError("invalid_memory_patch")
+        target["cloud"]["organization_attached"] = True
+        target["cloud"]["transition_notice_pending"] = False
+        target["cloud"]["applied_embedding_identity"] = (
+            current.memory.cloud.embedding_identity
+        )
     processing_patch = patch_payload.get("processing")
     if processing_patch is not None:
+        target_mode = target.get("mode")
+        if target_mode == "platform" or (
+            current.memory.settings_mode() != "custom"
+            and target_mode != "custom"
+        ):
+            raise ValueError("invalid_memory_patch")
         if not isinstance(processing_patch, dict) or not set(processing_patch).issubset(endpoints):
             raise ValueError("invalid_memory_patch")
         for endpoint in endpoints:
@@ -224,18 +278,9 @@ def _memory_candidate_config(current: V2Config, memory_payload: dict) -> V2Confi
 def _memory_embedding_configuration_changed(current: V2Config, candidate: V2Config) -> bool:
     """Return whether the normalized vector-space identity would change."""
 
-    current_embedding = current.memory.processing.embedding
-    candidate_embedding = candidate.memory.processing.embedding
-
-    def normalized(value: str | None) -> str | None:
-        stripped = (value or "").strip()
-        return stripped or None
-
     return (
-        normalized(current_embedding.base_url)
-        != normalized(candidate_embedding.base_url)
-        or normalized(current_embedding.model)
-        != normalized(candidate_embedding.model)
+        current.memory.runtime_embedding_identity()
+        != candidate.memory.runtime_embedding_identity()
     )
 
 
@@ -270,8 +315,9 @@ def _memory_preflight_required(candidate: V2Config) -> bool:
     """Require live admission unless a disabled candidate is still incomplete."""
 
     memory = candidate.memory
+    processing = memory.runtime_processing()
     return memory.enabled or (
-        memory.processing.llm.complete() and memory.processing.embedding.complete()
+        processing.llm.complete() and processing.embedding.complete()
     )
 
 
@@ -780,31 +826,93 @@ async def _apply_memory_settings_patch(
             )
             pending_marker = current.memory.recovery_intent == "rebuild"
             pending_factory_reset = current.memory.recovery_intent == "factory_reset"
-        except (TypeError, ValueError):
-            return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-
-        factory_reset_repair = (
-            pending_factory_reset and _memory_factory_reset_repair_patch(patch_payload)
-        )
-
-        # Unconfirmed identity change never writes — including on empty roots —
-        # so a check-then-save race cannot quietly accept a new vector space.
-        # A factory-reset repair is the one deliberate exception: the reset
-        # marker guarantees the next retry will wipe any remaining old root
-        # before activating the corrected endpoint.
-        if identity_changed and not confirm_rebuild and not factory_reset_repair:
-            return _memory_response(
-                {
-                    "status": "failed",
-                    "error": "memory_embedding_rebuild_required",
-                },
-                status_code=409,
+            factory_reset_repair = (
+                pending_factory_reset
+                and _memory_factory_reset_repair_patch(patch_payload)
             )
 
-        if pending_factory_reset and not factory_reset_repair:
+            # Validate the complete request before consuming a one-time mak
+            # response. A valid cloud switch keeps the minted key if a later
+            # provider preflight fails because no read surface can recover it.
+            if identity_changed and not confirm_rebuild and not factory_reset_repair:
+                return _memory_response(
+                    {
+                        "status": "failed",
+                        "error": "memory_embedding_rebuild_required",
+                    },
+                    status_code=409,
+                )
+
+            if pending_factory_reset and not factory_reset_repair:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_operation_in_progress"},
+                    status_code=409,
+                )
+
+            needs_cloud_key = (
+                isinstance(patch_payload, dict)
+                and (
+                    patch_payload.get("mode") == "platform"
+                    or patch_payload.get("acknowledge_transition") is True
+                )
+                and not current.memory.cloud.model_access_key
+            )
+            if needs_cloud_key:
+                from vibe.model_service import ensure_model_access_key
+
+                await asyncio.to_thread(ensure_model_access_key, current)
+                current = await asyncio.to_thread(V2Config.load)
+                target_payload, confirm_rebuild = _memory_settings_patch(
+                    current,
+                    patch_payload,
+                )
+                candidate = _memory_candidate_config(current, target_payload)
+                identity_changed = _memory_embedding_configuration_changed(
+                    current,
+                    candidate,
+                )
+                rerank_changed = _memory_rerank_configuration_changed(
+                    current,
+                    candidate,
+                )
+                multimodal_changed = _memory_multimodal_configuration_changed(
+                    current,
+                    candidate,
+                )
+                pending_marker = current.memory.recovery_intent == "rebuild"
+                pending_factory_reset = (
+                    current.memory.recovery_intent == "factory_reset"
+                )
+                factory_reset_repair = (
+                    pending_factory_reset
+                    and _memory_factory_reset_repair_patch(patch_payload)
+                )
+        except ValueError as exc:
+            if str(exc) == "memory_cloud_unavailable":
+                return _memory_response(
+                    {"status": "failed", "error": "memory_cloud_unavailable"},
+                    status_code=409,
+                )
             return _memory_response(
-                {"status": "failed", "error": "memory_operation_in_progress"},
-                status_code=409,
+                {"status": "failed", "error": "memory_invalid_input"},
+                status_code=400,
+            )
+        except TypeError:
+            return _memory_response(
+                {"status": "failed", "error": "memory_invalid_input"},
+                status_code=400,
+            )
+        except Exception as exc:
+            from vibe.model_service import ModelServiceResolutionError
+
+            if isinstance(exc, ModelServiceResolutionError):
+                return _memory_response(
+                    {"status": "failed", "error": "memory_cloud_unavailable"},
+                    status_code=409,
+                )
+            return _memory_response(
+                {"status": "failed", "error": "memory_store_unavailable"},
+                status_code=503,
             )
 
         if factory_reset_repair:

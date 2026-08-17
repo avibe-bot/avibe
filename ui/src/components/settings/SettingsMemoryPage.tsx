@@ -241,20 +241,18 @@ export const SettingsMemoryPage: React.FC = () => {
       activeTab="memory"
       title={t('memory.title')}
       subtitle={t('memory.subtitle')}
-    >
-      {!remoteUnavailable && canAdminister && settings?.enabled === true ? (
-        <div className="flex justify-end">
-          <Button
-            variant="secondary"
-            size="xs"
-            onClick={() => void restartEngine()}
-            disabled={restarting || rebuildRequired || rebuildBusy || repairBusy || repairMutationBusy}
-          >
-            {restarting ? <Loader2 className="animate-spin" /> : <RotateCw />}
-            {t('memory.status.restartEngine')}
-          </Button>
-        </div>
+      actions={!remoteUnavailable && canAdminister && settings?.enabled === true ? (
+        <Button
+          variant="secondary"
+          size="xs"
+          onClick={() => void restartEngine()}
+          disabled={restarting || rebuildRequired || rebuildBusy || repairBusy || repairMutationBusy}
+        >
+          {restarting ? <Loader2 className="animate-spin" /> : <RotateCw />}
+          {t('memory.status.restartEngine')}
+        </Button>
       ) : null}
+    >
       {remoteUnavailable ? (
         <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-10 text-center">
           <ShieldAlert className="size-6 text-muted" />

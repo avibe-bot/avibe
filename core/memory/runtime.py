@@ -774,13 +774,14 @@ class MemoryRuntime:
         if self._store is None:
             self._insight_reader = None
             return
-        rerank = config.processing.rerank
-        multimodal = config.processing.multimodal
+        processing = config.runtime_processing()
+        rerank = processing.rerank
+        multimodal = processing.multimodal
         base_urls = tuple(
             value
             for value in (
-                config.processing.llm.base_url,
-                config.processing.embedding.base_url,
+                processing.llm.base_url,
+                processing.embedding.base_url,
                 rerank.base_url if rerank else None,
                 multimodal.base_url if multimodal else None,
             )
@@ -789,8 +790,8 @@ class MemoryRuntime:
         exact_redaction_values = tuple(
             value
             for value in (
-                config.processing.llm.api_key,
-                config.processing.embedding.api_key,
+                processing.llm.api_key,
+                processing.embedding.api_key,
                 rerank.api_key if rerank else None,
                 multimodal.api_key if multimodal else None,
             )
@@ -1048,6 +1049,25 @@ class MemoryRuntime:
             self._restart_config = deepcopy(config)
             self._runtime_error = "memory_factory_reset_failed"
             return {"ok": False, "error": self._runtime_error}
+
+        if config.cloud_runtime_selected() and config.runtime_source() == "unavailable":
+            # A managed scope losing either half of the chat+embedding pair is
+            # a pause, never a fallback to saved custom providers. Capture can
+            # keep queuing while claims and the old sidecar stay fenced.
+            self.module.pause_claims()
+            await self._stop_worker()
+            await self._sidecar.stop()
+            self._config = deepcopy(config)
+            self._restart_config = deepcopy(config)
+            self._configure_insight_reader(config)
+            self._provider = EverOSPort(self._socket_path)
+            self.module.replace_provider(self._provider)
+            self._runtime_error = "memory_cloud_model_unavailable"
+            return {
+                "ok": True,
+                "state": "paused",
+                "reason": self._runtime_error,
+            }
 
         embedding_changed = (
             not skip_embedding_guard
@@ -1349,13 +1369,11 @@ class MemoryRuntime:
         """Return the stable explicit opt-in generation without probing providers."""
 
         snapshot = self._processing_runtime_snapshot()
-        multimodal = self._config.processing.multimodal
-        if snapshot.transition_active or not self._config.enabled or multimodal is None:
-            return None
-        try:
-            if not multimodal.complete():
-                return None
-        except Exception:
+        if (
+            snapshot.transition_active
+            or not self._config.enabled
+            or not self._config.effective_multimodal_available()
+        ):
             return None
         return snapshot.generation
 
@@ -2455,30 +2473,31 @@ class MemoryRuntime:
 
     async def preflight(self, config: MemoryConfig | None = None) -> dict[str, Any]:
         candidate = deepcopy(config or self._config)
+        processing = candidate.runtime_processing()
         provider = EverOSPort(
             self._socket_path,
-            llm_base_url=candidate.processing.llm.base_url,
-            llm_model=candidate.processing.llm.model,
-            llm_api_key=candidate.processing.llm.api_key,
-            embedding_base_url=candidate.processing.embedding.base_url,
-            embedding_model=candidate.processing.embedding.model,
-            embedding_api_key=candidate.processing.embedding.api_key,
-            rerank_base_url=(candidate.processing.rerank.base_url if candidate.processing.rerank else None),
-            rerank_model=(candidate.processing.rerank.model if candidate.processing.rerank else None),
-            rerank_api_key=(candidate.processing.rerank.api_key if candidate.processing.rerank else None),
+            llm_base_url=processing.llm.base_url,
+            llm_model=processing.llm.model,
+            llm_api_key=processing.llm.api_key,
+            embedding_base_url=processing.embedding.base_url,
+            embedding_model=processing.embedding.model,
+            embedding_api_key=processing.embedding.api_key,
+            rerank_base_url=(processing.rerank.base_url if processing.rerank else None),
+            rerank_model=(processing.rerank.model if processing.rerank else None),
+            rerank_api_key=(processing.rerank.api_key if processing.rerank else None),
             multimodal_base_url=(
-                candidate.processing.multimodal.base_url
-                if candidate.processing.multimodal
+                processing.multimodal.base_url
+                if processing.multimodal
                 else None
             ),
             multimodal_model=(
-                candidate.processing.multimodal.model
-                if candidate.processing.multimodal
+                processing.multimodal.model
+                if processing.multimodal
                 else None
             ),
             multimodal_api_key=(
-                candidate.processing.multimodal.api_key
-                if candidate.processing.multimodal
+                processing.multimodal.api_key
+                if processing.multimodal
                 else None
             ),
             preflight_call_recorder=self._record_preflight_call,
@@ -3689,15 +3708,16 @@ class MemoryRuntime:
 
 
 def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
-    rerank = config.processing.rerank
-    multimodal = config.processing.multimodal
+    processing = config.runtime_processing()
+    rerank = processing.rerank
+    multimodal = processing.multimodal
     return {
-        "llm_base_url": config.processing.llm.base_url,
-        "llm_model": config.processing.llm.model,
-        "llm_api_key": config.processing.llm.api_key,
-        "embedding_base_url": config.processing.embedding.base_url,
-        "embedding_model": config.processing.embedding.model,
-        "embedding_api_key": config.processing.embedding.api_key,
+        "llm_base_url": processing.llm.base_url,
+        "llm_model": processing.llm.model,
+        "llm_api_key": processing.llm.api_key,
+        "embedding_base_url": processing.embedding.base_url,
+        "embedding_model": processing.embedding.model,
+        "embedding_api_key": processing.embedding.api_key,
         "rerank_base_url": rerank.base_url if rerank else None,
         "rerank_model": rerank.model if rerank else None,
         "rerank_api_key": rerank.api_key if rerank else None,
@@ -3714,7 +3734,7 @@ def _attachment_capture_status(
 ) -> Literal["ready", "not_configured", "unavailable"]:
     """Project explicit IM attachment-capture readiness from config and health."""
 
-    if config.processing.multimodal is None:
+    if not config.effective_multimodal_available():
         return "not_configured"
     if not IM_ATTACHMENT_CAPTURE_PLATFORMS:
         return "unavailable"
@@ -3754,12 +3774,7 @@ def _active_compatible_root_formats(artifact_manager: MemoryArtifactPort) -> tup
 def _embedding_configuration_changed(current: MemoryConfig, candidate: MemoryConfig) -> bool:
     """Compare only settings that define the embedding vector space."""
 
-    current_embedding = current.processing.embedding
-    candidate_embedding = candidate.processing.embedding
-    return (
-        current_embedding.base_url != candidate_embedding.base_url
-        or current_embedding.model != candidate_embedding.model
-    )
+    return current.runtime_embedding_identity() != candidate.runtime_embedding_identity()
 
 
 def _same_embedding_identity(current: MemoryConfig, candidate: MemoryConfig) -> bool:
@@ -3795,7 +3810,8 @@ def _rebuild_settings_usable(settings: EverOSProcessSettings) -> bool:
 def _memory_processing_complete(config: MemoryConfig) -> bool:
     """Return whether both configured processing providers can be contacted."""
 
-    return config.processing.llm.complete() and config.processing.embedding.complete()
+    processing = config.runtime_processing()
+    return processing.llm.complete() and processing.embedding.complete()
 
 
 def _rebuild_public_result(result: RebuildProcessResult) -> dict[str, Any]:

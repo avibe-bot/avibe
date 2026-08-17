@@ -1860,6 +1860,11 @@ export type MemoryProcessingConfig = {
 export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
+  mode: 'organization' | 'platform' | 'custom';
+  cloud_available?: boolean;
+  managed?: boolean;
+  transition_notice_pending?: boolean;
+  capability_paused?: boolean;
   im_attachment_capture_available?: boolean;
   repair_available?: boolean;
   processing: MemoryProcessingConfig;
@@ -1879,6 +1884,8 @@ export type MemoryEndpointPatch = {
 
 export type MemorySettingsPatch = {
   enabled?: boolean;
+  mode?: 'platform' | 'custom';
+  acknowledge_transition?: true;
   processing?: {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
