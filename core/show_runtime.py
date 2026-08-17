@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import contextlib
 import hashlib
 import importlib.resources as package_resources
 import json
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -27,6 +29,8 @@ from sysconfig import get_platform
 from typing import Any, Mapping
 
 import httpx
+
+from storage.lock import MigrationFileLock, MigrationLockTimeout
 
 from config import paths
 from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
@@ -195,6 +199,15 @@ class ShowRuntimeManager:
         self._base_url: str | None = None
         self._lock = asyncio.Lock()
         self._capability_lock = asyncio.Lock()
+        # Cross-process in-flight install guard for the archive cache: held for
+        # the whole resolve-download-validate-extract window so a concurrent
+        # ``runtime clean`` (or another process's post-install cleanup) cannot
+        # unlink an archive this process has validated but not yet opened.
+        # ``flock`` is not re-entrant across file handles, so the depth counter
+        # lets the post-install cleanup reuse the installer's lock.
+        self._install_guard = threading.RLock()
+        self._install_guard_depth = 0
+        self._install_guard_path = self.runtime_dir / ".install.lock"
         self._capability_identity: tuple[str, int | None] | None = None
         self._context_key_capability: ShowRuntimeContextCapability | None = None
         self._capability_retry_deadline = 0.0
@@ -852,25 +865,46 @@ class ShowRuntimeManager:
         dry_run: bool = False,
         skip_metadata_under: set[Path] | None = None,
     ) -> dict[str, Any]:
-        protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
-        candidates = self._archive_cleanup_candidates(protected)
-        removed_count = 0
-        removed_bytes = 0
-        if not dry_run:
-            for path, size in candidates:
-                try:
-                    path.unlink()
-                except OSError:
-                    continue
-                removed_count += 1
-                removed_bytes += size
-        return {
-            "protected_count": len(protected),
-            "candidate_count": len(candidates),
-            "candidate_bytes": sum(size for _, size in candidates),
-            "removed_count": removed_count,
-            "removed_bytes": removed_bytes,
+        # Wait briefly for any concurrent install instead of racing it: the
+        # installer holds this guard from archive validation to extraction, so
+        # once acquired no in-flight archive can be selected below. A longer
+        # wait is pointless — skipping just defers pruning to the next
+        # post-install cleanup or manual clean.
+        skipped = {
+            "protected_count": 0,
+            "candidate_count": 0,
+            "candidate_bytes": 0,
+            "removed_count": 0,
+            "removed_bytes": 0,
+            "skipped_reason": "runtime_install_already_running",
         }
+        with self._install_guard_locked(timeout_seconds=1.0) as acquired:
+            if not acquired:
+                logger.warning("Show Runtime archive cleanup skipped: an install is already running")
+                return skipped
+            try:
+                protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
+                candidates = self._archive_cleanup_candidates(protected)
+                removed_count = 0
+                removed_bytes = 0
+                if not dry_run:
+                    for path, size in candidates:
+                        try:
+                            path.unlink()
+                        except OSError:
+                            continue
+                        removed_count += 1
+                        removed_bytes += size
+                return {
+                    "protected_count": len(protected),
+                    "candidate_count": len(candidates),
+                    "candidate_bytes": sum(size for _, size in candidates),
+                    "removed_count": removed_count,
+                    "removed_bytes": removed_bytes,
+                }
+            except Exception:
+                logger.warning("Show Runtime archive cleanup failed", exc_info=True)
+                return skipped
 
     def _clean_manifest_install_dirs(
         self,
@@ -1046,7 +1080,48 @@ class ShowRuntimeManager:
             return command
         return self._verified_manifest_runtime_command(self._legacy_manifest_install_dir(manifest, archive), manifest, archive, node)
 
+    @contextlib.contextmanager
+    def _install_guard_locked(self, *, timeout_seconds: float = 0.0):
+        """Serialize installs and archive cleanup, across processes too.
+
+        Yields ``True`` when the guard is held. The outermost caller in this
+        process takes the cross-process file lock; nested calls on the same
+        thread (post-install cleanup runs inside the install) reuse it, so the
+        non-re-entrant ``flock`` never deadlocks against itself. Yields
+        ``False`` when another install already holds the guard.
+        """
+        with self._install_guard:
+            if self._install_guard_depth > 0:
+                self._install_guard_depth += 1
+                try:
+                    yield True
+                finally:
+                    self._install_guard_depth -= 1
+                return
+            file_lock = MigrationFileLock(self._install_guard_path, timeout_seconds=timeout_seconds)
+            try:
+                file_lock.acquire()
+            except MigrationLockTimeout:
+                yield False
+                return
+            self._install_guard_depth = 1
+            try:
+                yield True
+            finally:
+                self._install_guard_depth = 0
+                try:
+                    file_lock.release()
+                except Exception:
+                    logger.warning("Failed to release Show Runtime install guard", exc_info=True)
+
     def _install_manifest_runtime(self) -> list[str] | None:
+        with self._install_guard_locked() as acquired:
+            if not acquired:
+                self._install_reason = "runtime_install_already_running"
+                return None
+            return self._install_manifest_runtime_locked()
+
+    def _install_manifest_runtime_locked(self) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"

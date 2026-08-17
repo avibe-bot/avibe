@@ -236,3 +236,41 @@ def test_cli_clean_dry_run_is_read_only_for_git_runtime(monkeypatch, capsys) -> 
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
     assert payload["git"]["removed"] == ["git-stale"]
+
+
+def test_cleanup_reuses_install_guard_without_deadlock(tmp_path: Path) -> None:
+    """The post-install cleanup runs inside the installer's guard.
+
+    ``flock`` is not re-entrant across file handles, so this exercises the
+    depth-counted reuse: cleaning while the guard is held must complete and
+    actually remove stale archives instead of timing out.
+    """
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(1), b"current")
+    stale = _write_archive(manager, _sha(2), b"stale")
+
+    with manager._install_guard_locked():
+        result = manager._clean_downloaded_archives()
+
+    assert result["removed_count"] == 1
+    assert not stale.exists()
+
+
+def test_cleanup_skips_while_foreign_process_holds_install_guard(tmp_path: Path) -> None:
+    from storage.lock import MigrationFileLock
+
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    stale = _write_archive(manager, _sha(2), b"stale")
+
+    foreign = MigrationFileLock(manager.runtime_dir / ".install.lock", timeout_seconds=0)
+    foreign.acquire()
+    try:
+        result = manager._clean_downloaded_archives()
+    finally:
+        foreign.release()
+
+    assert result["removed_count"] == 0
+    assert result["skipped_reason"] == "runtime_install_already_running"
+    assert stale.exists()
