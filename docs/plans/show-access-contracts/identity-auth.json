@@ -74,6 +74,7 @@
       "jwks_uri": "<paired_issuer>/oauth/jwks.json",
       "ttl_seconds": 300,
       "clock_skew_seconds": 0,
+      "jti": "unique_per_issuer_assertion",
       "verified_email_normalization": ["trim_ascii_surrounding_whitespace", "ascii_lowercase"],
       "verified_email_source": "fresh_verified_backend_identity_record",
       "forbidden_claims": ["page_id", "share_id", "page_membership", "whitelist", "instance_role", "instance_access_source", "show_page_email"]
@@ -99,7 +100,16 @@
       "state_and_pending_flow_cookie_lifetime_seconds": 300,
       "post_expiry_grace_seconds": 0,
       "stale_or_cookie_less_callback": "identity_retry_required",
-      "server_replay_ledger": false,
+      "pending_flow_server_ledger": false,
+      "successful_callback_consumption": {
+        "fingerprint": "sha256_utf8(verified_assertion.iss + ascii_nul + verified_assertion.jti)",
+        "storage": "local_durable_unique_record",
+        "atomic_order": "insert_if_absent_after_complete_verification_and_before_identity_session_creation",
+        "duplicate": "identity_retry_required_without_session_creation_or_session_expiry_extension",
+        "expires_at": "verified_assertion.exp",
+        "cleanup": "delete_after_expiry",
+        "failed_or_cookie_less_callback_allocates_record": false
+      },
       "signed_state": "#/$defs/SignedStateClaims",
       "pending_flow_cookie": {
         "name": "__Secure-avibe_show_identity_flow",
@@ -127,7 +137,9 @@
         "exact_configured_origin_and_fixed_path",
         "signed_state_signature_and_fixed_expiry",
         "request_cookie_name_and_value_digest_match_signed_state",
-        "assertion_rs256_signature_issuer_audience_instance_nonce_and_expiry",
+        "assertion_rs256_signature_and_complete_closed_claims_shape",
+        "assertion_issuer_audience_instance_nonce_and_fixed_expiry",
+        "atomically_consume_successful_callback_fingerprint_once",
         "expire_matching_browser_correlation_cookie",
         "create_or_replace_identity_only_session",
         "reresolve_safe_return_share"
@@ -165,7 +177,7 @@
     "reference_evidence": {
       "scenario": "AUTH-SETUP-401",
       "harness": "tests/scenario_harness/show_identity_callback.py",
-      "closed_loop": ["login_start_pending_flow_set_cookie", "authorize_request", "backend_form_post", "local_callback_cookie_pair", "stateless_signed_state_check", "cookie_digest_check_and_expiry", "assertion_binding_check", "digest_only_identity_session", "later_limited_navigation"],
+      "closed_loop": ["login_start_pending_flow_set_cookie", "authorize_request", "backend_form_post", "local_callback_cookie_pair", "stateless_signed_state_check", "cookie_digest_check_and_expiry", "complete_assertion_shape_and_binding_check", "atomic_successful_callback_consumption", "digest_only_identity_session", "later_limited_navigation"],
       "production_crypto_browser_conformance": "future_backend_avibe_and_browser_lanes"
     },
     "backend_forbidden_behavior": ["receive_local_whitelist", "decide_page_membership", "derive_instance_role", "create_instance_access_context"],

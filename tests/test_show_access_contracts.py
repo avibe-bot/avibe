@@ -375,12 +375,22 @@ def test_identity_flow_has_one_fixed_lifetime_and_latest_flow_wins() -> None:
 
     assert contract["assertion"]["ttl_seconds"] == 300
     assert contract["assertion"]["clock_skew_seconds"] == 0
+    assert contract["assertion"]["jti"] == "unique_per_issuer_assertion"
     assert flow["state_and_pending_flow_cookie_lifetime_seconds"] == 300
     assert flow["post_expiry_grace_seconds"] == 0
     assert flow["active_flow_cardinality"] == "one_browser_correlation_cookie_per_configured_callback_origin"
     assert flow["latest_login_start_replaces_previous"] is True
     assert flow["stale_or_cookie_less_callback"] == "identity_retry_required"
-    assert flow["server_replay_ledger"] is False
+    assert flow["pending_flow_server_ledger"] is False
+    assert flow["successful_callback_consumption"] == {
+        "fingerprint": "sha256_utf8(verified_assertion.iss + ascii_nul + verified_assertion.jti)",
+        "storage": "local_durable_unique_record",
+        "atomic_order": "insert_if_absent_after_complete_verification_and_before_identity_session_creation",
+        "duplicate": "identity_retry_required_without_session_creation_or_session_expiry_extension",
+        "expires_at": "verified_assertion.exp",
+        "cleanup": "delete_after_expiry",
+        "failed_or_cookie_less_callback_allocates_record": False,
+    }
     assert flow["start_path"] == "/auth/show-identity/start"
     assert flow["shared_cookie_path"] == "/auth/show-identity"
     assert flow["pending_flow_cookie"]["maximum_age_seconds"] == 300
@@ -394,6 +404,7 @@ def test_identity_flow_has_one_fixed_lifetime_and_latest_flow_wins() -> None:
     assert flow["repeated_cookie_less_starts"] == ("allocate_zero_durable_or_in_memory_pending_flow_records")
     assert "pending_flow_store" not in flow
     assert flow["callback_checks_in_order"][-1] == "reresolve_safe_return_share"
+    assert "atomically_consume_successful_callback_fingerprint_once" in flow["callback_checks_in_order"]
     assert key_lookup["maximum_forced_refreshes_per_login_attempt"] == 1
     assert key_lookup["refresh_is_coalesced_by_issuer"] is True
     assert key_lookup["refresh_is_not_keyed_by_untrusted_kid"] is True
@@ -719,8 +730,29 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     assert transport["relative_url_resolution"] == (
         "modules_styles_raw_assets_and_fetch(./api/data)_resolve_from_exact_capability_root_on_root_and_history_documents"
     )
+    assert transport["document_local_resource_rewrite"] == {
+        "attributes": [
+            "script.src",
+            "link.href",
+            "img.src",
+            "img.srcset",
+            "source.src",
+            "source.srcset",
+            "video.src",
+            "video.poster",
+            "audio.src",
+        ],
+        "resolution_base": "captured_source_document_before_server_owned_base_injection",
+        "output": "absolute_url_under_same_capability_prefix_asset_opaque_resource_handle",
+        "srcset": "rewrite_each_local_candidate_and_preserve_its_density_or_width_descriptor",
+        "inline_style_css_urls": "rewrite_each_local_url_with_the_same_opaque_asset_rule",
+        "rewrite_before_browser_response": True,
+        "authored_local_path_browser_visible": False,
+    }
     assert transport["page_api_namespace_mapping"] == "captured_page_api_only"
-    assert transport["nested_import_rewrite"] == ("absolute_url_under_same_namespace_document_capability_prefix")
+    assert transport["nested_import_rewrite"] == (
+        "module_import_css_import_and_css_url_dependencies_use_absolute_opaque_asset_urls_under_same_namespace_document_capability_prefix"
+    )
     assert transport["query_authority"] is False
     assert transport["cookie_authority"] is False
     assert transport["custom_request_header_required"] is False
@@ -735,11 +767,16 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     document_path = examples["shared_document_request"]["path"]
     history_path = examples["shared_history_fallback_request"]["path"]
     asset_path = examples["shared_module_request"]["path"]
+    entry_rewrite = examples["default_entry_resource_rewrite"]
     api_request = examples["shared_page_api_request"]
     preflight_request = examples["shared_page_api_preflight"]
     preflight_result = examples["shared_page_api_preflight_result"]
     api_path = api_request["path"]
     assert document_path.endswith("/")
+    _validate(document, "#/$defs/DocumentResourceRewrite", entry_rewrite)
+    assert entry_rewrite["authored_value"] == "./src/main.tsx"
+    assert entry_rewrite["rewritten_url"] == (f"{document_path}asset/{entry_rewrite['resource_handle']}")
+    assert "src/main.tsx" not in entry_rewrite["rewritten_url"]
     assert urljoin(f"https://show.example.test{document_path}", "./api/data") == (
         f"https://show.example.test{api_path}"
     )

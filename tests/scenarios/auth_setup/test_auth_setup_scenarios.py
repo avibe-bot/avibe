@@ -135,7 +135,7 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
         self.assertEqual(len(callback["set_cookie"]["value"]), 43)
         self.assertNotIn(callback["set_cookie"]["value"], flow.records)
         self.assertEqual(
-            flow.events[1:10],
+            flow.events[1:11],
             [
                 "local.signed_state_signer",
                 "backend.authorize",
@@ -143,11 +143,20 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
                 "local.signed_state_verifier",
                 "local.pending_flow_cookie_verifier",
                 "local.assertion_verifier",
+                "local.successful_callback_consumption",
                 "local.pending_flow_cookie_expiry",
                 "local.identity_session_digest_store",
                 "local.identity_session_set_cookie",
             ],
         )
+        record_count = len(flow.records)
+        replay = flow.post_callback(
+            login["form_post"],
+            request_cookie=login["pending_flow_request_cookie"],
+        )
+        self.assertEqual(replay["decision"], "identity_retry_required")
+        self.assertEqual(len(flow.records), record_count)
+        self.assertEqual(len(flow.consumed_callbacks), 1)
 
         returned = flow.navigate(callback["location"])
         later = flow.navigate()
@@ -247,12 +256,19 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
             ("iss", "https://attacker.example"),
             ("aud", "avibe-show-identity:other-client"),
             ("nonce", "other-nonce"),
+            ("sub", None),
+            ("jti", None),
         ):
             invalid = ShowIdentityCallbackHarness()
             flow = invalid.start_login(assertion_overrides={field: value})
             self.assertEqual(invalid.complete_login(flow)["decision"], "identity_retry_required")
             self.assertIn("local.assertion_verifier", invalid.events)
             self.assertFalse(invalid.records)
+
+        extra_claim = ShowIdentityCallbackHarness()
+        flow = extra_claim.start_login(assertion_overrides={"page_id": "page:alpha"})
+        self.assertEqual(extra_claim.complete_login(flow)["decision"], "identity_retry_required")
+        self.assertFalse(extra_claim.records)
 
         expired_state = ShowIdentityCallbackHarness()
         flow = expired_state.start_login()

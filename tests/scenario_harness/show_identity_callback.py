@@ -6,7 +6,22 @@ import hmac
 import json
 import re
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
+
+from jsonschema import Draft202012Validator
+
+
+_IDENTITY_DOCUMENT = json.loads(
+    (Path(__file__).parents[2] / "docs/plans/show-access-contracts/identity-auth.json").read_text(encoding="utf-8")
+)
+_IDENTITY_ASSERTION_VALIDATOR = Draft202012Validator(
+    {
+        "$schema": _IDENTITY_DOCUMENT["$schema"],
+        "$defs": _IDENTITY_DOCUMENT["$defs"],
+        "$ref": "#/$defs/IdentityAssertionClaims",
+    }
+)
 
 
 class StubShowIdentityBackend:
@@ -76,6 +91,7 @@ class ShowIdentityCallbackHarness:
         self.browser_pending_flow_cookies: dict[str, str] = {}
         self.browser_session_cookies: dict[str, str] = {}
         self.records: dict[str, dict[str, object]] = {}
+        self.consumed_callbacks: dict[str, int] = {}
         self.emails = {"alice@example.com"}
         self.loaded_documents: set[str] = set()
         self.membership_checks = 0
@@ -197,12 +213,19 @@ class ShowIdentityCallbackHarness:
             "nonce": state["nonce"],
             "instance_id": self.INSTANCE_ID,
         }
-        if (
-            claims is None
-            or not self._valid_time_window(claims)
-            or any(claims.get(field) != value for field, value in expected.items())
-        ):
+        if not self._valid_assertion(claims, expected):
             return {"decision": "identity_retry_required"}
+
+        self.consumed_callbacks = {
+            fingerprint: expires_at
+            for fingerprint, expires_at in self.consumed_callbacks.items()
+            if self.now < expires_at
+        }
+        fingerprint = self._callback_fingerprint(claims)
+        if fingerprint in self.consumed_callbacks:
+            return {"decision": "identity_retry_required"}
+        self.consumed_callbacks[fingerprint] = int(claims["exp"])
+        self.events.append("local.successful_callback_consumption")
 
         if self.browser_pending_flow_cookies.get(browser_id) == pending_flow_cookie:
             self.browser_pending_flow_cookies.pop(browser_id, None)
@@ -266,6 +289,22 @@ class ShowIdentityCallbackHarness:
             and expires_at - issued_at == 300
             and issued_at <= self.now < expires_at
         )
+
+    def _valid_assertion(
+        self,
+        claims: dict[str, object] | None,
+        expected: dict[str, object],
+    ) -> bool:
+        if claims is None or not _IDENTITY_ASSERTION_VALIDATOR.is_valid(claims):
+            return False
+        return self._valid_time_window(claims) and not any(
+            claims.get(field) != value for field, value in expected.items()
+        )
+
+    @staticmethod
+    def _callback_fingerprint(claims: dict[str, object]) -> str:
+        value = f"{claims['iss']}\0{claims['jti']}".encode("utf-8")
+        return hashlib.sha256(value).hexdigest()
 
     @staticmethod
     def _opaque_token(purpose: str, browser_id: str, sequence: int) -> str:

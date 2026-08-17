@@ -128,6 +128,15 @@
       "document_url_has_trailing_slash": true,
       "fallback_document_base_url": "strip_page_authored_base_elements_then_inject_exact_capability_root_before_page_content",
       "relative_url_resolution": "modules_styles_raw_assets_and_fetch(./api/data)_resolve_from_exact_capability_root_on_root_and_history_documents",
+      "document_local_resource_rewrite": {
+        "attributes": ["script.src", "link.href", "img.src", "img.srcset", "source.src", "source.srcset", "video.src", "video.poster", "audio.src"],
+        "resolution_base": "captured_source_document_before_server_owned_base_injection",
+        "output": "absolute_url_under_same_capability_prefix_asset_opaque_resource_handle",
+        "srcset": "rewrite_each_local_candidate_and_preserve_its_density_or_width_descriptor",
+        "inline_style_css_urls": "rewrite_each_local_url_with_the_same_opaque_asset_rule",
+        "rewrite_before_browser_response": true,
+        "authored_local_path_browser_visible": false
+      },
       "page_api_namespace_mapping": "captured_page_api_only",
       "top_level_history_mapping": {
         "browser_url": "/p/<share_id>/{normalized_relative_history_path}",
@@ -136,7 +145,7 @@
       },
       "history_and_api_path_segments": "one_or_more_segments_using_ascii_letters_digits_underscore_hyphen_dot_or_at_sign",
       "history_and_api_forbidden_syntax": ["dot_segments", "empty_segments", "encoded_separator", "encoded_traversal", "query", "raw_source_path"],
-      "nested_import_rewrite": "absolute_url_under_same_namespace_document_capability_prefix",
+      "nested_import_rewrite": "module_import_css_import_and_css_url_dependencies_use_absolute_opaque_asset_urls_under_same_namespace_document_capability_prefix",
       "page_api_content_type": "optional_validated_media_type_with_exact_multipart_boundary_preserved",
       "page_api_content_type_forwarding": "forward_the_validated_value_unchanged_without_reconstructing_parameters",
       "page_api_body": "optional_base64_with_declared_decoded_length",
@@ -224,6 +233,7 @@
     {"name": "shared_document_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "document", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/"}},
     {"name": "shared_history_fallback_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "fallback", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/history/users/alice@example.com"}},
     {"name": "shared_module_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "module", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/asset/res_opaque_01"}},
+    {"name": "default_entry_resource_rewrite", "schema_ref": "#/$defs/DocumentResourceRewrite", "value": {"element": "script", "attribute": "src", "authored_value": "./src/main.tsx", "resource_handle": "res_entry_01", "rewritten_url": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/asset/res_entry_01"}},
     {"name": "shared_page_api_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "POST", "surface": "page_api", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/api/data", "content_type": "application/json", "body": {"encoding": "base64", "data": "eyJwaW5nIjp0cnVlfQ==", "length_bytes": 13}}},
     {"name": "shared_page_api_preflight", "schema_ref": "#/$defs/SharedPageApiPreflightRequest", "value": {"method": "OPTIONS", "surface": "page_api_preflight", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/api/data", "origin": "null", "access_control_request_method": "POST", "access_control_request_headers": ["content-type"]}},
     {"name": "shared_page_api_preflight_result", "schema_ref": "#/$defs/SharedPageApiPreflightResult", "value": {"http_status": 204, "access_control_allow_origin": "*", "access_control_allow_methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS", "access_control_allow_headers": "content-type", "access_control_allow_credentials": false, "cache_control": "private, no-store", "body": "", "forwarded_to_runtime": false}}
@@ -307,6 +317,18 @@
     "OpaqueAssetPath": {
       "type": "string",
       "pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/asset/[A-Za-z0-9_-]+$"
+    },
+    "DocumentResourceRewrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["element", "attribute", "authored_value", "resource_handle", "rewritten_url"],
+      "properties": {
+        "element": {"enum": ["script", "link", "img", "source", "video", "audio"]},
+        "attribute": {"enum": ["src", "href", "srcset", "poster"]},
+        "authored_value": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "resource_handle": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$"},
+        "rewritten_url": {"$ref": "#/$defs/OpaqueAssetPath"}
+      }
     },
     "PageApiPath": {
       "type": "string",
