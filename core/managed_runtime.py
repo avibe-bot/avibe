@@ -342,7 +342,16 @@ class ManagedRuntimeManager:
         if dry_run:
             # Read-only preview: no lock acquisition (the file lock would create
             # ``.install.lock`` and mutate persistent state), so previews also
-            # work on read-only runtime directories.
+            # work on read-only runtime directories. An install that is
+            # actively staging right now is excluded via the in-process lock —
+            # a preview must not advertise removing live staging state.
+            if not self._install_lock.acquire(blocking=False):
+                return {
+                    "ok": False,
+                    "removed": [],
+                    "reason": self._reason("install_already_running"),
+                    "message": "an install is currently running",
+                }
             try:
                 return self._clean_locked(keep_previous=keep_previous, dry_run=True)
             except Exception as exc:  # noqa: BLE001
@@ -357,6 +366,8 @@ class ManagedRuntimeManager:
                     "reason": self._reason("clean_inspection_failed"),
                     "message": str(exc),
                 }
+            finally:
+                self._install_lock.release()
         try:
             file_lock = self._acquire_mutation_lock()
         except Exception as exc:  # noqa: BLE001

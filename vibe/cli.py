@@ -14157,8 +14157,14 @@ def cmd_runtime(args) -> int:
                 )
             elif skipped_reason:
                 # A skipped/failed archive pass is not a completed zero-removal
-                # cleanup; say so instead of printing placeholder counts.
-                print(i18n_t("runtime.clean.skipped", language, reason=skipped_reason), file=sys.stderr)
+                # cleanup; say so instead of printing placeholder counts, with
+                # remediation that matches the actual reason.
+                skip_key = (
+                    "runtime.clean.skippedInspection"
+                    if skipped_reason == "archive_inspection_failed"
+                    else "runtime.clean.skipped"
+                )
+                print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
             else:
                 archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
                 archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
@@ -14171,7 +14177,8 @@ def cmd_runtime(args) -> int:
                     )
                 )
             if git.get("ok") is False and git.get("reason"):
-                print(i18n_t("runtime.clean.gitSkipped", language, reason=git["reason"]), file=sys.stderr)
+                git_skip_key = "runtime.clean.gitSkippedPreview" if dry_run else "runtime.clean.gitSkipped"
+                print(i18n_t(git_skip_key, language, reason=git["reason"]), file=sys.stderr)
             else:
                 print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
         return 0

@@ -905,7 +905,9 @@
       "removedGit": "Removed {count} Git Runtime cache item(s).",
       "partiallyRemoved": " {failed} archive(s) could not be removed; check permissions and the Avibe log.",
       "skipped": "Archive cleanup skipped ({reason}); stale archives may remain. Try again after the running install or cleanup finishes.",
-      "gitSkipped": "Git Runtime cache preview skipped ({reason}); stale entries may remain."
+      "skippedInspection": "Archive cleanup could not inspect the cache ({reason}); stale archives may remain. Check runtime directory permissions and the Avibe log.",
+      "gitSkipped": "Git Runtime cleanup skipped ({reason}); stale entries remain.",
+      "gitSkippedPreview": "Git Runtime cache preview skipped ({reason}); stale entries may remain."
     },
     "doctor": {
       "archiveCacheReclaimable": "Show Runtime archive cache holds {count} reclaimable archive(s) ({size}); the current and rollback archives are kept.",

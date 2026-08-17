@@ -711,6 +711,26 @@ def test_symlinked_install_lock_is_refused(tmp_path: Path) -> None:
     assert victim.read_text(encoding="utf-8") == "precious"  # link never followed
 
 
+def test_downloads_dir_stat_failure_is_an_inspection_failure(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(2), b"stale")
+
+    import errno
+
+    real_stat = Path.stat
+
+    def _stat_guard(self, **kwargs):
+        if self.name == "downloads" and self.parent == manager.runtime_dir:
+            raise OSError(errno.EACCES, "permission denied")
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat_guard)
+    result = manager.clean()
+
+    assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
+
+
 def test_versions_dir_stat_failure_fails_closed(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))
@@ -719,14 +739,14 @@ def test_versions_dir_stat_failure_fails_closed(tmp_path: Path, monkeypatch) -> 
 
     import errno
 
-    real_is_dir = Path.is_dir
+    real_stat = Path.stat
 
-    def _is_dir_guard(self):
+    def _stat_guard(self, **kwargs):
         if self.name == "versions" and self.parent == manager.runtime_dir:
             raise OSError(errno.EACCES, "permission denied")
-        return real_is_dir(self)
+        return real_stat(self, **kwargs)
 
-    monkeypatch.setattr(Path, "is_dir", _is_dir_guard)
+    monkeypatch.setattr(Path, "stat", _stat_guard)
     result = manager.clean()
 
     assert result["archives"].get("skipped_reason") == "archive_inspection_failed"

@@ -861,10 +861,13 @@ class ShowRuntimeManager:
         if versions_dir.is_symlink():
             raise _ArchiveMetadataError("versions directory is a symlink")
         try:
-            versions_is_dir = versions_dir.is_dir()
+            # Path.is_dir()/exists() suppress OSError into False; an
+            # uninspectable versions tree must instead fail closed so every
+            # retained install keeps its rollback archive protected.
+            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
+        except FileNotFoundError:
+            versions_is_dir = False
         except OSError as exc:
-            # Path.is_dir() suppresses stat errors and reads as "absent",
-            # which would silently unprotect every retained install.
             raise _ArchiveInspectionError("versions directory cannot be inspected") from exc
         if versions_is_dir:
             for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
@@ -894,12 +897,19 @@ class ShowRuntimeManager:
         """
         downloads_dir = self.runtime_dir / "downloads"
         candidates: list[tuple[Path, int]] = []
-        if not downloads_dir.exists():
+        try:
+            downloads_exists = downloads_dir.stat().st_mode  # error-preserving
+            exists = True
+        except FileNotFoundError:
+            exists = False
+        except OSError as exc:
+            raise _ArchiveInspectionError("downloads directory cannot be inspected") from exc
+        if not exists:
             return candidates
         # A symlinked downloads directory would follow the link and unlink
         # files outside Avibe's runtime state; fail as an inspection error
         # rather than traverse it.
-        if downloads_dir.is_symlink() or not downloads_dir.is_dir():
+        if downloads_dir.is_symlink() or not stat.S_ISDIR(downloads_exists):
             raise _ArchiveInspectionError("downloads directory is a symlink or not a directory")
         mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
         for path in sorted(downloads_dir.iterdir()):
