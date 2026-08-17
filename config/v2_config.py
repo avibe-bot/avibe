@@ -1799,6 +1799,7 @@ class MemoryCloudConfig:
     source_instance_id: str = ""
     organization_attached: bool = False
     transition_notice_pending: bool = False
+    transition_rebuild_owned: bool = False
     applied_embedding_identity: str | None = None
     runtime_apply_pending: bool = False
 
@@ -1828,6 +1829,7 @@ class MemoryCloudConfig:
             ("quota_enforced", self.quota_enforced),
             ("organization_attached", self.organization_attached),
             ("transition_notice_pending", self.transition_notice_pending),
+            ("transition_rebuild_owned", self.transition_rebuild_owned),
             ("runtime_apply_pending", self.runtime_apply_pending),
         ):
             if not isinstance(value, bool):
@@ -1905,6 +1907,13 @@ class MemoryConfig:
         self.processing.validate()
         self.cloud.validate()
         self.diagnostics.validate()
+        if self.cloud.transition_rebuild_owned and (
+            not self.cloud.transition_notice_pending
+            or self.recovery_intent != "rebuild"
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.transition_rebuild_owned' requires a pending transition rebuild"
+            )
         if (
             self.enabled
             and not self.cloud_runtime_selected()
@@ -2121,6 +2130,7 @@ def memory_config_to_payload(
             "source_instance_id": memory.cloud.source_instance_id,
             "organization_attached": memory.cloud.organization_attached,
             "transition_notice_pending": memory.cloud.transition_notice_pending,
+            "transition_rebuild_owned": memory.cloud.transition_rebuild_owned,
             "applied_embedding_identity": memory.cloud.applied_embedding_identity,
             "runtime_apply_pending": memory.cloud.runtime_apply_pending,
         },

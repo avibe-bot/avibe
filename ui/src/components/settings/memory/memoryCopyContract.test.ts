@@ -117,6 +117,10 @@ describe('Memory UI copy contracts', () => {
     expect(text).toMatch(language === 'en' ? /may use/ : /可能消耗/);
   });
 
+  it.each(['en', 'zh'] as const)('localizes the closed cloud capability error in %s', (language) => {
+    expect(BUNDLES[language].errors.memory_capability_unavailable).toBeTruthy();
+  });
+
   it('keeps processing terminology aligned with the runtime contracts', () => {
     expect(en.memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak).not.toMatch(/cleanup/i);
     expect(en.memory.processingRecord.runtime.fact.cascadeReason.optimizeStuck).toMatch(/Optimization/);

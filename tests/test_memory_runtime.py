@@ -3695,7 +3695,7 @@ async def test_cloud_capability_removal_pauses_claims_keeps_capture_and_resumes_
     assert paused == {
         "ok": True,
         "state": "paused",
-        "reason": "memory_cloud_model_unavailable",
+        "reason": "memory_capability_unavailable",
     }
     assert runtime.module._worker._claims_paused is True
     assert factory.supervised[0].stopped is True

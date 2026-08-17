@@ -328,6 +328,50 @@ def test_memory_config_accepts_factory_reset_recovery_intent() -> None:
     assert config.memory.recovery_intent == "factory_reset"
 
 
+def test_memory_transition_rebuild_owner_round_trips(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config = V2Config.from_payload(
+        _payload(
+            {
+                "recovery_intent": "rebuild",
+                "cloud": {
+                    "transition_notice_pending": True,
+                    "transition_rebuild_owned": True,
+                },
+            }
+        )
+    )
+
+    config.save(config_path)
+
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    loaded = V2Config.load(config_path)
+    assert stored["memory"]["cloud"]["transition_rebuild_owned"] is True
+    assert loaded.memory.cloud.transition_rebuild_owned is True
+    assert loaded.memory.recovery_intent == "rebuild"
+
+
+@pytest.mark.parametrize(
+    "memory",
+    [
+        {
+            "recovery_intent": "rebuild",
+            "cloud": {"transition_rebuild_owned": True},
+        },
+        {
+            "recovery_intent": "factory_reset",
+            "cloud": {
+                "transition_notice_pending": True,
+                "transition_rebuild_owned": True,
+            },
+        },
+    ],
+)
+def test_memory_config_rejects_unowned_transition_rebuild_state(memory: dict) -> None:
+    with pytest.raises(ValueError, match="transition_rebuild_owned"):
+        V2Config.from_payload(_payload(memory))
+
+
 @pytest.mark.parametrize(
     ("field", "expected_name"),
     [

@@ -13,6 +13,7 @@ from config.v2_config import (
     MemoryConfig,
     MemoryEndpointConfig,
     MemoryProcessingConfig,
+    MemoryRecoveryIntent,
     RuntimeConfig,
     SlackConfig,
     V2Config,
@@ -234,6 +235,191 @@ def test_unpairing_clears_cloud_runtime_and_reconciles_the_running_sidecar(
     assert memory.cloud.organization_attached is False
 
 
+def test_replacement_pairing_fences_the_previous_sidecar_before_status_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-old",
+            applied_embedding_identity="emb-old",
+            model_access_key="mak_old",
+            proxy_base_url="https://old.example.test/v1/model",
+            source_instance_id="instance-old",
+        ),
+    )
+    _paired_config(current).save()
+    events: list[str] = []
+
+    def reconcile(candidate: MemoryConfig) -> bool:
+        events.append("reconcile")
+        assert candidate.runtime_source() == "unavailable"
+        model_service._clear_apply_pending(candidate)  # noqa: SLF001
+        return True
+
+    def device_request(*_args: object) -> dict:
+        events.append("status")
+        persisted = V2Config.load().memory
+        assert persisted.runtime_source() == "unavailable"
+        assert persisted.cloud.model_access_key is None
+        raise model_service.ModelServiceResolutionError("status_unavailable")
+
+    monkeypatch.setattr(model_service, "_reconcile_candidate", reconcile)
+    monkeypatch.setattr(model_service, "_device_request", device_request)
+
+    with pytest.raises(
+        model_service.ModelServiceResolutionError,
+        match="status_unavailable",
+    ):
+        model_service.sync_model_service_once()
+
+    memory = V2Config.load().memory
+    assert events == ["reconcile", "status"]
+    assert memory.cloud.source_instance_id == "instance-old"
+    assert memory.cloud.applied_embedding_identity == "emb-old"
+    assert memory.cloud.model_access_key is None
+    assert memory.cloud.runtime_apply_pending is False
+
+
+def test_replacement_pairing_does_not_contact_the_new_instance_until_the_fence_applies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-old",
+            applied_embedding_identity="emb-old",
+            model_access_key="mak_old",
+            proxy_base_url="https://old.example.test/v1/model",
+            source_instance_id="instance-old",
+        ),
+    )
+    _paired_config(current).save()
+    monkeypatch.setattr(model_service, "_reconcile_candidate", lambda _candidate: False)
+    monkeypatch.setattr(
+        model_service,
+        "_device_request",
+        lambda *_args: pytest.fail("status must wait for the durable runtime fence"),
+    )
+
+    with pytest.raises(
+        model_service.ModelServiceResolutionError,
+        match="model_service_pairing_fence_failed",
+    ):
+        model_service.sync_model_service_once()
+
+    memory = V2Config.load().memory
+    assert memory.runtime_source() == "unavailable"
+    assert memory.cloud.model_access_key is None
+    assert memory.cloud.runtime_apply_pending is True
+
+
+def test_stale_pairing_snapshot_is_fenced_before_any_status_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-old",
+            applied_embedding_identity="emb-old",
+            model_access_key="mak_old",
+            proxy_base_url="https://old.example.test/v1/model",
+            source_instance_id="instance-old",
+        ),
+    )
+    stale = _paired_config(current)
+    stale.remote_access.vibe_cloud.instance_id = "instance-old"
+    live = deepcopy(stale)
+    live.remote_access.vibe_cloud.instance_id = "instance-new"
+    live.save()
+
+    def reconcile(candidate: MemoryConfig) -> bool:
+        model_service._clear_apply_pending(candidate)  # noqa: SLF001
+        return True
+
+    monkeypatch.setattr(model_service, "_reconcile_candidate", reconcile)
+    monkeypatch.setattr(
+        model_service,
+        "_device_request",
+        lambda *_args: pytest.fail("a stale pairing snapshot must never be contacted"),
+    )
+    monkeypatch.setattr(model_service, "request_model_service_refresh", lambda: None)
+
+    with pytest.raises(
+        model_service.ModelServiceResolutionError,
+        match="model_service_pairing_changed",
+    ):
+        model_service.sync_model_service_once(stale)
+
+    memory = V2Config.load().memory
+    assert memory.runtime_source() == "unavailable"
+    assert memory.cloud.model_access_key is None
+    assert memory.cloud.source_instance_id == "instance-old"
+    assert memory.cloud.runtime_apply_pending is False
+
+
+def test_pairing_change_during_failed_status_request_fences_the_old_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-old",
+            applied_embedding_identity="emb-old",
+            model_access_key="mak_old",
+            proxy_base_url="https://old.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+    _paired_config(current).save()
+
+    def change_pairing_then_fail(*_args: object) -> dict:
+        changed = V2Config.load()
+        changed.remote_access.vibe_cloud.instance_id = "instance-new"
+        changed.save()
+        raise model_service.ModelServiceResolutionError("status_unavailable")
+
+    def reconcile(candidate: MemoryConfig) -> bool:
+        model_service._clear_apply_pending(candidate)  # noqa: SLF001
+        return True
+
+    monkeypatch.setattr(model_service, "_device_request", change_pairing_then_fail)
+    monkeypatch.setattr(model_service, "_reconcile_candidate", reconcile)
+    monkeypatch.setattr(model_service, "request_model_service_refresh", lambda: None)
+
+    with pytest.raises(
+        model_service.ModelServiceResolutionError,
+        match="model_service_pairing_changed",
+    ):
+        model_service.sync_model_service_once()
+
+    memory = V2Config.load().memory
+    assert memory.runtime_source() == "unavailable"
+    assert memory.cloud.model_access_key is None
+    assert memory.cloud.source_instance_id == "instance-1"
+    assert memory.cloud.runtime_apply_pending is False
+
+
 def test_managed_scope_is_persisted_before_first_key_mint(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -319,6 +505,7 @@ def test_enterprise_attachment_pauses_custom_until_acknowledged() -> None:
 
     assert candidate.settings_mode() == "organization"
     assert candidate.cloud.transition_notice_pending is True
+    assert candidate.cloud.transition_rebuild_owned is True
     assert candidate.cloud.organization_attached is False
     assert candidate.cloud.model_access_key is None
     assert candidate.recovery_intent == "rebuild"
@@ -383,21 +570,30 @@ def test_canceling_enterprise_attachment_resumes_the_preserved_custom_runtime(
             ),
         )
     else:
-        canceled = model_service._unpaired_memory(pending)  # noqa: SLF001
+        canceled = model_service._fenced_cloud_memory(pending)  # noqa: SLF001
 
     assert canceled.cloud.transition_notice_pending is False
+    assert canceled.cloud.transition_rebuild_owned is False
     assert canceled.cloud.organization_attached is False
     assert canceled.recovery_intent is None
     assert canceled.runtime_source() == "custom"
     assert canceled.cloud.runtime_apply_pending is True
 
 
-def test_canceling_enterprise_attachment_preserves_an_unrelated_recovery_fence() -> None:
+@pytest.mark.parametrize("recovery_intent", ["rebuild", "factory_reset"])
+def test_enterprise_attachment_preserves_an_unrelated_recovery_fence(
+    recovery_intent: MemoryRecoveryIntent,
+) -> None:
+    current = _manual_memory()
+    current.recovery_intent = recovery_intent
     pending = _resolved(
-        _manual_memory(),
+        current,
         _status(scope="organization"),
     )
-    pending.recovery_intent = "factory_reset"
+
+    assert pending.cloud.transition_notice_pending is True
+    assert pending.cloud.transition_rebuild_owned is False
+    assert pending.recovery_intent == recovery_intent
 
     canceled = _resolved(
         pending,
@@ -405,7 +601,8 @@ def test_canceling_enterprise_attachment_preserves_an_unrelated_recovery_fence()
     )
 
     assert canceled.cloud.transition_notice_pending is False
-    assert canceled.recovery_intent == "factory_reset"
+    assert canceled.cloud.transition_rebuild_owned is False
+    assert canceled.recovery_intent == recovery_intent
 
 
 def test_enterprise_transition_acknowledgement_cannot_edit_custom_endpoints() -> None:

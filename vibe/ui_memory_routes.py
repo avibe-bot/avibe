@@ -211,7 +211,7 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
             mode == "platform"
             and not current.memory.cloud.memory_capability_available()
         ):
-            raise ValueError("memory_cloud_unavailable")
+            raise ValueError("memory_capability_unavailable")
         target["mode"] = mode
         if mode == "platform":
             adopt_cloud_identity = True
@@ -225,6 +225,7 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
             raise ValueError("invalid_memory_patch")
         target["cloud"]["organization_attached"] = True
         target["cloud"]["transition_notice_pending"] = False
+        target["cloud"]["transition_rebuild_owned"] = False
         adopt_cloud_identity = True
     if adopt_cloud_identity:
         target["cloud"]["applied_embedding_identity"] = (
@@ -893,9 +894,12 @@ async def _apply_memory_settings_patch(
                     and _memory_factory_reset_repair_patch(patch_payload)
                 )
         except ValueError as exc:
-            if str(exc) == "memory_cloud_unavailable":
+            if str(exc) == "memory_capability_unavailable":
                 return _memory_response(
-                    {"status": "failed", "error": "memory_cloud_unavailable"},
+                    {
+                        "status": "failed",
+                        "error": "memory_capability_unavailable",
+                    },
                     status_code=409,
                 )
             return _memory_response(
@@ -912,7 +916,10 @@ async def _apply_memory_settings_patch(
 
             if isinstance(exc, ModelServiceResolutionError):
                 return _memory_response(
-                    {"status": "failed", "error": "memory_cloud_unavailable"},
+                    {
+                        "status": "failed",
+                        "error": "memory_capability_unavailable",
+                    },
                     status_code=409,
                 )
             return _memory_response(

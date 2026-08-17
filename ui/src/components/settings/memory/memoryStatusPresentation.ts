@@ -52,6 +52,7 @@ const MEMORY_SOURCE_ERROR_REASONS = new Set([
   'memory_sidecar_unavailable',
   'memory_provider_timeout',
   'memory_provider_response_invalid',
+  'memory_capability_unavailable',
   'memory_processing_failed',
   'memory_clear_failed',
   'memory_clear_legacy_state_requires_rerun',

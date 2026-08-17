@@ -179,8 +179,12 @@ def _cancel_organization_transition(memory: MemoryConfig) -> bool:
     if not memory.cloud.transition_notice_pending:
         return False
     memory.cloud.transition_notice_pending = False
-    if memory.recovery_intent == "rebuild":
+    if (
+        memory.cloud.transition_rebuild_owned
+        and memory.recovery_intent == "rebuild"
+    ):
         memory.recovery_intent = None
+    memory.cloud.transition_rebuild_owned = False
     return True
 
 
@@ -240,10 +244,14 @@ def _resolved_memory(
                     if first_managed_activation:
                         candidate.enabled = True
             elif candidate.cloud.transition_notice_pending:
-                candidate.recovery_intent = "rebuild"
+                if candidate.recovery_intent is None:
+                    candidate.recovery_intent = "rebuild"
+                    candidate.cloud.transition_rebuild_owned = True
             elif candidate.mode == "custom" and previous.custom_processing_complete():
                 candidate.cloud.transition_notice_pending = True
-                candidate.recovery_intent = "rebuild"
+                if candidate.recovery_intent is None:
+                    candidate.recovery_intent = "rebuild"
+                    candidate.cloud.transition_rebuild_owned = True
             else:
                 candidate.cloud.organization_attached = True
                 if candidate.cloud.model_access_key:
@@ -289,8 +297,8 @@ def _resolved_memory(
     return candidate
 
 
-def _unpaired_memory(current: MemoryConfig) -> MemoryConfig:
-    """Pause cloud Memory while retaining its scope and identity baseline."""
+def _fenced_cloud_memory(current: MemoryConfig) -> MemoryConfig:
+    """Fence cloud egress while retaining scope and the identity baseline."""
 
     cloud = current.cloud
     had_cloud_state = bool(
@@ -318,6 +326,49 @@ def _unpaired_memory(current: MemoryConfig) -> MemoryConfig:
     )
     candidate.validate()
     return candidate
+
+
+def _fence_replaced_pairing(current: MemoryConfig) -> tuple[MemoryConfig, bool]:
+    """Durably stop an old instance runtime before contacting its replacement."""
+
+    candidate = _fenced_cloud_memory(current)
+    changed = candidate != current
+    if changed:
+        candidate = _persist_candidate(current, candidate).memory
+    if candidate.cloud.runtime_apply_pending:
+        if not _reconcile_candidate(candidate):
+            raise ModelServiceResolutionError("model_service_pairing_fence_failed")
+        candidate = V2Config.load().memory
+    return candidate, changed
+
+
+def _guard_pairing_authority(credentials: tuple[str, str, str]) -> None:
+    """Fence stale cloud egress whenever the request authority has changed."""
+
+    live = V2Config.load()
+    if live.remote_access.vibe_cloud.runtime_credentials() == credentials:
+        return
+    _fence_replaced_pairing(live.memory)
+    request_model_service_refresh()
+    raise ModelServiceResolutionError("model_service_pairing_changed")
+
+
+def _paired_device_request(
+    config: V2Config,
+    credentials: tuple[str, str, str],
+    method: str,
+    suffix: str,
+) -> dict[str, Any]:
+    """Run one device request only while its captured pairing owns egress."""
+
+    _guard_pairing_authority(credentials)
+    try:
+        payload = _device_request(config, method, suffix)
+    except Exception:
+        _guard_pairing_authority(credentials)
+        raise
+    _guard_pairing_authority(credentials)
+    return payload
 
 
 def _persist_candidate(current: MemoryConfig, candidate: MemoryConfig) -> V2Config:
@@ -372,7 +423,7 @@ def sync_model_service_once(config: V2Config | None = None) -> dict[str, Any]:
         credentials = config.remote_access.vibe_cloud.runtime_credentials()
         if credentials is None:
             current = V2Config.load().memory
-            candidate = _unpaired_memory(current)
+            candidate = _fenced_cloud_memory(current)
             if candidate == current and not current.cloud.runtime_apply_pending:
                 return {"ok": False, "configured": False, "changed": False}
             changed = candidate != current
@@ -386,7 +437,16 @@ def sync_model_service_once(config: V2Config | None = None) -> dict[str, Any]:
                 "apply_pending": not applied,
             }
         backend_url, instance_id, _device_secret = credentials
-        status = _status_from_payload(_device_request(config, "GET", "model-service"))
+        changed = False
+        current = V2Config.load().memory
+        if (
+            current.cloud.source_instance_id
+            and current.cloud.source_instance_id != instance_id
+        ):
+            current, changed = _fence_replaced_pairing(current)
+        status = _status_from_payload(
+            _paired_device_request(config, credentials, "GET", "model-service")
+        )
         current = V2Config.load().memory
         candidate = _resolved_memory(
             current,
@@ -395,15 +455,21 @@ def sync_model_service_once(config: V2Config | None = None) -> dict[str, Any]:
             proxy_base_url=f"{backend_url.rstrip('/')}/v1/model",
             minted=None,
         )
-        changed = candidate != current
-        if changed:
+        status_changed = candidate != current
+        if status_changed:
             current = _persist_candidate(current, candidate).memory
+            changed = True
 
         current_key = current.cloud.model_access_key
         if _status_needs_model_key(current, status) and not current_key:
             try:
                 minted = _mint_from_payload(
-                    _device_request(config, "POST", "model-access-key")
+                    _paired_device_request(
+                        config,
+                        credentials,
+                        "POST",
+                        "model-access-key",
+                    )
                 )
             except Exception:
                 if current.cloud.runtime_apply_pending:
@@ -445,7 +511,14 @@ def rotate_model_access_key(config: V2Config | None = None) -> dict[str, Any]:
         current = V2Config.load().memory
         if current.cloud.source_instance_id != instance_id or not current.cloud_runtime_selected():
             raise ModelServiceResolutionError("model_service_not_configured")
-        minted = _mint_from_payload(_device_request(config, "POST", "model-access-key"))
+        minted = _mint_from_payload(
+            _paired_device_request(
+                config,
+                credentials,
+                "POST",
+                "model-access-key",
+            )
+        )
         candidate = deepcopy(current)
         candidate.cloud.model_access_key = minted.key
         candidate.cloud.runtime_apply_pending = True
@@ -483,7 +556,14 @@ def ensure_model_access_key(config: V2Config | None = None) -> V2Config:
             raise ModelServiceResolutionError("model_service_not_configured")
         if current.cloud.model_access_key:
             return V2Config.load()
-        minted = _mint_from_payload(_device_request(config, "POST", "model-access-key"))
+        minted = _mint_from_payload(
+            _paired_device_request(
+                config,
+                credentials,
+                "POST",
+                "model-access-key",
+            )
+        )
         candidate = deepcopy(current)
         candidate.cloud.model_access_key = minted.key
         candidate.validate()

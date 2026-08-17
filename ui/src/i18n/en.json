@@ -1678,6 +1678,7 @@
     "memory_sidecar_unavailable": "The Memory sidecar isn't reachable right now.",
     "memory_provider_timeout": "The Memory request timed out.",
     "memory_provider_response_invalid": "Memory returned an invalid response.",
+    "memory_capability_unavailable": "Memory models are temporarily unavailable. Try again when the configured model service is available.",
     "memory_processing_failed": "Memory processing failed.",
     "memory_clear_failed": "Clearing Memory data failed.",
     "memory_clear_marker_unreadable": "Memory Clear state could not be read. Run Clear again to repair it.",

@@ -1062,7 +1062,7 @@ class MemoryRuntime:
             self._configure_insight_reader(config)
             self._provider = EverOSPort(self._socket_path)
             self.module.replace_provider(self._provider)
-            self._runtime_error = "memory_cloud_model_unavailable"
+            self._runtime_error = "memory_capability_unavailable"
             return {
                 "ok": True,
                 "state": "paused",
