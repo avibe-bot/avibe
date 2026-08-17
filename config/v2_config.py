@@ -163,6 +163,27 @@ def _memory_config_transaction(config_path: Path) -> Iterator[None]:
 
 
 @contextmanager
+def config_lock_transaction(config_path: Optional[Path] = None) -> Iterator[None]:
+    """Hold the cross-process config file lock for a whole read-merge-write cycle.
+
+    Lower-level companion to :func:`config_write_transaction`: callers
+    that build the saved object themselves (payload merges,
+    create-if-absent seeding) hold this lock across their ENTIRE
+    load→decide→write sequence instead of only the final write, so a
+    concurrent process cannot commit between their read and their
+    write. Lock order matches the Memory transaction (CONFIG_LOCK
+    first, then the file lock); nested acquisitions re-enter the
+    process lock only.
+    """
+
+    from config import paths as _paths
+
+    path = config_path or _paths.get_config_path()
+    with _memory_config_transaction(path):
+        yield
+
+
+@contextmanager
 def config_write_transaction(config_path: Optional[Path] = None) -> Iterator["V2Config"]:
     """Cross-process read-modify-write transaction for ``config.json`` (#1458).
 

@@ -70,6 +70,10 @@ def isolated_claude_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     claude_home = tmp_path / "default-claude"
     claude_home.mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    # V2Config writes go through the cross-process transaction, which
+    # resolves config.json from AVIBE_HOME — isolate it so no test
+    # touches the developer's real ~/.avibe.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
 
 
 @pytest.fixture
@@ -366,7 +370,16 @@ def test_codex_oauth_success_clears_api_key_state(
         "provider_id": "OpenAI",
         "base_url": "https://relay.example/v1",
     }
-    assert saves == ["saved"]
+    # Persistence lands through the cross-process config transaction
+    # (the stub save is no longer invoked); the marker is durable in the
+    # isolated real config file.
+    from config.v2_config import V2Config
+
+    persisted_codex = V2Config.load().agents.codex
+    assert persisted_codex.oauth_relay_marker == {
+        "provider_id": "OpenAI",
+        "base_url": "https://relay.example/v1",
+    }
 
     # A repeated OAuth transition captures nothing (the pointer is
     # already gone) and must RETAIN the marker rather than erase it —

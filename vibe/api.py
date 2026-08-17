@@ -962,11 +962,18 @@ def save_config(
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
 
-    # Preserve the established in-process read -> merge -> validate -> write
-    # transaction. V2Config.save() nests the same RLock before taking Memory's
-    # cross-process file lock, so generic writers remain linearizable without
-    # changing the Memory transaction's lock order.
-    with CONFIG_LOCK:
+    # Serialize the WHOLE read-merge-write cycle across processes
+    # (#1458 stage ③): the base load, merge, validation, and write all
+    # happen under the config file lock, so a controller commit between
+    # our load and our write can no longer be overwritten. The in-lock
+    # merge also makes full-snapshot round-trips safe by construction —
+    # they merge onto a lock-fresh base rather than clobbering it.
+    # V2Config.save() nests the same RLock before taking Memory's
+    # cross-process file lock, so generic writers remain linearizable
+    # without changing the Memory transaction's lock order.
+    from config.v2_config import config_lock_transaction
+
+    with config_lock_transaction(), CONFIG_LOCK:
         base_payload: dict = {}
         base_config: Optional[V2Config] = None
         try:
@@ -6935,27 +6942,35 @@ def _run_install_command(
             # config entries, so they must not touch V2Config bookkeeping.
             if installed_path and is_agent_backend(name):
                 try:
-                    with CONFIG_LOCK:
-                        try:
-                            cfg = load_config()
-                        except FileNotFoundError:
-                            logger.debug(
-                                "install_agent: config is not initialized; skipping cli_path persistence for %s",
-                                name,
-                            )
-                        else:
+                    from config.v2_config import update_config_fields
+                    from config import paths as _paths
+
+                    if not _paths.get_config_path().exists():
+                        logger.debug(
+                            "install_agent: config is not initialized; skipping cli_path persistence for %s",
+                            name,
+                        )
+                    else:
+
+                        def _persist_cli_path(cfg) -> None:
+                            # Read-decide-write INSIDE the transaction (#1458
+                            # stage ③): the comparison runs on the
+                            # lock-fresh config, so a concurrent save cannot
+                            # be reverted by a stale snapshot.
                             target = getattr(getattr(cfg, "agents", None), name, None)
-                            if target is not None:
-                                previous = getattr(target, "cli_path", "") or ""
-                                if previous != installed_path:
-                                    target.cli_path = installed_path
-                                    cfg.save()
-                                    logger.info(
-                                        "install_agent: updated V2Config cli_path for %s: %s -> %s",
-                                        name,
-                                        previous or "<unset>",
-                                        installed_path,
-                                    )
+                            if target is None:
+                                return
+                            previous = getattr(target, "cli_path", "") or ""
+                            if previous != installed_path:
+                                target.cli_path = installed_path
+                                logger.info(
+                                    "install_agent: updated V2Config cli_path for %s: %s -> %s",
+                                    name,
+                                    previous or "<unset>",
+                                    installed_path,
+                                )
+
+                        update_config_fields(_persist_cli_path)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "install_agent: failed to persist cli_path for %s: %s",
@@ -7222,17 +7237,20 @@ def _persist_avault_cli_path(path: str) -> None:
             load_config()
         except FileNotFoundError:
             save_config({})
-        with CONFIG_LOCK:
-            cfg = load_config()
+        from config.v2_config import update_config_fields
+
+        def _apply_avault_cli_path(cfg) -> None:
+            # Read-decide-write INSIDE the transaction (#1458 stage ③).
             previous = getattr(cfg.agents.avault, "cli_path", "") or ""
             if previous != path:
                 cfg.agents.avault.cli_path = path
-                cfg.save()
                 logger.info(
                     "install_avault: updated V2Config cli_path: %s -> %s",
                     previous or "<unset>",
                     path,
                 )
+
+        update_config_fields(_apply_avault_cli_path)
     except Exception as exc:
         logger.warning("install_avault: failed to persist cli_path: %s", exc)
         raise
@@ -9637,36 +9655,36 @@ def remove_backend_api_key(backend: str) -> dict:
 
     # Clear V2Config api_key for both backends.
     try:
-        with CONFIG_LOCK:
-            try:
-                config = load_config()
-            except FileNotFoundError:
-                config = V2Config()
-            target = getattr(getattr(config, "agents", None), backend, None)
-            if target is not None:
-                target.auth_mode = "oauth"
-                target.api_key = None
-                # Drop base_url for both backends, not just Codex: a
-                # stale Claude relay URL stored in V2Config gets
-                # injected into the subprocess as ``ANTHROPIC_BASE_URL``
-                # on every launch via ``build_claude_subprocess_env``.
-                # After removing an API key (intent: fall back to
-                # OAuth), the OAuth credentials would still be routed
-                # to the api-key-only relay and silently 401.
-                target.base_url = None
-                # Remove key is an explicit OAuth choice — the relay
-                # marker goes with it, or a later refresh would
-                # repopulate the abandoned relay and reroute a freshly
-                # entered official key to it (Codex-only field).
-                if backend == "codex":
-                    target.oauth_relay_marker = None
-                # User explicitly chose OAuth by clicking Remove key —
-                # mark the flag so legacy env-var fallback in
-                # ``build_claude_subprocess_env`` is bypassed and the
-                # inherited ``ANTHROPIC_*`` env actually gets stripped.
-                if backend == "claude":
-                    target.auth_mode_set = True
-                config.save()
+        from config.v2_config import update_config_fields
+
+        def _clear_auth_fields(cfg: V2Config) -> None:
+            target = getattr(getattr(cfg, "agents", None), backend, None)
+            if target is None:
+                return
+            target.auth_mode = "oauth"
+            target.api_key = None
+            # Drop base_url for both backends, not just Codex: a
+            # stale Claude relay URL stored in V2Config gets
+            # injected into the subprocess as ``ANTHROPIC_BASE_URL``
+            # on every launch via ``build_claude_subprocess_env``.
+            # After removing an API key (intent: fall back to
+            # OAuth), the OAuth credentials would still be routed
+            # to the api-key-only relay and silently 401.
+            target.base_url = None
+            # Remove key is an explicit OAuth choice — the relay
+            # marker goes with it, or a later refresh would
+            # repopulate the abandoned relay and reroute a freshly
+            # entered official key to it (Codex-only field).
+            if backend == "codex":
+                target.oauth_relay_marker = None
+            # User explicitly chose OAuth by clicking Remove key —
+            # mark the flag so legacy env-var fallback in
+            # ``build_claude_subprocess_env`` is bypassed and the
+            # inherited ``ANTHROPIC_*`` env actually gets stripped.
+            if backend == "claude":
+                target.auth_mode_set = True
+
+        update_config_fields(_clear_auth_fields)
     except Exception as exc:  # noqa: BLE001
         logger.warning("V2Config clear during remove-key failed for %s: %s", backend, exc)
         # The disk key is already gone (the user-visible truth — report
@@ -10085,42 +10103,38 @@ def save_codex_auth(payload: dict) -> dict:
         logger.error("Failed to write Codex auth files: %s", exc, exc_info=True)
         return {"ok": False, "message": f"Failed to write Codex config: {exc}"}
 
-    with CONFIG_LOCK:
-        try:
-            config = load_config()
-        except FileNotFoundError:
-            config = V2Config()
-        config.agents.codex.auth_mode = auth_mode
-        config.agents.codex.api_key = api_key if auth_mode == "api_key" else None
-        config.agents.codex.base_url = effective_base_url
+    from config.v2_config import update_config_fields
+
+    def _apply_codex_auth(cfg: V2Config) -> None:
+        cfg.agents.codex.auth_mode = auth_mode
+        cfg.agents.codex.api_key = api_key if auth_mode == "api_key" else None
+        cfg.agents.codex.base_url = effective_base_url
         # Marker lifecycle on save: an explicit API-key save consumes
         # the OAuth-transition marker (the user just chose their
         # endpoint — restored, typed fresh, or official-only); an OAuth
         # save applies the same retention semantics as the controller
         # path (#1449): fresh capture overwrites, the official-key
         # transition clears, a repeated pure-OAuth save retains.
-        # A failed save here only loses the V2Config mirror — the
-        # durable marker state was already recorded by the pre-persist
-        # above, and the on-disk codex files are authoritative.
         if auth_mode == "api_key":
-            config.agents.codex.oauth_relay_marker = None
+            cfg.agents.codex.oauth_relay_marker = None
         elif captured_oauth_relay is not None:
-            config.agents.codex.oauth_relay_marker = captured_oauth_relay
+            cfg.agents.codex.oauth_relay_marker = captured_oauth_relay
         elif observed_api_key_auth:
-            config.agents.codex.oauth_relay_marker = None
-        try:
-            config.save()
-        except Exception:
-            # The on-disk codex files are authoritative and the durable
-            # marker state was pre-persisted, but the V2Config mirror
-            # (auth_mode / base_url intent the controller reloads via
-            # ``_load_backend_runtime_config``) did NOT land — surface a
-            # partial-failure notice instead of silently reporting
-            # success while runtime reconciliation sees stale config.
-            logger.warning("V2Config mirror write failed during codex auth save", exc_info=True)
-            notices = notices + [
-                {"code": "v2_mirror_save_failed", "detail": "saved to codex files but not to Avibe config"}
-            ]
+            cfg.agents.codex.oauth_relay_marker = None
+
+    try:
+        update_config_fields(_apply_codex_auth)
+    except Exception:
+        # The on-disk codex files are authoritative and the durable
+        # marker state was pre-persisted, but the V2Config mirror
+        # (auth_mode / base_url intent the controller reloads via
+        # ``_load_backend_runtime_config``) did NOT land — surface a
+        # partial-failure notice instead of silently reporting
+        # success while runtime reconciliation sees stale config.
+        logger.warning("V2Config mirror write failed during codex auth save", exc_info=True)
+        notices = notices + [
+            {"code": "v2_mirror_save_failed", "detail": "saved to codex files but not to Avibe config"}
+        ]
 
     restart_result = restart_backend(
         "codex",
@@ -10403,23 +10417,22 @@ def save_claude_auth(payload: dict) -> dict:
         logger.error("Failed to write Claude settings.json: %s", exc, exc_info=True)
         return {"ok": False, "message": f"Failed to write Claude settings: {exc}"}
 
-    with CONFIG_LOCK:
-        try:
-            config = load_config()
-        except FileNotFoundError:
-            config = V2Config()
-        config.agents.claude.auth_mode = auth_mode
+    from config.v2_config import update_config_fields
+
+    def _apply_claude_auth(cfg: V2Config) -> None:
+        cfg.agents.claude.auth_mode = auth_mode
         # Flip the explicit marker so ``build_claude_subprocess_env``
         # honors ``auth_mode`` strictly (strip inherited env in OAuth
         # mode) for this and subsequent launches. Legacy installs that
         # have never been through this save path keep the flag at its
         # ``False`` default and continue to inherit shell env vars.
-        config.agents.claude.auth_mode_set = True
+        cfg.agents.claude.auth_mode_set = True
         # Secrets and endpoint overrides live in Claude's own settings.json.
         # Clear legacy cache fields so future reads do not have two writers.
-        config.agents.claude.api_key = None
-        config.agents.claude.base_url = None
-        config.save()
+        cfg.agents.claude.api_key = None
+        cfg.agents.claude.base_url = None
+
+    update_config_fields(_apply_claude_auth)
 
     oauth_cleanup_result: dict | None = None
     if auth_mode == "api_key":
@@ -11802,20 +11815,26 @@ async def _delete_opencode_provider_auth_async(provider_id: str) -> dict:
 def _clear_opencode_default_provider_if(provider_id: str) -> None:
     """Clear the saved OpenCode default if it points at ``provider_id``."""
 
-    with CONFIG_LOCK:
-        try:
-            cfg = load_config()
-        except FileNotFoundError:
-            return
+    from config import paths as _paths
+    from config.v2_config import update_config_fields
+
+    if not _paths.get_config_path().exists():
+        return
+
+    def _clear_if_matching(cfg) -> None:
+        # Compare-and-clear INSIDE the transaction on the lock-fresh
+        # config (#1458 stage ③): a concurrent default switch to another
+        # provider must not be cleared by a stale comparison.
         opencode_cfg = getattr(getattr(cfg, "agents", None), "opencode", None)
         current_default = getattr(opencode_cfg, "default_provider", None)
         if isinstance(current_default, str) and current_default.strip() == provider_id:
             opencode_cfg.default_provider = None
-            cfg.save()
             logger.info(
                 "clear_opencode_default_provider: cleared default_provider after removing %s",
                 provider_id,
             )
+
+    update_config_fields(_clear_if_matching)
 
 
 def delete_opencode_provider_auth(provider_id: str) -> dict:

@@ -28,6 +28,12 @@ class _IsolatedClaudeConfigDirMixin:
         self._claude_config_dir_tmp = tempfile.TemporaryDirectory()
         self._previous_claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self._claude_config_dir_tmp.name) / ".claude")
+        # V2Config writes go through the cross-process transaction, which
+        # resolves config.json from AVIBE_HOME — isolate it per test so
+        # no test touches the developer's real ~/.avibe.
+        self._avibe_home_tmp = tempfile.TemporaryDirectory()
+        self._previous_avibe_home = os.environ.get("AVIBE_HOME")
+        os.environ["AVIBE_HOME"] = self._avibe_home_tmp.name
 
     def tearDown(self):
         if self._previous_claude_config_dir is None:
@@ -35,6 +41,11 @@ class _IsolatedClaudeConfigDirMixin:
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = self._previous_claude_config_dir
         self._claude_config_dir_tmp.cleanup()
+        if self._previous_avibe_home is None:
+            os.environ.pop("AVIBE_HOME", None)
+        else:
+            os.environ["AVIBE_HOME"] = self._previous_avibe_home
+        self._avibe_home_tmp.cleanup()
         super().tearDown()
 
 
@@ -1340,7 +1351,9 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         cleanup.assert_called()
         self.assertEqual(controller.config.agents.claude.auth_mode, "oauth")
         self.assertTrue(controller.config.agents.claude.auth_mode_set)
-        self.assertEqual(controller.config.save_calls, 1)
+        # The persisted write goes through the cross-process config
+        # transaction (which writes the file directly), not the stub's
+        # save(); the live mirror above is the in-memory contract.
         service._refresh_backend_runtime.assert_awaited_once_with("claude")
         service._disconnect_claude_client.assert_awaited_once_with(flow.claude_client)
         self.assertIn("login is active again", controller.im_client.sent_messages[0][1].lower())

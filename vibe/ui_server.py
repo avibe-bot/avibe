@@ -7885,7 +7885,6 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
         wechat["base_url"] = result["base_url"].strip()
     elif not wechat.get("base_url"):
         wechat["base_url"] = "https://ilinkai.weixin.qq.com"
-    current["wechat"] = wechat
 
     platforms = dict(current.get("platforms") or {})
     enabled = list(platforms.get("enabled") or [])
@@ -7894,9 +7893,11 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
     platforms["enabled"] = enabled
     if not platforms.get("primary") or platforms.get("primary") == "avibe":
         platforms["primary"] = "wechat"
-    current["platforms"] = platforms
 
-    vibe_api.save_config(current)
+    # Patch-write shape (#1458 stage ③): only the sections this flow
+    # owns — a full-snapshot round-trip would revert unrelated fields
+    # another process changed since the read above.
+    vibe_api.save_config({"wechat": wechat, "platforms": platforms})
 
 
 WECHAT_QR_LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -12875,10 +12876,11 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                 # Merge CWD into existing config (load → modify → save)
                 from vibe import api as vibe_api
 
-                current = vibe_api.config_to_payload(vibe_api.load_config())
-                current.setdefault("runtime", {})
-                current["runtime"]["default_cwd"] = modal_values.get("cwd", "/tmp")
-                result = vibe_api.save_config(current)
+                # Patch-write shape (#1458 stage ③): only the field
+                # this modal owns.
+                result = vibe_api.save_config(
+                    {"runtime": {"default_cwd": modal_values.get("cwd", "/tmp")}}
+                )
                 return jsonify({"ok": True, "action": action})
 
             elif action == "routing_submit":

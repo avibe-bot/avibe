@@ -188,13 +188,10 @@ class V2ModelHubConfigStore:
 
     def save(self, model_hub: ModelHubConfig) -> None:
         model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
-        with CONFIG_LOCK:
-            try:
-                config = V2Config.load()
-            except FileNotFoundError:
-                config = default_config()
-            config.model_hub = model_hub
-            config.save()
+        self.ensure_writable()
+        from config.v2_config import update_config_fields
+
+        update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub))
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""

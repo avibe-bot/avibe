@@ -2622,7 +2622,13 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.home = Path(state_dir.name)
         codex_home = self.home / ".codex"
         codex_home.mkdir(parents=True)
-        self._codex_home_env = patch.dict(os.environ, {"CODEX_HOME": str(codex_home)})
+        # AVIBE_HOME isolation: the V2Config writes in this scenario go
+        # through the cross-process config transaction, which resolves
+        # config.json from AVIBE_HOME — keep them on the test's temp dir.
+        self._codex_home_env = patch.dict(
+            os.environ,
+            {"CODEX_HOME": str(codex_home), "AVIBE_HOME": str(self.home)},
+        )
         self._codex_home_env.start()
         self.addCleanup(self._codex_home_env.stop)
 
@@ -2739,7 +2745,9 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
             # The user's provider settings survive the round trip.
             self.assertIn('wire_api = "responses"', toml)
             self.assertNotIn("[model_providers.openai-managed]", toml)
-        self.assertIsNone(self.codex_cfg.oauth_relay_marker)
+        from config.v2_config import V2Config
+
+        self.assertIsNone(V2Config.load().agents.codex.oauth_relay_marker)
 
         ScenarioExpect.step_history(
             runner, ["oauth_transition", "settings_reload", "api_key_save"]

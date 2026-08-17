@@ -3882,14 +3882,12 @@ class AgentAuthService:
             config = getattr(self.controller, "config", None)
             target = getattr(getattr(config, "agents", None), backend, None)
             saver = getattr(config, "save", None) if config is not None else None
-            loaded_config = None
             if target is None or not callable(saver):
                 from config.v2_config import V2Config
 
-                loaded_config = V2Config.load()
-                target = getattr(getattr(loaded_config, "agents", None), backend, None)
-                saver = getattr(loaded_config, "save", None)
-            if target is None or not callable(saver):
+                loaded = V2Config.load()
+                target = getattr(getattr(loaded, "agents", None), backend, None)
+            if target is None:
                 return
             # An explicit OAuth save must also flip ``auth_mode_set``
             # for Claude — otherwise a successful OAuth flow on a
@@ -3929,48 +3927,54 @@ class AgentAuthService:
                 resolved_codex_relay_marker = getattr(target, "oauth_relay_marker", None)
             if not needs_mode_write and not needs_marker_write and not needs_codex_oauth_cleanup:
                 return
-            try:
-                from config.v2_config import CONFIG_LOCK
 
-                with CONFIG_LOCK:
-                    if needs_mode_write:
-                        target.auth_mode = auth_mode
-                    if needs_marker_write:
-                        target.auth_mode_set = True
-                    if needs_codex_oauth_cleanup:
-                        target.api_key = None
-                        # ``base_url`` returns to plain "last saved
-                        # preference" semantics (the live relay is gone
-                        # for OAuth); the explicit ``oauth_relay_marker``
-                        # carries the recovery record instead. A repeated
-                        # OAuth transition captures nothing (the pointer
-                        # is already gone), so retain any existing marker
-                        # — only an explicit API-key save or sign-out
-                        # clears it.
-                        target.base_url = None
-                        target.oauth_relay_marker = resolved_codex_relay_marker
-                    saver()
-            except ImportError:
+            # Persisted write: cross-process patch transaction (#1458
+            # stage ③) — load fresh inside the file lock, assign only
+            # the auth fields, save. The relay-marker pre-persist above
+            # stays a SEPARATE durable boundary: it must land before the
+            # external ~/.codex cleanup, which no config transaction can
+            # span.
+            from config.v2_config import update_config_fields
+
+            def _apply_auth_fields(cfg) -> None:
+                cfg_target = getattr(getattr(cfg, "agents", None), backend, None)
+                if cfg_target is None:
+                    return
                 if needs_mode_write:
-                    target.auth_mode = auth_mode
+                    cfg_target.auth_mode = auth_mode
                 if needs_marker_write:
-                    target.auth_mode_set = True
+                    cfg_target.auth_mode_set = True
                 if needs_codex_oauth_cleanup:
-                    target.api_key = None
-                    target.base_url = None
-                    target.oauth_relay_marker = resolved_codex_relay_marker
-                saver()
-            if loaded_config is not None and config is not None:
-                compat_target = getattr(config, backend, None)
-                if compat_target is not None:
-                    if needs_mode_write:
-                        setattr(compat_target, "auth_mode", auth_mode)
-                    if needs_marker_write:
-                        setattr(compat_target, "auth_mode_set", True)
-                    if needs_codex_oauth_cleanup:
-                        setattr(compat_target, "api_key", None)
-                        setattr(compat_target, "base_url", None)
-                        setattr(compat_target, "oauth_relay_marker", resolved_codex_relay_marker)
+                    cfg_target.api_key = None
+                    # ``base_url`` returns to plain "last saved
+                    # preference" semantics (the live relay is gone
+                    # for OAuth); the explicit ``oauth_relay_marker``
+                    # carries the recovery record instead.
+                    cfg_target.base_url = None
+                    cfg_target.oauth_relay_marker = resolved_codex_relay_marker
+
+            update_config_fields(_apply_auth_fields)
+
+            def _mirroronto(obj) -> None:
+                if obj is None:
+                    return
+                if needs_mode_write:
+                    setattr(obj, "auth_mode", auth_mode)
+                if needs_marker_write:
+                    setattr(obj, "auth_mode_set", True)
+                if needs_codex_oauth_cleanup:
+                    setattr(obj, "api_key", None)
+                    setattr(obj, "base_url", None)
+                    setattr(obj, "oauth_relay_marker", resolved_codex_relay_marker)
+
+            # Mirror onto the controller's LIVE config objects so the
+            # running process observes the transition without a reload
+            # (previous behavior: target was mutated and saved). The
+            # legacy compat projection (top-level ``config.<backend>``)
+            # is mirrored too when present.
+            _mirroronto(target)
+            if config is not None:
+                _mirroronto(getattr(config, backend, None))
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",
