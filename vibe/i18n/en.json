@@ -903,7 +903,8 @@
       "removedItems": "Removed {count} Show Runtime cache item(s).",
       "removedArchives": "Removed {count} downloaded Show Runtime archive(s) ({size}).",
       "removedGit": "Removed {count} Git Runtime cache item(s).",
-      "skipped": "Archive cleanup skipped ({reason}); stale archives may remain. Try again after the running install or cleanup finishes."
+      "skipped": "Archive cleanup skipped ({reason}); stale archives may remain. Try again after the running install or cleanup finishes.",
+      "gitSkipped": "Git Runtime cache preview skipped ({reason}); stale entries may remain."
     },
     "doctor": {
       "archiveCacheReclaimable": "Show Runtime archive cache holds {count} reclaimable archive(s) ({size}); the current and rollback archives are kept.",

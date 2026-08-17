@@ -23,6 +23,49 @@ class FixtureRuntimeManager(ManagedRuntimeManager):
         return binary.read_text(encoding="utf-8").strip()
 
 
+def test_clean_dry_run_is_read_only_and_creates_no_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    versions = runtime_dir / "versions" / "v1" / "linux-x64" / "aaa"
+    versions.mkdir(parents=True)
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    (versions / manager.spec.metadata_filename).write_text("{}", encoding="utf-8")
+
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is True
+    assert not (runtime_dir / ".install.lock").exists()
+
+
+def test_clean_dry_run_reports_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    manager = GitRuntimeManager(
+        runtime_dir=tmp_path / "git-runtime",
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+
+    def _boom(*, keep_previous, dry_run=False):
+        raise OSError("disk unreadable")
+
+    monkeypatch.setattr(manager, "_clean_locked", _boom)
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_inspection_failed"
+    assert "disk unreadable" in result["message"]
+
+
 def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() -> None:
     module = ast.parse(Path("core/managed_runtime.py").read_text(encoding="utf-8"))
     manager = next(

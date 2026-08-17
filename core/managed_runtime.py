@@ -339,6 +339,24 @@ class ManagedRuntimeManager:
         )
 
     def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
+        if dry_run:
+            # Read-only preview: no lock acquisition (the file lock would create
+            # ``.install.lock`` and mutate persistent state), so previews also
+            # work on read-only runtime directories.
+            try:
+                return self._clean_locked(keep_previous=keep_previous, dry_run=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Managed %s runtime dry-run inspection failed",
+                    self.spec.runtime_id,
+                    exc_info=True,
+                )
+                return {
+                    "ok": False,
+                    "removed": [],
+                    "reason": self._reason("clean_inspection_failed"),
+                    "message": str(exc),
+                }
         try:
             file_lock = self._acquire_mutation_lock()
         except Exception as exc:  # noqa: BLE001

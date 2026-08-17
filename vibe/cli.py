@@ -14144,7 +14144,10 @@ def cmd_runtime(args) -> int:
                         size=_format_byte_size(archive_bytes),
                     )
                 )
-                print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
+                if git.get("ok") is False and git.get("reason"):
+                    print(i18n_t("runtime.clean.gitSkipped", language, reason=git["reason"]), file=sys.stderr)
+                else:
+                    print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
         return 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 

@@ -305,6 +305,27 @@ def test_cleanup_reports_inspection_failure_distinct_from_lock_contention(tmp_pa
     assert result["skipped_reason"] == "archive_inspection_failed"
 
 
+def test_dry_run_reports_inspection_failure_instead_of_raising(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+
+    def _boom(skip_metadata_under=None):
+        raise OSError("disk unreadable")
+
+    original = manager._protected_archive_sha256s
+    manager._protected_archive_sha256s = _boom
+    try:
+        dry = manager.clean(dry_run=True)
+        status = manager.archive_cache_status()
+    finally:
+        manager._protected_archive_sha256s = original
+
+    # Both read-only surfaces return a skipped report the Doctor/CLI can
+    # render; neither lets the exception escape as a silent no-item result.
+    assert dry["archives"]["skipped_reason"] == "archive_inspection_failed"
+    assert status["skipped_reason"] == "archive_inspection_failed"
+
+
 def test_cli_clean_reports_skipped_archives_without_zero_counts(monkeypatch, capsys) -> None:
     from vibe import cli as vibe_cli
 

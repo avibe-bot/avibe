@@ -879,8 +879,12 @@ class ShowRuntimeManager:
         failure — consumers key off ``skipped_reason`` alone.
         """
         if dry_run:
-            protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
-            candidates = self._archive_cleanup_candidates(protected)
+            try:
+                protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
+                candidates = self._archive_cleanup_candidates(protected)
+            except Exception:
+                logger.warning("Show Runtime archive cleanup inspection failed", exc_info=True)
+                return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
             return {
                 "protected_count": len(protected),
                 "candidate_count": len(candidates),
