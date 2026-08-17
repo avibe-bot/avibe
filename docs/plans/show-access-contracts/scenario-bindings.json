@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "design_source": "docs/plans/public-show-live-update.md",
-  "design_sha": "556f73095bc02c91cbbbf1158acb21e60625e40c",
-  "design_blob_sha": "556f73095bc02c91cbbbf1158acb21e60625e40c",
+  "design_sha": "113596b0d0f9bbd3f19eb7cb2115b3d614a86ac5",
+  "design_blob_sha": "113596b0d0f9bbd3f19eb7cb2115b3d614a86ac5",
   "evidence_boundaries": {
     "contract": "machine_contract_proof",
     "residual_browser": "future_browser_conformance",
@@ -178,7 +178,14 @@
     { "id": "CLAIM-AVAILABILITY-RACES", "source": { "kind": "semantic", "document": "fixtures/apply-mutations.json", "check": "availability_races" }, "expected": true },
     { "id": "CLAIM-STATE-MAX-LIFETIME", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/local_handshake/signed_state_lifecycle/maximum_lifetime_seconds" }, "expected": 600 },
     { "id": "CLAIM-JWKS-MUST-REVALIDATE", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/jwks_verification/cache_policy/revalidation" }, "expected": "must_revalidate_at_expiry_including_known_kid" },
-    { "id": "CLAIM-IDENTITY-SESSION-ONLY", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/local_handshake/identity_session/purpose" }, "expected": "verified_identity_only" }
+    { "id": "CLAIM-IDENTITY-SESSION-ONLY", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/local_handshake/identity_session/purpose" }, "expected": "verified_identity_only" },
+    { "id": "CLAIM-CALLBACK-EFFECTIVE-PORT", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/closed_loop_scenario/start/callback_origin/effective_port" }, "expected": 443 },
+    { "id": "CLAIM-JWT-MALFORMED-SANITIZED", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/wire_protocol/strict_json_boundary/malformed_signed_input_outcome" }, "expected": "sanitized_reject_identity_assertion_without_raise" },
+    { "id": "CLAIM-IDENTITY-LINEAGE-SINGLE", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/local_handshake/identity_session/rotation/maximum_valid_records_per_lineage" }, "expected": 1 },
+    { "id": "CLAIM-JWKS-DERIVED-RETENTION", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/signing_keys/minimum_previous_key_availability/derived_seconds" }, "expected": 720 },
+    { "id": "CLAIM-RUNTIME-INFLIGHT-LIMIT", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/resource_governance/maximum_shared_in_flight_seconds" }, "expected": 60 },
+    { "id": "CLAIM-RUNTIME-ABSOLUTE-EXPIRY-PIN", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/namespace_lifetime/absolute_expiry_cancels_remaining_pins" }, "expected": true },
+    { "id": "CLAIM-RUNTIME-LEDGER-OWNER", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/resource_governance/in_flight_state_machine/ledger_owner" }, "expected": "resource_governance_process_wide_weighted_budget" }
   ],
   "bindings": [
     { "scenario_id": "SHOW-LIVE-001", "expected_evidence": "Trusted top-level navigation redirects to canonical `/show/` with private no-store metadata and safe suffix/query preservation; resource editor receives HMR and annotations only on `/show/`; missing multiple or untrusted HMR Origin rejects before upstream WebSocket; React Fast Refresh preservation remains a future browser check", "clauses": [
@@ -193,9 +200,9 @@
       { "text": "`/p/` has no HMR or annotations", "claim_ids": ["CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] },
       { "text": "new content appears only after a later refresh", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-003", "expected_evidence": "Bounded signed state and paired JWKS lifecycles close one cross-site form POST; callback rotates a local identity-only session; the later limited request re-resolves current membership; absent membership returns one generic denial with no page bytes or loop", "clauses": [
-      { "text": "Bounded signed state and paired JWKS lifecycles close one cross-site form POST", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-WIRE-STATE-MACHINE", "CLAIM-STATE-MAX-LIFETIME", "CLAIM-JWKS-MUST-REVALIDATE"] },
-      { "text": "callback rotates a local identity-only session", "claim_ids": ["CLAIM-IDENTITY-SESSION-ONLY"] },
+    { "scenario_id": "SHOW-LIVE-003", "expected_evidence": "Exact callback origin strict JWT types and derived JWKS lifecycles close one cross-site form POST; callback atomically rotates one local identity-only session lineage; the later limited request re-resolves current membership; absent membership returns one generic denial with no page bytes or loop", "clauses": [
+      { "text": "Exact callback origin strict JWT types and derived JWKS lifecycles close one cross-site form POST", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-WIRE-STATE-MACHINE", "CLAIM-STATE-MAX-LIFETIME", "CLAIM-JWKS-MUST-REVALIDATE", "CLAIM-CALLBACK-EFFECTIVE-PORT", "CLAIM-JWT-MALFORMED-SANITIZED", "CLAIM-JWKS-DERIVED-RETENTION"] },
+      { "text": "callback atomically rotates one local identity-only session lineage", "claim_ids": ["CLAIM-IDENTITY-SESSION-ONLY", "CLAIM-IDENTITY-LINEAGE-SINGLE"] },
       { "text": "the later limited request re-resolves current membership", "claim_ids": ["CLAIM-SAFE-RETURN-BOUND", "CLAIM-FRESH-LOCAL-LOOKUP"] },
       { "text": "absent membership returns one generic denial with no page bytes or loop", "claim_ids": ["CLAIM-UNLISTED-MEMBER-ABSENT", "CLAIM-UNLISTED-DENY", "CLAIM-UNLISTED-NO-BYTES-OR-LOOP"] }
     ] },
@@ -317,13 +324,13 @@
       { "text": "Apply returns no change", "claim_ids": ["CLAIM-SAME-SET-NO-CHANGE"] },
       { "text": "audience revision and stable binding remain unchanged", "claim_ids": ["CLAIM-SAME-SET-REVISION", "CLAIM-SAME-SET-BINDING"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-027", "expected_evidence": "Absolute lifetime remains non-renewable; whole namespace and snapshot bytes are reclaimed; stale document must reload", "clauses": [
-      { "text": "Absolute lifetime remains non-renewable", "claim_ids": ["CLAIM-NAMESPACE-HARD-LIFETIME", "CLAIM-NAMESPACE-NONRENEWABLE"] },
+    { "scenario_id": "SHOW-LIVE-027", "expected_evidence": "Absolute lifetime remains non-renewable and cancels every remaining pin; whole namespace and snapshot bytes are reclaimed; stale document must reload", "clauses": [
+      { "text": "Absolute lifetime remains non-renewable and cancels every remaining pin", "claim_ids": ["CLAIM-NAMESPACE-HARD-LIFETIME", "CLAIM-NAMESPACE-NONRENEWABLE", "CLAIM-RUNTIME-ABSOLUTE-EXPIRY-PIN"] },
       { "text": "whole namespace and snapshot bytes are reclaimed", "claim_ids": ["CLAIM-NAMESPACE-RECLAIM-WHOLE"] },
       { "text": "stale document must reload", "claim_ids": ["CLAIM-EXPIRED-RELOAD"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-028", "expected_evidence": "Process and per-Session bounds hold; private reserve cannot be consumed by shared traffic; excess shared admission is sanitized", "clauses": [
-      { "text": "Process and per-Session bounds hold", "claim_ids": ["CLAIM-BUDGET-PROCESS", "CLAIM-BUDGET-PER-SESSION"] },
+    { "scenario_id": "SHOW-LIVE-028", "expected_evidence": "Process and per-Session bounds hold with a sixty-second in-flight limit and one ledger owner; private reserve cannot be consumed by shared traffic; excess shared admission is sanitized", "clauses": [
+      { "text": "Process and per-Session bounds hold with a sixty-second in-flight limit and one ledger owner", "claim_ids": ["CLAIM-BUDGET-PROCESS", "CLAIM-BUDGET-PER-SESSION", "CLAIM-RUNTIME-INFLIGHT-LIMIT", "CLAIM-RUNTIME-LEDGER-OWNER"] },
       { "text": "private reserve cannot be consumed by shared traffic", "claim_ids": ["CLAIM-BUDGET-PRIVATE-RESERVE"] },
       { "text": "excess shared admission is sanitized", "claim_ids": ["CLAIM-BUDGET-SANITIZED"] }
     ] },
@@ -368,9 +375,9 @@
       { "text": "actual HTTP metadata is private and no-store while the projection excludes mutation receipts", "claim_ids": ["CLAIM-SETTINGS-RECEIPT-FREE", "CLAIM-SETTINGS-PRIVATE-NOSTORE"] },
       { "text": "Backend receives no whitelist data", "claim_ids": ["CLAIM-BACKEND-MEMBERSHIP-FALSE", "CLAIM-FORBIDDEN-WHITELIST"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-037", "expected_evidence": "Backend returns one bounded signed verified instance-bound identity assertion with fail-closed JWKS revalidation; Avibe closes callback correlation and rotates a local identity-only session; a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/`", "clauses": [
-      { "text": "Backend returns one bounded signed verified instance-bound identity assertion with fail-closed JWKS revalidation", "claim_ids": ["CLAIM-IDENTITY-SIGNED-ONLY", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-INSTANCE-BOUND", "CLAIM-IDENTITY-VERIFIED-EMAIL", "CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL", "CLAIM-IDENTITY-WIRE-STATE-MACHINE", "CLAIM-STATE-MAX-LIFETIME", "CLAIM-JWKS-MUST-REVALIDATE"] },
-      { "text": "Avibe closes callback correlation and rotates a local identity-only session", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-SESSION-ONLY"] },
+    { "scenario_id": "SHOW-LIVE-037", "expected_evidence": "Backend returns one strictly typed signed verified instance-bound identity assertion with derived fail-closed JWKS retention; Avibe closes exact-origin callback correlation and atomically rotates one local identity-only session lineage; a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/`", "clauses": [
+      { "text": "Backend returns one strictly typed signed verified instance-bound identity assertion with derived fail-closed JWKS retention", "claim_ids": ["CLAIM-IDENTITY-SIGNED-ONLY", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-INSTANCE-BOUND", "CLAIM-IDENTITY-VERIFIED-EMAIL", "CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL", "CLAIM-IDENTITY-WIRE-STATE-MACHINE", "CLAIM-STATE-MAX-LIFETIME", "CLAIM-JWKS-MUST-REVALIDATE", "CLAIM-JWT-MALFORMED-SANITIZED", "CLAIM-JWKS-DERIVED-RETENTION"] },
+      { "text": "Avibe closes exact-origin callback correlation and atomically rotates one local identity-only session lineage", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-SESSION-ONLY", "CLAIM-CALLBACK-EFFECTIVE-PORT", "CLAIM-IDENTITY-LINEAGE-SINGLE"] },
       { "text": "a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/`", "claim_ids": ["CLAIM-SHARE-RERESOLVE", "CLAIM-FRESH-LOCAL-LOOKUP", "CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-IDENTITY-LISTED-SHARED", "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR"] }
     ] },
     { "scenario_id": "SHOW-LIVE-038", "expected_evidence": "Current membership plus a binding-scoped credential positively serves limited `/p/`; canonical document module API and HMR remain denied; membership and browsing credential create no Instance role or editor capability", "clauses": [

@@ -217,7 +217,9 @@
     "successful_read_refreshes": "idle_deadline_only",
     "absolute_lifetime_renewable": false,
     "reclaim_unit": "whole_namespace",
-    "expired_read_outcome": "fixed_stale_document_reload_required"
+    "expired_read_outcome": "fixed_stale_document_reload_required",
+    "absolute_expiry_cancels_remaining_pins": true,
+    "pre_expiry_admission_extends_absolute_deadline": false
   },
   "resource_governance": {
     "id": "RUNTIME-PROCESS-WIDE-WEIGHTED-BUDGET",
@@ -240,7 +242,34 @@
       "oldest_shared_bundle_without_in_flight_request"
     ],
     "private_admission_reclaim": "any_shared_bundle_without_in_flight_request",
-    "in_flight_pinning": "until_response_finishes_only",
+    "in_flight_pinning": "until_response_finishes_or_hard_deadline_whichever_is_first",
+    "maximum_shared_in_flight_seconds": 60,
+    "covered_shared_response_kinds": ["document", "module", "resource", "fallback", "api_handler", "stream"],
+    "streaming_policy": {
+      "bounded": true,
+      "unbounded_streams_supported": false,
+      "client_reconnect_allowed": true
+    },
+    "hard_request_deadline": {
+      "formula": "min(request_admitted_at + maximum_shared_in_flight_seconds, namespace_absolute_deadline)",
+      "at_deadline": ["cancel_or_terminate_handler_or_stream", "atomically_release_pin", "atomically_release_weighted_budget_charge"],
+      "timeout_outcomes": ["fixed_sanitized_shared_timeout", "fixed_stale_document_reload_required"],
+      "paths_or_diagnostics_exposed": false,
+      "in_flight_work_extends_namespace_or_process_slot": false
+    },
+    "in_flight_state_machine": {
+      "ledger_owner": "resource_governance_process_wide_weighted_budget",
+      "release_is_idempotent": true,
+      "cases": [
+        {"id": "RESOURCE-HUNG-HANDLER", "response_kind": "api_handler", "admitted_at": 1000, "namespace_absolute_deadline": 8000, "observed_at": 1060, "handler_state": "hung", "expected_deadline": 1060, "termination_or_stream_close_at": 1060, "atomic_pin_and_charge_release_at": 1060, "outcome": "fixed_sanitized_shared_timeout", "pin_released": true, "charge_released": true, "later_admission": "admit"},
+        {"id": "RESOURCE-INFINITE-STREAM", "response_kind": "stream", "admitted_at": 2000, "namespace_absolute_deadline": 9000, "observed_at": 2060, "handler_state": "streaming", "expected_deadline": 2060, "termination_or_stream_close_at": 2060, "atomic_pin_and_charge_release_at": 2060, "outcome": "fixed_sanitized_shared_timeout", "pin_released": true, "charge_released": true, "later_admission": "admit"},
+        {"id": "RESOURCE-EXACT-REQUEST-DEADLINE", "response_kind": "module", "admitted_at": 3000, "namespace_absolute_deadline": 9000, "observed_at": 3060, "handler_state": "running", "expected_deadline": 3060, "termination_or_stream_close_at": 3060, "atomic_pin_and_charge_release_at": 3060, "outcome": "fixed_sanitized_shared_timeout", "pin_released": true, "charge_released": true, "later_admission": "admit"},
+        {"id": "RESOURCE-NAMESPACE-EXPIRY-RACE", "response_kind": "document", "admitted_at": 4000, "namespace_absolute_deadline": 4025, "observed_at": 4025, "handler_state": "running", "expected_deadline": 4025, "termination_or_stream_close_at": 4025, "atomic_pin_and_charge_release_at": 4025, "outcome": "fixed_stale_document_reload_required", "pin_released": true, "charge_released": true, "later_admission": "reload"},
+        {"id": "RESOURCE-CONCURRENT-RECLAIM", "response_kind": "resource", "admitted_at": 5000, "namespace_absolute_deadline": 9000, "observed_at": 5060, "handler_state": "running_during_reclaim", "expected_deadline": 5060, "termination_or_stream_close_at": 5060, "atomic_pin_and_charge_release_at": 5060, "outcome": "fixed_sanitized_shared_timeout", "pin_released": true, "charge_released": true, "later_admission": "admit"},
+        {"id": "RESOURCE-LEDGER-RECOVERY", "response_kind": "fallback", "admitted_at": 6000, "namespace_absolute_deadline": 9000, "observed_at": 6060, "handler_state": "cancellation_cleanup_failed", "expected_deadline": 6060, "termination_or_stream_close_at": 6060, "atomic_pin_and_charge_release_at": 6060, "outcome": "fixed_sanitized_shared_timeout", "pin_released": true, "charge_released": true, "later_admission": "admit"},
+        {"id": "RESOURCE-ADMISSION-AFTER-RELEASE", "response_kind": "api_handler", "admitted_at": 7000, "namespace_absolute_deadline": 9000, "observed_at": 7061, "handler_state": "cancelled_at_deadline", "expected_deadline": 7060, "termination_or_stream_close_at": 7060, "atomic_pin_and_charge_release_at": 7060, "outcome": "fixed_sanitized_shared_timeout", "pin_released": true, "charge_released": true, "later_admission": "admit"}
+      ]
+    },
     "shared_overload_outcome": "bounded_sanitized_retryable_unavailable"
   },
   "shared_proxy_policy": {

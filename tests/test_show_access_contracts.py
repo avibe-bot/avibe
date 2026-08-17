@@ -211,6 +211,12 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
             start, callback, request = loop["start"], loop["callback"], loop["protected_request"]
             handshake = document["local_handshake"]
             cookie = handshake["correlation_cookie"]
+            parsed_callback = urlsplit(callback["callback_url"])
+            callback_origin = {
+                "scheme": parsed_callback.scheme,
+                "normalized_host": parsed_callback.hostname,
+                "effective_port": parsed_callback.port or 443,
+            }
             return (
                 callback["http_method"] == "POST"
                 and callback["delivery"] == "form_post"
@@ -219,8 +225,8 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and callback["callback_url"].endswith("/auth/show-identity/callback")
                 and "?" not in callback["callback_url"]
                 and "#" not in callback["callback_url"]
-                and callback["callback_url"].split("/", 3)[2] == start["callback_hostname"]
-                and callback["callback_url"].split("/", 3)[2] in start["allowed_callback_hostnames"]
+                and callback_origin == start["callback_origin"]
+                and callback_origin in start["server_owned_callback_origins"]
                 and start["instance_id"] == callback["instance_id"] == request["credential_binding"]["instance_id"]
                 and start["page_id"] == callback["resolved_page_id"] == request["credential_binding"]["page_id"]
                 and start["share_id"] == callback["resolved_share_id"] == request["credential_binding"]["share_id"]
@@ -252,6 +258,8 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and request["identity_session_record_revalidated"] is True
                 and handshake["identity_session"]["purpose"] == "verified_identity_only"
                 and handshake["identity_session"]["page_authorization"] is False
+                and handshake["identity_session"]["cookie"]["same_site"] == "None"
+                and handshake["identity_session"]["rotation"]["maximum_valid_records_per_lineage"] == 1
             )
         if check == "identity_wire_state_machine":
             wire = document["backend_assertion"]["wire_protocol"]
@@ -259,11 +267,17 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
             jwks = document["backend_assertion"]["jwks_verification"]
             flows = document["local_handshake"]["concurrent_flow_state_machine"]
             vectors = {item["id"]: item for item in document["backend_assertion"]["interoperability_vectors"]}
+            strict = wire["strict_json_boundary"]
+            retention = document["backend_assertion"]["signing_keys"]["minimum_previous_key_availability"]
             return (
                 wire["serialization"] == "compact_jws"
                 and wire["segment_count"] == 3
                 and wire["protected_header"]["required_and_only_fields"] == ["alg", "typ", "kid"]
                 and wire["protected_header"]["alg"] == "RS256"
+                and set(strict["header_string_limits"]) == {"alg", "typ", "kid"}
+                and set(strict["payload_string_limits"])
+                == {"iss", "aud", "sub", "jti", "nonce", "instance_id", "verified_email"}
+                and strict["numeric_date_type"] == "json_integer_excluding_boolean"
                 and trust["authority"] == "local_paired_instance_record"
                 and trust["token_or_request_selects_trust"] is False
                 and trust["jwks_uri_same_origin_with_issuer"] is True
@@ -279,6 +293,11 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and vectors["JWKS-DUPLICATE-KID"]["outcome"] == "reject_identity_assertion"
                 and vectors["JWKS-OLD-KEY-REMOVED"]["outcome"] == "reject_identity_assertion"
                 and vectors["JWKS-EXPIRED-REFRESH-UNAVAILABLE"]["outcome"] == "reject_identity_assertion"
+                and vectors["JWKS-PREVIOUS-KEY-BEFORE-720"]["outcome"] == "verified_identity"
+                and vectors["JWKS-PREVIOUS-KEY-AFTER-720"]["outcome"] == "reject_identity_assertion"
+                and retention["derived_seconds"]
+                == retention["maximum_assertion_lifetime_seconds"] + 2 * retention["verifier_clock_skew_seconds"]
+                == 720
                 and flows["independent_same_host_flows"] is True
                 and flows["terminal_callback_affects_other_flows"] is False
                 and {item["id"] for item in flows["cases"]}
@@ -1067,20 +1086,35 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
     }
     assert assertion["request_inputs"]["required"] == ["state", "nonce", "redirect_uri"]
     assert assertion["request_inputs"]["additional_allowed"] is False
-    assert assertion["wire_protocol"] == {
-        "serialization": "compact_jws",
-        "segment_count": 3,
-        "payload_kind": "jwt_claims",
-        "protected_header": {
-            "required_and_only_fields": ["alg", "typ", "kid"],
-            "alg": "RS256",
-            "typ": "JWT",
-            "kid": "nonempty_server_key_identifier",
+    wire = assertion["wire_protocol"]
+    assert wire["serialization"] == "compact_jws"
+    assert wire["segment_count"] == 3
+    assert wire["protected_header"] == {
+        "required_and_only_fields": ["alg", "typ", "kid"],
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "nonempty_server_key_identifier",
+    }
+    assert wire["maximum_compact_token_bytes"] == 16384
+    assert wire["strict_json_boundary"] == {
+        "header_string_limits": {"alg": 16, "typ": 16, "kid": 128},
+        "payload_string_limits": {
+            "iss": 2048,
+            "aud": 512,
+            "sub": 512,
+            "jti": 256,
+            "nonce": 256,
+            "instance_id": 256,
+            "verified_email": 320,
         },
-        "forbidden_algorithms": ["none", "HS256", "ES256", "EdDSA"],
-        "forbidden_header_parameters": ["jku", "jwk", "x5u", "x5c", "crit", "b64"],
-        "unsupported_critical_or_unencoded_payload_outcome": "reject_identity_assertion",
-        "payload_claim_set_exact": True,
+        "numeric_date_fields": ["iat", "exp"],
+        "numeric_date_type": "json_integer_excluding_boolean",
+        "numeric_date_relation": "iat <= exp and exp - iat <= maximum_lifetime_seconds",
+        "required_string_properties": "nonempty_and_within_named_bound",
+        "duplicate_members": "reject_before_lookup_or_store_input",
+        "null_number_array_object_or_empty_string": "reject_for_every_string_authority_identifier",
+        "extra_or_missing_members": "reject",
+        "malformed_signed_input_outcome": "sanitized_reject_identity_assertion_without_raise",
     }
     trust = assertion["pairing_trust"]
     assert trust["authority"] == "local_paired_instance_record"
@@ -1135,8 +1169,11 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
     assert assertion["ttl_seconds"] == 300
     assert assertion["maximum_lifetime_seconds"] == 600
     assert assertion["verifier_clock_skew_seconds"] == 60
-    assert assertion["signing_keys"]["minimum_overlap_seconds"] >= (
-        assertion["maximum_lifetime_seconds"] + assertion["verifier_clock_skew_seconds"]
+    retention = assertion["signing_keys"]["minimum_previous_key_availability"]
+    assert (
+        retention["derived_seconds"]
+        == (assertion["maximum_lifetime_seconds"] + 2 * assertion["verifier_clock_skew_seconds"])
+        == 720
     )
     assert assertion["verified_email_source"] == {
         "lookup": "fresh_backend_identity_provider_or_user_lookup",
@@ -1202,10 +1239,34 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "domain_attribute_allowed": False,
         "secure": True,
         "http_only": True,
-        "same_site": "Lax",
+        "same_site": "None",
         "path": "/",
     }
     assert identity_session["server_record_key"] == "sha256_of_cookie_token"
+    assert {"callback_origin", "lineage_id", "lineage_generation", "store_generation"} <= set(
+        identity_session["server_record_fields"]
+    )
+    assert identity_session["rotation"] == {
+        "operation": "atomic_lineage_generation_advance_after_all_callback_checks",
+        "prior_token_delivery": "cross_site_form_post_includes_same_site_none_session_cookie",
+        "login_start_flow_correlation": (
+            "server_side_nonce_record_captures_only_a_current_prior_token_hash_lineage_and_generation_and_"
+            "expires_with_signed_state"
+        ),
+        "callback_prior_token_requirement": (
+            "posted_callback_cookie_hash_must_match_the_flow_captured_prior_token_hash"
+        ),
+        "valid_prior_token": "advance_existing_lineage_and_invalidate_every_earlier_generation",
+        "concurrent_completion": (
+            "flows_that_captured_the_same_valid_prior_generation_advance_the_same_lineage_in_callback_order"
+        ),
+        "no_valid_prior_token_at_login_start": "create_new_lineage",
+        "invalid_or_terminal_callback": "no_lineage_change",
+        "maximum_valid_records_per_lineage": 1,
+        "concurrent_completion_outcome": (
+            "one_current_generation_older_response_token_may_be_stale_and_must_restart_login"
+        ),
+    }
     assert identity_session["maximum_lifetime_seconds"] == 86400
     assert identity_session["renewable"] is identity_session["page_authorization"] is False
     assert set(identity_session["forbidden_capabilities"]) == {
@@ -1226,9 +1287,17 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
             "local_identity_session_store",
         ],
         "content_type": "application/x-www-form-urlencoded",
-        "active_custom_callback_origin": "https://show.example.test",
+        "active_custom_callback_origin": {
+            "scheme": "https",
+            "normalized_host": "show.example.test",
+            "effective_port": 443,
+        },
         "contract_evidence": "http_form_jwt_jwks_and_atomic_state_machine",
-        "browser_cookie_delivery_evidence": "future_real_browser_conformance",
+        "browser_cookie_delivery_evidence": "reference_http_same_site_delivery_model",
+        "browser_cookie_delivery_rule": (
+            "cross_site_form_post_sends_identity_session_only_with_same_site_none_secure_https"
+        ),
+        "real_browser_conformance": "future_local_incus_browser_lane",
         "production_conformance": "future_avibe_and_backend_implementation_lanes",
     }
 
@@ -1270,7 +1339,10 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "add_callback_fragment",
         "place_assertion_in_browser_history",
         "place_assertion_in_referrer",
-        "replace_callback_hostname",
+        "replace_callback_host",
+        "replace_callback_port",
+        "replace_callback_scheme",
+        "replace_callback_path",
         "add_page_authorization_claim",
         "identity_not_verified",
         "identity_unavailable",
@@ -1919,6 +1991,72 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
         assert trace["elapsed_after_detection"] <= 1000
 
 
+def test_runtime_shared_in_flight_deadline_releases_pin_and_weighted_ledger() -> None:
+    contract = _load("runtime-context.json")
+    lifetime = contract["namespace_lifetime"]
+    governance = contract["resource_governance"]
+    assert governance["maximum_shared_in_flight_seconds"] == 60
+    assert governance["covered_shared_response_kinds"] == [
+        "document",
+        "module",
+        "resource",
+        "fallback",
+        "api_handler",
+        "stream",
+    ]
+    assert governance["streaming_policy"] == {
+        "bounded": True,
+        "unbounded_streams_supported": False,
+        "client_reconnect_allowed": True,
+    }
+    assert lifetime["absolute_expiry_cancels_remaining_pins"] is True
+    assert lifetime["pre_expiry_admission_extends_absolute_deadline"] is False
+    deadline_contract = governance["hard_request_deadline"]
+    assert deadline_contract["formula"] == (
+        "min(request_admitted_at + maximum_shared_in_flight_seconds, namespace_absolute_deadline)"
+    )
+    assert deadline_contract["in_flight_work_extends_namespace_or_process_slot"] is False
+    assert deadline_contract["paths_or_diagnostics_exposed"] is False
+
+    cases = {case["id"]: case for case in governance["in_flight_state_machine"]["cases"]}
+    assert set(cases) == {
+        "RESOURCE-HUNG-HANDLER",
+        "RESOURCE-INFINITE-STREAM",
+        "RESOURCE-EXACT-REQUEST-DEADLINE",
+        "RESOURCE-NAMESPACE-EXPIRY-RACE",
+        "RESOURCE-CONCURRENT-RECLAIM",
+        "RESOURCE-LEDGER-RECOVERY",
+        "RESOURCE-ADMISSION-AFTER-RELEASE",
+    }
+    assert {case["response_kind"] for case in cases.values()} == set(governance["covered_shared_response_kinds"])
+
+    for case in cases.values():
+        calculated_deadline = min(
+            case["admitted_at"] + governance["maximum_shared_in_flight_seconds"],
+            case["namespace_absolute_deadline"],
+        )
+        assert calculated_deadline == case["expected_deadline"], case["id"]
+        assert case["termination_or_stream_close_at"] == calculated_deadline, case["id"]
+        assert case["atomic_pin_and_charge_release_at"] == calculated_deadline, case["id"]
+        assert case["observed_at"] >= calculated_deadline
+        expected_outcome = (
+            "fixed_stale_document_reload_required"
+            if calculated_deadline == case["namespace_absolute_deadline"]
+            else "fixed_sanitized_shared_timeout"
+        )
+        assert case["outcome"] == expected_outcome
+        assert case["pin_released"] is case["charge_released"] is True
+        assert case["later_admission"] in {"admit", "reload"}
+
+    assert cases["RESOURCE-CONCURRENT-RECLAIM"]["later_admission"] == "admit"
+    assert cases["RESOURCE-LEDGER-RECOVERY"]["handler_state"] == "cancellation_cleanup_failed"
+    assert cases["RESOURCE-LEDGER-RECOVERY"]["charge_released"] is True
+    assert (
+        cases["RESOURCE-ADMISSION-AFTER-RELEASE"]["observed_at"]
+        > cases["RESOURCE-ADMISSION-AFTER-RELEASE"]["expected_deadline"]
+    )
+
+
 def test_runtime_release_advertisement_is_pinned_to_one_reviewed_smoked_sha() -> None:
     contract = _load("runtime-context.json")
     release_gate = contract["release_gate"]
@@ -2007,10 +2145,12 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "verified_email",
         "state",
         "assertion",
+        "strict_json_boundary",
         "paired_jwks_uri",
         "unknown_kid_refresh",
         "jwks_cache_max_age",
         "jwks_must_revalidate",
+        "minimum_previous_key_availability",
         "removed_key_rejection",
     ]
     assert interfaces["C09"]["delivery"]["authentication"] == "server_owned_orthogonal_facts"
@@ -2018,8 +2158,10 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "runtime_graph_ownership",
         "operation_context_eligibility",
         "shared_namespace_confinement",
-        "namespace_lifetime",
-        "resource_governance",
+        "namespace_lifetime.absolute_expiry_cancels_remaining_pins",
+        "resource_governance.maximum_shared_in_flight_seconds",
+        "resource_governance.hard_request_deadline",
+        "resource_governance.in_flight_state_machine",
         "shared_proxy_policy",
     ]
     assert interfaces["C15"]["signature"]["schema"] == "retirement.schema.json"
@@ -2030,6 +2172,10 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
     assert interfaces["C18"]["delivery"]["authentication"] == (
         "full_current_local_show_access_validation_then_atomic_runtime_pin"
     )
+    assert {
+        "runtime-context.resource_governance.maximum_shared_in_flight_seconds",
+        "runtime-context.resource_governance.hard_request_deadline",
+    } <= set(interfaces["C18"]["signature"]["covered_fields"])
     assert interfaces["C19"]["signature"]["schema"] == "local-legacy-mapping.schema.json"
     assert interfaces["C20"]["signature"]["schema"] == "apply-transition-algebra.json#/stable_writer"
     assert interfaces["C20"]["signature"]["covered_fields"][-2:] == [

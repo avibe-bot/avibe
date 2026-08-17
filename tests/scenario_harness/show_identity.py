@@ -6,13 +6,16 @@ import hmac
 import json
 import secrets
 import threading
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import jwt
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -31,6 +34,45 @@ def _encode(value: bytes) -> str:
 
 def _decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _strict_json_object(value: bytes) -> dict[str, Any] | None:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("duplicate_json_member")
+            result[key] = item
+        return result
+
+    try:
+        decoded = json.loads(value, object_pairs_hook=reject_duplicates)
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _origin_from_url(value: str) -> dict[str, Any] | None:
+    try:
+        parsed = urlsplit(value)
+        if parsed.username is not None or parsed.password is not None or parsed.hostname is None:
+            return None
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "scheme": parsed.scheme.lower(),
+        "normalized_host": parsed.hostname.lower(),
+        "effective_port": port,
+    }
+
+
+def _origin_url(origin: dict[str, Any]) -> str:
+    scheme = origin["scheme"]
+    host = origin["normalized_host"]
+    port = origin["effective_port"]
+    default_port = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}{'' if port == default_port else f':{port}'}"
 
 
 @dataclass(frozen=True)
@@ -98,12 +140,34 @@ class BackendRs256Issuer:
             keys.append(self.public_jwk(self.previous_key, self.previous_kid))
         return {"keys": keys}
 
+    @staticmethod
+    def authorize_redirect_uri(
+        redirect_uri: str,
+        server_owned_origins: list[dict[str, Any]],
+        callback_path: str,
+    ) -> bool:
+        try:
+            parsed = urlsplit(redirect_uri)
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            parsed.scheme == "https"
+            and not parsed.query
+            and not parsed.fragment
+            and parsed.path == callback_path
+            and _origin_from_url(redirect_uri) in server_owned_origins
+        )
+
     def rotate(self) -> None:
         self.previous_key = self.current_key
         self.previous_kid = self.current_kid
         self._generation += 1
         self.current_kid = f"show-identity-key-{self._generation}"
         self.current_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def retire_previous(self) -> None:
+        self.previous_kid = None
+        self.previous_key = None
 
     def issue(
         self,
@@ -121,6 +185,17 @@ class BackendRs256Issuer:
         if algorithm is None:
             signing_key = None
         return jwt.encode(claims, signing_key, algorithm=algorithm, headers=protected)
+
+    def issue_raw_json(
+        self,
+        protected_json: str,
+        payload_json: str,
+        *,
+        key: rsa.RSAPrivateKey | None = None,
+    ) -> str:
+        signing_input = f"{_encode(protected_json.encode())}.{_encode(payload_json.encode())}".encode()
+        signature = (key or self.current_key).sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+        return f"{signing_input.decode()}.{_encode(signature)}"
 
 
 class JwksProvider:
@@ -165,6 +240,7 @@ class AvibeJwtVerifier:
         self._refresh_attempted: set[str] = set()
         self._refresh_lock = threading.Lock()
         self._cache_expires_at = 0
+        self.verify_call_count = 0
         if not pairing.issuer.startswith("https://"):
             raise ValueError("issuer_not_https")
         expected_jwks_uri = f"{pairing.issuer}/oauth/jwks.json"
@@ -222,26 +298,49 @@ class AvibeJwtVerifier:
             self._cache_expires_at = now + self.contract["jwks_verification"]["cache_policy"]["maximum_age_seconds"]
             return kid in self._keys
 
-    @staticmethod
-    def _protected_header(token: str) -> dict[str, Any] | None:
+    def _wire_parts(self, token: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
         try:
+            if (
+                not isinstance(token, str)
+                or len(token.encode("utf-8")) > self.contract["wire_protocol"]["maximum_compact_token_bytes"]
+            ):
+                return None
             segments = token.split(".")
             if len(segments) != 3 or any(not segment for segment in segments):
                 return None
-            header = json.loads(_decode(segments[0]))
-        except (TypeError, ValueError, json.JSONDecodeError):
+            header = _strict_json_object(_decode(segments[0]))
+            claims = _strict_json_object(_decode(segments[1]))
+        except (TypeError, ValueError):
             return None
-        return header if isinstance(header, dict) else None
+        if header is None or claims is None:
+            return None
+
+        strict = self.contract["wire_protocol"]["strict_json_boundary"]
+        if set(header) != set(strict["header_string_limits"]):
+            return None
+        if set(claims) != set(self.contract["required_signed_claims"]):
+            return None
+        for field, maximum in strict["header_string_limits"].items():
+            value = header[field]
+            if not isinstance(value, str) or not value or len(value) > maximum:
+                return None
+        for field, maximum in strict["payload_string_limits"].items():
+            value = claims[field]
+            if not isinstance(value, str) or not value or len(value) > maximum:
+                return None
+        if any(type(claims[field]) is not int for field in strict["numeric_date_fields"]):
+            return None
+        return header, claims
 
     def verify(self, token: str) -> dict[str, Any] | None:
-        header = self._protected_header(token)
-        if header is None or set(header) != {"alg", "typ", "kid"}:
+        self.verify_call_count += 1
+        wire = self._wire_parts(token)
+        if wire is None:
             return None
+        header, unverified_claims = wire
         if header.get("alg") != "RS256" or header.get("typ") != "JWT":
             return None
         kid = header.get("kid")
-        if not isinstance(kid, str) or not kid:
-            return None
 
         if not self._refresh_if_needed(kid):
             return None
@@ -256,23 +355,21 @@ class AvibeJwtVerifier:
                 algorithms=["RS256"],
                 options={"verify_aud": False, "verify_exp": False, "verify_iat": False},
             )
-        except jwt.PyJWTError:
+        except (TypeError, ValueError, jwt.PyJWTError):
             return None
         required = self.contract["required_signed_claims"]
-        if not isinstance(claims, dict) or set(claims) != set(required):
+        if not isinstance(claims, dict) or set(claims) != set(required) or claims != unverified_claims:
             return None
         if claims["iss"] != self.pairing.issuer or claims["aud"] != self.pairing.audience:
             return None
         if claims["instance_id"] != self.pairing.instance_id:
             return None
-        if not isinstance(claims["aud"], str):
-            return None
         now = self.now()
-        if type(claims["iat"]) is not int or type(claims["exp"]) is not int:
-            return None
         if not (claims["iat"] - self.contract["verifier_clock_skew_seconds"] <= now):
             return None
         if not (now <= claims["exp"] + self.contract["verifier_clock_skew_seconds"]):
+            return None
+        if not (claims["iat"] <= claims["exp"]):
             return None
         if claims["exp"] - claims["iat"] > self.contract["maximum_lifetime_seconds"]:
             return None
@@ -304,66 +401,107 @@ class LocalIdentitySessionStore:
     def __init__(self, contract: dict[str, Any], now: Callable[[], int]) -> None:
         self.contract = contract
         self.now = now
-        self.generation = secrets.token_urlsafe(16)
+        self.store_generation = secrets.token_urlsafe(16)
+        self._lock = threading.Lock()
         self.records: dict[str, dict[str, Any]] = {}
+        self.lineages: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def token_hash(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def issue(self, pairing: PairingRecord, claims: dict[str, Any], callback_hostname: str) -> str:
-        token = secrets.token_urlsafe(32)
-        issued_at = self.now()
-        self.records[self.token_hash(token)] = {
-            "paired_instance_id": pairing.instance_id,
-            "issuer": pairing.issuer,
-            "subject": claims["sub"],
-            "normalized_verified_email": claims["verified_email"],
-            "callback_hostname": callback_hostname,
-            "issued_at": issued_at,
-            "expires_at": issued_at + self.contract["maximum_lifetime_seconds"],
-            "generation": self.generation,
-        }
-        return token
+    def rotate(
+        self,
+        pairing: PairingRecord,
+        claims: dict[str, Any],
+        callback_origin: dict[str, Any],
+        prior_token: str | None,
+        prior_flow: dict[str, Any] | None,
+    ) -> str:
+        with self._lock:
+            prior_hash = self.token_hash(prior_token) if prior_token is not None else None
+            lineage_id: str | None = None
+            if (
+                prior_flow is not None
+                and prior_hash == prior_flow["prior_token_hash"]
+                and self.now() <= prior_flow["expires_at"]
+            ):
+                candidate = self.lineages.get(prior_flow["lineage_id"])
+                if candidate is not None and prior_flow["lineage_generation"] <= candidate["current_generation"]:
+                    lineage_id = prior_flow["lineage_id"]
+            if lineage_id is None:
+                lineage_id = uuid.uuid4().hex
+                self.lineages[lineage_id] = {"current_generation": 0, "current_token_hash": None}
+
+            lineage = self.lineages[lineage_id]
+            old_hash = lineage["current_token_hash"]
+            if old_hash is not None:
+                self.records.pop(old_hash, None)
+            lineage_generation = lineage["current_generation"] + 1
+            token = secrets.token_urlsafe(32)
+            token_hash = self.token_hash(token)
+            issued_at = self.now()
+            self.records[token_hash] = {
+                "paired_instance_id": pairing.instance_id,
+                "issuer": pairing.issuer,
+                "subject": claims["sub"],
+                "normalized_verified_email": claims["verified_email"],
+                "callback_origin": dict(callback_origin),
+                "lineage_id": lineage_id,
+                "lineage_generation": lineage_generation,
+                "store_generation": self.store_generation,
+                "issued_at": issued_at,
+                "expires_at": issued_at + self.contract["maximum_lifetime_seconds"],
+            }
+            lineage.update(current_generation=lineage_generation, current_token_hash=token_hash)
+            return token
+
+    def _record_is_current(
+        self,
+        record: dict[str, Any],
+        pairing: PairingRecord,
+        callback_origin: dict[str, Any],
+    ) -> bool:
+        lineage = self.lineages.get(record["lineage_id"])
+        return bool(
+            type(record["issued_at"]) is int
+            and type(record["expires_at"]) is int
+            and record["issued_at"] <= self.now() <= record["expires_at"]
+            and record["paired_instance_id"] == pairing.instance_id
+            and record["issuer"] == pairing.issuer
+            and record["callback_origin"] == callback_origin
+            and record["store_generation"] == self.store_generation
+            and lineage is not None
+            and record["lineage_generation"] == lineage["current_generation"]
+        )
 
     def validate(
         self,
         token: str | None,
         *,
         pairing: PairingRecord,
-        request_hostname: str,
+        request_origin: dict[str, Any],
     ) -> dict[str, Any] | None:
         if token is None:
             return None
         record = self.records.get(self.token_hash(token))
         if record is None:
             return None
-        if type(record["issued_at"]) is not int or type(record["expires_at"]) is not int:
-            return None
-        if not (record["issued_at"] <= self.now() <= record["expires_at"]):
-            return None
-        if (
-            record["paired_instance_id"] != pairing.instance_id
-            or record["issuer"] != pairing.issuer
-            or record["callback_hostname"] != request_hostname
-            or record["generation"] != self.generation
-        ):
+        if not self._record_is_current(record, pairing, request_origin):
             return None
         return record
 
     def reset(self) -> None:
-        self.generation = secrets.token_urlsafe(16)
-        self.records.clear()
-
-    def revoke(self, token: str | None) -> None:
-        if token is not None:
-            self.records.pop(self.token_hash(token), None)
+        with self._lock:
+            self.store_generation = secrets.token_urlsafe(16)
+            self.records.clear()
+            self.lineages.clear()
 
 
 class ShowIdentityScenarioHarness:
     """Executable HTTP/JWT/JWKS reference boundary, not browser conformance."""
 
-    def __init__(self) -> None:
+    def __init__(self, callback_origin: dict[str, Any] | None = None) -> None:
         self.now = REFERENCE_NOW
         self.contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
         self.scenario = self.contract["closed_loop_scenario"]
@@ -373,6 +511,7 @@ class ShowIdentityScenarioHarness:
         self.callback_contract = self.scenario["callback"]
         self.cookie_contract = self.handshake["correlation_cookie"]
         self.session_contract = self.handshake["identity_session"]
+        self.callback_origin = dict(callback_origin or self.start_contract["callback_origin"])
         self.state_signer = LocalStateSigner()
         self.pairing = PairingRecord(instance_id=self.start_contract["instance_id"])
         self.issuer = BackendRs256Issuer(self.pairing)
@@ -383,6 +522,12 @@ class ShowIdentityScenarioHarness:
         self.issued_credential: dict[str, Any] | None = None
         self.successful_callback_count = 0
         self.http_callback_count = 0
+        self.cookie_selection_count = 0
+        self.page_lookup_count = 0
+        self.session_rotation_count = 0
+        self.last_callback_cookie_names: set[str] = set()
+        self.last_browser_sent_cookie_names: set[str] = set()
+        self.flow_prior_sessions: dict[str, dict[str, Any] | None] = {}
         self.pages = {
             self.start_contract["share_id"]: {
                 "instance_id": self.start_contract["instance_id"],
@@ -416,21 +561,37 @@ class ShowIdentityScenarioHarness:
             "emails": emails,
         }
 
-    async def _start(self, share_id: str):
+    async def _start(self, request: Request, share_id: str):
         page = self.pages.get(share_id)
         if page is None:
             return JSONResponse({"error": "show_not_found"}, status_code=404)
         nonce = secrets.token_urlsafe(32)
         cookie_value = secrets.token_urlsafe(32)
         cookie_name = self.cookie_name(nonce)
-        callback_hostname = self.start_contract["callback_hostname"]
-        callback_url = f"https://{callback_hostname}{self.cookie_contract['path']}"
+        callback_url = f"{_origin_url(self.callback_origin)}{self.cookie_contract['path']}"
+        session_cookie_name = self.session_contract["cookie"]["name"]
+        prior_token = request.cookies.get(session_cookie_name)
+        prior_record = self.identity_sessions.validate(
+            prior_token,
+            pairing=self.pairing,
+            request_origin=_origin_from_url(str(request.url)) or {},
+        )
+        self.flow_prior_sessions[nonce] = (
+            {
+                "prior_token_hash": self.identity_sessions.token_hash(prior_token),
+                "lineage_id": prior_record["lineage_id"],
+                "lineage_generation": prior_record["lineage_generation"],
+                "expires_at": self.now + self.backend["ttl_seconds"],
+            }
+            if prior_token is not None and prior_record is not None
+            else None
+        )
         payload = {
             "instance_id": page["instance_id"],
             "page_id": page["page_id"],
             "share_id": page["share_id"],
             "safe_public_return_target": f"/p/{page['share_id']}/",
-            "callback_hostname": callback_hostname,
+            "callback_origin": dict(self.callback_origin),
             "nonce": nonce,
             "correlation_cookie_sha256": hashlib.sha256(cookie_value.encode()).hexdigest(),
             "issued_at": self.now,
@@ -455,17 +616,22 @@ class ShowIdentityScenarioHarness:
             max_age=self.backend["ttl_seconds"],
             secure=True,
             httponly=True,
-            samesite="none",
+            samesite=self.cookie_contract["same_site"].lower(),
             path=self.cookie_contract["path"],
         )
         response.headers["Cache-Control"] = "private, no-store"
         return response
 
-    def begin(self, *, share_id: str | None = None) -> IdentityHandshakeStart:
+    def begin(self, *, share_id: str | None = None, client: TestClient | None = None) -> IdentityHandshakeStart:
         selected_share = share_id or self.start_contract["share_id"]
-        response = self.client.get(f"https://{self.start_contract['callback_hostname']}/p/{selected_share}/")
+        response = (client or self.client).get(f"{_origin_url(self.callback_origin)}/p/{selected_share}/")
         assert response.status_code == 200
         request = response.json()["authorize_request"]
+        assert self.issuer.authorize_redirect_uri(
+            request["redirect_uri"],
+            self.start_contract["server_owned_callback_origins"],
+            self.cookie_contract["path"],
+        )
         return IdentityHandshakeStart(
             state=request["state"],
             nonce=request["nonce"],
@@ -506,7 +672,7 @@ class ShowIdentityScenarioHarness:
                 cookie_name,
                 secure=True,
                 httponly=True,
-                samesite="none",
+                samesite=self.cookie_contract["same_site"].lower(),
                 path=self.cookie_contract["path"],
             )
         return response
@@ -530,7 +696,7 @@ class ShowIdentityScenarioHarness:
         session = self.identity_sessions.validate(
             session_cookie,
             pairing=self.pairing,
-            request_hostname=request.url.hostname or "",
+            request_origin=_origin_from_url(str(request.url)) or {},
         )
         if session is None:
             return self._deny("identity_required_without_page_bytes")
@@ -550,15 +716,25 @@ class ShowIdentityScenarioHarness:
         }
         return JSONResponse({"outcome": "serve_shared_after_current_membership"})
 
-    def later_request(self, share_id: str | None = None, *, base_url: str | None = None):
+    def later_request(
+        self,
+        share_id: str | None = None,
+        *,
+        base_url: str | None = None,
+        client: TestClient | None = None,
+    ):
         selected_share = share_id or self.start_contract["share_id"]
-        origin = base_url or f"https://{self.start_contract['callback_hostname']}"
-        return self.client.get(f"{origin}/p/{selected_share}/__identity_session")
+        origin = base_url or _origin_url(self.callback_origin)
+        return (client or self.client).get(f"{origin}/p/{selected_share}/__identity_session")
 
     async def _callback(self, request: Request):
         self.http_callback_count += 1
         content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if request.url.query or content_type != self.callback_contract["content_type"]:
+        if (
+            request.url.query
+            or request.url.path != self.cookie_contract["path"]
+            or content_type != self.callback_contract["content_type"]
+        ):
             return self._deny()
         decoded_form = parse_qs((await request.body()).decode(), keep_blank_values=True)
         if set(decoded_form) != set(self.backend["delivery"]["form_fields"]):
@@ -571,16 +747,23 @@ class ShowIdentityScenarioHarness:
         state = self.state_signer.verify(decoded_form["state"][0])
         if state is None or set(state) != set(self.handshake["signed_state_fields"]):
             return self._deny()
-        cookie_name = self.cookie_name(state["nonce"])
         if not self._state_is_current(state):
-            return self._deny(cookie_name=cookie_name)
+            nonce = state.get("nonce")
+            return self._deny(cookie_name=self.cookie_name(nonce) if isinstance(nonce, str) and nonce else None)
+        actual_origin = _origin_from_url(str(request.url))
+        trusted_origins = self.start_contract["server_owned_callback_origins"]
+        if (
+            actual_origin is None
+            or state.get("callback_origin") not in trusted_origins
+            or actual_origin != state.get("callback_origin")
+        ):
+            return self._deny()
+        cookie_name = self.cookie_name(state["nonce"])
+        self.cookie_selection_count += 1
+        self.last_callback_cookie_names = set(request.cookies)
         cookie = request.cookies.get(cookie_name)
         claims = self.verifier.verify(decoded_form["assertion"][0])
         if cookie is None or claims is None:
-            return self._deny(cookie_name=cookie_name)
-        if request.url.hostname != state["callback_hostname"]:
-            return self._deny(cookie_name=cookie_name)
-        if request.url.hostname not in self.start_contract["allowed_callback_hostnames"]:
             return self._deny(cookie_name=cookie_name)
         if claims["nonce"] != state["nonce"] or claims["instance_id"] != state["instance_id"]:
             return self._deny(cookie_name=cookie_name)
@@ -591,6 +774,7 @@ class ShowIdentityScenarioHarness:
         if not self.consumption_store.consume(claims["nonce"], claims["jti"], retained_until):
             return self._deny(cookie_name=cookie_name)
 
+        self.page_lookup_count += 1
         page = self.pages.get(state["share_id"])
         if page is None:
             return self._deny(cookie_name=cookie_name)
@@ -601,8 +785,14 @@ class ShowIdentityScenarioHarness:
         ):
             return self._deny(cookie_name=cookie_name)
         session_cookie = self.session_contract["cookie"]
-        self.identity_sessions.revoke(request.cookies.get(session_cookie["name"]))
-        identity_session_token = self.identity_sessions.issue(self.pairing, claims, state["callback_hostname"])
+        identity_session_token = self.identity_sessions.rotate(
+            self.pairing,
+            claims,
+            state["callback_origin"],
+            request.cookies.get(session_cookie["name"]),
+            self.flow_prior_sessions.pop(state["nonce"], None),
+        )
+        self.session_rotation_count += 1
         self.successful_callback_count += 1
         response = RedirectResponse(state["safe_public_return_target"], status_code=303)
         response.headers["Cache-Control"] = "no-store"
@@ -610,7 +800,7 @@ class ShowIdentityScenarioHarness:
             cookie_name,
             secure=True,
             httponly=True,
-            samesite="none",
+            samesite=self.cookie_contract["same_site"].lower(),
             path=self.cookie_contract["path"],
         )
         response.set_cookie(
@@ -619,7 +809,7 @@ class ShowIdentityScenarioHarness:
             max_age=self.session_contract["maximum_lifetime_seconds"],
             secure=True,
             httponly=True,
-            samesite="lax",
+            samesite="none",
             path="/",
         )
         return response
@@ -633,20 +823,48 @@ class ShowIdentityScenarioHarness:
         base_url: str | None = None,
         path_suffix: str = "",
         referer: str = "https://avibe.bot/show-identity/authorize",
+        client: TestClient | None = None,
     ):
         callback = urlsplit(start.callback_url)
-        return self.client.post(
-            f"{base_url or f'{callback.scheme}://{callback.netloc}'}{callback.path}{path_suffix}",
+        selected_client = client or self.client
+        request_url = f"{base_url or f'{callback.scheme}://{callback.netloc}'}{callback.path}{path_suffix}"
+        request_parts = urlsplit(request_url)
+        referer_origin = _origin_from_url(referer)
+        request_origin = _origin_from_url(request_url)
+        cross_site = referer_origin is not None and request_origin is not None and referer_origin != request_origin
+        sent_cookies: list[str] = []
+        sent_names: set[str] = set()
+        for cookie in selected_client.cookies.jar:
+            domain_matches = request_parts.hostname == cookie.domain.lstrip(".")
+            path_matches = request_parts.path.startswith(cookie.path)
+            secure_matches = not cookie.secure or request_parts.scheme == "https"
+            session_blocked = (
+                cross_site
+                and cookie.name == self.session_contract["cookie"]["name"]
+                and self.session_contract["cookie"]["same_site"].lower() != "none"
+            )
+            if domain_matches and path_matches and secure_matches and not session_blocked:
+                sent_cookies.append(f"{cookie.name}={cookie.value}")
+                sent_names.add(cookie.name)
+        self.last_browser_sent_cookie_names = sent_names
+        return selected_client.post(
+            request_url,
             data={"state": state or start.state, "assertion": assertion},
-            headers={"Referer": referer},
+            headers={"Referer": referer, "Cookie": "; ".join(sent_cookies)},
             follow_redirects=False,
         )
 
-    def replace_cookie(self, start: IdentityHandshakeStart, value: str | None = None) -> None:
-        self.client.cookies.set(
+    def replace_cookie(
+        self,
+        start: IdentityHandshakeStart,
+        value: str | None = None,
+        *,
+        client: TestClient | None = None,
+    ) -> None:
+        (client or self.client).cookies.set(
             start.cookie_name,
             value or start.cookie_value,
-            domain=self.start_contract["callback_hostname"],
+            domain=self.callback_origin["normalized_host"],
             path=self.cookie_contract["path"],
         )
 
@@ -698,12 +916,24 @@ class ShowIdentityScenarioHarness:
                 self.issue_assertion(start, claims),
                 referer="https://avibe.bot/show-identity/authorize?assertion=leak",
             ).json()["outcome"]
-        elif mutation == "replace_callback_hostname":
+        elif mutation == "replace_callback_host":
             return self.form_post(
                 start,
                 self.issue_assertion(start, claims),
                 base_url="https://attacker.example",
             ).json()["outcome"]
+        elif mutation == "replace_callback_port":
+            response = self.form_post(
+                start, self.issue_assertion(start, claims), base_url="https://show.example.test:8443"
+            )
+            return response.json()["outcome"]
+        elif mutation == "replace_callback_scheme":
+            response = self.form_post(start, self.issue_assertion(start, claims), base_url="http://show.example.test")
+            return response.json()["outcome"]
+        elif mutation == "replace_callback_path":
+            response = self.form_post(start, self.issue_assertion(start, claims), path_suffix="/other")
+            assert response.status_code == 404
+            return "reject_without_credential_or_page_bytes"
         elif mutation == "add_page_authorization_claim":
             claims["page_authorization"] = "limited"
         elif mutation != "reuse_consumed_nonce":

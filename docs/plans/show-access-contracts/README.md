@@ -28,15 +28,21 @@ Avibe Backend authenticates identity only. Its compact RS256 JWT/JWS assertion i
 and contains a verified email, but no page membership, page authorization, Instance
 role, or `show_page_email` access source. Local Avibe re-resolves the share and
 checks current local membership on every limited request.
-The executable identity owner derives one host-only, callback-scoped,
+The executable identity owner derives one server-owned callback origin as exact
+scheme, normalized host, and effective port, then creates one host-only, callback-scoped,
 `SameSite=None`, `Secure`, `HttpOnly` cookie per signed nonce. The cookie value is
 an independent 32-byte secret, state is verified before cookie selection, and atomic
 nonce/`jti` retention supports concurrent flows. The reference harness performs a
-real HTTP form POST plus compact JWT/JWKS verification. Signed state and paired-issuer
+real HTTP form POST plus strict compact JWT/JWKS verification. Signed state and paired-issuer
 JWKS caches have closed clocks and fail-closed refresh behavior. Callback success
-rotates a token-hash-backed, host-bound, identity-only local session with a
+atomically advances a token-hash-backed, exact-origin-bound identity-only session
+lineage and invalidates every prior generation. Its `SameSite=None` cookie supports
+the cross-site callback without becoming page authorization. A nonce-scoped server
+flow record captures only a currently valid prior token hash and lineage, so concurrent
+callbacks serialize without giving a later stale token lineage authority. The session has a
 non-renewable 24-hour maximum; every later limited request still checks current local
-membership. Browser cookie delivery is residual real-browser evidence.
+membership. The HTTP harness executes the cookie policy model; real-browser delivery
+remains residual conformance evidence.
 
 There is no migration or compatibility phase. The unused hosted storage, endpoints,
 clients, and Instance authorization source are direct deletion targets.
@@ -92,7 +98,12 @@ clients, and Instance authorization source are direct deletion targets.
 - Every protected surface and method revalidates active local ShowAccess, shared mode,
   exact binding, revision, capability lifetime, and limited membership before Runtime
   atomically pins a live namespace/document handle. Offline-to-active never revives an
-  old capability; a request pinned before change may finish and later requests reload.
+  old capability; a request pinned before change may finish only within the hard
+  request deadline, and later requests reload.
+- Every shared response, including streams, has a hard deadline at the earlier of
+  60 seconds after admission or namespace absolute expiry. The deadline terminates the
+  work and atomically releases its pin and weighted charge; no request can keep a
+  namespace or process slot alive past absolute expiry.
 - Membership removal affects the next request without Backend. Loaded guest tabs are
   not actively closed.
 - Ordinary editor file edits never create, rebase, or background-build a shared

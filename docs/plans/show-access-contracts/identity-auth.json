@@ -22,11 +22,17 @@
       "forbidden_assertion_locations": ["url_query", "url_fragment", "browser_history", "referrer"]
     },
     "callback_uri_policy": {
+      "authority_source": "server_owned_active_instance_or_custom_listener",
+      "origin_representation": ["scheme", "normalized_host", "effective_port"],
+      "default_https_effective_port": 443,
+      "explicit_port_requires_server_owned_listener": true,
+      "browser_or_request_values_create_authority": false,
       "scheme": "https",
       "query_allowed": false,
       "fragment_allowed": false,
       "path": "/auth/show-identity/callback",
-      "hostname_source": ["active_instance_hostname", "active_custom_hostname"]
+      "equality_boundaries": ["backend_authorize_redirect_uri", "signed_local_state", "actual_callback_request", "identity_session_record", "safe_return_flow"],
+      "rejection_order": "before_assertion_cookie_session_store_or_page_use"
     },
     "wire_protocol": {
       "serialization": "compact_jws",
@@ -41,7 +47,20 @@
       "forbidden_algorithms": ["none", "HS256", "ES256", "EdDSA"],
       "forbidden_header_parameters": ["jku", "jwk", "x5u", "x5c", "crit", "b64"],
       "unsupported_critical_or_unencoded_payload_outcome": "reject_identity_assertion",
-      "payload_claim_set_exact": true
+      "payload_claim_set_exact": true,
+      "maximum_compact_token_bytes": 16384,
+      "strict_json_boundary": {
+        "header_string_limits": {"alg": 16, "typ": 16, "kid": 128},
+        "payload_string_limits": {"iss": 2048, "aud": 512, "sub": 512, "jti": 256, "nonce": 256, "instance_id": 256, "verified_email": 320},
+        "numeric_date_fields": ["iat", "exp"],
+        "numeric_date_type": "json_integer_excluding_boolean",
+        "numeric_date_relation": "iat <= exp and exp - iat <= maximum_lifetime_seconds",
+        "required_string_properties": "nonempty_and_within_named_bound",
+        "duplicate_members": "reject_before_lookup_or_store_input",
+        "null_number_array_object_or_empty_string": "reject_for_every_string_authority_identifier",
+        "extra_or_missing_members": "reject",
+        "malformed_signed_input_outcome": "sanitized_reject_identity_assertion_without_raise"
+      }
     },
     "pairing_trust": {
       "authority": "local_paired_instance_record",
@@ -98,7 +117,13 @@
     "signing_keys": {
       "issuer": "current_signing_key_only",
       "jwks_public_keys": ["current", "previous_during_overlap"],
-      "minimum_overlap_seconds": 660
+      "minimum_previous_key_availability": {
+        "formula": "maximum_assertion_lifetime_seconds + 2 * verifier_clock_skew_seconds",
+        "maximum_assertion_lifetime_seconds": 600,
+        "verifier_clock_skew_seconds": 60,
+        "derived_seconds": 720,
+        "measured_from": "last_possible_old_key_signing"
+      }
     },
     "terminal_errors": [
       {"code": "identity_not_verified", "cache_control": "no-store", "assertion_returned": false},
@@ -122,13 +147,26 @@
       {"id": "JWKS-KNOWN-KID-CACHE-EXPIRY", "token_key": "current", "jwks_state": "known_key_cache_expired", "refreshes": 1, "outcome": "verified_identity"},
       {"id": "JWKS-OLD-KEY-REMOVED", "token_key": "previous", "jwks_state": "old_key_removed_after_overlap", "refreshes": 1, "outcome": "reject_identity_assertion"},
       {"id": "JWKS-EXPIRED-REFRESH-UNAVAILABLE", "token_key": "current", "jwks_state": "expired_cache_refresh_unavailable", "refreshes": 1, "outcome": "reject_identity_assertion"},
-      {"id": "JWKS-UNKNOWN-KID-CONCURRENT", "token_key": "unknown", "jwks_state": "issuer_coalesced_concurrent_refresh", "refreshes": 1, "outcome": "reject_identity_assertion"}
+      {"id": "JWKS-UNKNOWN-KID-CONCURRENT", "token_key": "unknown", "jwks_state": "issuer_coalesced_concurrent_refresh", "refreshes": 1, "outcome": "reject_identity_assertion"},
+      {"id": "JWKS-PREVIOUS-KEY-BEFORE-720", "token_key": "previous", "jwks_state": "previous_key_available_before_derived_deadline", "refreshes": 1, "outcome": "verified_identity"},
+      {"id": "JWKS-PREVIOUS-KEY-AFTER-720", "token_key": "previous", "jwks_state": "previous_key_removed_after_derived_deadline", "refreshes": 1, "outcome": "reject_identity_assertion"}
     ]
   },
   "local_handshake": {
     "producer": "avibe",
-    "server_resolved_before_start": ["instance_id", "page_id", "share_id", "safe_public_return_target"],
-    "signed_state_fields": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_hostname", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"],
+    "server_resolved_before_start": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_origin"],
+    "signed_state_fields": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_origin", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"],
+    "callback_origin_state_machine": {
+      "representation": ["scheme", "normalized_host", "effective_port"],
+      "default_https_port": 443,
+      "fixed_callback_path": "/auth/show-identity/callback",
+      "positive_vectors": [
+        {"id": "CALLBACK-ORIGIN-DEFAULT-HTTPS", "server_owned_origin": {"scheme": "https", "normalized_host": "show.example.test", "effective_port": 443}, "redirect_uri": "https://show.example.test/auth/show-identity/callback", "outcome": "accept_origin"},
+        {"id": "CALLBACK-ORIGIN-EXPLICIT-PORT", "server_owned_origin": {"scheme": "https", "normalized_host": "show.example.test", "effective_port": 7443}, "redirect_uri": "https://show.example.test:7443/auth/show-identity/callback", "outcome": "accept_origin"}
+      ],
+      "negative_mutations": ["alternate_port", "scheme", "host", "path", "query", "fragment"],
+      "failure_outcome": "reject_before_assertion_cookie_session_store_or_page_use"
+    },
     "signed_state_lifecycle": {
       "numeric_date_fields": ["issued_at", "expires_at"],
       "numeric_date_type": "integer",
@@ -159,7 +197,7 @@
       "invalid_state_cookie_deletion": "none",
       "terminal_callback_cookie_action": "consume_and_delete_matching_flow_only"
     },
-    "callback_checks": ["assertion_compact_jws_header_and_rs256_signature", "assertion_pairing_issuer_audience_instance_and_jwks", "assertion_expiry_and_exact_claim_set", "nonce_and_jti_match_and_are_atomically_single_use", "form_post_targets_fixed_https_callback_without_query_or_fragment", "flow_specific_cookie_hash_matches_signed_state", "return_target_matches_signed_same_share_target", "share_reresolves_before_membership_check"],
+    "callback_checks": ["exact_server_owned_callback_origin_and_fixed_path_before_other_inputs", "assertion_compact_jws_header_and_rs256_signature", "strict_header_and_payload_types_before_lookup_or_store_input", "assertion_pairing_issuer_audience_instance_and_jwks", "assertion_expiry_and_exact_claim_set", "nonce_and_jti_match_and_are_atomically_single_use", "flow_specific_cookie_hash_matches_signed_state", "return_target_matches_signed_same_origin_share_target", "share_reresolves_before_membership_check"],
     "consumption_store": {
       "key_fields": ["nonce", "jti"],
       "consume_operation": "atomic_compare_absent_then_insert",
@@ -192,16 +230,27 @@
         "domain_attribute_allowed": false,
         "secure": true,
         "http_only": true,
-        "same_site": "Lax",
+        "same_site": "None",
         "path": "/"
       },
       "server_record_key": "sha256_of_cookie_token",
-      "server_record_fields": ["paired_instance_id", "issuer", "subject", "normalized_verified_email", "callback_hostname", "issued_at", "expires_at"],
+      "server_record_fields": ["paired_instance_id", "issuer", "subject", "normalized_verified_email", "callback_origin", "lineage_id", "lineage_generation", "store_generation", "issued_at", "expires_at"],
       "maximum_lifetime_seconds": 86400,
       "renewable": false,
-      "rotation": "every_successful_login_replaces_prior_session_for_that_browser_flow",
+      "rotation": {
+        "operation": "atomic_lineage_generation_advance_after_all_callback_checks",
+        "prior_token_delivery": "cross_site_form_post_includes_same_site_none_session_cookie",
+        "login_start_flow_correlation": "server_side_nonce_record_captures_only_a_current_prior_token_hash_lineage_and_generation_and_expires_with_signed_state",
+        "callback_prior_token_requirement": "posted_callback_cookie_hash_must_match_the_flow_captured_prior_token_hash",
+        "valid_prior_token": "advance_existing_lineage_and_invalidate_every_earlier_generation",
+        "concurrent_completion": "flows_that_captured_the_same_valid_prior_generation_advance_the_same_lineage_in_callback_order",
+        "no_valid_prior_token_at_login_start": "create_new_lineage",
+        "invalid_or_terminal_callback": "no_lineage_change",
+        "maximum_valid_records_per_lineage": 1,
+        "concurrent_completion_outcome": "one_current_generation_older_response_token_may_be_stale_and_must_restart_login"
+      },
       "reset_policy": "key_or_session_store_reset_invalidates_all_existing_cookies",
-      "request_validation": ["token_hash_record_exists", "integer_times_and_not_expired", "paired_instance_matches", "issuer_matches_pairing", "request_host_matches_record", "local_key_and_session_generation_match"],
+      "request_validation": ["token_hash_record_exists", "integer_times_and_not_expired", "paired_instance_matches", "issuer_matches_pairing", "exact_callback_origin_matches_record", "lineage_generation_is_current", "local_store_generation_matches"],
       "failure_outcome": "identity_required_without_page_bytes",
       "page_authorization": false,
       "later_limited_request": ["resolve_current_share", "load_current_ShowAccess", "require_active_limited", "match_current_local_membership", "mint_page_bound_browsing_credential"],
@@ -213,7 +262,11 @@
         {"id": "SESSION-INSTANCE-MISMATCH", "mutation": "request_other_instance_share", "outcome": "identity_required_without_page_bytes"},
         {"id": "SESSION-MISSING-RECORD", "mutation": "delete_server_record", "outcome": "identity_required_without_page_bytes"},
         {"id": "SESSION-STORE-RESET", "mutation": "rotate_local_session_generation", "outcome": "identity_required_without_page_bytes"},
-        {"id": "SESSION-MEMBER-REMOVED", "mutation": "remove_email_from_current_ShowAccess", "outcome": "generic_deny_without_page_bytes_or_login_loop"}
+        {"id": "SESSION-MEMBER-REMOVED", "mutation": "remove_email_from_current_ShowAccess", "outcome": "generic_deny_without_page_bytes_or_login_loop"},
+        {"id": "SESSION-SEQUENTIAL-ROTATION", "mutation": "second_cross_site_login_with_prior_cookie", "outcome": "new_generation_only_old_token_rejected"},
+        {"id": "SESSION-CONCURRENT-ROTATION", "mutation": "two_valid_callbacks_from_same_prior_generation", "outcome": "one_current_generation_other_response_may_be_stale"},
+        {"id": "SESSION-UNRELATED-LINEAGES", "mutation": "separate_browser_without_prior_token", "outcome": "independent_current_lineages"},
+        {"id": "SESSION-INVALID-CALLBACK", "mutation": "invalid_state_or_terminal_error", "outcome": "existing_lineage_unchanged"}
       ]
     },
     "membership_lookup": "fresh_local_page_email_lookup_on_every_limited_request",
@@ -225,9 +278,11 @@
       "actual_http_boundary": "POST /auth/show-identity/callback",
       "components": ["local_state_signer", "backend_rs256_issuer_and_jwks", "avibe_jwt_verifier", "local_identity_session_store"],
       "content_type": "application/x-www-form-urlencoded",
-      "active_custom_callback_origin": "https://show.example.test",
+      "active_custom_callback_origin": {"scheme": "https", "normalized_host": "show.example.test", "effective_port": 443},
       "contract_evidence": "http_form_jwt_jwks_and_atomic_state_machine",
-      "browser_cookie_delivery_evidence": "future_real_browser_conformance",
+      "browser_cookie_delivery_evidence": "reference_http_same_site_delivery_model",
+      "browser_cookie_delivery_rule": "cross_site_form_post_sends_identity_session_only_with_same_site_none_secure_https",
+      "real_browser_conformance": "future_local_incus_browser_lane",
       "production_conformance": "future_avibe_and_backend_implementation_lanes"
     }
   },
@@ -239,8 +294,11 @@
       "page_id": "ses_identity_contract",
       "share_id": "identity-contract-share",
       "safe_public_return_target": "/p/identity-contract-share/",
-      "callback_hostname": "show.example.test",
-      "allowed_callback_hostnames": ["alice.example.test", "show.example.test"],
+      "callback_origin": {"scheme": "https", "normalized_host": "show.example.test", "effective_port": 443},
+      "server_owned_callback_origins": [
+        {"scheme": "https", "normalized_host": "show.example.test", "effective_port": 443},
+        {"scheme": "https", "normalized_host": "show.example.test", "effective_port": 7443}
+      ],
       "nonce": "nonce_identity_contract_0001",
       "signed_state_valid": true,
       "correlation_cookie_name": "__Secure-avibe_show_identity_c_nonce_identity_contract_0001",
@@ -285,7 +343,10 @@
       {"id": "IDENTITY-CALLBACK-URL-FRAGMENT", "mutation": "add_callback_fragment", "outcome": "reject_without_credential_or_page_bytes"},
       {"id": "IDENTITY-CALLBACK-HISTORY-LEAK", "mutation": "place_assertion_in_browser_history", "outcome": "reject_without_credential_or_page_bytes"},
       {"id": "IDENTITY-CALLBACK-REFERRER-LEAK", "mutation": "place_assertion_in_referrer", "outcome": "reject_without_credential_or_page_bytes"},
-      {"id": "IDENTITY-CALLBACK-UNTRUSTED-HOST", "mutation": "replace_callback_hostname", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-UNTRUSTED-HOST", "mutation": "replace_callback_host", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-ALTERNATE-PORT", "mutation": "replace_callback_port", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-SCHEME", "mutation": "replace_callback_scheme", "outcome": "reject_without_credential_or_page_bytes"},
+      {"id": "IDENTITY-CALLBACK-PATH", "mutation": "replace_callback_path", "outcome": "reject_without_credential_or_page_bytes"},
       {"id": "IDENTITY-CALLBACK-FORBIDDEN-CLAIM", "mutation": "add_page_authorization_claim", "outcome": "reject_without_credential_or_page_bytes"},
       {"id": "IDENTITY-CALLBACK-NOT-VERIFIED", "mutation": "identity_not_verified", "outcome": "identity_not_verified_no_store_without_assertion"},
       {"id": "IDENTITY-CALLBACK-IDENTITY-UNAVAILABLE", "mutation": "identity_unavailable", "outcome": "identity_unavailable_no_store_without_assertion"}

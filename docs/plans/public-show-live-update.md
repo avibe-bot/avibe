@@ -175,8 +175,14 @@ Each login flow has a distinct host-only correlation cookie named
 `__Secure-avibe_show_identity_c_<base64url_nonce>`. Its independent value is a
 32-byte CSPRNG secret; it is `SameSite=None`, `Secure`, `HttpOnly`, scoped exactly
 to `/auth/show-identity/callback`, single-use, and expires no later than signed
-state. Signed state binds the page, its hash, callback hostname, nonce, instance,
-share, safe return, and expiry. Avibe verifies state before selecting a cookie;
+state. One server-owned callback origin is represented as `(scheme, normalized_host,
+effective_port)`; HTTPS without an explicit port means 443. The Backend authorize
+request, `redirect_uri`, signed state, actual callback, identity-session record, and
+safe return flow must agree on that exact origin and the fixed callback path. Signed
+state binds the page, its hash, callback origin, nonce, instance, share, safe return,
+and expiry. Browser values never create callback authority. Avibe rejects scheme,
+host, effective-port, path, query, or fragment mismatch before assertion, cookie,
+session-store, or page use. Avibe verifies state before selecting a cookie;
 invalid state deletes none, and a terminal callback consumes only its flow. Nonce
 and `jti` consumption is atomic and retained through the later state/assertion
 expiry plus verifier skew. Concurrent same-host flows may finish in either order,
@@ -191,7 +197,12 @@ It has exactly three base64url segments and uses RS256 only. The protected heade
 contains exactly `alg=RS256`, `typ=JWT`, and one nonempty `kid`; `none`, other
 algorithms, token-directed key URLs/embedded keys, unsupported critical headers,
 and unencoded payload behavior fail closed. Authorization-code exchange is not part
-of this contract.
+of this contract. Header `alg`, `typ`, and `kid` plus payload `iss`, single-string
+`aud`, `sub`, `jti`, `nonce`, `instance_id`, and `verified_email` are bounded nonempty
+strings. `iat` and `exp` are JSON integers, booleans are rejected, and they must
+satisfy `iat <= exp` plus the maximum-lifetime bound. Duplicate,
+null, wrong-type, empty, extra, or missing members fail with one sanitized result
+before any authority value becomes a key, URL, cookie name, or store input.
 The browser calls
 `GET /api/v1/instances/{instanceId}/show-identity/authorize` with exactly signed
 `state`, `nonce`, and an HTTPS `redirect_uri` on the active instance/custom hostname
@@ -220,8 +231,9 @@ removed or stale keys are not accepted, and refresh failure fails closed.
 Normal lifetime is 300 seconds, hard maximum is 600 seconds, and verifier skew is
 60 seconds. The email is ASCII-trimmed and lowercased from a fresh verified Backend
 identity lookup. Only the current key signs; JWKS keeps current plus previous public
-keys for at least the hard maximum plus skew. Old and new assertions remain
-verifiable during that overlap. `identity_not_verified` and `identity_unavailable`
+keys for at least `maximum lifetime + 2 * verifier skew = 720` seconds after the last
+possible old-key signing. This derived window covers future-`iat` and expiry skew;
+old and new assertions remain verifiable throughout it. `identity_not_verified` and `identity_unavailable`
 are no-store, assertion-free terminal errors. Backend issues unique `jti`; local
 Avibe consumes the nonce and `jti` once.
 
@@ -234,9 +246,18 @@ The local callback verifies signature, issuer, audience, expiry, nonce, single u
 and instance binding, then returns only to the signed safe `/p/` target. Signed state
 uses integer NumericDate fields, is non-renewable, permits 60 seconds of verifier skew,
 and cannot exceed 600 seconds. Success rotates an opaque local server-side identity
-session: the host-only `__Host-` cookie is Secure, HttpOnly, SameSite=Lax, Path=/,
-stores no identity, and maps by token hash to an instance/issuer/subject/email/host
-record for at most 24 non-renewable hours. Expiry, host or instance mismatch, missing
+session only after every callback check succeeds. The host-only `__Host-` cookie is
+Secure, HttpOnly, SameSite=None, Path=/, stores no identity, and maps by token hash to
+an instance/issuer/subject/email/exact-origin record for at most 24 non-renewable
+hours. Each browser lineage has one current generation. A valid prior cookie advances
+the lineage atomically and invalidates every earlier record. At login start, a
+server-side nonce record captures the prior token hash, lineage, and generation only
+when that session is current, and expires with signed state; the callback cookie hash
+must match it. Concurrent flows that captured the same valid generation advance that
+one lineage in callback order and leave at most one valid generation, while a stale
+response token fails closed and restarts login. A flow started with no valid prior
+session creates a new lineage. Invalid and terminal callbacks never rotate. Expiry, origin or
+instance mismatch, missing
 record, and local key/session-store reset fail closed. The next limited request
 re-resolves the share and performs a fresh local membership lookup. The identity
 session is evidence of identity, never cached page authorization. An unlisted identity
@@ -291,8 +312,9 @@ single increment, and no-ops do not advance it. Thus offline-to-active cannot re
 an old capability. Active/offline replay, shared/private changes, public/limited
 changes, binding/revision changes, member remove/re-add, capability expiry,
 namespace expiry, and budget reclaim each have one closed later-request outcome.
-An in-flight request pinned before a transition may finish, but every later request
-revalidates. Already loaded guest DOM/JavaScript is never actively closed, and
+An in-flight request pinned before a transition may finish only within the Runtime
+hard request deadline; every later request revalidates. Already loaded guest
+DOM/JavaScript is never actively closed, and
 Instance/resource ACL revision remains orthogonal.
 
 ### Direct retirement of the unused hosted model
@@ -353,7 +375,13 @@ Shared graphs use immutable opaque namespaces. Recursive TSX, CSS, raw-loader, a
 worker dependencies remain in one namespace with captured provenance; handles never
 reopen source paths or cross namespaces. Namespace lifetime is non-renewable, memory
 uses one process-wide weighted budget with per-Session bounds and private reserve,
-and sanitized overload is the only shared admission failure.
+and sanitized overload is the only shared admission failure. Every shared document,
+module, resource, fallback, API response, and stream is bounded to 60 seconds. Its
+hard deadline is the earlier of admission plus 60 seconds and namespace absolute
+expiry. Runtime then terminates the handler or stream, atomically releases the pin and
+weighted charge, and emits only a sanitized timeout or reload-required result. No
+pre-expiry admission can keep a namespace or process slot alive past absolute expiry;
+unbounded shared streams are unsupported and clients may reconnect.
 
 Every public and limited shared response is `private, no-store`: shell, entry,
 document, module, SPA fallback, API handler, redirect, and error. Limited responses
@@ -450,14 +478,17 @@ Contract tests must:
   does not promise active tab closure;
 - prove identity assertions cannot carry page authority, membership, Instance roles,
   or privileged surface capability;
-- execute compact RS256 JWT/JWKS verification, paired trust, rotation/refresh failure
-  vectors, bounded signed-state and JWKS-cache clocks, the flow-specific
-  cookie/state/nonce/`jti` concurrent login machine, and the later identity-session
+- execute exact callback-origin equality, strict compact RS256 JWT/JWKS types, paired
+  trust, derived 720-second rotation/refresh boundaries, bounded signed-state and
+  JWKS-cache clocks, the flow-specific cookie/state/nonce/`jti` concurrent login
+  machine, browser-accurate session-lineage rotation, and the later identity-session
   request through expiry/removal/reset;
 - prove the trusted `/p/` shell can load a current limited member while arbitrary
   sibling page code cannot fetch, frame, open/read, or use ambient credentials for it;
 - exhaust every protected surface and method across current/offline/mode/binding/
   revision/membership/expiry/reclaim inputs and the full post-mint transition table;
+- execute hung handler, infinite stream, request-deadline, namespace-expiry,
+  concurrent reclaim, ledger recovery, and post-release admission traces;
 - exhaust public/limited shared response surfaces and require `private, no-store`;
 - reject noncanonical stored/result emails, globally contended share bindings, and a
   latest-only receipt implementation using known-answer canonical digest vectors and
@@ -483,7 +514,7 @@ browser, Backend, Runtime, or local Incus evidence.
 | --- | --- | --- |
 | `SHOW-LIVE-001` | Resource editor opens `/p/<share>/` and the Agent edits | Trusted top-level navigation redirects to canonical `/show/` with private no-store metadata and safe suffix/query preservation; resource editor receives HMR and annotations only on `/show/`; missing multiple or untrusted HMR Origin rejects before upstream WebSocket; React Fast Refresh preservation remains a future browser check |
 | `SHOW-LIVE-002` | Listed-only guest opens limited `/p/` and the Agent edits | Trusted shell plus a current binding-scoped credential serves the opaque-origin shared page; sibling page code cannot fetch frame or open/read it; `/p/` has no HMR or annotations; new content appears only after a later refresh |
-| `SHOW-LIVE-003` | Unlisted identity completes limited login and retries | Bounded signed state and paired JWKS lifecycles close one cross-site form POST; callback rotates a local identity-only session; the later limited request re-resolves current membership; absent membership returns one generic denial with no page bytes or loop |
+| `SHOW-LIVE-003` | Unlisted identity completes limited login and retries | Exact callback origin strict JWT types and derived JWKS lifecycles close one cross-site form POST; callback atomically rotates one local identity-only session lineage; the later limited request re-resolves current membership; absent membership returns one generic denial with no page bytes or loop |
 | `SHOW-LIVE-004` | The same stable link changes from limited to fully public | Local Apply preserves the binding and advances audience revision once; anonymous `/p/` receives an admitted protected-content capability and becomes readable; shared readers still have no HMR or annotations |
 | `SHOW-LIVE-005` | Private `/show/` and shared `/p/` traffic run together | Runtime graphs are keyed by Session and context; shared lifecycle cannot rebase or close private HMR; both `/p/` audiences remain shared |
 | `SHOW-LIVE-006` | Identity resolution fails for public and limited requests | Public `/p/` independently admits anonymous protected content and remains readable; limited `/p/` fails closed; neither outcome selects HMR |
@@ -507,8 +538,8 @@ browser, Backend, Runtime, or local Incus evidence.
 | `SHOW-LIVE-024` | Source path changes after an opaque handle is issued | Existing handle serves immutable captured bytes; handle reads do not reopen the path; unsafe replacement cannot receive new admission |
 | `SHOW-LIVE-025` | Apply uses stale revision reuses a mutation ID or contends for a custom slug | Stale expected audience revision rejects before write; conflicting payload reuse rejects before write; an atomically detected binding collision returns share_id_taken without write; none changes the local aggregate |
 | `SHOW-LIVE-026` | Owner applies a canonically identical limited email set | Normalization produces one lowercase unique lexicographically sorted set; noncanonical persisted or result order rejects; Apply returns no change; audience revision and stable binding remain unchanged |
-| `SHOW-LIVE-027` | Anonymous reads touch superseded namespaces before idle deadlines | Absolute lifetime remains non-renewable; whole namespace and snapshot bytes are reclaimed; stale document must reload |
-| `SHOW-LIVE-028` | Shared traffic exceeds the Runtime-wide budget | Process and per-Session bounds hold; private reserve cannot be consumed by shared traffic; excess shared admission is sanitized |
+| `SHOW-LIVE-027` | Anonymous reads touch superseded namespaces before idle deadlines | Absolute lifetime remains non-renewable and cancels every remaining pin; whole namespace and snapshot bytes are reclaimed; stale document must reload |
+| `SHOW-LIVE-028` | Shared traffic exceeds the Runtime-wide budget | Process and per-Session bounds hold with a sixty-second in-flight limit and one ledger owner; private reserve cannot be consumed by shared traffic; excess shared admission is sanitized |
 | `SHOW-LIVE-029` | Limited changes to public without rotating its link | Local Apply preserves the binding; membership becomes empty; anonymous reads begin from the same slug immediately |
 | `SHOW-LIVE-030` | Released headerless Avibe client sends only legacy base | Entry module fallback and prewarm retain singleton propagation; keyed context remains disabled; unknown protocol still rejects safely |
 | `SHOW-LIVE-031` | Apply crashes at every local transaction boundary | There is no partially authoritative aggregate; receipts with frozen canonical digests survive later Apply and replay the original result; no hosted operation cleanup or reconciliation exists |
@@ -517,7 +548,7 @@ browser, Backend, Runtime, or local Incus evidence.
 | `SHOW-LIVE-034` | Custom-slug public page changes to limited | The exact custom binding is preserved; normalized local membership installs atomically; listed shared reads and anonymous denial use the same slug |
 | `SHOW-LIVE-035` | Resource viewer and editor open `/p/` with a legacy Runtime | Both trusted top-level requests redirect to canonical `/show/`; viewer remains read-only; editor HMR remains on the private canonical surface |
 | `SHOW-LIVE-036` | Authorized owner reads limited settings | Route HTTP IPC result and projection page identities all match or no settings return; exact normalized emails come only from local storage; actual HTTP metadata is private and no-store while the projection excludes mutation receipts; Backend receives no whitelist data |
-| `SHOW-LIVE-037` | Listed guest completes identity-only login | Backend returns one bounded signed verified instance-bound identity assertion with fail-closed JWKS revalidation; Avibe closes callback correlation and rotates a local identity-only session; a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/` |
+| `SHOW-LIVE-037` | Listed guest completes identity-only login | Backend returns one strictly typed signed verified instance-bound identity assertion with derived fail-closed JWKS retention; Avibe closes exact-origin callback correlation and atomically rotates one local identity-only session lineage; a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/` |
 | `SHOW-LIVE-038` | Listed-only guest copies page ID and requests canonical `/show/` | Current membership plus a binding-scoped credential positively serves limited `/p/`; canonical document module API and HMR remain denied; membership and browsing credential create no Instance role or editor capability |
 | `SHOW-LIVE-039` | Malicious code on a public sibling page targets a limited share | Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker registration opener or protected bytes; every forged or ambient request is denied; capability-path OPTIONS and JSON mutations are credentialless and sibling attempts are sanitized; trusted shell plus current membership and public anonymous admission remain positive paths |
 
@@ -537,8 +568,9 @@ The design is ready for implementation lanes only when:
   promises active guest-tab closure;
 - identity-only Backend assertions cannot express page or Instance authorization;
 - the shared auth scenario executes form POST with compact RS256/JWKS verification,
-  flow-specific callback cookies, atomic concurrent nonce/`jti` consumption, paired
-  issuer/audience/instance trust, and safe return checks;
+  exact server-owned callback-origin checks, strict wire types, flow-specific callback
+  cookies, atomic concurrent nonce/`jti` consumption and session-lineage rotation,
+  paired issuer/audience/instance trust, derived key retention, and safe return checks;
 - resource viewer/editor authority remains independent of local membership;
 - private disables but retains a stable binding, limited/public preserve it, and
   explicit rotation replaces it;
@@ -556,8 +588,9 @@ The design is ready for implementation lanes only when:
   plus resource-editor authority before upstream open, and one persistent monitor
   gives every durable revocation source a five-second total closure bound even when
   notification delivery is lost;
-- Runtime protocol, graph isolation, immutable shared confinement, budgets, proxy
-  sanitation, and release provenance remain frozen;
+- Runtime protocol, graph isolation, immutable shared confinement, the 60-second
+  in-flight deadline and absolute-expiry pin cancellation, budgets, proxy sanitation,
+  and release provenance remain frozen;
 - every SHOW-LIVE Expected evidence clause has executable scalar contract proof;
 - later UI, Backend, Runtime, browser, and Incus lanes remain explicitly residual.
 
