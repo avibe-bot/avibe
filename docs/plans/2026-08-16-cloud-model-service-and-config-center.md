@@ -206,8 +206,9 @@ scope per instance behind them.
   by scope, config revision, and capability so status polling cannot create one event per instance
   per minute; the first observing instance remains a context tag but is not part of the
   deduplication key. Explicit admin verification uses the fixed non-customer
-  `model-service-probe` context when there is no calling instance. Both adapters atomically upsert
-  `available`/`unavailable` state in a shared
+  `model-service-probe` context when there is no calling instance; transition-window claimless
+  realtime uses its existing fixed `unattributed-legacy` context. Neither value identifies a
+  customer instance. Both adapters atomically upsert `available`/`unavailable` state in a shared
   transition table; only a successfully persisted transition to `unavailable` grants permission
   to emit the outage event. A successful managed decrypt attempts the `available` transition on
   every call. If that recovery write fails, the usable call still proceeds, the write is retried
