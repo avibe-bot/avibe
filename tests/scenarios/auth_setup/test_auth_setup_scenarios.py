@@ -12,7 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -33,6 +35,7 @@ from config.v2_config import (
 )
 from core.agent_auth_service import AgentAuthService
 from core.handlers.model_hub.service import ModelHubError
+from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
@@ -42,6 +45,7 @@ from tests.scenario_harness.organization_management import (
     OrganizationManagementScenarioHarness,
 )
 from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
+from tests.ui_server_test_helpers import _save_config
 from storage import remote_access_authorization_service
 from vibe import cloud_management
 from tests.scenario_harness.model_hub_native_oauth import (
@@ -58,7 +62,7 @@ from vibe.claude_config import (
     materialize_claude_subprocess_env,
     read_claude_settings_env,
 )
-from vibe import remote_access, ui_server
+from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
 
 
@@ -101,6 +105,111 @@ class ShowPageEmailAccessScenarioTests(unittest.TestCase):
             self.harness.get(existing_session_handshake["next_path"]).status_code,
             200,
         )
+
+
+def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-404"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.issuer = "https://backend.test"
+    cloud.jwks_uri = "https://backend.test/oauth/jwks.json"
+    config.save()
+
+    store = ShowPageStore()
+    try:
+        page = store.ensure("limited-identity-scenario")
+        access = store.get_access(page.session_id)
+        assert access is not None
+        applied = store.apply_access(
+            page.session_id,
+            expected_revision=access.revision,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["viewer@example.com"],
+        )
+        assert applied.status == "applied"
+    finally:
+        store.close()
+
+    client = app.test_client()
+    remote_peer = {"REMOTE_ADDR": "203.0.113.44"}
+    navigation = client.get(
+        f"/p/{page.share_id}/reports/daily?tab=1",
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer,
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert navigation.status_code == 302
+    authorize_url = urllib.parse.urlsplit(navigation.headers["Location"])
+    assert authorize_url.path == (
+        "/api/v1/instances/inst_123/show-identity/authorize"
+    )
+    authorize_query = urllib.parse.parse_qs(authorize_url.query)
+    state = authorize_query["state"][0]
+    nonce = authorize_query["nonce"][0]
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    issued_at = int(time.time())
+    assertion = jwt.encode(
+        {
+            "iss": cloud.issuer,
+            "aud": f"avibe-show-identity:{cloud.client_id}",
+            "sub": "viewer-1",
+            "iat": issued_at,
+            "exp": issued_at + 300,
+            "jti": f"scenario-{time.time_ns()}",
+            "nonce": nonce,
+            "instance_id": cloud.instance_id,
+            "verified_email": "viewer@example.com",
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"typ": "JWT", "kid": "scenario"},
+    )
+
+    class ScenarioJwkClient:
+        def __init__(self, uri, *, timeout):
+            assert uri == cloud.jwks_uri
+            assert timeout == 5
+
+        def get_signing_key_from_jwt(self, token):
+            assert token == assertion
+            return SimpleNamespace(key=private_key.public_key())
+
+    monkeypatch.setattr(show_identity, "PyJWKClient", ScenarioJwkClient)
+    form = {"state": state, "assertion": assertion}
+    callback = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer,
+        data=form,
+        follow_redirects=False,
+    )
+    assert callback.status_code == 303
+    assert callback.headers["Location"] == f"/p/{page.share_id}/reports/daily?tab=1"
+    assert show_identity.show_guest_cookie_name(page.share_id) in callback.headers[
+        "Set-Cookie"
+    ]
+
+    admitted = client.get(
+        f"/p/{page.share_id}/__show/me",
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer,
+    )
+    assert admitted.status_code == 200
+    assert admitted.get_json() == {"authenticated": False, "canAnnotate": False}
+
+    replay = app.test_client().post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.45"},
+        data=form,
+    )
+    assert replay.status_code == 400
+    assert replay.get_json()["error"] == "replayed_assertion"
 
 
 class _FakeNextTurnRuntime:
