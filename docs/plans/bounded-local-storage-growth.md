@@ -67,8 +67,8 @@ Design decisions:
 
 - [x] Lane A implementation + tests (`tests/test_show_runtime_archive_cleanup.py`)
 - [ ] Lane A PR review loop
+- [x] Lane A user docs: `vibe runtime clean` / `--dry-run` en + zh (avibe-bot/avibe-docs#24)
 - [ ] Lane B migration (partial index) — next alembic head after `20260817_0055`
 - [ ] Lane B retention service + controller task + CLI + tests
 - [ ] Lane B PR review loop
-- [ ] avibe-docs: en/zh CLI + operations docs for `vibe runtime clean --dry-run`
-      and trace retention
+- [ ] avibe-docs: en/zh docs for trace retention (ships with lane B)
