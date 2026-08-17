@@ -195,10 +195,12 @@ scope per instance behind them.
 - Slot API keys encrypted at rest with AES-256-GCM under a new env `MODEL_SERVICE_KEY_SECRET`;
   decrypted only for a model call, a bounded save/explicit-verification probe, or the instance
   status key-availability check. A save first encrypts the candidate, decrypts that managed
-  ciphertext, and uses only the decrypted value for any upstream probe; every enabled candidate
-  must complete the encrypt/decrypt round trip before persistence, including when `force: true`
-  skips the upstream probe. Status uses decrypt-validate-and-discard and never retains or returns
-  plaintext. This status-only read-path exception supersedes the earlier proxy-only wording.
+  ciphertext, and uses only the decrypted value for any upstream probe. Every newly submitted or
+  legacy-materialized key, including one for a disabled slot, must complete the encrypt/decrypt
+  round trip before persistence; every enabled candidate retaining saved ciphertext must do the
+  same, including when `force: true` skips the upstream probe. A disabled slot that retains its
+  unchanged saved ciphertext is exempt. Status uses decrypt-validate-and-discard and never retains
+  or returns plaintext. This status-only read-path exception supersedes the earlier proxy-only wording.
   All read APIs return `has_api_key: true/false`, never the value. Keys and ciphertext never enter
   API responses, logs, Sentry, or usage events. Missing or invalid key-secret material for a
   committed saved slot is reported as a high-priority Sentry event tagged by scope, capability,
@@ -238,8 +240,9 @@ scope per instance behind them.
   settings ladder's probe-before-apply). Both successful verify responses (200) and failed verify
   responses (422) carry the scope's current `revision`, so a caller can settle its optimistic
   snapshot without another read. Managed-key custody failures are never force-overridable: if any
-  enabled candidate cannot complete its encrypt/decrypt round trip, `PUT` returns
-  `model_service_key_unavailable` (503), performs no upstream probe, and persists nothing.
+  newly submitted or legacy-materialized key, or any enabled retained key, cannot complete its
+  encrypt/decrypt round trip, `PUT` returns `model_service_key_unavailable` (503), performs no
+  upstream probe, and persists nothing.
 - **Platform admin (user session; email ∈ `PLATFORM_ADMIN_EMAILS`, new env following the
   `ORGANIZATION_CREATION_ALLOWED_EMAILS` pattern)**:
   `GET/PUT /api/admin/model-service` (platform slots + limits), `GET /api/admin/model-service/usage`
@@ -507,10 +510,11 @@ turns on.
   `realtime_url` while trying to retain ciphertext bound to the prior address. Address changes
   never carry prior ciphertext forward. This client-input validation runs before managed custody
   validation and never emits a custody alert.
-- `model_service_key_unavailable` (503) — an enabled save candidate cannot complete its managed
-  encrypt/decrypt round trip after an actual key has been selected, or an enabled saved slot has
-  neither decryptable custody nor an eligible same-scope platform env recovery under the shared
-  effectiveness predicate. The failure is not overrideable by `force: true`, never maps to
+- `model_service_key_unavailable` (503) — a newly submitted or legacy-materialized candidate key,
+  including one for a disabled slot, cannot complete its managed encrypt/decrypt round trip; an
+  enabled candidate retaining saved ciphertext cannot complete that round trip; or an enabled
+  saved slot has neither decryptable custody nor an eligible same-scope platform env recovery under
+  the shared effectiveness predicate. The failure is not overrideable by `force: true`, never maps to
   `model_service_not_configured`, makes no upstream call, and persists no candidate change. A
   rejected pre-save custody check writes a scrubbed structured log only: it creates no transition
   row and emits no ops alert because the request response and admin UI are its presentation surface.
@@ -548,9 +552,10 @@ turns on.
 3. No API response, log line, Sentry event, usage event, or error message ever contains a slot API
    key or its ciphertext; a `mak_` key appears exactly once — in the body of its own mint/rotate
    response (shown once by design) — and nowhere else; config reads expose only `has_api_key`.
-   Every enabled saved slot is decrypt-valid before persistence, and status reflects the shared
-   runtime effectiveness result, including only the approved platform env recovery, rather than
-   ciphertext presence.
+   Every newly submitted or legacy-materialized key is decrypt-valid before persistence, including
+   for a disabled slot; every enabled retained key is likewise decrypt-valid. Status reflects the
+   shared runtime effectiveness result, including only the approved platform env recovery, rather
+   than ciphertext presence.
 4. The upstream model invoked is always the configured slot's model, regardless of any
    client-supplied model string (documented exception: the legacy env cleanup chain, until a
    platform config is saved — each attempt's actual model is metered per §6.6).
