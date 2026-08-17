@@ -7874,30 +7874,45 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
     if not isinstance(token, str) or not token.strip():
         return
 
+    from config.v2_config import config_lock_transaction
     from vibe import api as vibe_api
-    from core.services import settings as settings_service
 
-    config = settings_service.load_config(default_factory=settings_service.default_config)
-    current = vibe_api.config_to_payload(config, include_secrets=True)
-    wechat = dict(current.get("wechat") or {})
-    wechat["bot_token"] = token.strip()
+    new_bot_token = token.strip()
+    new_base_url = None
     if isinstance(result.get("base_url"), str) and result["base_url"].strip():
-        wechat["base_url"] = result["base_url"].strip()
-    elif not wechat.get("base_url"):
-        wechat["base_url"] = "https://ilinkai.weixin.qq.com"
+        new_base_url = result["base_url"].strip()
 
-    platforms = dict(current.get("platforms") or {})
-    enabled = list(platforms.get("enabled") or [])
-    if "wechat" not in enabled:
-        enabled.append("wechat")
-    platforms["enabled"] = enabled
-    if not platforms.get("primary") or platforms.get("primary") == "avibe":
-        platforms["primary"] = "wechat"
+    # Patch-write shape (#1458 stage ③): the whole compute-and-save runs
+    # under the config transaction — the wechat fields and the
+    # enabled-list mutation are derived from the lock-fresh snapshot, so
+    # a concurrent wechat/platform save between an earlier read and this
+    # write can no longer be overwritten by stale section values.
+    with config_lock_transaction():
+        try:
+            base = vibe_api.load_config()
+        except FileNotFoundError:
+            # Fresh install: seed the same default the settings loader
+            # uses, exactly like the previous default_factory path.
+            from core.services import settings as settings_service
 
-    # Patch-write shape (#1458 stage ③): only the sections this flow
-    # owns — a full-snapshot round-trip would revert unrelated fields
-    # another process changed since the read above.
-    vibe_api.save_config({"wechat": wechat, "platforms": platforms})
+            base = settings_service.default_config()
+        current = vibe_api.config_to_payload(base, include_secrets=True)
+        wechat = dict(current.get("wechat") or {})
+        wechat["bot_token"] = new_bot_token
+        if new_base_url:
+            wechat["base_url"] = new_base_url
+        elif not wechat.get("base_url"):
+            wechat["base_url"] = "https://ilinkai.weixin.qq.com"
+
+        platforms = dict(current.get("platforms") or {})
+        enabled = list(platforms.get("enabled") or [])
+        if "wechat" not in enabled:
+            enabled.append("wechat")
+        platforms["enabled"] = enabled
+        if not platforms.get("primary") or platforms.get("primary") == "avibe":
+            platforms["primary"] = "wechat"
+
+        vibe_api.save_config({"wechat": wechat, "platforms": platforms})
 
 
 WECHAT_QR_LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com"

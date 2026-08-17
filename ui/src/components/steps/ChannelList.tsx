@@ -190,9 +190,18 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     return configVersionRef.current;
   };
 
-  const saveLatestConfig = async (): Promise<boolean> => {
+  // Patch-write shape: send only the platform flag being toggled. A
+  // full ``configRef`` snapshot round-trip would treat every stale field
+  // it carries as intentional inside the locked merge and could revert
+  // concurrent cross-process writes (installer cli_path updates, auth
+  // saves, unrelated platform edits).
+  const savePlatformFlagPatch = async (
+    key: string,
+    field: string,
+    value: boolean
+  ): Promise<boolean> => {
     const saveTask = configSaveQueueRef.current.then(async () => {
-      await api.saveConfig(configRef.current);
+      await api.saveConfig({ [key]: { [field]: value } });
     });
     configSaveQueueRef.current = saveTask.catch(() => {});
     try {
@@ -1201,7 +1210,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       [key]: { ...(currentConfig as any)[key], [field]: !current },
     };
     const version = applyConfig(updated);
-    const saved = await saveLatestConfig();
+    const saved = await savePlatformFlagPatch(key, field, !current);
     if (saved) {
       showToast(t('common.saved'), 'success');
     } else {
