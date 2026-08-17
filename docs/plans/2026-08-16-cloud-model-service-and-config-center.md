@@ -520,8 +520,9 @@ turns on.
    reservations per §6.4). Failure responses bearing upstream usage are metered with that usage.
    Dashboard aggregates equal the sum of recorded events.
 2. An instance in an enterprise-configured org never consumes platform credentials or platform
-   quota, for any capability; a misconfigured org yields `model_service_not_configured`, never a
-   silent fallback.
+   quota, for any capability; a missing or disabled organization slot yields
+   `model_service_not_configured`, while an enabled slot with unavailable key custody yields
+   `model_service_key_unavailable`, never a silent fallback.
 3. No API response, log line, Sentry event, usage event, or error message ever contains a slot API
    key or its ciphertext; a `mak_` key appears exactly once — in the body of its own mint/rotate
    response (shown once by design) — and nowhere else; config reads expose only `has_api_key`.
