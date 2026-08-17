@@ -1,0 +1,103 @@
+version: 1
+capability:
+  id: current_instance_permissions
+  name: Current-instance Permissions policy and authority
+  canonical_tests:
+    - tests/scenarios/permissions/test_permissions_scenarios.py
+    - tests/test_permissions.py
+status_legend:
+  covered: scenario coverage exists
+  partial: unit or contract coverage exists but the closed loop is incomplete
+  manual: currently validated only by human regression
+  gap: not covered yet
+scenarios:
+  - id: PERMISSIONS-001
+    name: Trusted-local owner enters Permissions without Cloud OAuth
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_001_002_existing_sessions_enter_without_management_oauth
+    given: The local owner session and paired instance credential are current
+    when: The owner opens the same-origin Permissions API
+    then: The current-instance projection is returned without any management OAuth route
+  - id: PERMISSIONS-002
+    name: Remote OIDC owner enters Permissions without Cloud OAuth
+    status: covered
+    kind: happy_path
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_001_002_existing_sessions_enter_without_management_oauth
+    given: A current remote OIDC owner session is established
+    when: The owner opens Permissions
+    then: The same current-instance projection is returned without a second login
+  - id: PERMISSIONS-003
+    name: Viewer reads policy but mutation fails before Backend contact
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_003_viewer_mutation_fails_before_backend_contact
+    given: A remote Viewer has a current instance session
+    when: The Viewer reads and then attempts to mutate authorized users
+    then: Read succeeds and mutation is denied before the paired Backend client runs
+  - id: PERMISSIONS-004
+    name: Instance-managed policy writes advance authorization revision
+    status: covered
+    kind: mutation
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_004_instance_managed_write_advances_revision
+    given: The current instance owns policy at revision zero
+    when: The owner replaces current-instance authorized users
+    then: The exact projection changes and authorization revision advances atomically
+  - id: PERMISSIONS-005
+    name: Cloud-managed policy remains readable and locally read-only
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_005_cloud_authority_is_readable_and_read_only
+    given: Avibe Cloud owns the current-instance policy
+    when: The owner reads and then attempts a paired write
+    then: Read succeeds and Backend returns permission_authority_cloud for the write
+  - id: PERMISSIONS-006
+    name: Offline state serves exact-instance last-known policy
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_006_offline_uses_bound_cached_projection
+    given: A live projection has been cached for the paired instance
+    when: Backend connectivity is lost
+    then: The same projection is returned as cached and offline with writes disabled by the UI contract
+  - id: PERMISSIONS-007
+    name: Project applying state converges after acknowledgement
+    status: covered
+    kind: convergence
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_007_project_write_applies_then_acknowledges
+    given: A published Project is in sync
+    when: The owner writes a newer restricted access revision and the instance acknowledges it
+    then: The committed response is pending and the next projection converges to in_sync
+  - id: PERMISSIONS-008
+    name: Revision conflict returns current revision without changing policy
+    status: covered
+    kind: concurrency
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_008_conflict_is_stable_and_non_mutating
+    given: The authoritative instance revision is newer than the browser draft
+    when: The owner submits the stale revision
+    then: The API returns permission_revision_conflict and current_revision without mutation
+  - id: PERMISSIONS-009
+    name: Browser cannot inject another target instance
+    status: covered
+    kind: authorization
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_009_target_injection_is_rejected_before_backend_contact
+    given: The browser is authorized for the paired current instance
+    when: A mutation body includes another instance identifier
+    then: The local API rejects it before Backend contact and all live requests remain exact-instance bound
+  - id: PERMISSIONS-010
+    name: Old Organization and Show Page Cloud-management paths are absent
+    status: covered
+    kind: retirement
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_010_legacy_management_surfaces_are_absent
+    given: Current-instance Permissions and local Show Page sharing are installed
+    when: Registered routes and frontend sources are inventoried
+    then: No Management OAuth proxy or embedded Organization route remains

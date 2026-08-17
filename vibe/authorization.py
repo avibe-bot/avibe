@@ -345,6 +345,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/media/[^/]+(?:/meta)?$",
         r"^/api/org/(?:context|groups)$",
         r"^/api/resource-policies$",
+        r"^/api/permissions$",
         r"^/api/show-pages$",
         r"^/api/show-pages/[^/]+/access$",
         r"^/api/show-pages/[^/]+/icon$",
@@ -428,10 +429,6 @@ def http_authorization_policy(
     """Return the minimum Instance role for one HTTP request."""
 
     normalized_method = method.upper()
-    # Organization management is an explicit Cloud proxy namespace. Cloud user
-    # identity and object authorization are re-evaluated by that boundary.
-    if path.startswith("/api/cloud-management/"):
-        return HttpAuthorizationPolicy("viewer")
     if path.startswith("/show/"):
         return HttpAuthorizationPolicy("viewer")
     if path == "/status":

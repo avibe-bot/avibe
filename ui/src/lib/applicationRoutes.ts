@@ -20,12 +20,7 @@ export const APPLICATION_ROUTE_PATHS = [
   '/apps/library',
   '/admin',
   '/admin/dashboard',
-  '/admin/organization',
-  '/admin/organization/overview',
-  '/admin/organization/members',
-  '/admin/organization/groups',
-  '/admin/organization/instances',
-  '/admin/organization/resources',
+  '/admin/permissions',
   '/admin/remote-access',
   '/admin/groups',
   '/admin/users',
@@ -71,9 +66,6 @@ export const APPLICATION_ROUTE_PATHS = [
 export const APPLICATION_DYNAMIC_ROUTE_PATHS = [
   '/apps/show/:sessionId',
   '/chat/:sessionId',
-  '/admin/organization/groups/:groupId',
-  '/admin/organization/instances/:instanceId/access',
-  '/admin/organization/instances/:instanceId/projects',
 ] as const;
 
 const APPLICATION_ROUTES = new Set<string>(APPLICATION_ROUTE_PATHS);

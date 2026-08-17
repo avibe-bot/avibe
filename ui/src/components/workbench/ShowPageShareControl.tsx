@@ -15,7 +15,6 @@ import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
-import { ShowPageWorkspaceAccessControl } from './ShowPageWorkspaceAccessControl';
 
 type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
@@ -294,21 +293,6 @@ export const ShowPageShareControl: React.FC<{
             />
           </div>
         ) : null}
-
-        <div className="border-t border-border pt-3">
-          <ShowPageWorkspaceAccessControl
-            access={access}
-            active={open}
-            sessionId={sessionId}
-            onConfirmationOpenChange={setConfirmationOpen}
-            ownerWindowId={ownerWindowId}
-          />
-          {accessError ? (
-            <p className="mt-2 text-[11px] leading-snug text-destructive-ink">
-              {t('chat.showPage.accessLoadError')}
-            </p>
-          ) : null}
-        </div>
 
         {payload ? (
           <div className="border-t border-border pt-3">
