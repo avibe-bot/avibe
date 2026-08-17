@@ -214,6 +214,10 @@ def test_show_guest_lease_is_page_and_share_bound_without_live_membership_state(
         share_id="shared-page",
         normalized_email="viewer@example.com",
     )
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.backend_url = ""
+    config.remote_access.vibe_cloud.issuer = ""
+    config.remote_access.vibe_cloud.jwks_uri = ""
 
     lease = show_identity.read_show_guest_lease(
         config,

@@ -142,6 +142,13 @@ def _cloud(config: V2Config):
     return cloud
 
 
+def _lease_secret(config: V2Config) -> str:
+    secret = config.remote_access.vibe_cloud.session_secret
+    if not isinstance(secret, str) or not secret:
+        raise ShowIdentityError("identity_unavailable")
+    return secret
+
+
 def _normalize_origin(origin: str) -> str:
     try:
         parsed = urlsplit(origin)
@@ -374,11 +381,10 @@ def make_show_guest_lease(
     share_id: str,
     normalized_email: str,
 ) -> str:
-    cloud = _cloud(config)
     # Deliberately a browser-session lease: access changes govern new
     # admissions without interrupting a page the user already opened.
     return _encode_signed_payload(
-        cloud.session_secret,
+        _lease_secret(config),
         _LEASE_PREFIX,
         {
             "v": 1,
@@ -396,9 +402,8 @@ def read_show_guest_lease(
     *,
     expected_share_id: str,
 ) -> ShowGuestLease:
-    cloud = _cloud(config)
     payload = _decode_signed_payload(
-        cloud.session_secret,
+        _lease_secret(config),
         _LEASE_PREFIX,
         token,
         max_bytes=MAX_STATE_BYTES,

@@ -556,6 +556,30 @@ def test_limited_show_page_uses_editor_route_and_redirects_guest_to_identity(
     assert upgraded_editor.headers["Location"] == "/show/ses123/reports/daily?tab=1"
     assert all(editor_resolution_was_offloaded)
 
+    store = ShowPageStore()
+    try:
+        access = store.get_access("ses123")
+        assert access is not None
+        private = store.apply_access(
+            "ses123",
+            expected_revision=access.revision,
+            target_access_mode="private",
+            target_share_id=share_id,
+            target_emails=[],
+        )
+        assert private.status == "applied"
+    finally:
+        store.close()
+    private_editor = editor_client.get(
+        f"/p/{share_id}/reports/daily?tab=1",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert private_editor.status_code == 302
+    assert private_editor.headers["Location"] == "/show/ses123/reports/daily?tab=1"
+
     asset = app.test_client().get(
         f"/p/{share_id}/app.js",
         base_url="https://alex.avibe.bot",

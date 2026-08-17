@@ -15161,29 +15161,29 @@ async def serve_public_show_page(share_id, asset_path):
         )
         if page.visibility == "offline":
             return _show_page_offline_response()
+        is_spa_navigation = _is_show_page_spa_route_request(
+            asset_path,
+            request._request,
+        )
+        if page.visibility != "public" and is_spa_navigation:
+            editor_context = await asyncio.to_thread(_show_public_editor_context)
+            if editor_context is not None:
+                try:
+                    store.require_access(
+                        page.session_id,
+                        user_context=editor_context,
+                    )
+                except ShowPageError:
+                    pass
+                else:
+                    private_target = f"/show/{quote(page.session_id, safe='')}/"
+                    if asset_path:
+                        private_target += quote(asset_path.lstrip("/"), safe="/@:-._~")
+                    query = urlsplit(request.full_path).query
+                    if query:
+                        private_target = f"{private_target}?{query}"
+                    return redirect(private_target)
         if page.visibility == "limited":
-            is_spa_navigation = _is_show_page_spa_route_request(
-                asset_path,
-                request._request,
-            )
-            if is_spa_navigation:
-                editor_context = await asyncio.to_thread(_show_public_editor_context)
-                if editor_context is not None:
-                    try:
-                        store.require_access(
-                            page.session_id,
-                            user_context=editor_context,
-                        )
-                    except ShowPageError:
-                        pass
-                    else:
-                        private_target = f"/show/{quote(page.session_id, safe='')}/"
-                        if asset_path:
-                            private_target += quote(asset_path.lstrip("/"), safe="/@:-._~")
-                        query = urlsplit(request.full_path).query
-                        if query:
-                            private_target = f"{private_target}?{query}"
-                        return redirect(private_target)
             if not limited_guest:
                 if request.method != "GET" or not is_spa_navigation:
                     return _show_page_not_found_response()
