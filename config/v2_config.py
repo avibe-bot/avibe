@@ -1120,6 +1120,15 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
     de-duplicating — as a whole, which is what stops the recovery loop.
     """
 
+    if section == "memory.cloud":
+        match = re.search(r"Config '([^']+)'", str(error))
+        if not match:
+            return None
+        path = match.group(1)
+        prefix = "memory.cloud."
+        if not path.startswith(prefix):
+            return None
+        return path[len(prefix) :].split(".", 1)[0]
     if section not in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return None
     match = re.search(r"Config '([^']+)'", str(error))
@@ -1183,6 +1192,87 @@ def _recover_switch_section_field(
     return False
 
 
+def _memory_cloud_recovery_requires_managed_fence(payload: dict) -> bool:
+    """Fail closed when a paired instance is not authoritatively personal."""
+
+    remote_access = payload.get("remote_access")
+    if not isinstance(remote_access, dict):
+        return False
+    vibe_cloud = remote_access.get("vibe_cloud")
+    if not isinstance(vibe_cloud, dict):
+        return False
+    instance_kind = vibe_cloud.get("instance_kind")
+    if instance_kind == "personal":
+        return False
+    if instance_kind == "organization":
+        return True
+    return bool(
+        vibe_cloud.get("enabled") is True
+        and isinstance(vibe_cloud.get("instance_id"), str)
+        and vibe_cloud.get("instance_id", "").strip()
+        and isinstance(vibe_cloud.get("instance_secret"), str)
+        and vibe_cloud.get("instance_secret", "").strip()
+    )
+
+
+def _arm_memory_cloud_recovery(memory: dict) -> None:
+    """Keep an unknown cloud identity behind the existing rebuild ladder."""
+
+    if memory.get("recovery_intent") is None:
+        memory["recovery_intent"] = "rebuild"
+
+
+def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> bool:
+    """Recover one cloud-cache member without losing valid runtime ownership."""
+
+    memory = payload.get("memory")
+    if not isinstance(memory, dict):
+        return False
+    cloud = memory.get("cloud")
+    managed_fence = _memory_cloud_recovery_requires_managed_fence(payload)
+    if not isinstance(cloud, dict) or field_name is None:
+        if managed_fence:
+            memory["cloud"] = {
+                "scope": "organization",
+                "organization_attached": True,
+                "runtime_apply_pending": True,
+            }
+            _arm_memory_cloud_recovery(memory)
+        else:
+            memory["cloud"] = {}
+            if memory.get("mode") == "platform":
+                _arm_memory_cloud_recovery(memory)
+        return True
+
+    cloud.pop(field_name, None)
+    if field_name == "runtime_apply_pending":
+        cloud["runtime_apply_pending"] = True
+    elif field_name == "applied_embedding_identity":
+        live_identity = cloud.get("embedding_identity")
+        if isinstance(live_identity, str) and live_identity.strip():
+            cloud["applied_embedding_identity"] = live_identity
+        else:
+            _arm_memory_cloud_recovery(memory)
+    elif field_name == "source_instance_id":
+        cloud["capabilities"] = {}
+        cloud["embedding_identity"] = None
+        cloud["model_access_key"] = None
+        cloud["proxy_base_url"] = None
+        _arm_memory_cloud_recovery(memory)
+
+    if managed_fence and field_name in {
+        "scope",
+        "organization_attached",
+        "transition_notice_pending",
+    }:
+        cloud["scope"] = "organization"
+        cloud["organization_attached"] = True
+        cloud["transition_notice_pending"] = False
+        cloud["transition_rebuild_owned"] = False
+        _arm_memory_cloud_recovery(memory)
+    return True
+
+
 def _reset_recoverable_config_section(
     payload: dict, section: str, field_name: Optional[str] = None
 ) -> bool:
@@ -1210,11 +1300,7 @@ def _reset_recoverable_config_section(
         processing.pop("multimodal", None)
         return True
     if section == "memory.cloud":
-        memory = payload.get("memory")
-        if not isinstance(memory, dict):
-            return False
-        memory["cloud"] = {}
-        return True
+        return _recover_memory_cloud_section(payload, field_name)
     if section == "runtime":
         # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
         # required cwd, so an empty object would make the recovery loop fail a

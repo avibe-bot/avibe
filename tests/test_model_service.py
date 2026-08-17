@@ -715,6 +715,31 @@ def test_fresh_managed_instance_enables_when_organization_adds_memory_pair() -> 
     assert activated.recovery_intent is None
 
 
+def test_recovered_cloud_rebuild_fence_prevents_fresh_activation_override() -> None:
+    recovered = MemoryConfig(
+        enabled=False,
+        mode="custom",
+        processing=_manual_memory().processing,
+        recovery_intent="rebuild",
+        cloud=MemoryCloudConfig(
+            scope="organization",
+            source_instance_id="instance-1",
+            organization_attached=True,
+        ),
+    )
+
+    activated = _resolved(
+        recovered,
+        _status(scope="organization", identity="emb-org", revision=2),
+        minted=_mint(),
+    )
+
+    assert activated.enabled is False
+    assert activated.cloud.applied_embedding_identity == "emb-org"
+    assert activated.runtime_source() == "cloud"
+    assert activated.recovery_intent == "rebuild"
+
+
 def test_fresh_platform_instance_enables_when_memory_capabilities_recover() -> None:
     waiting = _resolved(
         MemoryConfig(),

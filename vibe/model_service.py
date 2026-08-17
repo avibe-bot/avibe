@@ -201,7 +201,7 @@ def _adopt_cloud_embedding_identity(
     """Record one cloud target while checking the prior runtime baseline."""
 
     baseline = previous.cloud.applied_embedding_identity
-    first_activation = baseline is None
+    first_activation = baseline is None and previous.recovery_intent is None
     if previous.cloud_runtime_selected() and baseline is not None and baseline != identity:
         candidate.arm_rebuild_if_idle()
     candidate.cloud.applied_embedding_identity = identity
