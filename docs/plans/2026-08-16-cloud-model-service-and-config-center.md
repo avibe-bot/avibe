@@ -223,7 +223,9 @@ scope per instance behind them.
   `force: true` — a live org's config change is never blindly activated (mirrors the local
   settings ladder's probe-before-apply). Both successful verify responses (200) and failed verify
   responses (422) carry the scope's current `revision`, so a caller can settle its optimistic
-  snapshot without another read.
+  snapshot without another read. Managed-key custody failures are never force-overridable: if any
+  enabled candidate cannot complete its encrypt/decrypt round trip, `PUT` returns
+  `model_service_key_unavailable` (503), performs no upstream probe, and persists nothing.
 - **Platform admin (user session; email ∈ `PLATFORM_ADMIN_EMAILS`, new env following the
   `ORGANIZATION_CREATION_ALLOWED_EMAILS` pattern)**:
   `GET/PUT /api/admin/model-service` (platform slots + limits), `GET /api/admin/model-service/usage`
@@ -274,10 +276,12 @@ scope per instance behind them.
   so unattributed-legacy usage can only ever be platform-scope in fact and invariant 2 holds.
   **Error mapping on legacy voice routes** (invariant 6): `model_service_not_configured` surfaces
   through the existing voice error vocabulary (`asr_not_configured` 503 family; a missing chat
-  slot degrades cleanup per §6.5-5); `model_service_key_unavailable` (503),
-  `model_quota_exhausted` (429), and `model_service_unavailable` (503) pass through as new
-  additive codes — released clients already treat unknown codes as generic errors of their
-  status class.
+  slot degrades cleanup per §6.5-5). On required ASR and the dedicated cleanup endpoint,
+  `model_service_key_unavailable` (503), `model_quota_exhausted` (429), and
+  `model_service_unavailable` (503) pass through as new additive codes — released clients already
+  treat unknown codes as generic errors of their status class. Composite voice flows catch every
+  optional cleanup failure, including `model_service_key_unavailable`, and return the successful
+  raw ASR transcript per §6.5-5.
 
 ### 6.4 Quota (platform scope only, v1)
 
@@ -447,11 +451,12 @@ required.
 }
 ```
 
-`mode` ∈ `organization | platform`. `embedding_identity` is an opaque hash of the embedding slot's
-(base_url, model); it changes iff vector-space identity changes, and is `null` when the bound
-scope has no enabled embedding slot (e.g. a voice-only enterprise org) — the client then treats
-cloud memory as unavailable, matching `capabilities.embedding: false`. Before serializing a saved
-scope, the endpoint decrypt-validates every enabled slot and immediately discards the plaintext.
+`mode` ∈ `organization | platform`. While the effective memory pair is available,
+`embedding_identity` is an opaque hash of the embedding slot's (base_url, model) and changes iff
+vector-space identity changes. It is `null` whenever `capabilities.embedding` is false — including
+a missing/disabled slot or a custody failure in either member of the required chat+embedding pair —
+so released clients can parse the degraded payload and pause cloud memory. Before serializing a
+saved scope, the endpoint decrypt-validates every enabled slot and immediately discards the plaintext.
 An enabled slot whose key cannot be decrypted is reported as unavailable and the response adds a
 per-slot reason map, for example `"degraded": { "asr": "model_service_key_unavailable" }`;
 `degraded` is omitted when no slot is degraded.
@@ -477,10 +482,12 @@ turns on.
 ### 8.4 Error codes (stable, machine-readable `code` field)
 
 - `model_service_not_configured` (503) — resolved scope lacks an enabled slot for the capability.
-- `model_service_key_unavailable` (503) — an enabled saved slot exists but its API key cannot be
-  decrypted with the deployed `MODEL_SERVICE_KEY_SECRET`. It never maps to
-  `model_service_not_configured`; no upstream call is made, status marks the affected capability
-  false with the same reason, and a scrubbed high-priority Sentry event is emitted.
+- `model_service_key_unavailable` (503) — an enabled save candidate cannot complete its managed
+  encrypt/decrypt round trip, or an enabled saved slot cannot be decrypted with the deployed
+  `MODEL_SERVICE_KEY_SECRET`. The failure is not overrideable by `force: true`, never maps to
+  `model_service_not_configured`, makes no upstream call, and persists no candidate change. For
+  saved-slot failures, status marks the affected capability false with the same reason. Every path
+  emits a scrubbed high-priority Sentry event.
 - `model_service_unavailable` (503) — quota **reservation** persistence failed on an
   enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
   never produces this error: the response is served and the un-settled reservation is reaped as a
@@ -518,8 +525,10 @@ turns on.
    model-configuration affordance.
 6. Released voice clients keep working unchanged across the M1 rewiring (device-secret path,
    cloud-token path, realtime WS).
-7. `embedding_identity` changes iff the embedding slot's (base_url, model) changes, and every
-   member instance's sidecar treats it exactly like a local embedding change (rebuild ladder).
+7. While `capabilities.embedding` remains true, `embedding_identity` changes iff the embedding
+   slot's (base_url, model) changes, and every member instance's sidecar treats it exactly like a
+   local embedding change (rebuild ladder). It is `null` whenever the effective chat+embedding
+   pair is unavailable; restoring the same pair restores the same identity.
 8. With enforcement on, an over-cap free-pool call fails before reaching any upstream.
 9. Changing any API key (slot key or mak) with base_url and model unchanged never alters
    `embedding_identity`, never triggers a rebuild or re-embedding, and never loses or duplicates
