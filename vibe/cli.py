@@ -10760,6 +10760,30 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         )
         return items
 
+    try:
+        archive_cache = manager.archive_cache_status()
+    except Exception:  # noqa: BLE001
+        archive_cache = None
+    if archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
+        _add_doctor_item(
+            items,
+            "warn",
+            (
+                f"Show Runtime archive cache holds {archive_cache['candidate_count']} reclaimable archive(s) "
+                f"({_format_byte_size(int(archive_cache.get('candidate_bytes') or 0))}); "
+                "the current and rollback archives are kept."
+            ),
+            "Run `vibe runtime clean --dry-run` to preview, then `vibe runtime clean` to reclaim.",
+            code="show_runtime.archive_cache_reclaimable",
+        )
+    elif archive_cache is not None:
+        _add_doctor_item(
+            items,
+            "pass",
+            "Show Runtime archive cache has no reclaimable archives",
+            code="show_runtime.archive_cache_clean",
+        )
+
     provider = str(status.get("provider") or "unknown")
     explicit_command = status.get("explicit_command")
     if explicit_command:
@@ -14078,15 +14102,23 @@ def cmd_runtime(args) -> int:
         strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
-        payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))
+        payload = manager.clean(
+            keep_previous=getattr(args, "keep_previous", 1),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
         git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1))
         payload["git"] = git
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
+            prefix = "Would remove" if payload.get("dry_run") else "Removed"
             removed = payload.get("removed") or []
-            print(f"Removed {len(removed)} Show Runtime cache item(s).")
-            print(f"Removed {len(git.get('removed') or [])} Git Runtime cache item(s).")
+            archives = payload.get("archives") or {}
+            print(f"{prefix} {len(removed)} Show Runtime cache item(s).")
+            archive_count = int(archives.get("candidate_count") or 0) if payload.get("dry_run") else int(archives.get("removed_count") or 0)
+            archive_bytes = int(archives.get("candidate_bytes") or 0) if payload.get("dry_run") else int(archives.get("removed_bytes") or 0)
+            print(f"{prefix} {archive_count} downloaded Show Runtime archive(s) ({_format_byte_size(archive_bytes)}).")
+            print(f"{prefix} {len(git.get('removed') or [])} Git Runtime cache item(s).")
         return 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
@@ -14173,6 +14205,16 @@ def _ensure_git_during_prepare(offline: bool | None = None, force: bool = False)
         return GitRuntimeManager(offline=offline).ensure(force=force)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
+
+
+def _format_byte_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PiB"
 
 
 def _clean_git_runtime(*, keep_previous: int) -> dict:
@@ -14432,6 +14474,11 @@ def build_parser():
 
     runtime_clean_parser = runtime_subparsers.add_parser("clean", help="Clean stale managed runtime cache entries")
     runtime_clean_parser.add_argument("--keep-previous", type=int, default=1, help="Number of previous runtime versions to keep.")
+    runtime_clean_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report stale archives and cache entries without removing anything.",
+    )
     runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
     remote_parser = subparsers.add_parser(
         "remote",

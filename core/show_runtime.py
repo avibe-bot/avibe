@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -47,6 +48,7 @@ _RUNTIME_SOURCE_NPM = "npm"
 _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
 _PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
 _MANAGED_RUNTIME_ROLLBACK_INSTALLS = 1
+_CONTENT_ADDRESSED_ARCHIVE_RE = re.compile(r"^[0-9a-f]{64}\.tgz$")
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
@@ -599,6 +601,13 @@ class ShowRuntimeManager:
             )
             if removed:
                 logger.info("Removed %d stale managed Show Runtime install(s)", len(removed))
+            archives = self._clean_downloaded_archives()
+            if archives["removed_count"]:
+                logger.info(
+                    "Removed %d stale managed Show Runtime archive(s), reclaimed %d byte(s)",
+                    archives["removed_count"],
+                    archives["removed_bytes"],
+                )
         except Exception:
             # Cache cleanup must never turn a usable runtime install into a failed prepare.
             logger.warning("Failed to clean stale managed Show Runtime installs", exc_info=True)
@@ -724,15 +733,103 @@ class ShowRuntimeManager:
             result["reason"] = "runtime_archive_download_failed"
         return result
 
-    def clean(self, *, keep_previous: int = 1) -> dict[str, Any]:
+    def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
         removed: list[str] = []
         for pattern in ("prebuilt-*", "manifest-*"):
             for path in self.runtime_dir.glob(pattern):
                 if path.is_dir():
-                    shutil.rmtree(path, ignore_errors=True)
+                    if not dry_run:
+                        shutil.rmtree(path, ignore_errors=True)
                     removed.append(str(path))
-        removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous))
-        return {"ok": True, "removed": removed}
+        removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=dry_run))
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            # Paths removed by this run (or that a real run would remove, when dry_run).
+            "removed": removed,
+            "archives": self._clean_downloaded_archives(dry_run=dry_run),
+        }
+
+    def archive_cache_status(self) -> dict[str, Any]:
+        """Report reclaimable content-addressed archives without deleting anything."""
+        return self._clean_downloaded_archives(dry_run=True)
+
+    def _protected_archive_sha256s(self) -> set[str]:
+        """SHA-256 digests of archives the current and retained installs still need.
+
+        Sources: the ``current.json`` pointer plus every remaining managed
+        install's ``.vibe-show-runtime.json`` metadata. Called after
+        install-dir cleanup, so the remaining metadata files are exactly the
+        current install plus the retained rollback install(s).
+        """
+        protected: set[str] = set()
+        try:
+            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
+            digest = pointer.get("archive_sha256")
+            if isinstance(digest, str) and digest:
+                protected.add(digest)
+        except Exception:
+            pass
+        versions_dir = self.runtime_dir / "versions"
+        if versions_dir.is_dir():
+            for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
+                for metadata_path in versions_dir.glob(pattern):
+                    try:
+                        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    digest = metadata.get("archive_sha256")
+                    if isinstance(digest, str) and digest:
+                        protected.add(digest)
+        return protected
+
+    def _archive_cleanup_candidates(self, protected: set[str]) -> list[tuple[Path, int]]:
+        """Completed content-addressed archives outside the protected set.
+
+        Only strict ``<sha256>.tgz`` regular files are candidates. The manifest
+        download flow stages into ``<sha256>.tmp`` and atomically renames only
+        after size + checksum verification, so a matching name implies a
+        completed, verified archive; in-progress ``.tmp`` downloads, symlinks,
+        and unknown file names are never candidates.
+        """
+        downloads_dir = self.runtime_dir / "downloads"
+        candidates: list[tuple[Path, int]] = []
+        if not downloads_dir.is_dir():
+            return candidates
+        for path in sorted(downloads_dir.iterdir()):
+            if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(path.name):
+                continue
+            try:
+                stat_result = path.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(stat_result.st_mode):
+                continue
+            if path.stem in protected:
+                continue
+            candidates.append((path, stat_result.st_size))
+        return candidates
+
+    def _clean_downloaded_archives(self, *, dry_run: bool = False) -> dict[str, Any]:
+        protected = self._protected_archive_sha256s()
+        candidates = self._archive_cleanup_candidates(protected)
+        removed_count = 0
+        removed_bytes = 0
+        if not dry_run:
+            for path, size in candidates:
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                removed_count += 1
+                removed_bytes += size
+        return {
+            "protected_count": len(protected),
+            "candidate_count": len(candidates),
+            "candidate_bytes": sum(size for _, size in candidates),
+            "removed_count": removed_count,
+            "removed_bytes": removed_bytes,
+        }
 
     def _clean_manifest_install_dirs(
         self,
@@ -740,6 +837,7 @@ class ShowRuntimeManager:
         keep_previous: int,
         manifest_source: str | None = None,
         protected_install_dirs: set[Path] | None = None,
+        dry_run: bool = False,
     ) -> list[str]:
         versions_dir = self.runtime_dir / "versions"
         if not versions_dir.is_dir():
@@ -789,9 +887,11 @@ class ShowRuntimeManager:
         for path in sorted(safe_removable_install_dirs, key=lambda item: len(resolved_install_dirs[item].parts), reverse=True):
             if not path.is_dir():
                 continue
-            shutil.rmtree(path, ignore_errors=True)
+            if not dry_run:
+                shutil.rmtree(path, ignore_errors=True)
             removed.append(str(path))
-        self._prune_empty_manifest_version_dirs(versions_dir)
+        if not dry_run:
+            self._prune_empty_manifest_version_dirs(versions_dir)
         return removed
 
     @staticmethod
