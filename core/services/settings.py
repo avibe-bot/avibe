@@ -80,6 +80,18 @@ def load_config(
     """
 
     target = config_path or paths.get_config_path()
+
+    if default_factory is None:
+        # Pure read: no lock and NO side effects — ``V2Config.load``
+        # unconditionally ``ensure_data_dirs()`` (creating the whole
+        # home tree), and taking the config file lock would mkdir the
+        # config directory too. A caller asking for a must-exist config
+        # must not mutate its environment; check existence first and
+        # raise without loading. A bare read cannot lose updates.
+        if not target.exists():
+            raise FileNotFoundError(f"V2 config not found at {target}")
+        return V2Config.load(target)
+
     from config.v2_config import config_lock_transaction
 
     # Create-if-absent under the cross-process file lock (#1458 stage
@@ -87,8 +99,6 @@ def load_config(
     # (see the matching note in vibe.runtime.ensure_config).
     with config_lock_transaction(target):
         if not target.exists():
-            if default_factory is None:
-                raise FileNotFoundError(f"V2 config not found at {target}")
             default = default_factory()
             default.save(target)
     return V2Config.load(target)

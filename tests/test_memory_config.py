@@ -872,13 +872,19 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """Generic read/merge/write stays one process-local linearized operation."""
+    """Generic read/merge/write stays one linearized operation.
+
+    With the cross-process config transaction (#1458 stage ③) the whole
+    cycle — base load, merge, write — runs under the config file lock,
+    so a second save that starts mid-cycle blocks at the lock (not the
+    process-local CONFIG_LOCK), and both updates persist.
+    """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     V2Config.from_payload(_payload({})).save()
     first_merged = threading.Event()
     release_first = threading.Event()
-    second_entered = threading.Event()
+    second_done = threading.Event()
     failures: list[BaseException] = []
     merge = api._deep_merge_dicts
 
@@ -896,23 +902,26 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
         except BaseException as exc:
             failures.append(exc)
 
-    monkeypatch.setattr(api, "CONFIG_LOCK", _ObservedConfigLock(second_entered))
     monkeypatch.setattr(api, "_deep_merge_dicts", hold_first_merge)
     first = threading.Thread(
         target=save,
         args=({"language": "zh"},),
         name="first-config-save",
     )
-    second = threading.Thread(
-        target=save,
-        args=({"runtime": {"log_level": "DEBUG"}},),
-        name="second-config-save",
-    )
+    second = threading.Thread(target=save, args=({"runtime": {"log_level": "DEBUG"}},))
+
+    def observed_second_save() -> None:
+        save({"runtime": {"log_level": "DEBUG"}})
+        second_done.set()
+
+    second = threading.Thread(target=observed_second_save)
 
     first.start()
     assert first_merged.wait(5)
     second.start()
-    assert second_entered.wait(5)
+    # While the first save holds the transaction (mid-merge), the second
+    # must be blocked on the config file lock — generous negative window.
+    assert not second_done.wait(1.0), "second save entered while first held the lock"
     release_first.set()
     first.join(5)
     second.join(5)
