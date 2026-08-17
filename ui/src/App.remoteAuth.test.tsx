@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { useLayoutEffect } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -56,24 +57,27 @@ describe('AuthGuard remote authorization recovery', () => {
       authorization_state: 'current' as const,
     };
     api.getAuthSession.mockResolvedValue(session);
+    let recoveryReported = false;
+
+    const SameTickRecoverySignal = () => {
+      useLayoutEffect(() => {
+        if (recoveryReported) return;
+        recoveryReported = true;
+        window.dispatchEvent(new CustomEvent(REMOTE_AUTH_STATE_EVENT, {
+          detail: { state: 'unavailable' },
+        }));
+        window.dispatchEvent(new CustomEvent(REMOTE_AUTH_STATE_EVENT, {
+          detail: { state: 'current' },
+        }));
+      }, []);
+      return <div>protected shell</div>;
+    };
 
     render(
       <MemoryRouter initialEntries={['/']}>
-        <AuthGuard><div>protected shell</div></AuthGuard>
+        <AuthGuard><SameTickRecoverySignal /></AuthGuard>
       </MemoryRouter>,
     );
-
-    expect(await screen.findByText('protected shell')).toBeTruthy();
-    expect(api.getAuthSession).toHaveBeenCalledOnce();
-
-    act(() => {
-      window.dispatchEvent(new CustomEvent(REMOTE_AUTH_STATE_EVENT, {
-        detail: { state: 'unavailable' },
-      }));
-      window.dispatchEvent(new CustomEvent(REMOTE_AUTH_STATE_EVENT, {
-        detail: { state: 'current' },
-      }));
-    });
 
     await waitFor(() => expect(api.getAuthSession).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('protected shell')).toBeTruthy();

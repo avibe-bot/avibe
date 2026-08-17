@@ -312,11 +312,12 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 setAuthorizationUnavailable(false);
                 setGuardStatus('authorization-revoked');
             } else if (state === 'unavailable') {
+                // This listener can still hold the previous guardStatus until its
+                // dependency effect re-runs, so track recovery independently.
+                authorizationUnavailableRef.current = true;
                 if (guardStatus === 'ready') {
-                    authorizationUnavailableRef.current = true;
                     setAuthorizationUnavailable(true);
                 } else {
-                    authorizationUnavailableRef.current = false;
                     setGuardStatus('authorization-unavailable');
                 }
             } else if (state === 'current') {
