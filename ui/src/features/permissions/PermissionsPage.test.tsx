@@ -10,7 +10,11 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { PermissionsApiError } from './api';
 import { PermissionsPage } from './PermissionsPage';
 import { requiresAccessNarrowing } from './policy';
-import type { PermissionsResponse } from './types';
+import type {
+  AuthorizedUsersWriteResponse,
+  PermissionsResponse,
+  ProjectAccessWriteResponse,
+} from './types';
 
 const api = vi.hoisted(() => ({
   getPermissions: vi.fn(),
@@ -93,6 +97,14 @@ function renderPage(canManage = true) {
       <PermissionsPage />
     </InstanceAuthorizationContext.Provider>,
   );
+}
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }
 
 beforeEach(() => {
@@ -276,11 +288,13 @@ describe('PermissionsPage state model', () => {
     api.replaceAuthorizedUsers
       .mockResolvedValueOnce({
         ok: true,
+        instance_id: 'inst-123',
         authorization_revision: 5,
         entries: [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
       })
       .mockResolvedValueOnce({
         ok: true,
+        instance_id: 'inst-123',
         authorization_revision: 6,
         entries: [],
       });
@@ -318,6 +332,150 @@ describe('PermissionsPage state model', () => {
       5,
       'inst-123',
     ]);
+  });
+
+  it.each([
+    'access edit',
+    'Project edit',
+    'access removal',
+  ] as const)('rejects an instance A %s acknowledgement after refresh installs instance B', async (flow) => {
+    vi.useFakeTimers();
+    const instanceA = response();
+    instanceA.projection.policy_sync.status = 'applying';
+    instanceA.projection.projects[0]!.sync.status = 'pending';
+    instanceA.projection.access.entries = [{
+      kind: 'email',
+      value: 'instance-a@example.com',
+      role: 'viewer',
+    }];
+    const instanceB = response();
+    instanceB.projection.instance.id = 'inst-b';
+    instanceB.projection.instance.authorization_revision = 1;
+    instanceB.projection.access.entries = [{
+      kind: 'email',
+      value: 'instance-b@example.com',
+      role: 'viewer',
+    }];
+    instanceB.projection.projects[0] = {
+      ...instanceB.projection.projects[0]!,
+      display_name: 'Instance B Project',
+      access: {
+        ...instanceB.projection.projects[0]!.access,
+        bindings: [{
+          principal_kind: 'email',
+          principal_value: 'instance-b@example.com',
+          access_role: 'viewer',
+        }],
+      },
+    };
+    api.getPermissions
+      .mockResolvedValueOnce(instanceA)
+      .mockResolvedValueOnce(instanceB);
+    const accessAcknowledgement = deferred<AuthorizedUsersWriteResponse>();
+    const projectAcknowledgement = deferred<ProjectAccessWriteResponse>();
+    if (flow === 'Project edit') {
+      api.updateProjectAccess.mockReturnValueOnce(projectAcknowledgement.promise);
+    } else {
+      api.replaceAuthorizedUsers.mockReturnValueOnce(accessAcknowledgement.promise);
+    }
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+
+    if (flow === 'access edit') {
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.editAccess' }));
+      fireEvent.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    } else if (flow === 'Project edit') {
+      fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+      fireEvent.change(screen.getByLabelText('permissions.fields.role'), {
+        target: { value: 'editor' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.removeAccess' }));
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'permissions.actions.removeAccess',
+      }));
+    }
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByText('inst-b')).toBeTruthy();
+
+    await act(async () => {
+      if (flow === 'Project edit') {
+        projectAcknowledgement.resolve({
+          ok: true,
+          instance_id: 'inst-123',
+          authorization_revision: 5,
+          project: {
+            ...instanceA.projection.projects[0]!,
+            display_name: 'Instance A Acknowledgement',
+          },
+        });
+      } else {
+        accessAcknowledgement.resolve({
+          ok: true,
+          instance_id: 'inst-123',
+          authorization_revision: 5,
+          entries: flow === 'access edit' ? [{
+            kind: 'email',
+            value: 'instance-a@example.com',
+            role: 'editor',
+          }] : [],
+        });
+      }
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('inst-b')).toBeTruthy();
+    if (flow === 'Project edit') {
+      expect(screen.getByText('Instance B Project')).toBeTruthy();
+      expect(screen.queryByText('Instance A Acknowledgement')).toBeNull();
+    } else {
+      expect(screen.getByText('instance-b@example.com')).toBeTruthy();
+      expect(screen.queryByText('instance-a@example.com')).toBeNull();
+    }
+  });
+
+  it.each([
+    ['a different instance', 'inst-other', 5],
+    ['an older revision', 'inst-123', 3],
+  ] as const)('rejects an access acknowledgement bound to %s', async (
+    _condition,
+    acknowledgementInstanceId,
+    acknowledgementRevision,
+  ) => {
+    const initial = response();
+    initial.projection.access.entries = [{
+      kind: 'email',
+      value: 'viewer@example.com',
+      role: 'viewer',
+    }];
+    api.getPermissions.mockResolvedValueOnce(initial);
+    api.replaceAuthorizedUsers.mockResolvedValueOnce({
+      ok: true,
+      instance_id: acknowledgementInstanceId,
+      authorization_revision: acknowledgementRevision,
+      entries: [{
+        kind: 'email',
+        value: 'viewer@example.com',
+        role: 'editor',
+      }],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', {
+      name: 'permissions.actions.editAccess',
+    }));
+    await user.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByText('permissions.roles.viewer')).toBeTruthy();
+    expect(screen.queryByText('permissions.roles.editor')).toBeNull();
   });
 
   it('installs an offline fallback before stopping an applying-policy refresh', async () => {
@@ -475,6 +633,7 @@ describe('PermissionsPage state model', () => {
       .mockResolvedValueOnce(staleCache);
     api.replaceAuthorizedUsers.mockResolvedValueOnce({
       ok: true,
+      instance_id: 'inst-123',
       authorization_revision: 5,
       entries: [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
     });
@@ -554,6 +713,7 @@ describe('PermissionsPage state model', () => {
     api.getPermissions.mockResolvedValue(nextApplying);
     api.replaceAuthorizedUsers.mockResolvedValueOnce({
       ok: true,
+      instance_id: 'inst-123',
       authorization_revision: 5,
       entries: nextApplying.projection.access.entries,
     });
@@ -727,6 +887,7 @@ describe('PermissionsPage conflict handling', () => {
       }))
       .mockResolvedValueOnce({
         ok: true,
+        instance_id: 'inst-123',
         authorization_revision: 6,
         entries: [
           { kind: 'email', value: 'beta@example.com', role: 'editor' },
@@ -793,6 +954,7 @@ describe('PermissionsPage conflict handling', () => {
     api.getPermissions.mockResolvedValueOnce(initial);
     api.replaceAuthorizedUsers.mockResolvedValueOnce({
       ok: true,
+      instance_id: 'inst-123',
       authorization_revision: 5,
       entries: [{ kind: 'email', value: 'editor@example.com', role: 'viewer' }],
     });
@@ -841,6 +1003,7 @@ describe('PermissionsPage conflict handling', () => {
       }))
       .mockResolvedValueOnce({
         ok: true,
+        instance_id: 'inst-123',
         authorization_revision: 6,
         entries: [{ kind: 'email', value: 'beta@example.com', role: 'viewer' }],
       });
@@ -899,6 +1062,7 @@ describe('PermissionsPage conflict handling', () => {
   it('encodes Owner only as restricted with an empty binding set', async () => {
     api.updateProjectAccess.mockResolvedValue({
       ok: true,
+      instance_id: 'inst-123',
       authorization_revision: 5,
       project: {
         ...response().projection.projects[0]!,
@@ -940,6 +1104,7 @@ describe('PermissionsPage conflict handling', () => {
       }))
       .mockResolvedValueOnce({
         ok: true,
+        instance_id: 'inst-123',
         authorization_revision: 5,
         project: {
           ...latest.projection.projects[0]!,

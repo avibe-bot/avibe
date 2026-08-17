@@ -68,6 +68,7 @@ def test_permissions_004_instance_managed_write_advances_revision(harness) -> No
     )
 
     assert response.status_code == 200
+    assert response.get_json()["instance_id"] == "inst-current"
     assert response.get_json()["authorization_revision"] == 1
     assert harness.projection["access"]["entries"][0]["role"] == "editor"
     assert harness.projection["instance"]["authorization_revision"] == 1
@@ -132,6 +133,7 @@ def test_permissions_007_project_write_applies_then_acknowledges(harness) -> Non
         headers=harness.csrf(client),
     )
     assert write.status_code == 200
+    assert write.get_json()["instance_id"] == "inst-current"
     assert write.get_json()["project"]["sync"]["status"] == "pending"
     assert write.get_json()["authorization_revision"] == 1
 

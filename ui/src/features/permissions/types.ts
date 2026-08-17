@@ -90,12 +90,14 @@ export type PermissionsResponse = {
 
 export type AuthorizedUsersWriteResponse = {
   ok: true;
+  instance_id: string;
   entries: AccessEntry[];
   authorization_revision: number;
 };
 
 export type ProjectAccessWriteResponse = {
   ok: true;
+  instance_id: string;
   project: PermissionProject;
   authorization_revision: number;
 };

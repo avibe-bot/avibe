@@ -139,6 +139,8 @@ NONEMPTY_PROJECTION_STRING_PATHS = [
 ]
 
 INVALID_PROJECT_ROUTE_IDS = [
+    pytest.param(".", id="current-directory-segment"),
+    pytest.param("..", id="parent-directory-segment"),
     pytest.param("project/child", id="forward-embedded"),
     pytest.param("/project", id="forward-leading"),
     pytest.param("project/", id="forward-trailing"),
@@ -1204,6 +1206,7 @@ def test_committed_permissions_mutations_survive_watermark_persistence_failure(
         remote_access._authorization_revision_state_path().read_text(encoding="utf-8")  # noqa: SLF001
     )
     assert result["authorization_revision"] == 4
+    assert result["instance_id"] == "inst-123"
     assert remote_access.current_authorization_revision(config) == 4
     assert persisted["authorization_revision"] == 3
     assert remote_access.acknowledge_authorization_revision(config, 4) == 4

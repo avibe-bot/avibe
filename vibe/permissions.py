@@ -35,6 +35,7 @@ _PROJECT_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "d
 _POLICY_SYNC_STATUSES = frozenset({"none", "in_sync", "applying", "offline", "error"})
 _SYNC_COUNT_KEYS = ("active", "error", "offline", "applying", "in_sync")
 _PROJECT_ID_PATH_SEPARATORS = frozenset({"/", "\\"})
+_PROJECT_ID_DOT_SEGMENTS = frozenset({".", ".."})
 logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.RLock()
 
@@ -141,6 +142,7 @@ def _is_valid_project_id(value: Any) -> bool:
     return (
         isinstance(value, str)
         and bool(value.strip())
+        and value not in _PROJECT_ID_DOT_SEGMENTS
         and not any(separator in value for separator in _PROJECT_ID_PATH_SEPARATORS)
     )
 
@@ -578,7 +580,7 @@ def replace_authorized_users(
         result["authorization_revision"],
         access_entries=result["entries"],
     )
-    return result
+    return {**result, "instance_id": instance_id}
 
 
 def update_project_access(
@@ -605,7 +607,7 @@ def update_project_access(
         result["authorization_revision"],
         project=result["project"],
     )
-    return result
+    return {**result, "instance_id": instance_id}
 
 
 def response_payload(result: PermissionsProjectionResult) -> dict[str, Any]:

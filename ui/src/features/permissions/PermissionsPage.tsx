@@ -276,7 +276,10 @@ function AccessEntryDialog({
   editable: boolean;
   onOpenChange: (open: boolean) => void;
   onRefresh: AuthoritativeRefresh;
-  onSaved: (result: Awaited<ReturnType<typeof replaceAuthorizedUsers>>) => void;
+  onSaved: (
+    instanceId: string,
+    result: Awaited<ReturnType<typeof replaceAuthorizedUsers>>,
+  ) => void;
 }) {
   const { t } = useTranslation();
   const initialized = useRef(false);
@@ -368,12 +371,13 @@ function AccessEntryDialog({
     setSaving(true);
     setError(undefined);
     try {
+      const requestInstanceId = expectedInstanceId.current;
       const result = await replaceAuthorizedUsers(
         nextEntries,
         revision,
-        expectedInstanceId.current,
+        requestInstanceId,
       );
-      onSaved(result);
+      onSaved(requestInstanceId, result);
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
@@ -510,7 +514,10 @@ function ProjectAccessDialog({
   editable: boolean;
   onOpenChange: (open: boolean) => void;
   onRefresh: AuthoritativeRefresh;
-  onSaved: (result: Awaited<ReturnType<typeof updateProjectAccess>>) => void;
+  onSaved: (
+    instanceId: string,
+    result: Awaited<ReturnType<typeof updateProjectAccess>>,
+  ) => void;
 }) {
   const { t } = useTranslation();
   const initialized = useRef(false);
@@ -592,14 +599,15 @@ function ProjectAccessDialog({
     setSaving(true);
     setError(undefined);
     try {
+      const requestInstanceId = expectedInstanceId.current;
       const result = await updateProjectAccess(
         project,
         wireMode,
         wireBindings,
         revision,
-        expectedInstanceId.current,
+        requestInstanceId,
       );
-      onSaved(result);
+      onSaved(requestInstanceId, result);
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
@@ -779,6 +787,20 @@ export function PermissionsPage() {
     return accepted;
   }, []);
 
+  const installMutationAcknowledgement = useCallback((
+    requestInstanceId: string,
+    acknowledgementInstanceId: string,
+    updater: (current: PermissionsResponse) => PermissionsResponse,
+  ): void => {
+    const current = readyResponseRef.current;
+    if (
+      current === null
+      || current.projection.instance.id !== requestInstanceId
+      || acknowledgementInstanceId !== requestInstanceId
+    ) return;
+    installReadyResponse(updater(current));
+  }, [installReadyResponse]);
+
   const installPageResult = useCallback((result: PageLoadResult): void => {
     if (!mounted.current) return;
     if (result.response) {
@@ -892,11 +914,6 @@ export function PermissionsPage() {
     && `${project.display_name} ${project.project_id}`.toLowerCase().includes(search.trim().toLowerCase())
   ));
 
-  const updateResponse = (updater: (current: PermissionsResponse) => PermissionsResponse) => {
-    const current = readyResponseRef.current;
-    if (current !== null) installReadyResponse(updater(current));
-  };
-
   const closeRemoval = () => {
     setRemovingAccess(null);
     setRemovalInstanceId(null);
@@ -949,12 +966,13 @@ export function PermissionsPage() {
     );
     setRemovalError(undefined);
     try {
+      const requestInstanceId = removalInstanceId;
       const result = await replaceAuthorizedUsers(
         entries,
         projection.instance.authorization_revision,
-        removalInstanceId,
+        requestInstanceId,
       );
-      updateResponse((current) => ({
+      installMutationAcknowledgement(requestInstanceId, result.instance_id, (current) => ({
         ...current,
         projection: {
           ...current.projection,
@@ -1154,7 +1172,7 @@ export function PermissionsPage() {
         editable={editable}
         onOpenChange={(open) => { if (!open) setEditingAccess(undefined); }}
         onRefresh={refreshReady}
-        onSaved={(result) => updateResponse((current) => ({
+        onSaved={(instanceId, result) => installMutationAcknowledgement(instanceId, result.instance_id, (current) => ({
           ...current,
           projection: {
             ...current.projection,
@@ -1170,7 +1188,7 @@ export function PermissionsPage() {
         editable={editable}
         onOpenChange={(open) => { if (!open) setEditingProject(null); }}
         onRefresh={refreshReady}
-        onSaved={(result) => updateResponse((current) => ({
+        onSaved={(instanceId, result) => installMutationAcknowledgement(instanceId, result.instance_id, (current) => ({
           ...current,
           projection: {
             ...current.projection,
