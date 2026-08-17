@@ -34,7 +34,7 @@ def _embedded_cli_examples(body: str) -> list[str]:
 
 
 def test_avibe_skills_teach_current_harness_defaults() -> None:
-    for path in ("skills/use-avibe/SKILL.md", "skills/use-vibe-remote/SKILL.md"):
+    for path in ("skills/use-avibe/SKILL.md",):
         body = _read(path)
 
         assert "Runs are async by default" in body
@@ -103,7 +103,6 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
 
     for path in (
         "skills/use-avibe/SKILL.md",
-        "skills/use-vibe-remote/SKILL.md",
         "skills/background-watch-hook/SKILL.md",
     ):
         body = _read(path)
@@ -112,7 +111,7 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
 
 
 def test_use_avibe_skill_keeps_its_broad_scope_without_a_session_lifecycle_protocol() -> None:
-    for path in ("skills/use-avibe/SKILL.md", "skills/use-vibe-remote/SKILL.md"):
+    for path in ("skills/use-avibe/SKILL.md",):
         body = _read(path)
 
         assert "configure, repair, explain, or operate a local Avibe installation" in body
