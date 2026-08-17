@@ -415,20 +415,18 @@ class LocalIdentitySessionStore:
         pairing: PairingRecord,
         claims: dict[str, Any],
         callback_origin: dict[str, Any],
-        prior_token: str | None,
-        prior_flow: dict[str, Any] | None,
-    ) -> str:
+        prior_flow: dict[str, Any],
+    ) -> str | None:
         with self._lock:
-            prior_hash = self.token_hash(prior_token) if prior_token is not None else None
-            lineage_id: str | None = None
-            if (
-                prior_flow is not None
-                and prior_hash == prior_flow["prior_token_hash"]
-                and self.now() <= prior_flow["expires_at"]
-            ):
+            lineage_id = prior_flow["lineage_id"]
+            if prior_flow["prior_token_hash"] is not None:
                 candidate = self.lineages.get(prior_flow["lineage_id"])
-                if candidate is not None and prior_flow["lineage_generation"] <= candidate["current_generation"]:
-                    lineage_id = prior_flow["lineage_id"]
+                if (
+                    candidate is None
+                    or candidate["current_token_hash"] != prior_flow["prior_token_hash"]
+                    or candidate["current_generation"] != prior_flow["lineage_generation"]
+                ):
+                    return None
             if lineage_id is None:
                 lineage_id = uuid.uuid4().hex
                 self.lineages[lineage_id] = {"current_generation": 0, "current_token_hash": None}
@@ -527,7 +525,7 @@ class ShowIdentityScenarioHarness:
         self.session_rotation_count = 0
         self.last_callback_cookie_names: set[str] = set()
         self.last_browser_sent_cookie_names: set[str] = set()
-        self.flow_prior_sessions: dict[str, dict[str, Any] | None] = {}
+        self.flow_prior_sessions: dict[str, dict[str, Any]] = {}
         self.pages = {
             self.start_contract["share_id"]: {
                 "instance_id": self.start_contract["instance_id"],
@@ -576,16 +574,16 @@ class ShowIdentityScenarioHarness:
             pairing=self.pairing,
             request_origin=_origin_from_url(str(request.url)) or {},
         )
-        self.flow_prior_sessions[nonce] = (
-            {
-                "prior_token_hash": self.identity_sessions.token_hash(prior_token),
-                "lineage_id": prior_record["lineage_id"],
-                "lineage_generation": prior_record["lineage_generation"],
-                "expires_at": self.now + self.backend["ttl_seconds"],
-            }
+        self.flow_prior_sessions[nonce] = {
+            "prior_token_hash": self.identity_sessions.token_hash(prior_token)
             if prior_token is not None and prior_record is not None
-            else None
-        )
+            else None,
+            "lineage_id": prior_record["lineage_id"] if prior_record is not None else None,
+            "lineage_generation": prior_record["lineage_generation"] if prior_record is not None else None,
+            "expires_at": self.now
+            + self.backend["ttl_seconds"]
+            + self.handshake["signed_state_lifecycle"]["verifier_clock_skew_seconds"],
+        }
         payload = {
             "instance_id": page["instance_id"],
             "page_id": page["page_id"],
@@ -613,12 +611,22 @@ class ShowIdentityScenarioHarness:
         response.set_cookie(
             cookie_name,
             cookie_value,
-            max_age=self.backend["ttl_seconds"],
+            max_age=(
+                self.backend["ttl_seconds"] + self.handshake["signed_state_lifecycle"]["verifier_clock_skew_seconds"]
+            ),
             secure=True,
             httponly=True,
             samesite=self.cookie_contract["same_site"].lower(),
             path=self.cookie_contract["path"],
         )
+        if prior_token is not None and prior_record is None:
+            response.delete_cookie(
+                session_cookie_name,
+                secure=True,
+                httponly=True,
+                samesite=self.session_contract["cookie"]["same_site"].lower(),
+                path="/",
+            )
         response.headers["Cache-Control"] = "private, no-store"
         return response
 
@@ -770,6 +778,22 @@ class ShowIdentityScenarioHarness:
         if hashlib.sha256(cookie.encode()).hexdigest() != state["correlation_cookie_sha256"]:
             return self._deny(cookie_name=cookie_name)
 
+        session_cookie = self.session_contract["cookie"]
+        current_session_token = request.cookies.get(session_cookie["name"])
+        current_session_hash = (
+            self.identity_sessions.token_hash(current_session_token) if current_session_token is not None else None
+        )
+        prior_flow = self.flow_prior_sessions.pop(state["nonce"], None)
+        if (
+            prior_flow is None
+            or self.now > prior_flow["expires_at"]
+            or current_session_hash != prior_flow["prior_token_hash"]
+        ):
+            return self._deny(
+                "identity_flow_superseded_restart_required",
+                cookie_name=cookie_name,
+            )
+
         retained_until = max(state["expires_at"], claims["exp"]) + self.backend["verifier_clock_skew_seconds"]
         if not self.consumption_store.consume(claims["nonce"], claims["jti"], retained_until):
             return self._deny(cookie_name=cookie_name)
@@ -784,14 +808,17 @@ class ShowIdentityScenarioHarness:
             or state["safe_public_return_target"] != f"/p/{page['share_id']}/"
         ):
             return self._deny(cookie_name=cookie_name)
-        session_cookie = self.session_contract["cookie"]
         identity_session_token = self.identity_sessions.rotate(
             self.pairing,
             claims,
             state["callback_origin"],
-            request.cookies.get(session_cookie["name"]),
-            self.flow_prior_sessions.pop(state["nonce"], None),
+            prior_flow,
         )
+        if identity_session_token is None:
+            return self._deny(
+                "identity_flow_superseded_restart_required",
+                cookie_name=cookie_name,
+            )
         self.session_rotation_count += 1
         self.successful_callback_count += 1
         response = RedirectResponse(state["safe_public_return_target"], status_code=303)

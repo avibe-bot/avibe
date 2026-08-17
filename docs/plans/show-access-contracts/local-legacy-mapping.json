@@ -11,10 +11,40 @@
     "public": { "availability": "active", "access_mode": "public" },
     "offline": { "availability": "offline", "access_mode": "private" },
     "share_binding": {
-      "non_null_share_id": "retain_as_stable_binding_even_when_inactive",
+      "non_null_valid_v2_share_id": "retain_as_stable_binding_even_when_inactive",
       "null_share_id": "map_to_null_binding"
     }
   },
+  "malformed_source_policy": {
+    "input_boundary": "released_unconstrained_legacy_strings",
+    "known_visibility_values": ["private", "public", "offline"],
+    "valid_share_id_contract": "show-access.schema.json#/$defs/share_id",
+    "trigger": "unknown_visibility_or_non_null_invalid_v2_share_id",
+    "result": {
+      "schema_version": 2,
+      "availability": "offline",
+      "access_mode": "private",
+      "share_binding": null,
+      "audience_revision": 0,
+      "emails": [],
+      "last_mutation": null
+    },
+    "shared_route_admitted": false,
+    "startup_aborted": false,
+    "warning_code": "legacy_show_access_source_degraded_fail_closed"
+  },
+  "invalid_source_vectors": [
+    {"id": "LOCAL-LEGACY-INVALID-VISIBILITY-EMPTY", "source": {"page_id": "ses_invalid_visibility_empty", "legacy_visibility": "", "share_id": null}},
+    {"id": "LOCAL-LEGACY-INVALID-VISIBILITY-UNKNOWN", "source": {"page_id": "ses_invalid_visibility_unknown", "legacy_visibility": "friends", "share_id": "valid-share"}},
+    {"id": "LOCAL-LEGACY-INVALID-VISIBILITY-UNICODE", "source": {"page_id": "ses_invalid_visibility_unicode", "legacy_visibility": "公开", "share_id": null}},
+    {"id": "LOCAL-LEGACY-INVALID-VISIBILITY-OVERLONG", "source": {"page_id": "ses_invalid_visibility_overlong", "legacy_visibility": "private-private-private-private-private-private-private-private-private-private-private-private", "share_id": null}},
+    {"id": "LOCAL-LEGACY-INVALID-SHARE-EMPTY", "source": {"page_id": "ses_invalid_share_empty", "legacy_visibility": "public", "share_id": ""}},
+    {"id": "LOCAL-LEGACY-INVALID-SHARE-SHORT", "source": {"page_id": "ses_invalid_share_short", "legacy_visibility": "public", "share_id": "ab"}},
+    {"id": "LOCAL-LEGACY-INVALID-SHARE-UNICODE", "source": {"page_id": "ses_invalid_share_unicode", "legacy_visibility": "private", "share_id": "共享-link"}},
+    {"id": "LOCAL-LEGACY-INVALID-SHARE-OVERLONG", "source": {"page_id": "ses_invalid_share_overlong", "legacy_visibility": "offline", "share_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+    {"id": "LOCAL-LEGACY-INVALID-SHARE-SLASH", "source": {"page_id": "ses_invalid_share_slash", "legacy_visibility": "public", "share_id": "bad/share"}},
+    {"id": "LOCAL-LEGACY-INVALID-SHARE-EDGE", "source": {"page_id": "ses_invalid_share_edge", "legacy_visibility": "private", "share_id": "-bad-edge-"}}
+  ],
   "cases": [
     {
       "id": "LOCAL-LEGACY-PRIVATE",

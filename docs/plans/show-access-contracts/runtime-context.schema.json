@@ -16,6 +16,7 @@
     "shared_capture_admission",
     "operation_context_eligibility",
     "capability_cache",
+    "shared_runtime_admission",
     "shared_namespace_confinement",
     "namespace_lifetime",
     "resource_governance",
@@ -56,7 +57,10 @@
             "startup_reconciliation_prewarm",
             "show_update_prewarm"
           ],
-          "keyed_context_enabled": false
+          "keyed_context_enabled": false,
+          "allowed_operation_context": "released_non_shared_compatibility_only",
+          "shared_admission_allowed": false,
+          "shared_outcome": "fixed_sanitized_shared_runtime_unavailable"
         },
         {
           "id": "declared_v1",
@@ -209,6 +213,28 @@
         "maximum_retry_delay_seconds": 5,
         "identity_inputs": ["runtime_process_identity", "runtime_base_url"],
         "identity_change_clears": ["all_outcomes", "retry_deadline"]
+      }
+    },
+    "shared_runtime_admission": {
+      "const": {
+        "owner": "SharedRuntimeAdmission",
+        "served_shared_requires": [
+          "capability_matrix_read_decision_serve_shared",
+          "runtime_context_shared",
+          "keyed_context_supported"
+        ],
+        "unsupported": {
+          "outcome": "fixed_sanitized_shared_runtime_unavailable",
+          "upstream_shared_request_allowed": false,
+          "legacy_singleton_graph_allowed": false
+        },
+        "transient_unknown": {
+          "before_supported": "bounded_capability_negotiation_retry_only",
+          "upstream_shared_request_allowed": false,
+          "legacy_singleton_graph_allowed": false,
+          "retry_exhausted_outcome": "fixed_sanitized_shared_runtime_unavailable"
+        },
+        "private_redirect_independence": "trusted_top_level_resource_viewer_or_editor_redirect_to_show_requires_no_shared_runtime_admission"
       }
     },
     "shared_namespace_confinement": {
@@ -646,7 +672,8 @@
         "outcome",
         "process_cache",
         "redirect_eligible",
-        "request_before_next_probe"
+        "shared_runtime_admission",
+        "legacy_singleton_graph_touched"
       ],
       "properties": {
         "id": { "enum": ["supported", "unsupported", "transient_unknown"] },
@@ -656,7 +683,14 @@
         "outcome": { "enum": ["supported", "unsupported", "transient-unknown"] },
         "process_cache": { "enum": ["permanent", "retry_deadline"] },
         "redirect_eligible": { "type": "boolean" },
-        "request_before_next_probe": { "const": "shared" }
+        "shared_runtime_admission": {
+          "enum": [
+            "admit_keyed_context",
+            "fixed_sanitized_shared_runtime_unavailable",
+            "bounded_retry_then_fixed_sanitized_shared_runtime_unavailable"
+          ]
+        },
+        "legacy_singleton_graph_touched": { "const": false }
       },
       "allOf": [
         {
@@ -666,7 +700,8 @@
               "evidence": { "const": "protocol_1_with_feature" },
               "outcome": { "const": "supported" },
               "process_cache": { "const": "permanent" },
-              "redirect_eligible": { "const": true }
+              "redirect_eligible": { "const": true },
+              "shared_runtime_admission": { "const": "admit_keyed_context" }
             }
           }
         },
@@ -677,7 +712,8 @@
               "evidence": { "const": "definitive_legacy" },
               "outcome": { "const": "unsupported" },
               "process_cache": { "const": "permanent" },
-              "redirect_eligible": { "const": true }
+              "redirect_eligible": { "const": true },
+              "shared_runtime_admission": { "const": "fixed_sanitized_shared_runtime_unavailable" }
             }
           }
         },
@@ -688,7 +724,8 @@
               "evidence": { "const": "transient_or_malformed" },
               "outcome": { "const": "transient-unknown" },
               "process_cache": { "const": "retry_deadline" },
-              "redirect_eligible": { "const": true }
+              "redirect_eligible": { "const": true },
+              "shared_runtime_admission": { "const": "bounded_retry_then_fixed_sanitized_shared_runtime_unavailable" }
             }
           }
         }

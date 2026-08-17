@@ -44,6 +44,11 @@
       "id": "INVARIANT-OFFLINE-DENIES-BOTH-SURFACES",
       "assertion": "offline_never_serves_or_redirects",
       "scenario_ids": ["SHOW-LIVE-018", "SHOW-LIVE-032"]
+    },
+    {
+      "id": "INVARIANT-SHARED-REQUIRES-KEYED-CONTEXT",
+      "assertion": "serve_shared_and_shared_runtime_context_require_keyed_context_supported",
+      "scenario_ids": ["SHOW-LIVE-014", "SHOW-LIVE-015"]
     }
   ],
   "rules": [
@@ -73,15 +78,27 @@
     },
     {
       "id": "MATRIX-P-LIMITED-CURRENT-MEMBER-NO-RESOURCE",
-      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "*", "resource_authority": "none", "identity_state": "verified", "page_membership": "current", "keyed_context": "*" },
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "*", "resource_authority": "none", "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" },
       "decision": { "read_decision": "serve_shared", "runtime_context": "shared", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
       "scenario_ids": ["SHOW-LIVE-002", "SHOW-LIVE-008", "SHOW-LIVE-037", "SHOW-LIVE-038"]
     },
     {
       "id": "MATRIX-P-LIMITED-CURRENT-MEMBER-NONTOP-RESOURCE",
-      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "verified", "page_membership": "current", "keyed_context": "*" },
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "verified", "page_membership": "current", "keyed_context": "supported" },
       "decision": { "read_decision": "serve_shared", "runtime_context": "shared", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
       "scenario_ids": ["SHOW-LIVE-011", "SHOW-LIVE-033"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-CURRENT-MEMBER-NO-RESOURCE-KEYED-UNAVAILABLE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "*", "resource_authority": "none", "identity_state": "verified", "page_membership": "current", "keyed_context": ["unsupported", "transient-unknown"] },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-014", "SHOW-LIVE-015"]
+    },
+    {
+      "id": "MATRIX-P-LIMITED-CURRENT-MEMBER-NONTOP-KEYED-UNAVAILABLE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "verified", "page_membership": "current", "keyed_context": ["unsupported", "transient-unknown"] },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-014", "SHOW-LIVE-015"]
     },
     {
       "id": "MATRIX-P-LIMITED-LOGIN-NO-RESOURCE",
@@ -121,15 +138,27 @@
     },
     {
       "id": "MATRIX-P-PUBLIC-SHARED-NO-RESOURCE",
-      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "*", "resource_authority": "none", "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "*", "resource_authority": "none", "identity_state": "*", "page_membership": "*", "keyed_context": "supported" },
       "decision": { "read_decision": "serve_shared", "runtime_context": "shared", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
       "scenario_ids": ["SHOW-LIVE-004", "SHOW-LIVE-006", "SHOW-LIVE-011", "SHOW-LIVE-029"]
     },
     {
       "id": "MATRIX-P-PUBLIC-SHARED-NONTOP-RESOURCE",
-      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "*", "page_membership": "*", "keyed_context": "*" },
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "*", "page_membership": "*", "keyed_context": "supported" },
       "decision": { "read_decision": "serve_shared", "runtime_context": "shared", "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
       "scenario_ids": ["SHOW-LIVE-011"]
+    },
+    {
+      "id": "MATRIX-P-PUBLIC-NO-RESOURCE-KEYED-UNAVAILABLE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "*", "resource_authority": "none", "identity_state": "*", "page_membership": "*", "keyed_context": ["unsupported", "transient-unknown"] },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-014", "SHOW-LIVE-015"]
+    },
+    {
+      "id": "MATRIX-P-PUBLIC-NONTOP-KEYED-UNAVAILABLE",
+      "selector": { "surface": "/p", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": ["viewer", "editor"], "identity_state": "*", "page_membership": "*", "keyed_context": ["unsupported", "transient-unknown"] },
+      "decision": { "read_decision": "deny", "runtime_context": null, "show_editor_capability": false, "hmr": false, "annotations": false, "top_level_redirect": false, "redirect_role": null },
+      "scenario_ids": ["SHOW-LIVE-014", "SHOW-LIVE-015"]
     },
     {
       "id": "MATRIX-SHOW-NO-RESOURCE-DENY",

@@ -141,11 +141,13 @@
         "receipt_a_b_a",
         "canonical_receipt_digest",
         "legacy_null_binding",
+        "legacy_malformed_fail_closed",
         "private_hmr_authority",
             "settings_identity_and_delivery",
             "availability_races",
             "settings_projection_excludes_receipts",
-            "sibling_isolation"
+            "sibling_isolation",
+            "dedicated_module_worker_broker"
           ]
         }
       }

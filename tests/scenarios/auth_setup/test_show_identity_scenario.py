@@ -37,7 +37,7 @@ def test_form_post_closes_custom_host_identity_and_membership_loop() -> None:
     assert "HttpOnly" in start.set_cookie
     assert "samesite=none" in start.set_cookie.lower()
     assert "Domain=" not in start.set_cookie
-    assert "Max-Age=300" in start.set_cookie
+    assert "Max-Age=360" in start.set_cookie
     assert start.state not in start.callback_url
 
     assertion = harness.issue_assertion(start)
@@ -347,14 +347,17 @@ def test_flow_specific_cookies_and_atomic_consumption_support_concurrency() -> N
     assert flow_b.cookie_name in response_b.headers["Set-Cookie"]
     assert flow_a.cookie_name not in response_b.headers["Set-Cookie"]
     response_a = harness.form_post(flow_a, harness.issue_assertion(flow_a))
-    assert response_a.status_code == 303
-    assert harness.successful_callback_count == 2
+    assert response_a.status_code == 403
+    assert response_a.json()["outcome"] == "identity_flow_superseded_restart_required"
+    assert harness.successful_callback_count == 1
 
     same_page = ShowIdentityScenarioHarness()
     same_a = same_page.begin()
     same_b = same_page.begin()
     assert same_page.form_post(same_a, same_page.issue_assertion(same_a)).status_code == 303
-    assert same_page.form_post(same_b, same_page.issue_assertion(same_b)).status_code == 303
+    same_b_response = same_page.form_post(same_b, same_page.issue_assertion(same_b))
+    assert same_b_response.status_code == 403
+    assert same_b_response.json()["outcome"] == "identity_flow_superseded_restart_required"
 
     swapped = ShowIdentityScenarioHarness()
     swap_a = swapped.begin()
@@ -386,7 +389,9 @@ def test_flow_specific_cookies_and_atomic_consumption_support_concurrency() -> N
     assert invalid_response.status_code == 403
     assert "Set-Cookie" not in invalid_response.headers
     assert invalid_state.form_post(invalid_a, invalid_state.issue_assertion(invalid_a)).status_code == 303
-    assert invalid_state.form_post(invalid_b, invalid_state.issue_assertion(invalid_b)).status_code == 303
+    invalid_b_response = invalid_state.form_post(invalid_b, invalid_state.issue_assertion(invalid_b))
+    assert invalid_b_response.status_code == 403
+    assert invalid_b_response.json()["outcome"] == "identity_flow_superseded_restart_required"
 
     expiry = ShowIdentityScenarioHarness()
     expired_a = expiry.begin()
@@ -449,7 +454,10 @@ def test_flow_specific_cookies_and_atomic_consumption_support_concurrency() -> N
     new_flow = rotated_flows.begin()
     new_token = rotated_flows.issue_assertion(new_flow)
     assert rotated_flows.form_post(old_flow, old_token).status_code == 303
-    assert rotated_flows.form_post(new_flow, new_token).status_code == 303
+    assert rotated_flows.verifier.verify(new_token) is not None
+    rotated_response = rotated_flows.form_post(new_flow, new_token)
+    assert rotated_response.status_code == 403
+    assert rotated_response.json()["outcome"] == "identity_flow_superseded_restart_required"
 
 
 def test_state_and_identity_session_lifecycles_are_executable() -> None:
@@ -473,6 +481,29 @@ def test_state_and_identity_session_lifecycles_are_executable() -> None:
         )
         expected_status = 303 if vector["outcome"] == "accept_state" else 403
         assert response.status_code == expected_status, vector["id"]
+
+    accepted_boundary = ShowIdentityScenarioHarness()
+    accepted_start = accepted_boundary.begin()
+    accepted_boundary.now += accepted_boundary.backend["ttl_seconds"] + lifecycle["verifier_clock_skew_seconds"]
+    assert (
+        accepted_boundary.form_post(
+            accepted_start,
+            accepted_boundary.issue_assertion(accepted_start),
+        ).status_code
+        == 303
+    )
+
+    rejected_after_boundary = ShowIdentityScenarioHarness()
+    rejected_start = rejected_after_boundary.begin()
+    rejected_after_boundary.now += (
+        rejected_after_boundary.backend["ttl_seconds"] + lifecycle["verifier_clock_skew_seconds"] + 1
+    )
+    rejected = rejected_after_boundary.form_post(
+        rejected_start,
+        rejected_after_boundary.issue_assertion(rejected_start),
+    )
+    assert rejected.status_code == 403
+    assert rejected_start.cookie_name in rejected.headers["Set-Cookie"]
 
     callback = ShowIdentityScenarioHarness()
     start = callback.begin()
@@ -531,7 +562,8 @@ def test_state_and_identity_session_lifecycles_are_executable() -> None:
         session_cookie, first_token, domain=rotation.callback_origin["normalized_host"], path="/"
     )
     stale_started_flow = rotation.begin()
-    assert rotation.flow_prior_sessions[stale_started_flow.nonce] is None
+    assert rotation.client.cookies.get(session_cookie) is None
+    assert rotation.flow_prior_sessions[stale_started_flow.nonce]["prior_token_hash"] is None
     assert rotation.form_post(stale_started_flow, rotation.issue_assertion(stale_started_flow)).status_code == 303
     replacement_token = rotation.client.cookies.get(session_cookie)
     replacement_record = rotation.identity_sessions.records[rotation.identity_sessions.token_hash(replacement_token)]
@@ -542,47 +574,39 @@ def test_state_and_identity_session_lifecycles_are_executable() -> None:
     lax_first = lax_control.begin()
     assert lax_control.form_post(lax_first, lax_control.issue_assertion(lax_first)).status_code == 303
     lax_second = lax_control.begin()
-    assert lax_control.form_post(lax_second, lax_control.issue_assertion(lax_second)).status_code == 303
+    lax_response = lax_control.form_post(lax_second, lax_control.issue_assertion(lax_second))
+    assert lax_response.status_code == 403
+    assert lax_response.json()["outcome"] == "identity_flow_superseded_restart_required"
     assert session_cookie not in lax_control.last_browser_sent_cookie_names
-    assert len(lax_control.identity_sessions.records) == 2
+    assert len(lax_control.identity_sessions.records) == 1
 
     concurrent = ShowIdentityScenarioHarness()
     base = concurrent.begin()
     assert concurrent.form_post(base, concurrent.issue_assertion(base)).status_code == 303
-    base_token = concurrent.client.cookies.get(session_cookie)
     flow_a = concurrent.begin()
     flow_b = concurrent.begin()
     response_a = concurrent.form_post(flow_a, concurrent.issue_assertion(flow_a))
     token_a = concurrent.client.cookies.get(session_cookie)
-    concurrent.client.cookies.set(
-        session_cookie,
-        base_token,
-        domain=concurrent.callback_origin["normalized_host"],
-        path="/",
-    )
     response_b = concurrent.form_post(flow_b, concurrent.issue_assertion(flow_b))
-    token_b = concurrent.client.cookies.get(session_cookie)
-    assert response_a.status_code == response_b.status_code == 303
-    assert token_a != token_b
+    assert response_a.status_code == 303
+    assert response_b.status_code == 403
+    assert response_b.json()["outcome"] == "identity_flow_superseded_restart_required"
+    assert concurrent.client.cookies.get(session_cookie) == token_a
     assert len(concurrent.identity_sessions.records) == 1
     active_lineages = {item["lineage_id"] for item in concurrent.identity_sessions.records.values()}
     assert len(active_lineages) == 1
     active_record = next(iter(concurrent.identity_sessions.records.values()))
-    assert active_record["lineage_generation"] == 3
-    concurrent.client.cookies.set(
-        session_cookie,
-        token_a,
-        domain=concurrent.callback_origin["normalized_host"],
-        path="/",
-    )
-    assert concurrent.later_request().status_code == 403
-    concurrent.client.cookies.set(
-        session_cookie,
-        token_b,
-        domain=concurrent.callback_origin["normalized_host"],
-        path="/",
-    )
+    assert active_record["lineage_generation"] == 2
     assert concurrent.later_request().status_code == 200
+
+    no_base = ShowIdentityScenarioHarness()
+    no_base_a = no_base.begin()
+    no_base_b = no_base.begin()
+    assert no_base.form_post(no_base_b, no_base.issue_assertion(no_base_b)).status_code == 303
+    no_base_a_response = no_base.form_post(no_base_a, no_base.issue_assertion(no_base_a))
+    assert no_base_a_response.status_code == 403
+    assert no_base_a_response.json()["outcome"] == "identity_flow_superseded_restart_required"
+    assert len(no_base.identity_sessions.records) == len(no_base.identity_sessions.lineages) == 1
 
     unrelated = ShowIdentityScenarioHarness()
     browser_a = TestClient(unrelated.app)

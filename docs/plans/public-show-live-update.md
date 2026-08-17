@@ -175,7 +175,8 @@ Each login flow has a distinct host-only correlation cookie named
 `__Secure-avibe_show_identity_c_<base64url_nonce>`. Its independent value is a
 32-byte CSPRNG secret; it is `SameSite=None`, `Secure`, `HttpOnly`, scoped exactly
 to `/auth/show-identity/callback`, single-use, and expires no later than signed
-state. One server-owned callback origin is represented as `(scheme, normalized_host,
+state expiry plus the same 60-second verifier-skew boundary. One server-owned callback
+origin is represented as `(scheme, normalized_host,
 effective_port)`; HTTPS without an explicit port means 443. The Backend authorize
 request, `redirect_uri`, signed state, actual callback, identity-session record, and
 safe return flow must agree on that exact origin and the fixed callback path. Signed
@@ -251,12 +252,15 @@ Secure, HttpOnly, SameSite=None, Path=/, stores no identity, and maps by token h
 an instance/issuer/subject/email/exact-origin record for at most 24 non-renewable
 hours. Each browser lineage has one current generation. A valid prior cookie advances
 the lineage atomically and invalidates every earlier record. At login start, a
-server-side nonce record captures the prior token hash, lineage, and generation only
-when that session is current, and expires with signed state; the callback cookie hash
-must match it. Concurrent flows that captured the same valid generation advance that
-one lineage in callback order and leave at most one valid generation, while a stale
-response token fails closed and restarts login. A flow started with no valid prior
-session creates a new lineage. Invalid and terminal callbacks never rotate. Expiry, origin or
+server-side nonce record always captures the exact current valid token hash, lineage,
+and generation, including an explicit null snapshot, and expires at the signed-state-
+plus-skew boundary. An invalid or stale browser cookie is cleared before that null
+snapshot is recorded. At callback, the browser-current token hash must equal the
+captured hash, including null equality. The first matching concurrent flow rotates;
+every later flow whose browser-current cookie changed is superseded and must restart
+without creating a lineage, rotating again, or leaving a second valid session. A flow
+started with no valid prior session creates a new lineage only while the browser-current
+cookie is still null. Invalid and terminal callbacks never rotate. Expiry, origin or
 instance mismatch, missing
 record, and local key/session-store reset fail closed. The next limited request
 re-resolves the share and performs a fresh local membership lookup. The identity
@@ -297,6 +301,16 @@ re-resolves the share and current membership before any new credential or page b
 Consequently, code on a sibling public page cannot fetch, frame, open and read, or
 reuse ambient credentials for a limited page.
 
+Canonical Vite-style dedicated module-worker construction is rewritten to the same
+containment Owner's opaque-origin worker broker. It fetches the worker entry through
+the existing share-bound capability, verifies the same namespace and document handles,
+recursively rewrites the closed static worker module graph to same-opaque-origin
+Blob/Object URLs, and starts the worker from that opaque URL. Worker bootstrap receives
+no cookie, identity, Session, path, HMR, or annotation state. Generated URLs are revoked
+on worker termination, namespace expiry, or budget reclaim. Dynamic or unrecognized
+worker construction returns one sanitized unsupported result. Contract fixtures prove
+this transform boundary; real-browser execution remains future Incus evidence.
+
 Minting is not a lasting authorization decision. Every protected document, module,
 CSS, raw, worker, fallback, API, preflight, and write request first linearizes one
 current local `ShowAccess` snapshot and requires active availability, a shared mode,
@@ -322,9 +336,12 @@ Instance/resource ACL revision remains orthogonal.
 The local SQLite schema migration is intentionally separate from hosted retirement.
 Existing active private/public values map to `availability=active` with the matching
 mode. Legacy offline cannot recover its historical audience mode, so it maps fail
-closed to `availability=offline` and `access_mode=private`. Any existing `share_id`
-is retained as an inactive stable binding; a null legacy `share_id` remains a null
-binding. Emails initialize empty, and
+closed to `availability=offline` and `access_mode=private`. The released source
+boundary accepts unconstrained visibility and share-ID strings. A known visibility
+with a valid v2 non-null `share_id` retains that stable binding, and null remains null.
+Any unknown visibility or malformed/non-v2 share ID degrades atomically to offline,
+private, null binding, empty emails, and one fixed warning; it never aborts startup or
+preserves a suspect binding. Emails initialize empty, and
 `audience_revision` initializes deterministically to zero. This local migration has
 no hosted import, bridge, or double write.
 
@@ -367,9 +384,14 @@ unless a real shared request or explicit prewarm is admitted.
 
 Protocol-1 validation precedes Session resolution and every graph lookup, create,
 rebase, ownership mutation, prewarm, or HMR connection. Headerless released clients
-retain the legacy singleton base path. Unknown protocols reject without graph side
-effects. Capability probe failures retry with a bounded deadline and all cached
-outcomes reset when Runtime process identity changes.
+retain the legacy singleton base path only for released non-shared compatibility;
+shared admission never uses that singleton. A shared decision requires keyed-context
+support. Definitive unsupported returns one sanitized shared-runtime-unavailable result
+without upstream graph work. Transient-unknown retries only under the bounded probe
+policy, then returns the same result and never serves shared while unknown. Trusted
+top-level resource redirects to canonical `/show/` remain independent because they
+admit no shared Runtime work. Unknown protocols reject without graph side effects,
+and all cached outcomes reset when Runtime process identity changes.
 
 Shared graphs use immutable opaque namespaces. Recursive TSX, CSS, raw-loader, and
 worker dependencies remain in one namespace with captured provenance; handles never
@@ -514,7 +536,7 @@ browser, Backend, Runtime, or local Incus evidence.
 | --- | --- | --- |
 | `SHOW-LIVE-001` | Resource editor opens `/p/<share>/` and the Agent edits | Trusted top-level navigation redirects to canonical `/show/` with private no-store metadata and safe suffix/query preservation; resource editor receives HMR and annotations only on `/show/`; missing multiple or untrusted HMR Origin rejects before upstream WebSocket; React Fast Refresh preservation remains a future browser check |
 | `SHOW-LIVE-002` | Listed-only guest opens limited `/p/` and the Agent edits | Trusted shell plus a current binding-scoped credential serves the opaque-origin shared page; sibling page code cannot fetch frame or open/read it; `/p/` has no HMR or annotations; new content appears only after a later refresh |
-| `SHOW-LIVE-003` | Unlisted identity completes limited login and retries | Exact callback origin strict JWT types and derived JWKS lifecycles close one cross-site form POST; callback atomically rotates one local identity-only session lineage; the later limited request re-resolves current membership; absent membership returns one generic denial with no page bytes or loop |
+| `SHOW-LIVE-003` | Unlisted identity completes limited login and retries | Exact callback origin strict JWT types and derived JWKS lifecycles close one cross-site form POST; callback compares the browser-current session cookie and atomically rotates one identity-only lineage through the signed-state skew boundary; the later limited request re-resolves current membership; absent membership returns one generic denial with no page bytes or loop |
 | `SHOW-LIVE-004` | The same stable link changes from limited to fully public | Local Apply preserves the binding and advances audience revision once; anonymous `/p/` receives an admitted protected-content capability and becomes readable; shared readers still have no HMR or annotations |
 | `SHOW-LIVE-005` | Private `/show/` and shared `/p/` traffic run together | Runtime graphs are keyed by Session and context; shared lifecycle cannot rebase or close private HMR; both `/p/` audiences remain shared |
 | `SHOW-LIVE-006` | Identity resolution fails for public and limited requests | Public `/p/` independently admits anonymous protected content and remains readable; limited `/p/` fails closed; neither outcome selects HMR |
@@ -524,14 +546,14 @@ browser, Backend, Runtime, or local Incus evidence.
 | `SHOW-LIVE-010` | Editor and shared viewers remain open through repeated edits | Private HMR graph identity stays stable; repeated edits create or rebase no shared graph; context and namespace resources stay bounded |
 | `SHOW-LIVE-011` | Identity changes while a shared document loads modules | Entry and modules remain on the shared representation selected for that request chain; all shared surfaces are private and no-store; opaque-origin code cannot cross into a sibling share; no private Session path or mixed graph appears |
 | `SHOW-LIVE-012` | Independent resource viewer opens canonical `/show/` | Complete private modules are readable; HMR and annotations remain editor-only |
-| `SHOW-LIVE-013` | Shared content attempts Service Worker registration before an editor opens the link | Opaque-origin registration fails with a security error and no Service-Worker-Allowed header; no worker controls `/p/` or `/show/` and no private bytes are exposed; ordinary Web Worker support remains separate |
-| `SHOW-LIVE-014` | Avibe runs against Runtime without keyed-context support | Shared viewers use the explicit legacy singleton compatibility path; HMR stays disabled on `/p/`; compatibility is not advertised as isolation |
-| `SHOW-LIVE-015` | First capability probe is transiently unavailable | Current request remains shared; retry delay is bounded; Runtime process identity change clears all cached outcomes |
-| `SHOW-LIVE-016` | Shared transforms emit nested TSX, CSS, raw-loader, worker, and unsafe responses | Recursive dependencies stay in one immutable opaque namespace; handles never reopen paths or escape namespaces; diagnostics and host paths are sanitized |
+| `SHOW-LIVE-013` | Shared content attempts Service Worker registration before an editor opens the link | Opaque-origin registration fails with a security error and no Service-Worker-Allowed header; no worker controls `/p/` or `/show/` and no private bytes are exposed; canonical dedicated module workers use the opaque-origin broker while real-browser proof remains residual |
+| `SHOW-LIVE-014` | Avibe runs against Runtime without keyed-context support | Shared admission returns one sanitized unavailable result without touching the legacy singleton graph; HMR stays disabled on `/p/`; trusted resource redirects remain independent |
+| `SHOW-LIVE-015` | First capability probe is transiently unavailable | Transient-unknown never serves shared or opens upstream work; bounded retry ends in the same sanitized unavailable result; Runtime process identity change clears all cached outcomes |
+| `SHOW-LIVE-016` | Shared transforms emit nested TSX, CSS, raw-loader, worker, and unsafe responses | Recursive dependencies including brokered dedicated module workers stay in one immutable opaque namespace; handles never reopen paths or escape namespaces; diagnostics and host paths are sanitized |
 | `SHOW-LIVE-017` | Startup and show-update explicitly prewarm graphs | Every prewarm carries a typed server envelope; protocol validation occurs before graph mutation; ordinary editor edits never implicitly prewarm shared context |
 | `SHOW-LIVE-018` | Direct CLI changes an active page to offline with HMR connected | Apply and offline transitions share one page writer and preserve both ordered effects; one coalesced persistent monitor observes durable state; polling plus closure completes within five seconds even after a lost event |
 | `SHOW-LIVE-019` | Public changes to limited while Backend is unavailable | One local transaction preserves the stable binding and installs normalized membership; anonymous access stops immediately; Backend availability is irrelevant to Apply |
-| `SHOW-LIVE-020` | The unused hosted exact-email model is retired | Backend table and authorized-email endpoints are deleted; Avibe hosted-email clients are deleted; application reads stop before destructive DDL; no migration or compatibility bridge exists; local legacy null bindings remain null while non-null bindings are preserved |
+| `SHOW-LIVE-020` | The unused hosted exact-email model is retired | Backend table and authorized-email endpoints are deleted; Avibe hosted-email clients are deleted; application reads stop before destructive DDL; no migration or compatibility bridge exists; known local rows preserve valid bindings while malformed released strings degrade offline/private with no binding and one warning |
 | `SHOW-LIVE-021` | Process crashes around a limited-list replacement and retries | Before-transaction crash leaves the old aggregate; after-commit crash leaves the complete new aggregate; canonical digest vectors make Apply A then B then replay A return A's original terminal result; no cloud coordinator exists |
 | `SHOW-LIVE-022` | Limited changes to private while Backend is unavailable | Private commits locally and disables `/p/`; the stable binding is retained but inactive; listed-only identity still cannot use `/show/` |
 | `SHOW-LIVE-023` | Legacy Runtime returns an unsafe transform error and nested raw path | Both responses use fixed path-free output; no host path or development diagnostic reaches the browser |
@@ -548,7 +570,7 @@ browser, Backend, Runtime, or local Incus evidence.
 | `SHOW-LIVE-034` | Custom-slug public page changes to limited | The exact custom binding is preserved; normalized local membership installs atomically; listed shared reads and anonymous denial use the same slug |
 | `SHOW-LIVE-035` | Resource viewer and editor open `/p/` with a legacy Runtime | Both trusted top-level requests redirect to canonical `/show/`; viewer remains read-only; editor HMR remains on the private canonical surface |
 | `SHOW-LIVE-036` | Authorized owner reads limited settings | Route HTTP IPC result and projection page identities all match or no settings return; exact normalized emails come only from local storage; actual HTTP metadata is private and no-store while the projection excludes mutation receipts; Backend receives no whitelist data |
-| `SHOW-LIVE-037` | Listed guest completes identity-only login | Backend returns one strictly typed signed verified instance-bound identity assertion with derived fail-closed JWKS retention; Avibe closes exact-origin callback correlation and atomically rotates one local identity-only session lineage; a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/` |
+| `SHOW-LIVE-037` | Listed guest completes identity-only login | Backend returns one strictly typed signed verified instance-bound identity assertion with derived fail-closed JWKS retention; Avibe closes exact-origin callback correlation, compares the browser-current session cookie, and atomically rotates one identity-only lineage through the signed-state skew boundary; a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/` |
 | `SHOW-LIVE-038` | Listed-only guest copies page ID and requests canonical `/show/` | Current membership plus a binding-scoped credential positively serves limited `/p/`; canonical document module API and HMR remain denied; membership and browsing credential create no Instance role or editor capability |
 | `SHOW-LIVE-039` | Malicious code on a public sibling page targets a limited share | Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker registration opener or protected bytes; every forged or ambient request is denied; capability-path OPTIONS and JSON mutations are credentialless and sibling attempts are sanitized; trusted shell plus current membership and public anonymous admission remain positive paths |
 

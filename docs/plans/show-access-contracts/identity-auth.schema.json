@@ -282,7 +282,7 @@
             "path": "/auth/show-identity/callback",
             "domain_attribute_allowed": false,
             "single_use": true,
-            "expires_no_later_than": "signed_state.expires_at",
+            "expires_no_later_than": "signed_state.expires_at_plus_verifier_clock_skew",
             "state_verification_precedes_cookie_selection": true,
             "invalid_state_cookie_deletion": "none",
             "terminal_callback_cookie_action": "consume_and_delete_matching_flow_only"
@@ -334,7 +334,7 @@
                 "properties": {
                   "id": {"type": "string", "pattern": "^FLOW-[A-Z0-9-]+$"},
                   "sequence": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-                  "successes": {"type": "array", "items": {"enum": ["a", "b"]}},
+                  "successes": {"type": "array", "maxItems": 2, "items": {"enum": ["a", "b"]}},
                   "remaining_cookies": {"type": "array", "items": {"enum": ["a", "b"]}}
                 }
               }
@@ -362,14 +362,16 @@
               "rotation": {
                 "operation": "atomic_lineage_generation_advance_after_all_callback_checks",
                 "prior_token_delivery": "cross_site_form_post_includes_same_site_none_session_cookie",
-                "login_start_flow_correlation": "server_side_nonce_record_captures_only_a_current_prior_token_hash_lineage_and_generation_and_expires_with_signed_state",
-                "callback_prior_token_requirement": "posted_callback_cookie_hash_must_match_the_flow_captured_prior_token_hash",
+                "login_start_flow_correlation": "server_side_nonce_record_always_captures_the_exact_current_valid_token_hash_lineage_and_generation_including_null_and_expires_with_signed_state_plus_skew",
+                "login_start_invalid_or_stale_cookie": "clear_browser_cookie_and_capture_null",
+                "callback_prior_token_requirement": "browser_current_callback_cookie_hash_must_equal_the_flow_captured_hash_including_null_equality",
                 "valid_prior_token": "advance_existing_lineage_and_invalidate_every_earlier_generation",
-                "concurrent_completion": "flows_that_captured_the_same_valid_prior_generation_advance_the_same_lineage_in_callback_order",
+                "concurrent_completion": "first_matching_callback_rotates_and_every_later_flow_with_a_different_browser_current_hash_is_superseded",
                 "no_valid_prior_token_at_login_start": "create_new_lineage",
+                "superseded_callback": "restart_required_without_new_lineage_rotation_or_second_valid_session",
                 "invalid_or_terminal_callback": "no_lineage_change",
-              "maximum_valid_records_per_lineage": 1,
-              "concurrent_completion_outcome": "one_current_generation_older_response_token_may_be_stale_and_must_restart_login"
+                "maximum_valid_records_per_lineage": 1,
+                "concurrent_completion_outcome": "exactly_one_current_browser_lineage_and_session"
             },
             "reset_policy": "key_or_session_store_reset_invalidates_all_existing_cookies",
             "request_validation": ["token_hash_record_exists", "integer_times_and_not_expired", "paired_instance_matches", "issuer_matches_pairing", "exact_callback_origin_matches_record", "lineage_generation_is_current", "local_store_generation_matches"],
@@ -386,7 +388,9 @@
               {"id": "SESSION-STORE-RESET", "mutation": "rotate_local_session_generation", "outcome": "identity_required_without_page_bytes"},
               {"id": "SESSION-MEMBER-REMOVED", "mutation": "remove_email_from_current_ShowAccess", "outcome": "generic_deny_without_page_bytes_or_login_loop"},
               {"id": "SESSION-SEQUENTIAL-ROTATION", "mutation": "second_cross_site_login_with_prior_cookie", "outcome": "new_generation_only_old_token_rejected"},
-              {"id": "SESSION-CONCURRENT-ROTATION", "mutation": "two_valid_callbacks_from_same_prior_generation", "outcome": "one_current_generation_other_response_may_be_stale"},
+              {"id": "SESSION-CONCURRENT-ROTATION", "mutation": "two_valid_callbacks_from_same_prior_generation", "outcome": "first_rotates_second_is_superseded_restart_required"},
+              {"id": "SESSION-CONCURRENT-NULL-BASE", "mutation": "two_flows_started_without_session_complete_in_either_order", "outcome": "first_creates_lineage_second_is_superseded_restart_required"},
+              {"id": "SESSION-STALE-COOKIE-START", "mutation": "login_start_with_invalid_or_stale_cookie", "outcome": "cookie_cleared_and_null_captured"},
               {"id": "SESSION-UNRELATED-LINEAGES", "mutation": "separate_browser_without_prior_token", "outcome": "independent_current_lineages"},
               {"id": "SESSION-INVALID-CALLBACK", "mutation": "invalid_state_or_terminal_error", "outcome": "existing_lineage_unchanged"}
             ]
@@ -484,7 +488,7 @@
             "properties": {
               "id": { "type": "string", "pattern": "^IDENTITY-CALLBACK-[A-Z0-9-]+$" },
               "mutation": { "enum": ["reuse_consumed_nonce", "replace_assertion_instance_id", "replace_signed_return_share", "replace_correlation_cookie", "add_callback_query", "add_callback_fragment", "place_assertion_in_browser_history", "place_assertion_in_referrer", "replace_callback_host", "replace_callback_port", "replace_callback_scheme", "replace_callback_path", "add_page_authorization_claim", "identity_not_verified", "identity_unavailable"] },
-              "outcome": { "enum": ["reject_without_credential_or_page_bytes", "identity_not_verified_no_store_without_assertion", "identity_unavailable_no_store_without_assertion"] }
+              "outcome": { "enum": ["reject_without_credential_or_page_bytes", "identity_flow_superseded_restart_required", "identity_not_verified_no_store_without_assertion", "identity_unavailable_no_store_without_assertion"] }
             }
           }
         }

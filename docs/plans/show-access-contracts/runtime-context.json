@@ -21,7 +21,10 @@
         "startup_reconciliation_prewarm",
         "show_update_prewarm"
       ],
-      "keyed_context_enabled": false
+      "keyed_context_enabled": false,
+      "allowed_operation_context": "released_non_shared_compatibility_only",
+      "shared_admission_allowed": false,
+      "shared_outcome": "fixed_sanitized_shared_runtime_unavailable"
     },
     {
       "id": "declared_v1",
@@ -43,7 +46,8 @@
       "outcome": "supported",
       "process_cache": "permanent",
       "redirect_eligible": true,
-      "request_before_next_probe": "shared"
+      "shared_runtime_admission": "admit_keyed_context",
+      "legacy_singleton_graph_touched": false
     },
     {
       "id": "unsupported",
@@ -51,7 +55,8 @@
       "outcome": "unsupported",
       "process_cache": "permanent",
       "redirect_eligible": true,
-      "request_before_next_probe": "shared"
+      "shared_runtime_admission": "fixed_sanitized_shared_runtime_unavailable",
+      "legacy_singleton_graph_touched": false
     },
     {
       "id": "transient_unknown",
@@ -59,7 +64,8 @@
       "outcome": "transient-unknown",
       "process_cache": "retry_deadline",
       "redirect_eligible": true,
-      "request_before_next_probe": "shared"
+      "shared_runtime_admission": "bounded_retry_then_fixed_sanitized_shared_runtime_unavailable",
+      "legacy_singleton_graph_touched": false
     }
   ],
   "app_graph_operations": [
@@ -180,6 +186,26 @@
     "maximum_retry_delay_seconds": 5,
     "identity_inputs": ["runtime_process_identity", "runtime_base_url"],
     "identity_change_clears": ["all_outcomes", "retry_deadline"]
+  },
+  "shared_runtime_admission": {
+    "owner": "SharedRuntimeAdmission",
+    "served_shared_requires": [
+      "capability_matrix_read_decision_serve_shared",
+      "runtime_context_shared",
+      "keyed_context_supported"
+    ],
+    "unsupported": {
+      "outcome": "fixed_sanitized_shared_runtime_unavailable",
+      "upstream_shared_request_allowed": false,
+      "legacy_singleton_graph_allowed": false
+    },
+    "transient_unknown": {
+      "before_supported": "bounded_capability_negotiation_retry_only",
+      "upstream_shared_request_allowed": false,
+      "legacy_singleton_graph_allowed": false,
+      "retry_exhausted_outcome": "fixed_sanitized_shared_runtime_unavailable"
+    },
+    "private_redirect_independence": "trusted_top_level_resource_viewer_or_editor_redirect_to_show_requires_no_shared_runtime_admission"
   },
   "shared_namespace_confinement": {
     "id": "RUNTIME-IMMUTABLE-OPAQUE-NAMESPACE",

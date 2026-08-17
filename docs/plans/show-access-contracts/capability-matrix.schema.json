@@ -49,7 +49,7 @@
     },
     "rules": {
       "type": "array",
-      "minItems": 17,
+      "minItems": 21,
       "items": { "$ref": "#/$defs/rule" }
     }
   },

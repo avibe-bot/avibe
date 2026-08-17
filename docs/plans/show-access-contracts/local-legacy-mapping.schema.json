@@ -3,7 +3,7 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/local-legacy-mapping.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "owner", "scope", "initial_audience_revision", "email_initialization", "hosted_import_allowed", "dual_write_allowed", "mapping_rules", "cases"],
+  "required": ["schema_version", "owner", "scope", "initial_audience_revision", "email_initialization", "hosted_import_allowed", "dual_write_allowed", "mapping_rules", "malformed_source_policy", "invalid_source_vectors", "cases"],
   "properties": {
     "schema_version": { "const": 2 },
     "owner": { "const": "LocalLegacyShowAccessMapper" },
@@ -18,8 +18,41 @@
         "public": { "availability": "active", "access_mode": "public" },
         "offline": { "availability": "offline", "access_mode": "private" },
         "share_binding": {
-          "non_null_share_id": "retain_as_stable_binding_even_when_inactive",
+          "non_null_valid_v2_share_id": "retain_as_stable_binding_even_when_inactive",
           "null_share_id": "map_to_null_binding"
+        }
+      }
+    },
+    "malformed_source_policy": {
+      "const": {
+        "input_boundary": "released_unconstrained_legacy_strings",
+        "known_visibility_values": ["private", "public", "offline"],
+        "valid_share_id_contract": "show-access.schema.json#/$defs/share_id",
+        "trigger": "unknown_visibility_or_non_null_invalid_v2_share_id",
+        "result": {
+          "schema_version": 2,
+          "availability": "offline",
+          "access_mode": "private",
+          "share_binding": null,
+          "audience_revision": 0,
+          "emails": [],
+          "last_mutation": null
+        },
+        "shared_route_admitted": false,
+        "startup_aborted": false,
+        "warning_code": "legacy_show_access_source_degraded_fail_closed"
+      }
+    },
+    "invalid_source_vectors": {
+      "type": "array",
+      "minItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "source"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^LOCAL-LEGACY-INVALID-[A-Z0-9-]+$" },
+          "source": { "$ref": "#/$defs/source" }
         }
       }
     },
@@ -32,10 +65,10 @@
       "required": ["page_id", "legacy_visibility", "share_id"],
       "properties": {
         "page_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id" },
-        "legacy_visibility": { "enum": ["private", "public", "offline"] },
+        "legacy_visibility": { "type": "string" },
         "share_id": {
           "oneOf": [
-            { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/share_id" },
+            { "type": "string" },
             { "type": "null" }
           ]
         }

@@ -38,8 +38,11 @@ JWKS caches have closed clocks and fail-closed refresh behavior. Callback succes
 atomically advances a token-hash-backed, exact-origin-bound identity-only session
 lineage and invalidates every prior generation. Its `SameSite=None` cookie supports
 the cross-site callback without becoming page authorization. A nonce-scoped server
-flow record captures only a currently valid prior token hash and lineage, so concurrent
-callbacks serialize without giving a later stale token lineage authority. The session has a
+flow record captures the exact browser-current valid token hash, lineage, and generation,
+including null; stale cookies are cleared at start. A callback rotates only when the
+current cookie still equals that snapshot, so a superseded concurrent flow creates no
+lineage or second session. The flow cookie remains valid through the same signed-state
+plus verifier-skew boundary. The session has a
 non-renewable 24-hour maximum; every later limited request still checks current local
 membership. The HTTP harness executes the cookie policy model; real-browser delivery
 remains residual conformance evidence.
@@ -58,9 +61,9 @@ clients, and Instance authorization source are direct deletion targets.
 | `fixtures/apply-mutations.json` | Canonical transitions, crash/idempotency trace, next-request revocation |
 | `owner-settings.schema.json` | Page-correlated local settings IPC and actual private/no-store HTTP metadata |
 | `identity-auth.json` | Compact RS256/JWKS, bounded state/cache, concurrent callback, and identity-session state machines |
-| `local-legacy-mapping.json` | Deterministic local SQLite private/public/offline mapping with offline fail-closed |
-| `capability-matrix.json` | Closed `/p` and `/show` decision over independent resource and membership axes |
-| `shared-browser-containment.json` | Trusted shell, opaque Runtime capture, every-request validation, sibling isolation |
+| `local-legacy-mapping.json` | Wide legacy string boundary with deterministic valid mapping and malformed fail-closed |
+| `capability-matrix.json` | Closed `/p` and `/show` decision requiring keyed support for every shared admission |
+| `shared-browser-containment.json` | Trusted shell, opaque Runtime capture, worker broker, every-request validation, sibling isolation |
 | `retirement.json` | Direct removal inventory with migration and compatibility forbidden |
 | `runtime-context.json` | Protocol, trusted envelope, isolated graphs, demand-only shared work, confinement and budgets |
 | `mirror-registry.json` | Exact future producer, consumer, signature, delivery and serialization owner |
@@ -80,18 +83,22 @@ clients, and Instance authorization source are direct deletion targets.
 - Receipts remain for the page lifetime with no time/count eviction and are removed
   only by the page cascade.
 - Legacy local offline maps to offline/private; private/public map active in their
-  matching mode; any existing stable binding remains, a null binding stays null, and
-  no hosted data is imported.
+  matching mode. A valid stable binding remains and null stays null. Unknown visibility
+  or malformed/non-v2 binding degrades to offline/private/null with one fixed warning;
+  startup continues and no hosted data is imported.
 - Listed-only identity can read current limited `/p` and nothing privileged.
 - Resource viewer/editor authority is independent. Trusted top-level `/p`
   navigation redirects to canonical `/show`; only editor authority enables HMR and
   annotations there.
-- `/p` always selects shared Runtime and never exposes HMR, annotations, private
-  context, Session internals, Workbench, APIs, or Agents.
+- A served `/p` always selects keyed shared Runtime and never exposes HMR, annotations,
+  private context, Session internals, Workbench, APIs, or Agents. Unsupported or
+  transient-unknown keyed context never touches the legacy singleton graph and returns
+  one sanitized unavailable result after any bounded retry.
 - Arbitrary shared code runs in an opaque-origin sandbox and cannot obtain or reuse
   another share's bootstrap, handle, capability, cookie, DOM, CORS response, opener,
   or protected bytes. Service Worker registration is unsupported and no
-  Service-Worker-Allowed header is emitted; ordinary Web Workers remain separate.
+  Service-Worker-Allowed header is emitted. Canonical dedicated module workers use the
+  containment Owner's opaque-origin broker; dynamic/unrecognized constructors fail closed.
 - Public anonymous and current-member limited admission both mint opaque capability-
   path authority. Protected document/module/resource/API requests are credentialless;
   JSON mutation preflight has an exact closed method/header policy.

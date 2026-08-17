@@ -235,7 +235,8 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and start["correlation_cookie"] == callback["correlation_cookie"]
                 and hashlib.sha256(start["correlation_cookie"].encode("utf-8")).hexdigest()
                 == start["correlation_cookie_sha256"]
-                and start["correlation_cookie_expires_at"] <= start["signed_state_expires_at"]
+                and start["correlation_cookie_expires_at"]
+                == start["signed_state_expires_at"] + handshake["signed_state_lifecycle"]["verifier_clock_skew_seconds"]
                 and cookie
                 == {
                     "name_template": "__Secure-avibe_show_identity_c_<base64url_nonce>",
@@ -247,7 +248,7 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                     "path": "/auth/show-identity/callback",
                     "domain_attribute_allowed": False,
                     "single_use": True,
-                    "expires_no_later_than": "signed_state.expires_at",
+                    "expires_no_later_than": "signed_state.expires_at_plus_verifier_clock_skew",
                     "state_verification_precedes_cookie_selection": True,
                     "invalid_state_cookie_deletion": "none",
                     "terminal_callback_cookie_action": "consume_and_delete_matching_flow_only",
@@ -260,6 +261,10 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and handshake["identity_session"]["page_authorization"] is False
                 and handshake["identity_session"]["cookie"]["same_site"] == "None"
                 and handshake["identity_session"]["rotation"]["maximum_valid_records_per_lineage"] == 1
+                and handshake["identity_session"]["rotation"]["callback_prior_token_requirement"]
+                == "browser_current_callback_cookie_hash_must_equal_the_flow_captured_hash_including_null_equality"
+                and handshake["identity_session"]["rotation"]["superseded_callback"]
+                == "restart_required_without_new_lineage_rotation_or_second_valid_session"
             )
         if check == "identity_wire_state_machine":
             wire = document["backend_assertion"]["wire_protocol"]
@@ -300,6 +305,8 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 == 720
                 and flows["independent_same_host_flows"] is True
                 and flows["terminal_callback_affects_other_flows"] is False
+                and {item["id"]: item["successes"] for item in flows["cases"]}["FLOW-A-THEN-B"] == ["a"]
+                and {item["id"]: item["successes"] for item in flows["cases"]}["FLOW-B-THEN-A"] == ["b"]
                 and {item["id"] for item in flows["cases"]}
                 >= {
                     "FLOW-A-THEN-B",
@@ -480,6 +487,25 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
             return all(case["result"]["share_binding"] is None for case in null_cases) and all(
                 case["result"]["share_binding"] == {"share_id": case["source"]["share_id"]} for case in retained
             )
+        if check == "legacy_malformed_fail_closed":
+            policy = document["malformed_source_policy"]
+            vectors = document["invalid_source_vectors"]
+            return (
+                policy["input_boundary"] == "released_unconstrained_legacy_strings"
+                and policy["result"]
+                == {
+                    "schema_version": 2,
+                    "availability": "offline",
+                    "access_mode": "private",
+                    "share_binding": None,
+                    "audience_revision": 0,
+                    "emails": [],
+                    "last_mutation": None,
+                }
+                and policy["shared_route_admitted"] is False
+                and policy["startup_aborted"] is False
+                and len(vectors) == 10
+            )
         if check == "settings_identity_and_delivery":
             allowed = document["allowed_cases"]
             failures = {item["id"]: item for item in document["failure_cases"]}
@@ -590,6 +616,19 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 == {"fetch_limited_share", "frame_limited_share", "open_and_read_limited_share"}
                 and all(case["outcome"] == "generic_deny_without_page_bytes" for case in sibling)
                 and cases["CONTAINMENT-TRUSTED-SHELL-CURRENT-MEMBER"]["outcome"] == "serve_shared"
+            )
+        if check == "dedicated_module_worker_broker":
+            broker = document["dedicated_module_worker_broker"]
+            cases = {case["id"]: case for case in broker["cases"]}
+            return (
+                broker["transform_result"] == "opaque_origin_worker_broker_call"
+                and broker["tuple_origin_capability_url_used_for_worker_start"] is False
+                and broker["recursive_module_graph"]["cross_namespace_allowed"] is False
+                and broker["recursive_module_graph"]["source_path_reopen_allowed"] is False
+                and cases["WORKER-CANONICAL-ENTRY"]["outcome"] == "start_opaque_origin_dedicated_module_worker"
+                and cases["WORKER-NESTED-IMPORTS"]["outcome"] == "start_closed_recursive_opaque_origin_worker_graph"
+                and cases["WORKER-DYNAMIC-UNRECOGNIZED"]["outcome"] == "fixed_sanitized_worker_unsupported"
+                and all(case["path_bytes"] is False for case in cases.values())
             )
         raise AssertionError(f"unknown semantic claim: {check}")
     raise AssertionError(f"unknown claim source: {kind}")
@@ -1029,6 +1068,60 @@ def test_local_legacy_sqlite_mapping_is_deterministic_and_fail_closed() -> None:
         assert result["last_mutation"] is None
         assert case["shared_route_admitted"] is admitted
 
+    share_id_contract = _load("show-access.schema.json")["$defs"]["share_id"]
+    assert contract["malformed_source_policy"]["valid_share_id_contract"] == ("show-access.schema.json#/$defs/share_id")
+    share_id_pattern = re.compile(share_id_contract["pattern"])
+
+    def map_source(source: dict[str, Any]) -> dict[str, Any]:
+        visibility = source["legacy_visibility"]
+        share_id = source["share_id"]
+        valid_source = visibility in {"private", "public", "offline"} and (
+            share_id is None
+            or (
+                share_id_contract["minLength"] <= len(share_id) <= share_id_contract["maxLength"]
+                and share_id_pattern.fullmatch(share_id) is not None
+            )
+        )
+        if not valid_source:
+            return {
+                **contract["malformed_source_policy"]["result"],
+                "page_id": source["page_id"],
+                "warning_code": contract["malformed_source_policy"]["warning_code"],
+                "shared_route_admitted": False,
+                "startup_aborted": False,
+            }
+        mode = contract["mapping_rules"][visibility]
+        return {
+            "schema_version": 2,
+            "page_id": source["page_id"],
+            **mode,
+            "share_binding": {"share_id": share_id} if share_id is not None else None,
+            "audience_revision": 0,
+            "emails": [],
+            "last_mutation": None,
+            "warning_code": None,
+            "shared_route_admitted": visibility == "public",
+            "startup_aborted": False,
+        }
+
+    for case in contract["cases"]:
+        mapped = map_source(case["source"])
+        assert {key: mapped[key] for key in case["result"]} == case["result"]
+        assert mapped["warning_code"] is None
+        assert mapped["shared_route_admitted"] is case["shared_route_admitted"]
+
+    invalid_vectors = contract["invalid_source_vectors"]
+    assert len(invalid_vectors) == 10
+    for vector in invalid_vectors:
+        mapped = map_source(vector["source"])
+        assert mapped == {
+            "page_id": vector["source"]["page_id"],
+            **contract["malformed_source_policy"]["result"],
+            "warning_code": "legacy_show_access_source_degraded_fail_closed",
+            "shared_route_admitted": False,
+            "startup_aborted": False,
+        }
+
 
 def test_owner_settings_reads_exact_emails_only_from_local_authorized_state() -> None:
     settings = _load("fixtures/owner-settings.json")
@@ -1209,7 +1302,7 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "path": "/auth/show-identity/callback",
         "domain_attribute_allowed": False,
         "single_use": True,
-        "expires_no_later_than": "signed_state.expires_at",
+        "expires_no_later_than": "signed_state.expires_at_plus_verifier_clock_skew",
         "state_verification_precedes_cookie_selection": True,
         "invalid_state_cookie_deletion": "none",
         "terminal_callback_cookie_action": "consume_and_delete_matching_flow_only",
@@ -1250,22 +1343,22 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "operation": "atomic_lineage_generation_advance_after_all_callback_checks",
         "prior_token_delivery": "cross_site_form_post_includes_same_site_none_session_cookie",
         "login_start_flow_correlation": (
-            "server_side_nonce_record_captures_only_a_current_prior_token_hash_lineage_and_generation_and_"
-            "expires_with_signed_state"
+            "server_side_nonce_record_always_captures_the_exact_current_valid_token_hash_lineage_and_"
+            "generation_including_null_and_expires_with_signed_state_plus_skew"
         ),
+        "login_start_invalid_or_stale_cookie": "clear_browser_cookie_and_capture_null",
         "callback_prior_token_requirement": (
-            "posted_callback_cookie_hash_must_match_the_flow_captured_prior_token_hash"
+            "browser_current_callback_cookie_hash_must_equal_the_flow_captured_hash_including_null_equality"
         ),
         "valid_prior_token": "advance_existing_lineage_and_invalidate_every_earlier_generation",
         "concurrent_completion": (
-            "flows_that_captured_the_same_valid_prior_generation_advance_the_same_lineage_in_callback_order"
+            "first_matching_callback_rotates_and_every_later_flow_with_a_different_browser_current_hash_is_superseded"
         ),
         "no_valid_prior_token_at_login_start": "create_new_lineage",
+        "superseded_callback": "restart_required_without_new_lineage_rotation_or_second_valid_session",
         "invalid_or_terminal_callback": "no_lineage_change",
         "maximum_valid_records_per_lineage": 1,
-        "concurrent_completion_outcome": (
-            "one_current_generation_older_response_token_may_be_stale_and_must_restart_login"
-        ),
+        "concurrent_completion_outcome": "exactly_one_current_browser_lineage_and_session",
     }
     assert identity_session["maximum_lifetime_seconds"] == 86400
     assert identity_session["renewable"] is identity_session["page_authorization"] is False
@@ -1323,7 +1416,9 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         hashlib.sha256(closed_loop["start"]["correlation_cookie"].encode("utf-8")).hexdigest()
         == (closed_loop["start"]["correlation_cookie_sha256"])
     )
-    assert closed_loop["start"]["correlation_cookie_expires_at"] <= closed_loop["start"]["signed_state_expires_at"]
+    assert closed_loop["start"]["correlation_cookie_expires_at"] == (
+        closed_loop["start"]["signed_state_expires_at"] + state_lifecycle["verifier_clock_skew_seconds"]
+    )
     assert closed_loop["start"]["page_id"] == closed_loop["callback"]["resolved_page_id"]
     assert closed_loop["start"]["share_id"] == closed_loop["callback"]["resolved_share_id"]
     assert closed_loop["start"]["correlation_cookie_name"] == closed_loop["callback"]["correlation_cookie_name"]
@@ -1568,6 +1663,42 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
         "raw_import",
     }
     assert all(case["capability_required"] and case["same_namespace"] for case in contract["dependency_cases"])
+    worker = contract["dedicated_module_worker_broker"]
+    assert worker["owner"] == "SharedViewerBrowserContainment.shared_transform_runtime_boundary"
+    assert worker["transform_result"] == "opaque_origin_worker_broker_call"
+    assert worker["worker_start_url"] == "same_opaque_origin_blob_or_object_url"
+    assert worker["tuple_origin_capability_url_used_for_worker_start"] is False
+    assert worker["entry_fetch"]["required_validation"] == [
+        "protected_request_validation",
+        "same_namespace_handle",
+        "same_document_handle",
+    ]
+    assert worker["recursive_module_graph"] == {
+        "closure": "all_static_worker_imports",
+        "rewrite_target": "same_opaque_origin_blob_or_object_urls",
+        "cross_namespace_allowed": False,
+        "source_path_reopen_allowed": False,
+    }
+    worker_cases = {case["id"]: case for case in worker["cases"]}
+    assert set(worker_cases) == {
+        "WORKER-CANONICAL-ENTRY",
+        "WORKER-NESTED-IMPORTS",
+        "WORKER-CROSS-NAMESPACE",
+        "WORKER-PATH-ATTEMPT",
+        "WORKER-NAMESPACE-EXPIRY",
+        "WORKER-BUDGET-RECLAIM",
+        "WORKER-TERMINATION-REVOKE",
+        "WORKER-DYNAMIC-UNRECOGNIZED",
+    }
+    assert worker_cases["WORKER-CANONICAL-ENTRY"]["outcome"] == ("start_opaque_origin_dedicated_module_worker")
+    assert worker_cases["WORKER-NESTED-IMPORTS"]["outcome"] == ("start_closed_recursive_opaque_origin_worker_graph")
+    for case_id in ("WORKER-CROSS-NAMESPACE", "WORKER-PATH-ATTEMPT"):
+        assert worker_cases[case_id]["outcome"] == "fixed_sanitized_not_found"
+    for case_id in ("WORKER-NAMESPACE-EXPIRY", "WORKER-BUDGET-RECLAIM", "WORKER-TERMINATION-REVOKE"):
+        assert worker_cases[case_id]["urls_revoked"] is True
+    assert worker_cases["WORKER-DYNAMIC-UNRECOGNIZED"]["outcome"] == ("fixed_sanitized_worker_unsupported")
+    assert all(case["path_bytes"] is False for case in worker_cases.values())
+    assert worker["real_browser_conformance"] == "future_local_incus_browser_lane"
     assert all(not case["page_bytes"] and not case["path_bytes"] for case in contract["failure_responses"])
     assert contract["residual_evidence"] == {
         "browser_sandbox_cors": "future_local_incus_real_browser",
@@ -1619,6 +1750,11 @@ def test_capability_matrix_is_closed_and_resource_membership_axes_are_orthogonal
                 assert point["access_mode"] in {"limited", "public"}
                 assert point["request_kind"] == "trusted_top_level_navigation"
                 assert point["resource_authority"] in {"viewer", "editor"}
+            if decision["read_decision"] == "serve_shared" or decision["runtime_context"] == "shared":
+                assert point["keyed_context"] == "supported"
+            if point["keyed_context"] in {"unsupported", "transient-unknown"}:
+                assert decision["read_decision"] != "serve_shared"
+                assert decision["runtime_context"] is None
         if decision["hmr"]:
             assert point["surface"] == "/show"
             assert point["resource_authority"] == "editor"
@@ -1733,6 +1869,36 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
         capability.value for capability in ShowRuntimeContextCapability
     ]
     assert all(case["redirect_eligible"] is True for case in contract["negotiation_cases"])
+    negotiation = {case["id"]: case for case in contract["negotiation_cases"]}
+    assert negotiation["supported"]["shared_runtime_admission"] == "admit_keyed_context"
+    assert negotiation["unsupported"]["shared_runtime_admission"] == ("fixed_sanitized_shared_runtime_unavailable")
+    assert negotiation["transient_unknown"]["shared_runtime_admission"] == (
+        "bounded_retry_then_fixed_sanitized_shared_runtime_unavailable"
+    )
+    assert all(case["legacy_singleton_graph_touched"] is False for case in negotiation.values())
+    admission = contract["shared_runtime_admission"]
+    assert admission["owner"] == "SharedRuntimeAdmission"
+    assert admission["served_shared_requires"] == [
+        "capability_matrix_read_decision_serve_shared",
+        "runtime_context_shared",
+        "keyed_context_supported",
+    ]
+    assert admission["unsupported"] == {
+        "outcome": "fixed_sanitized_shared_runtime_unavailable",
+        "upstream_shared_request_allowed": False,
+        "legacy_singleton_graph_allowed": False,
+    }
+    assert admission["transient_unknown"] == {
+        "before_supported": "bounded_capability_negotiation_retry_only",
+        "upstream_shared_request_allowed": False,
+        "legacy_singleton_graph_allowed": False,
+        "retry_exhausted_outcome": "fixed_sanitized_shared_runtime_unavailable",
+    }
+    assert admission["private_redirect_independence"].endswith("requires_no_shared_runtime_admission")
+    headerless = contract["request_protocol_cases"][0]
+    assert headerless["allowed_operation_context"] == "released_non_shared_compatibility_only"
+    assert headerless["shared_admission_allowed"] is False
+    assert headerless["shared_outcome"] == "fixed_sanitized_shared_runtime_unavailable"
 
     boundary = contract["loopback_request_boundary"]
     assert boundary["browser_supplied_headers_removed"] == [
@@ -2157,7 +2323,10 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
     assert interfaces["C13"]["signature"]["covered_fields"] == [
         "runtime_graph_ownership",
         "operation_context_eligibility",
+        "shared_runtime_admission",
         "shared_namespace_confinement",
+        "negotiation_cases.shared_runtime_admission",
+        "negotiation_cases.legacy_singleton_graph_touched",
         "namespace_lifetime.absolute_expiry_cancels_remaining_pins",
         "resource_governance.maximum_shared_in_flight_seconds",
         "resource_governance.hard_request_deadline",
@@ -2175,8 +2344,16 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
     assert {
         "runtime-context.resource_governance.maximum_shared_in_flight_seconds",
         "runtime-context.resource_governance.hard_request_deadline",
+        "dedicated_module_worker_broker",
     } <= set(interfaces["C18"]["signature"]["covered_fields"])
     assert interfaces["C19"]["signature"]["schema"] == "local-legacy-mapping.schema.json"
+    assert {
+        "mapping_rules.share_binding.non_null_valid_v2_share_id",
+        "mapping_rules.share_binding.null_share_id",
+        "malformed_source_policy",
+        "invalid_source_vectors",
+        "malformed_source_policy.warning_code",
+    } <= set(interfaces["C19"]["signature"]["covered_fields"])
     assert interfaces["C20"]["signature"]["schema"] == "apply-transition-algebra.json#/stable_writer"
     assert interfaces["C20"]["signature"]["covered_fields"][-2:] == [
         "workbench_archive",
@@ -2184,6 +2361,12 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
     ]
     assert interfaces["C04"]["delivery"]["serialization_owner"].startswith("CanonicalApplyReceipt")
     assert interfaces["C07"]["delivery"]["serialization_owner"] == "avibe.ExecutableIdentityHandshake"
+    assert {
+        "correlation_cookie.expires_no_later_than",
+        "identity_session.rotation.login_start_flow_correlation",
+        "identity_session.rotation.callback_prior_token_requirement",
+        "identity_session.rotation.superseded_callback",
+    } <= set(interfaces["C07"]["signature"]["covered_fields"])
     assert interfaces["C14"]["delivery"]["serialization_owner"] == "avibe.PrivateHmrAuthority"
     assert interfaces["C14"]["delivery"]["authentication"] == (
         "server_validated_origin_source_and_resource_editor_before_upstream"
