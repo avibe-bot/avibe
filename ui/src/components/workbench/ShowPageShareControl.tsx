@@ -240,7 +240,7 @@ export const ShowPageShareControl: React.FC<{
           <p className="py-1 text-sm text-muted">{t('chat.showPage.loadError')}</p>
         ) : null}
 
-        {payload && !offline ? (
+        {payload && !offline && payload.visibility !== 'limited' ? (
           <div className="flex items-center gap-1.5">
             <Input
               id="show-share-link"
@@ -274,6 +274,12 @@ export const ShowPageShareControl: React.FC<{
               </Button>
             ) : null}
           </div>
+        ) : null}
+
+        {payload && !offline && payload.visibility === 'limited' ? (
+          <p className="text-[11px] leading-snug text-muted">
+            {t('chat.showPage.sharingHelp.limited')}
+          </p>
         ) : null}
 
         {access?.can_publish_public ? (

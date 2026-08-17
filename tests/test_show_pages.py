@@ -2333,6 +2333,31 @@ def test_show_page_payload_requires_enabled_avibe_cloud(monkeypatch, tmp_path):
         store.close()
 
 
+def test_show_page_payload_does_not_advertise_limited_link_before_guest_admission(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-limited-link")
+        limited = store.apply_access(
+            page.session_id,
+            expected_revision=page.access_revision,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["guest@example.com"],
+        )
+        payload = show_page_payload(store.get(page.session_id))
+
+        assert limited.status == "applied"
+        assert payload["visibility"] == "limited"
+        assert payload["active_url"] is None
+        assert payload["public_url"].endswith(f"/p/{page.share_id}/")
+    finally:
+        store.close()
+
+
 def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

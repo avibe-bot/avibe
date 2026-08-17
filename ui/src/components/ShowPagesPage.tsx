@@ -241,6 +241,11 @@ function ShowPageRow({
 
               {page.visibility === 'offline' ? (
                 <p className="text-[12px] text-muted">{t('showPages.offlineNoLink')}</p>
+              ) : page.visibility === 'limited' ? (
+                <div className="flex items-start gap-2 text-[12px] text-muted">
+                  <TriangleAlert size={14} className="mt-0.5 shrink-0 text-gold-ink" />
+                  <span>{t('chat.showPage.sharingHelp.limited')}</span>
+                </div>
               ) : (
                 <div className="flex flex-col gap-2">
                   <span className={LABEL}>{t('showPages.liveLink')}</span>
@@ -274,7 +279,7 @@ function ShowPageRow({
                       {t('showPages.open')}
                     </Button>
                   </div>
-                  {(page.visibility === 'limited' || page.visibility === 'public') && !page.url_available ? (
+                  {page.visibility === 'public' && !page.url_available ? (
                     <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                       <TriangleAlert size={13} className="text-gold-ink" />
                       <span className="text-muted">{t('showPages.cloudOff')}</span>

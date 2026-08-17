@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { editorPath, localPath, type ShowPageLinkInfo } from './showPageLinks';
+import { copyHref, editorPath, liveHref, localPath, type ShowPageLinkInfo } from './showPageLinks';
 
 const page = (visibility: string): ShowPageLinkInfo => ({
   session_id: 'ses/author',
@@ -18,8 +18,17 @@ describe('Show Page link routes', () => {
     expect(editorPath(page('unexpected'))).toBeNull();
   });
 
-  it('keeps Limited and public share links on the guest-facing route', () => {
-    expect(localPath(page('limited'))).toBe('/p/shared-link/');
+  it('does not expose Limited as a live link before signed-in guest admission exists', () => {
+    const limited = {
+      ...page('limited'),
+      active_url: 'https://show.example.test/p/shared-link/',
+    };
+    expect(localPath(limited)).toBeNull();
+    expect(liveHref(limited)).toBeNull();
+    expect(copyHref(limited)).toBeNull();
+  });
+
+  it('keeps public share links on the guest-facing route', () => {
     expect(localPath(page('public'))).toBe('/p/shared-link/');
   });
 });

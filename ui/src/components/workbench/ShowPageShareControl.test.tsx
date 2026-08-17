@@ -205,6 +205,38 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     });
   });
 
+  it('does not present a Limited shared link before guest admission exists', async () => {
+    api.getShowPageAccess.mockResolvedValue({
+      ok: true,
+      mode: 'local',
+      can_use: true,
+      can_manage: false,
+      can_publish_public: false,
+    });
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'limited',
+      active_url: '/p/stable-link/',
+      share_id: 'stable-link',
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByText(
+      'Configure the email audience now; the shared link is not active yet.',
+    )).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Copy link' })).toBeNull();
+    expect(screen.queryByDisplayValue('/p/stable-link/')).toBeNull();
+  });
+
   it('shows the loading state while a first access read is pending', async () => {
     // The app-window caller has no access yet: while the access read is in
     // flight the popover must show the loading row, not the load-error text.

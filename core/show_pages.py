@@ -1664,7 +1664,7 @@ def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict
     active_url = None
     if page.visibility == VISIBILITY_PRIVATE:
         active_url = private
-    elif page.visibility in {VISIBILITY_LIMITED, VISIBILITY_PUBLIC}:
+    elif page.visibility == VISIBILITY_PUBLIC:
         active_url = public
     return {
         "session_id": page.session_id,

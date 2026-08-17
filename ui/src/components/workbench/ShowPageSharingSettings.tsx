@@ -62,6 +62,8 @@ export function ShowPageSharingSettings({
   const [saving, setSaving] = useState(false);
   const [confirmNarrowing, setConfirmNarrowing] = useState(false);
   const generationRef = useRef(0);
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   const setConfirmationOpen = useCallback((next: boolean) => {
     setConfirmNarrowing(next);
@@ -139,17 +141,24 @@ export function ShowPageSharingSettings({
 
   const commit = async () => {
     if (!saved || !dirty || invalid || draftBlocked || !editable) return;
+    const generation = generationRef.current;
+    const requestSessionId = sessionId;
+    const isCurrent = () => (
+      generation === generationRef.current && requestSessionId === sessionIdRef.current
+    );
     setSaving(true);
     setConfirmationOpen(false);
     try {
-      const result = await api.applyShowAccess(sessionId, {
+      const result = await api.applyShowAccess(requestSessionId, {
         expected_revision: saved.revision,
         target_access_mode: mode,
         target_share_id: normalizedShareId,
         target_emails: targetEmails,
       });
-      if (result.show_access.page_id !== sessionId) throw new Error('ShowAccess page identity mismatch');
+      if (!isCurrent()) return;
+      if (result.show_access.page_id !== requestSessionId) throw new Error('ShowAccess page identity mismatch');
       if (result.status === 'conflict') {
+        setSaving(false);
         await load('conflict');
         return;
       }
@@ -161,9 +170,10 @@ export function ShowPageSharingSettings({
       setGate('ready');
       onApplied?.(result.show_access);
     } catch {
+      if (!isCurrent()) return;
       setGate('error');
     } finally {
-      setSaving(false);
+      if (isCurrent()) setSaving(false);
     }
   };
 

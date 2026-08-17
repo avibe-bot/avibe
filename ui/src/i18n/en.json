@@ -3554,7 +3554,7 @@
       },
       "sharingHelp": {
         "private": "The shared link is disabled.",
-        "limited": "Only the listed signed-in email addresses can open the shared link.",
+        "limited": "Configure the email audience now; the shared link is not active yet.",
         "public": "Anyone with the link can open the shared page."
       },
       "limitedEmails": "Limited access emails",

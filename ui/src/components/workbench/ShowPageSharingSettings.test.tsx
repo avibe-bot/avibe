@@ -1,11 +1,11 @@
 /** @vitest-environment jsdom */
 import { createInstance } from 'i18next';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
-import type { ShowAccess } from '../../lib/showPageAccess';
+import type { ShowAccess, ShowAccessApplyResult } from '../../lib/showPageAccess';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
 
 const api = {
@@ -38,11 +38,12 @@ const showAccess = (overrides: Partial<ShowAccess> = {}): ShowAccess => ({
   ...overrides,
 });
 
-const renderSettings = () => render(
+const settings = (sessionId = 'ses-1') => (
   <I18nextProvider i18n={i18n}>
-    <ShowPageSharingSettings active canManage sessionId="ses-1" />
-  </I18nextProvider>,
+    <ShowPageSharingSettings active canManage sessionId={sessionId} />
+  </I18nextProvider>
 );
+const renderSettings = (sessionId = 'ses-1') => render(settings(sessionId));
 
 afterEach(() => {
   cleanup();
@@ -203,5 +204,47 @@ describe('ShowPageSharingSettings', () => {
 
     expect(await screen.findByText('Link access could not be loaded.')).toBeTruthy();
     expect(screen.queryByText('secret@example.com')).toBeNull();
+  });
+
+  it('discards an in-flight Apply result after the component moves to another session', async () => {
+    api.getShowAccessSettings.mockImplementation((sessionId: string) => Promise.resolve({
+      show_access: showAccess({
+        page_id: sessionId,
+        share_id: sessionId === 'ses-1' ? 'first-link' : 'second-link',
+      }),
+    }));
+    let resolveApply = (_result: ShowAccessApplyResult) => undefined;
+    api.applyShowAccess.mockReturnValue(new Promise<ShowAccessApplyResult>((resolve) => {
+      resolveApply = resolve;
+    }));
+    const view = renderSettings();
+    await screen.findByRole('radio', { name: 'Private' });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Fully public' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+
+    view.rerender(settings('ses-2'));
+    await waitFor(() => {
+      expect(screen.getByRole('radio', { name: 'Private' }).getAttribute('aria-checked')).toBe('true');
+    });
+    await act(async () => {
+      resolveApply({
+        status: 'applied',
+        show_access: showAccess({
+          access_mode: 'limited',
+          revision: 1,
+          normalized_emails: ['first-secret@example.com'],
+        }),
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('radio', { name: 'Private' }).getAttribute('aria-checked')).toBe('true');
+    });
+    expect(screen.queryByRole('textbox', { name: 'Limited access emails' })).toBeNull();
+    expect(screen.queryByText('first-secret@example.com')).toBeNull();
+    expect(screen.queryByText('Link access could not be loaded.')).toBeNull();
   });
 });
