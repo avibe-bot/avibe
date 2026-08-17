@@ -66,9 +66,10 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
     def test_identity_session_rechecks_limited_membership_on_navigation(self):
         """Scenario: AUTH-SETUP-401"""
         flow = ShowIdentityCallbackHarness()
-        self.assertEqual(flow.navigate()["decision"], "identity_login_required")
+        requested_path = "/p/stable_alpha/users/alice@example.com"
+        self.assertEqual(flow.navigate(requested_path)["decision"], "identity_login_required")
 
-        login = flow.start_login()
+        login = flow.start_login(safe_return_path=requested_path)
         self.assertEqual(set(login["authorize_request"]), {"state", "nonce", "redirect_uri"})
         self.assertEqual(
             login["pending_flow_set_cookie"],
@@ -102,7 +103,7 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
                 flow.backend.assertions[login["form_post"]["form"]["assertion"]]
             )
         )
-        self.assertEqual(callback["location"], "/p/stable_alpha/")
+        self.assertEqual(callback["location"], requested_path)
         self.assertEqual(
             callback["expire_pending_flow_cookie"],
             {
@@ -148,7 +149,7 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
             ],
         )
 
-        returned = flow.navigate()
+        returned = flow.navigate(callback["location"])
         later = flow.navigate()
         self.assertEqual(
             (returned["decision"], later["decision"]),

@@ -38,6 +38,14 @@
         "request": "#/$defs/SharedBrowserRequest"
       },
       {
+        "id": "shared_page_api_preflight",
+        "producer": "shared_browser_document",
+        "consumer": "avibe.local_http.SharedCapabilityProxy",
+        "delivery": "opaque_origin_cors_preflight_terminated_before_runtime",
+        "request": "#/$defs/SharedPageApiPreflightRequest",
+        "result": "#/$defs/SharedPageApiPreflightResult"
+      },
+      {
         "id": "private_editor_connection",
         "producer": "avibe.local_http.ShowEditorAdmission",
         "consumer": "vibe-show-runtime.PrivateHmrAdmission",
@@ -129,18 +137,39 @@
       "history_and_api_path_segments": "one_or_more_segments_using_ascii_letters_digits_underscore_hyphen_dot_or_at_sign",
       "history_and_api_forbidden_syntax": ["dot_segments", "empty_segments", "encoded_separator", "encoded_traversal", "query", "raw_source_path"],
       "nested_import_rewrite": "absolute_url_under_same_namespace_document_capability_prefix",
-      "page_api_content_type": "optional_normalized_media_type_only",
+      "page_api_content_type": "optional_validated_media_type_with_exact_multipart_boundary_preserved",
+      "page_api_content_type_forwarding": "forward_the_validated_value_unchanged_without_reconstructing_parameters",
       "page_api_body": "optional_base64_with_declared_decoded_length",
       "page_api_body_length_invariant": "decoded_bytes == body.length_bytes <= maximum_page_api_body_bytes",
       "maximum_page_api_body_bytes": 1048576,
       "oversized_page_api_request": {"http_status": 413, "body": "request too large"},
       "forwarded_page_api_metadata_exact": ["content_type", "body"],
       "forbidden_ambient_request_metadata": ["cookie", "authorization", "arbitrary_headers"],
+      "page_api_preflight": {
+        "origin": "null",
+        "requested_methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+        "requested_headers": ["content-type"],
+        "termination": "trusted_avibe_proxy_returns_fixed_response_without_runtime_forwarding",
+        "response": {
+          "http_status": 204,
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers": "content-type",
+          "Access-Control-Allow-Credentials": false,
+          "Cache-Control": "private, no-store"
+        }
+      },
       "resource_handle": "opaque_non_path_source_identifier",
       "query_authority": false,
       "cookie_authority": false,
       "custom_request_header_required": false,
-      "capability_path_access_log_policy": "redact_namespace_document_capability_and_resource_handle_segments",
+      "capability_path_access_log_policy": {
+        "protected_prefix": "/__avibe_show_shared/v1/",
+        "logged_path": "/__avibe_show_shared/v1/[redacted]",
+        "redact_entire_suffix": true,
+        "query_logged": false,
+        "body_logged": false
+      },
       "access_control_allow_origin": "*",
       "access_control_allow_credentials": false,
       "set_cookie_allowed": false,
@@ -195,7 +224,9 @@
     {"name": "shared_document_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "document", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/"}},
     {"name": "shared_history_fallback_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "fallback", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/history/users/alice@example.com"}},
     {"name": "shared_module_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "module", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/asset/res_opaque_01"}},
-    {"name": "shared_page_api_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "POST", "surface": "page_api", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/api/data", "content_type": "application/json", "body": {"encoding": "base64", "data": "eyJwaW5nIjp0cnVlfQ==", "length_bytes": 13}}}
+    {"name": "shared_page_api_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "POST", "surface": "page_api", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/api/data", "content_type": "application/json", "body": {"encoding": "base64", "data": "eyJwaW5nIjp0cnVlfQ==", "length_bytes": 13}}},
+    {"name": "shared_page_api_preflight", "schema_ref": "#/$defs/SharedPageApiPreflightRequest", "value": {"method": "OPTIONS", "surface": "page_api_preflight", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/api/data", "origin": "null", "access_control_request_method": "POST", "access_control_request_headers": ["content-type"]}},
+    {"name": "shared_page_api_preflight_result", "schema_ref": "#/$defs/SharedPageApiPreflightResult", "value": {"http_status": 204, "access_control_allow_origin": "*", "access_control_allow_methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS", "access_control_allow_headers": "content-type", "access_control_allow_credentials": false, "cache_control": "private, no-store", "body": "", "forwarded_to_runtime": false}}
   ],
   "$defs": {
     "RuntimeEnvelope": {
@@ -281,6 +312,55 @@
       "type": "string",
       "pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/api/(?!\\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+)*$"
     },
+    "PageApiContentType": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^(?!multipart/form-data(?:;|$))[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+(?:; charset=[a-z0-9._-]+)?$"
+        },
+        {
+          "type": "string",
+          "minLength": 31,
+          "maxLength": 160,
+          "pattern": "^multipart/form-data; boundary=[A-Za-z0-9'()+_,./:=?-]{1,128}$"
+        }
+      ]
+    },
+    "SharedPageApiPreflightRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "surface", "path", "origin", "access_control_request_method", "access_control_request_headers"],
+      "properties": {
+        "method": {"const": "OPTIONS"},
+        "surface": {"const": "page_api_preflight"},
+        "path": {"$ref": "#/$defs/PageApiPath"},
+        "origin": {"const": "null"},
+        "access_control_request_method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]},
+        "access_control_request_headers": {
+          "type": "array",
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {"const": "content-type"}
+        }
+      }
+    },
+    "SharedPageApiPreflightResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["http_status", "access_control_allow_origin", "access_control_allow_methods", "access_control_allow_headers", "access_control_allow_credentials", "cache_control", "body", "forwarded_to_runtime"],
+      "properties": {
+        "http_status": {"const": 204},
+        "access_control_allow_origin": {"const": "*"},
+        "access_control_allow_methods": {"const": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"},
+        "access_control_allow_headers": {"const": "content-type"},
+        "access_control_allow_credentials": {"const": false},
+        "cache_control": {"const": "private, no-store"},
+        "body": {"const": ""},
+        "forwarded_to_runtime": {"const": false}
+      }
+    },
     "SharedRequestBody": {
       "type": "object",
       "additionalProperties": false,
@@ -328,10 +408,10 @@
           "additionalProperties": false,
           "required": ["method", "surface", "path"],
           "properties": {
-            "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]},
+            "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]},
             "surface": {"const": "page_api"},
             "path": {"$ref": "#/$defs/PageApiPath"},
-            "content_type": {"type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+(?:; charset=[a-z0-9._-]+)?$"},
+            "content_type": {"$ref": "#/$defs/PageApiContentType"},
             "body": {"$ref": "#/$defs/SharedRequestBody"}
           }
         }

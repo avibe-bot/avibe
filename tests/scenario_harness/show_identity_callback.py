@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -63,6 +64,11 @@ class ShowIdentityCallbackHarness:
     SESSION_LIFETIME = 2_592_000
     DEFAULT_BROWSER = "browser-a"
     STATE_SIGNING_KEY = b"show-identity-contract-state-key"
+    SAFE_RETURN_PATH = re.compile(
+        r"^/p/[A-Za-z0-9_-]+/"
+        r"(?:(?:(?!\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+)"
+        r"(?:/(?!\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+)*)?$"
+    )
 
     def __init__(self) -> None:
         self.now = self.NOW
@@ -88,7 +94,7 @@ class ShowIdentityCallbackHarness:
         browser_id: str = DEFAULT_BROWSER,
     ) -> dict[str, str]:
         self.events.append("local.top_level_navigation")
-        if path != "/p/stable_alpha/":
+        if not self.SAFE_RETURN_PATH.fullmatch(path) or not path.startswith("/p/stable_alpha/"):
             return {"decision": "not_found"}
         session_cookie = self.browser_session_cookies.get(browser_id)
         if session_cookie is None:
@@ -116,7 +122,10 @@ class ShowIdentityCallbackHarness:
         state_overrides: dict[str, object] | None = None,
         assertion_overrides: dict[str, object] | None = None,
         accept_set_cookie: bool = True,
+        safe_return_path: str = "/p/stable_alpha/",
     ) -> dict[str, object]:
+        if not self.SAFE_RETURN_PATH.fullmatch(safe_return_path):
+            raise ValueError("invalid safe return path")
         self._flow_number += 1
         nonce = f"nonce-{self._flow_number}"
         pending_flow_cookie = self._opaque_token("pending-flow", browser_id, self._flow_number)
@@ -126,7 +135,7 @@ class ShowIdentityCallbackHarness:
             "instance_id": self.INSTANCE_ID,
             "nonce": nonce,
             "callback_origin": self.CALLBACK_ORIGIN,
-            "safe_return_path": "/p/stable_alpha/",
+            "safe_return_path": safe_return_path,
             "pending_flow_cookie_sha256": hashlib.sha256(pending_flow_cookie.encode("ascii")).hexdigest(),
             "iat": self.now,
             "exp": self.now + 300,

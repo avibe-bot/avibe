@@ -92,6 +92,12 @@ def _decode_shared_request_body(transport: dict[str, Any], body: dict[str, Any])
     return decoded
 
 
+def _project_shared_access_log_path(policy: dict[str, Any], path: str) -> str:
+    if policy["redact_entire_suffix"] and path.startswith(policy["protected_prefix"]):
+        return policy["logged_path"]
+    return path
+
+
 def _serve_settings_read(
     authorized_route_page_id: str,
     request: dict[str, str],
@@ -449,10 +455,27 @@ def test_identity_session_wire_is_minimal_fixed_lifetime_and_identity_only() -> 
         "producer": "show_identity_browser",
         "consumer": "avibe.local_http.GET /auth/show-identity/start",
         "delivery": "browser_navigation_with_optional_cookie_pair",
+        "request": "#/$defs/LoginStartRequest",
         "request_cookie": "#/$defs/PendingFlowCookiePair",
         "request_cookie_optional_on_first_start": True,
         "result_cookie": "#/$defs/PendingFlowSetCookie",
     }
+    examples = {example["name"]: example["value"] for example in document["x-examples"]}
+    login_start = examples["login_start_request"]
+    _validate(document, "#/$defs/LoginStartRequest", login_start)
+    assert login_start["safe_return_path"] == ("/p/stable_alpha/users/alice@example.com")
+    for invalid_path in (
+        "https://attacker.example/p/stable_alpha/",
+        "/show/session-1/",
+        "/p/stable_alpha/../private",
+        "/p/stable_alpha/users/alice@example.com?token=1",
+    ):
+        with pytest.raises(ValidationError):
+            _validate(
+                document,
+                "#/$defs/LoginStartRequest",
+                {"safe_return_path": invalid_path},
+            )
     assert interfaces["show_identity_form_post"]["request_cookie"] == "#/$defs/PendingFlowCookiePair"
     assert interfaces["show_identity_form_post"]["correlation_cookie_expiry"] == ("#/$defs/PendingFlowExpiredSetCookie")
     assert interfaces["show_identity_session_cookie"]["result"] == "#/$defs/IdentitySessionCookie"
@@ -615,6 +638,14 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     interfaces = {interface["id"]: interface for interface in runtime["interfaces"]}
     assert interfaces["shared_document_admission"]["result"] == "#/$defs/SharedAdmissionResult"
     assert interfaces["shared_protected_resource"]["request"] == "#/$defs/SharedBrowserRequest"
+    assert interfaces["shared_page_api_preflight"] == {
+        "id": "shared_page_api_preflight",
+        "producer": "shared_browser_document",
+        "consumer": "avibe.local_http.SharedCapabilityProxy",
+        "delivery": "opaque_origin_cors_preflight_terminated_before_runtime",
+        "request": "#/$defs/SharedPageApiPreflightRequest",
+        "result": "#/$defs/SharedPageApiPreflightResult",
+    }
 
     admissions = [
         example["value"] for example in document["x-examples"] if example["schema_ref"] == "#/$defs/SharedAdmission"
@@ -693,12 +724,20 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     assert transport["query_authority"] is False
     assert transport["cookie_authority"] is False
     assert transport["custom_request_header_required"] is False
-    assert transport["capability_path_access_log_policy"].startswith("redact_")
+    assert transport["capability_path_access_log_policy"] == {
+        "protected_prefix": "/__avibe_show_shared/v1/",
+        "logged_path": "/__avibe_show_shared/v1/[redacted]",
+        "redact_entire_suffix": True,
+        "query_logged": False,
+        "body_logged": False,
+    }
     examples = {example["name"]: example["value"] for example in document["x-examples"]}
     document_path = examples["shared_document_request"]["path"]
     history_path = examples["shared_history_fallback_request"]["path"]
     asset_path = examples["shared_module_request"]["path"]
     api_request = examples["shared_page_api_request"]
+    preflight_request = examples["shared_page_api_preflight"]
+    preflight_result = examples["shared_page_api_preflight_result"]
     api_path = api_request["path"]
     assert document_path.endswith("/")
     assert urljoin(f"https://show.example.test{document_path}", "./api/data") == (
@@ -744,7 +783,7 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
             "#/$defs/SharedBrowserRequest",
             {"method": "GET", "surface": surface, "path": asset_path},
         )
-    for method in ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+    for method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         _validate(
             document,
             "#/$defs/SharedBrowserRequest",
@@ -759,10 +798,41 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     _validate(document, "#/$defs/SharedBrowserRequest", api_request)
     assert api_request["content_type"] == "application/json"
     assert _decode_shared_request_body(transport, api_request["body"]) == b'{"ping":true}'
+    multipart_boundary = "----AvibeBoundary7MA4YWxkTrZu0gW"
+    multipart_payload = f"--{multipart_boundary}--\r\n".encode()
+    multipart_request = {
+        **api_request,
+        "content_type": f"multipart/form-data; boundary={multipart_boundary}",
+        "body": {
+            "encoding": "base64",
+            "data": base64.b64encode(multipart_payload).decode("ascii"),
+            "length_bytes": len(multipart_payload),
+        },
+    }
+    _validate(document, "#/$defs/SharedBrowserRequest", multipart_request)
+    assert _decode_shared_request_body(transport, multipart_request["body"]) == multipart_payload
+    assert transport["page_api_content_type_forwarding"] == (
+        "forward_the_validated_value_unchanged_without_reconstructing_parameters"
+    )
     assert transport["maximum_page_api_body_bytes"] == 1_048_576
     assert transport["oversized_page_api_request"] == {"http_status": 413, "body": "request too large"}
     assert transport["forwarded_page_api_metadata_exact"] == ["content_type", "body"]
     assert transport["forbidden_ambient_request_metadata"] == ["cookie", "authorization", "arbitrary_headers"]
+    assert transport["page_api_preflight"]["termination"] == (
+        "trusted_avibe_proxy_returns_fixed_response_without_runtime_forwarding"
+    )
+    _validate(document, "#/$defs/SharedPageApiPreflightRequest", preflight_request)
+    _validate(document, "#/$defs/SharedPageApiPreflightResult", preflight_result)
+    assert preflight_result["forwarded_to_runtime"] is False
+    assert preflight_result["access_control_allow_origin"] == "*"
+    assert preflight_result["access_control_allow_credentials"] is False
+    for invalid_preflight in (
+        {**preflight_request, "origin": "https://show.example.test"},
+        {**preflight_request, "access_control_request_headers": ["authorization"]},
+        {**preflight_request, "access_control_request_headers": ["content-type", "x-page-token"]},
+    ):
+        with pytest.raises(ValidationError):
+            _validate(document, "#/$defs/SharedPageApiPreflightRequest", invalid_preflight)
     mismatched_body = {**api_request["body"], "length_bytes": api_request["body"]["length_bytes"] - 1}
     with pytest.raises(ValueError, match="body length mismatch"):
         _decode_shared_request_body(transport, mismatched_body)
@@ -782,6 +852,24 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
             "#/$defs/SharedBrowserRequest",
             {**api_request, "content_type": "Application/JSON"},
         )
+    for invalid_content_type in (
+        "multipart/form-data",
+        "multipart/form-data; boundary=",
+        "multipart/form-data; boundary=valid; charset=utf-8",
+    ):
+        with pytest.raises(ValidationError):
+            _validate(
+                document,
+                "#/$defs/SharedBrowserRequest",
+                {**api_request, "content_type": invalid_content_type},
+            )
+
+    log_policy = transport["capability_path_access_log_policy"]
+    for sensitive_path in (history_path, f"{api_prefix}users/alice@example.com"):
+        logged_path = _project_shared_access_log_path(log_policy, sensitive_path)
+        assert logged_path == "/__avibe_show_shared/v1/[redacted]"
+        assert "alice@example.com" not in logged_path
+        assert sensitive_path.split("/api/")[-1] not in logged_path
     for forbidden_path in (
         f"{api_path}?token=ambient",
         f"{api_prefix}",

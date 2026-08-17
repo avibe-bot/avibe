@@ -13,6 +13,7 @@
         "producer": "show_identity_browser",
         "consumer": "avibe.local_http.GET /auth/show-identity/start",
         "delivery": "browser_navigation_with_optional_cookie_pair",
+        "request": "#/$defs/LoginStartRequest",
         "request_cookie": "#/$defs/PendingFlowCookiePair",
         "request_cookie_optional_on_first_start": true,
         "result_cookie": "#/$defs/PendingFlowSetCookie"
@@ -118,6 +119,7 @@
       "correlation": "signed_state.pending_flow_cookie_sha256 == sha256_utf8(request_cookie.value)",
       "server_pending_flow_records": 0,
       "start": "mint_and_overwrite_browser_cookie_then_sign_its_digest_into_state",
+      "return_path": "validate_the_requested_root_or_nested_p_route_then_copy_it_unchanged_into_signed_state",
       "repeated_cookie_less_starts": "allocate_zero_durable_or_in_memory_pending_flow_records",
       "different_browsers": "independent_browser_cookie_jars",
       "matching_callback_consumption": "expire_only_the_matching_browser_cookie",
@@ -171,6 +173,11 @@
   },
   "x-examples": [
     {
+      "name": "login_start_request",
+      "schema_ref": "#/$defs/LoginStartRequest",
+      "value": {"safe_return_path": "/p/stable_alpha/users/alice@example.com"}
+    },
+    {
       "name": "authorize_request",
       "schema_ref": "#/$defs/AuthorizeRequest",
       "value": {"state": "signed-state-value", "nonce": "nonce-value", "redirect_uri": "https://show.example.test/auth/show-identity/callback"}
@@ -188,7 +195,7 @@
     {
       "name": "signed_state_claims",
       "schema_ref": "#/$defs/SignedStateClaims",
-      "value": {"instance_id": "instance-1", "nonce": "nonce-value", "callback_origin": "https://show.example.test", "safe_return_path": "/p/stable_alpha/", "pending_flow_cookie_sha256": "0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a", "iat": 1786935600, "exp": 1786935900}
+      "value": {"instance_id": "instance-1", "nonce": "nonce-value", "callback_origin": "https://show.example.test", "safe_return_path": "/p/stable_alpha/users/alice@example.com", "pending_flow_cookie_sha256": "0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a", "iat": 1786935600, "exp": 1786935900}
     },
     {
       "name": "pending_flow_cookie_pair",
@@ -223,6 +230,20 @@
   ],
   "$defs": {
     "BoundedString": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "SafeReturnPath": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 2048,
+      "pattern": "^/p/[A-Za-z0-9_-]+/(?:((?!\\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+)(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+)*)?$"
+    },
+    "LoginStartRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["safe_return_path"],
+      "properties": {
+        "safe_return_path": {"$ref": "#/$defs/SafeReturnPath"}
+      }
+    },
     "AuthorizeRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -250,7 +271,7 @@
         "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "nonce": {"type": "string", "minLength": 1, "maxLength": 256},
         "callback_origin": {"type": "string", "format": "uri", "pattern": "^https://[^/?#]+$"},
-        "safe_return_path": {"type": "string", "minLength": 4, "maxLength": 2048, "pattern": "^/p/[A-Za-z0-9_-]+/$"},
+        "safe_return_path": {"$ref": "#/$defs/SafeReturnPath"},
         "pending_flow_cookie_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "iat": {"type": "integer"},
         "exp": {"type": "integer"}
