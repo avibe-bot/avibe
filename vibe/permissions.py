@@ -34,6 +34,7 @@ _PROJECT_ACCESS_MODES = frozenset({"inherit", "restricted"})
 _PROJECT_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
 _POLICY_SYNC_STATUSES = frozenset({"none", "in_sync", "applying", "offline", "error"})
 _SYNC_COUNT_KEYS = ("active", "error", "offline", "applying", "in_sync")
+_PROJECT_ID_PATH_SEPARATORS = frozenset({"/", "\\"})
 logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.RLock()
 
@@ -136,6 +137,19 @@ def _require_nonempty_string(value: Any, *, nullable: bool = False) -> None:
         _invalid_response()
 
 
+def _is_valid_project_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and not any(separator in value for separator in _PROJECT_ID_PATH_SEPARATORS)
+    )
+
+
+def _require_project_id(value: Any) -> None:
+    if not _is_valid_project_id(value):
+        _invalid_response()
+
+
 def _require_enum(value: Any, allowed: frozenset[str]) -> None:
     if not isinstance(value, str) or value not in allowed:
         _invalid_response()
@@ -164,7 +178,7 @@ def _validate_access_entries(value: Any) -> list[Any]:
 def _validate_project(value: Any) -> dict[str, Any]:
     project = _require_mapping(value)
     _require_keys(project, "project_id", "organization_id", "display_name", "access", "sync")
-    _require_nonempty_string(project["project_id"])
+    _require_project_id(project["project_id"])
     _require_nonempty_string(project["organization_id"], nullable=True)
     _require_string(project["display_name"])
 
@@ -572,7 +586,7 @@ def update_project_access(
     payload: Mapping[str, Any],
     config: V2Config | None = None,
 ) -> dict[str, Any]:
-    if not isinstance(project_id, str) or not project_id or "/" in project_id:
+    if not _is_valid_project_id(project_id):
         raise PermissionsInvalidResponseError("invalid_project_id")
     config, load_current_config = _request_config(config)
     expected_instance_id, backend_payload = _mutation_payload(payload)

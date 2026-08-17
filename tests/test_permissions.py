@@ -138,6 +138,15 @@ NONEMPTY_PROJECTION_STRING_PATHS = [
     ),
 ]
 
+INVALID_PROJECT_ROUTE_IDS = [
+    pytest.param("project/child", id="forward-embedded"),
+    pytest.param("/project", id="forward-leading"),
+    pytest.param("project/", id="forward-trailing"),
+    pytest.param(r"project\child", id="backslash-embedded"),
+    pytest.param(r"\project", id="backslash-leading"),
+    pytest.param("project\\", id="backslash-trailing"),
+]
+
 
 def _replace_nested(value: dict, path: tuple[str | int, ...], replacement: object) -> None:
     parent: Any = value
@@ -680,6 +689,93 @@ def test_permissions_rejects_a_blank_matching_instance_identifier(instance_id: s
         permissions._validated_projection(  # noqa: SLF001
             _complete_projection(instance_id),
             instance_id,
+        )
+
+
+@pytest.mark.parametrize("project_id", INVALID_PROJECT_ROUTE_IDS)
+def test_permissions_rejects_project_route_ids_before_caching(
+    monkeypatch,
+    project_id: str,
+) -> None:
+    malformed = _complete_projection()
+    malformed["projects"][0]["project_id"] = project_id
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, malformed),
+    )
+
+    with pytest.raises(permissions.PermissionsInvalidResponseError):
+        permissions.get_current_permissions(_config())
+
+    assert not permissions._cache_path().exists()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("project_id", INVALID_PROJECT_ROUTE_IDS)
+def test_permissions_ignores_cached_project_route_ids(
+    monkeypatch,
+    project_id: str,
+) -> None:
+    malformed = _complete_projection()
+    malformed["projects"][0]["project_id"] = project_id
+    permissions._write_cache("inst-123", malformed)  # noqa: SLF001
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError()),
+    )
+
+    with pytest.raises(permissions.PermissionsUnavailableError):
+        permissions.get_current_permissions(_config())
+
+    assert permissions._read_cache("inst-123") is None  # noqa: SLF001
+
+
+@pytest.mark.parametrize("project_id", INVALID_PROJECT_ROUTE_IDS)
+def test_permissions_rejects_project_route_ids_before_mutation(
+    monkeypatch,
+    project_id: str,
+) -> None:
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: pytest.fail("invalid Project ID reached Backend"),
+    )
+
+    with pytest.raises(
+        permissions.PermissionsInvalidResponseError,
+        match="invalid_project_id",
+    ):
+        permissions.update_project_access(
+            project_id,
+            {
+                "mode": "inherit",
+                "bindings": [],
+                "if_match_revision": 2,
+                "if_match_instance_id": "inst-123",
+            },
+            _config(),
+        )
+
+
+@pytest.mark.parametrize("project_id", INVALID_PROJECT_ROUTE_IDS)
+def test_permissions_rejects_project_route_ids_in_mutation_results(
+    project_id: str,
+) -> None:
+    valid = _complete_projection()
+    malformed_project = {
+        **valid["projects"][0],
+        "project_id": project_id,
+    }
+
+    with pytest.raises(permissions.PermissionsInvalidResponseError):
+        permissions._validated_project_result(  # noqa: SLF001
+            {
+                "ok": True,
+                "project": malformed_project,
+                "authorization_revision": 4,
+            },
+            project_id,
         )
 
 
