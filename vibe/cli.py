@@ -14124,21 +14124,27 @@ def cmd_runtime(args) -> int:
             print(json.dumps(payload, indent=2))
         else:
             language = _configured_cli_language()
-            prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
-            removed = payload.get("removed") or []
             archives = payload.get("archives") or {}
-            print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
-            archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
-            archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
-            print(
-                i18n_t(
-                    f"{prefix_key}Archives",
-                    language,
-                    count=archive_count,
-                    size=_format_byte_size(archive_bytes),
+            skipped_reason = str(archives.get("skipped_reason") or "")
+            if skipped_reason:
+                # A skipped cleanup is not a completed zero-removal cleanup;
+                # say so instead of printing placeholder counts.
+                print(i18n_t("runtime.clean.skipped", language, reason=skipped_reason), file=sys.stderr)
+            else:
+                prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
+                removed = payload.get("removed") or []
+                print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+                archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
+                archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
+                print(
+                    i18n_t(
+                        f"{prefix_key}Archives",
+                        language,
+                        count=archive_count,
+                        size=_format_byte_size(archive_bytes),
+                    )
                 )
-            )
-            print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
+                print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
         return 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 

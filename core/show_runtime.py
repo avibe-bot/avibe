@@ -58,6 +58,10 @@ _CONTENT_ADDRESSED_ARCHIVE_RE = re.compile(r"^[0-9a-f]{64}\.tgz$")
 # archive is not yet protected. Archives younger than this window are never
 # pruned by automatic or manual cleanup; real stale archives are days old.
 _ARCHIVE_MTIME_GUARD_SECONDS = 15 * 60
+# Skip reasons for archive-cache cleanup; consumers (CLI, Doctor) key off
+# ``skipped_reason`` generically instead of matching literal strings.
+_SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING = "runtime_install_already_running"
+_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED = "archive_inspection_failed"
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
@@ -865,36 +869,41 @@ class ShowRuntimeManager:
         dry_run: bool = False,
         skip_metadata_under: set[Path] | None = None,
     ) -> dict[str, Any]:
-        # Wait briefly for any concurrent install instead of racing it: the
-        # installer holds this guard from archive validation to extraction, so
-        # once acquired no in-flight archive can be selected below. A longer
-        # wait is pointless — skipping just defers pruning to the next
-        # post-install cleanup or manual clean.
-        skipped = {
-            "protected_count": 0,
-            "candidate_count": 0,
-            "candidate_bytes": 0,
-            "removed_count": 0,
-            "removed_bytes": 0,
-            "skipped_reason": "runtime_install_already_running",
-        }
+        """Report on / prune the content-addressed archive cache.
+
+        Dry runs are strictly read-only: they never take the install guard,
+        never create or rewrite ``.install.lock``, and stay usable on a
+        read-only runtime directory (Doctor contract). Real cleanup serializes
+        against installs via the guard (re-entrant inside an install) and
+        reports one of two skip reasons: lock contention, or inspection
+        failure — consumers key off ``skipped_reason`` alone.
+        """
+        if dry_run:
+            protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
+            candidates = self._archive_cleanup_candidates(protected)
+            return {
+                "protected_count": len(protected),
+                "candidate_count": len(candidates),
+                "candidate_bytes": sum(size for _, size in candidates),
+                "removed_count": 0,
+                "removed_bytes": 0,
+            }
         with self._install_guard_locked(timeout_seconds=1.0) as acquired:
             if not acquired:
                 logger.warning("Show Runtime archive cleanup skipped: an install is already running")
-                return skipped
+                return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING)
             try:
                 protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
                 candidates = self._archive_cleanup_candidates(protected)
                 removed_count = 0
                 removed_bytes = 0
-                if not dry_run:
-                    for path, size in candidates:
-                        try:
-                            path.unlink()
-                        except OSError:
-                            continue
-                        removed_count += 1
-                        removed_bytes += size
+                for path, size in candidates:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        continue
+                    removed_count += 1
+                    removed_bytes += size
                 return {
                     "protected_count": len(protected),
                     "candidate_count": len(candidates),
@@ -904,7 +913,18 @@ class ShowRuntimeManager:
                 }
             except Exception:
                 logger.warning("Show Runtime archive cleanup failed", exc_info=True)
-                return skipped
+                return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+
+    @staticmethod
+    def _skipped_archive_report(reason: str) -> dict[str, Any]:
+        return {
+            "protected_count": 0,
+            "candidate_count": 0,
+            "candidate_bytes": 0,
+            "removed_count": 0,
+            "removed_bytes": 0,
+            "skipped_reason": reason,
+        }
 
     def _clean_manifest_install_dirs(
         self,

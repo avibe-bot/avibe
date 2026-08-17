@@ -274,3 +274,59 @@ def test_cleanup_skips_while_foreign_process_holds_install_guard(tmp_path: Path)
     assert result["removed_count"] == 0
     assert result["skipped_reason"] == "runtime_install_already_running"
     assert stale.exists()
+
+
+def test_archive_cache_status_is_read_only_and_creates_no_lock(tmp_path: Path) -> None:
+    """Doctor/status previews must not create or rewrite runtime state."""
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(2), b"stale")
+
+    report = manager.archive_cache_status()
+
+    assert report["candidate_count"] == 1
+    assert not (manager.runtime_dir / ".install.lock").exists()
+
+
+def test_cleanup_reports_inspection_failure_distinct_from_lock_contention(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+
+    def _boom(skip_metadata_under=None):
+        raise OSError("disk unreadable")
+
+    original = manager._protected_archive_sha256s
+    manager._protected_archive_sha256s = _boom
+    try:
+        result = manager._clean_downloaded_archives()
+    finally:
+        manager._protected_archive_sha256s = original
+
+    assert result["skipped_reason"] == "archive_inspection_failed"
+
+
+def test_cli_clean_reports_skipped_archives_without_zero_counts(monkeypatch, capsys) -> None:
+    from vibe import cli as vibe_cli
+
+    parser = vibe_cli.build_parser()
+    args = parser.parse_args(["runtime", "clean"])
+
+    class FakeRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {"removed_count": 0, "skipped_reason": "runtime_install_already_running"},
+            }
+
+    monkeypatch.setattr(vibe_cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(
+        vibe_cli,
+        "_clean_git_runtime",
+        lambda *, keep_previous, dry_run=False: {"ok": True, "removed": []},
+    )
+
+    assert vibe_cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "runtime_install_already_running" in captured.err
+    assert "0" not in captured.out  # no placeholder zero-removal lines
