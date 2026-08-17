@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import contextlib
+import errno
 import fnmatch
 import hashlib
 import importlib.resources as package_resources
@@ -31,7 +32,7 @@ from typing import Any, Iterable, Iterator, Mapping
 
 import httpx
 
-from storage.lock import MigrationFileLock, MigrationLockTimeout
+from storage.lock import MigrationFileLock, MigrationLockTimeout, _try_lock as storage_lock_try_lock
 
 from config import paths
 from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
@@ -775,17 +776,24 @@ class ShowRuntimeManager:
         Detects an active install (same process via the RLock depth, another
         process via flock on an existing ``.install.lock``) so a preview never
         advertises a live staging directory (``manifest-*``) as removable.
+        On POSIX an unopenable-but-existing guard reports unavailable (an
+        inspection problem); where flock does not exist (native Windows) a
+        staging sentinel — a fresh ``manifest-*``/``prebuilt-*`` directory
+        modified within the install guard window — is used instead.
         """
         if self._install_guard_depth > 0:
             return "runtime_install_already_running"
         try:
             import fcntl
         except ImportError:
-            return None
+            # Windows: no flock probe; fall back to the staging sentinel.
+            return self._staging_sentinel_reason()
         try:
             self._install_guard_path.stat()
-        except OSError:
+        except FileNotFoundError:
             return None
+        except OSError:
+            return "runtime_install_guard_unavailable"
         try:
             fd = os.open(self._install_guard_path, os.O_RDONLY)
         except OSError:
@@ -798,6 +806,21 @@ class ShowRuntimeManager:
             return "runtime_install_already_running"
         finally:
             os.close(fd)
+
+    def _staging_sentinel_reason(self) -> str | None:
+        """Treat freshly-modified staging dirs as busy (flock-less platforms)."""
+        mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
+        try:
+            for pattern in ("manifest-*", "prebuilt-*"):
+                for path in self.runtime_dir.glob(pattern):
+                    try:
+                        if path.is_dir() and path.stat().st_mtime > mtime_floor:
+                            return "runtime_install_already_running"
+                    except OSError:
+                        continue
+        except OSError:
+            return None
+        return None
 
     def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
         try:
@@ -819,11 +842,19 @@ class ShowRuntimeManager:
         if dry_run:
             busy_reason = self._preview_busy_reason()
             if busy_reason:
+                # Map both contention and guard-unavailability through the
+                # same skip-reason taxonomy the real cleanup uses, so the CLI
+                # renders reason-specific guidance either way.
+                skip_reason = (
+                    _SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED
+                    if busy_reason == "runtime_install_guard_unavailable"
+                    else _SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING
+                )
                 return {
                     "ok": False,
                     "dry_run": True,
                     "removed": [],
-                    "archives": self._skipped_archive_report(busy_reason),
+                    "archives": self._skipped_archive_report(skip_reason),
                 }
         for pattern in ("prebuilt-*", "manifest-*"):
             for path in self.runtime_dir.glob(pattern):
@@ -877,11 +908,17 @@ class ShowRuntimeManager:
             parts = pattern.split("/")
             current: Iterable[Path] = [versions_dir]
             for depth, part in enumerate(parts):
+                is_last = depth == len(parts) - 1
                 next_paths: list[Path] = []
                 for parent in current:
                     try:
                         iterator = os.scandir(parent)
                     except FileNotFoundError:
+                        continue
+                    except NotADirectoryError:
+                        # An unrelated non-directory matched a wildcard level
+                        # (e.g. .DS_Store under versions/); skip it rather
+                        # than disabling archive reporting for the cache.
                         continue
                     except OSError as exc:
                         raise _ArchiveInspectionError(f"versions traversal failed: {parent}") from exc
@@ -889,11 +926,12 @@ class ShowRuntimeManager:
                         for entry in iterator:
                             if not fnmatch.fnmatch(entry.name, part):
                                 continue
+                            if not is_last and not entry.is_dir(follow_symlinks=False):
+                                # Intermediate wildcard levels must be
+                                # directories; files/symlinks are not installs.
+                                continue
                             child = parent / entry.name
-                            if depth < len(parts) - 1:
-                                next_paths.append(child)
-                            else:
-                                next_paths.append(child)
+                            next_paths.append(child)
                     except OSError as exc:
                         raise _ArchiveInspectionError(f"versions traversal failed: {parent}") from exc
                     finally:
@@ -963,7 +1001,7 @@ class ShowRuntimeManager:
                         protected.add(digest)
         return protected
 
-    def _archive_cleanup_candidates(self, protected: set[str]) -> list[tuple[Path, int, str]]:
+    def _archive_cleanup_candidates(self, protected: set[str]) -> list[tuple[Path, int, str, int]]:
         """Completed content-addressed archives outside the protected set.
 
         Only strict ``<sha256>.tgz`` regular files are candidates. The manifest
@@ -976,7 +1014,9 @@ class ShowRuntimeManager:
         yet.
         """
         downloads_dir = self.runtime_dir / "downloads"
-        candidates: list[tuple[Path, int, str]] = []
+        # Windows tuples carry an extra inode field for identity checks;
+        # POSIX tuples pad it so both branches share one unpack shape.
+        candidates: list[tuple[Path, int, str, int]] = []
         try:
             downloads_exists = downloads_dir.stat().st_mode  # error-preserving
             exists = True
@@ -1017,7 +1057,11 @@ class ShowRuntimeManager:
                         continue
                     if entry.name[: -len(".tgz")] in protected:
                         continue
-                    candidates.append((downloads_dir / entry.name, entry_stat.st_size, entry.name))
+                    # Record the enumerated identity so the removal phase can
+                    # verify it deletes exactly this entry, not a replacement.
+                    candidates.append(
+                        (downloads_dir / entry.name, entry_stat.st_size, entry.name, entry_stat.st_ino)
+                    )
             finally:
                 iterator.close()
             return candidates
@@ -1044,7 +1088,7 @@ class ShowRuntimeManager:
                 path = downloads_dir / name
                 if name[: -len(".tgz")] in protected:
                     continue
-                candidates.append((path, stat_result.st_size, name))
+                candidates.append((path, stat_result.st_size, name, 0))
         finally:
             os.close(dir_fd)
         return candidates
@@ -1075,7 +1119,7 @@ class ShowRuntimeManager:
                 "outcome": "cleaned" if not candidates else "partial",
                 "protected_count": len(protected),
                 "candidate_count": len(candidates),
-                "candidate_bytes": sum(size for _, size, _name in candidates),
+                "candidate_bytes": sum(size for _, size, _name, _ino in candidates),
                 "removed_count": 0,
                 "removed_bytes": 0,
                 "failed_count": 0,
@@ -1098,9 +1142,11 @@ class ShowRuntimeManager:
                 # never opens the directory at all.
                 if candidates:
                     if os.name == "nt":
-                        for path, size, name in candidates:
+                        for path, size, name, inode in candidates:
                             try:
                                 pre_stat = os.stat(path, follow_symlinks=False)
+                                if inode and pre_stat.st_ino != inode:
+                                    raise OSError("entry was replaced after enumeration")
                                 if not stat.S_ISREG(pre_stat.st_mode):
                                     raise OSError("entry replaced by a non-regular file")
                                 os.unlink(path)
@@ -1123,7 +1169,7 @@ class ShowRuntimeManager:
                             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0),
                         )
                         try:
-                            for path, size, name in candidates:
+                            for path, size, name, _inode in candidates:
                                 try:
                                     os.unlink(name, dir_fd=dir_fd)
                                 except OSError:
@@ -1137,7 +1183,7 @@ class ShowRuntimeManager:
                 report = {
                     "protected_count": len(protected),
                     "candidate_count": len(candidates),
-                    "candidate_bytes": sum(size for _, size, _name in candidates),
+                    "candidate_bytes": sum(size for _, size, _name, _ino in candidates),
                     "removed_count": removed_count,
                     "removed_bytes": removed_bytes,
                     "failed_count": failed_count,
@@ -1383,28 +1429,62 @@ class ShowRuntimeManager:
                 )
                 yield unavailable
                 return
-            file_lock = MigrationFileLock(self._install_guard_path, timeout_seconds=timeout_seconds)
+            # Open the guard ourselves with no-follow semantics so a raced
+            # replacement (symlink/hard link swapped in after the lstat) can
+            # never be truncated by MigrationFileLock's append-open; we then
+            # validate the descriptor and hand the same handle's fd to the
+            # lock so validation and locking cover one identical inode.
+            guard_dir = self._install_guard_path.parent
             try:
-                file_lock.acquire()
-                # The lstat above can race a same-user replacement of the lock
-                # path; validate the descriptor we now hold instead of the
-                # path we checked: it must be a regular file with no other
-                # hard links before MigrationFileLock truncates it.
-                lock_fd = getattr(file_lock, "_handle", None)
-                if lock_fd is not None:
-                    open_stat = os.fstat(lock_fd.fileno())
-                    if not stat.S_ISREG(open_stat.st_mode) or open_stat.st_nlink != 1:
-                        logger.warning(
-                            "Show Runtime install guard descriptor is not an exclusive regular file; releasing",
-                        )
-                        try:
-                            file_lock.release()
-                        except Exception:
-                            pass
-                        yield unavailable
+                guard_dir.mkdir(parents=True, exist_ok=True)
+                guard_flags = os.O_RDWR | os.O_CREAT
+                if hasattr(os, "O_NOFOLLOW"):
+                    guard_flags |= os.O_NOFOLLOW
+                lock_fd = os.open(self._install_guard_path, guard_flags, 0o644)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    logger.warning("Show Runtime install guard %s is a symlink; refusing to lock", self._install_guard_path)
+                    yield unavailable
+                    return
+                logger.warning(
+                    "Show Runtime install guard %s is unavailable",
+                    self._install_guard_path,
+                    exc_info=True,
+                )
+                yield unavailable
+                return
+            try:
+                open_stat = os.fstat(lock_fd)
+                if not stat.S_ISREG(open_stat.st_mode) or open_stat.st_nlink != 1:
+                    logger.warning(
+                        "Show Runtime install guard descriptor is not an exclusive regular file; refusing",
+                    )
+                    os.close(lock_fd)
+                    yield unavailable
+                    return
+                file_lock = MigrationFileLock(self._install_guard_path, timeout_seconds=timeout_seconds)
+                file_lock._handle = os.fdopen(lock_fd, "a+", encoding="utf-8")
+                deadline = time.monotonic() + timeout_seconds
+                while True:
+                    file_lock._handle.seek(0)
+                    if storage_lock_try_lock(file_lock._handle):
+                        file_lock._handle.seek(0)
+                        file_lock._handle.truncate()
+                        file_lock._handle.write(str(os.getpid()))
+                        file_lock._handle.flush()
+                        break
+                    if time.monotonic() >= deadline:
+                        file_lock._handle.close()
+                        yield busy
                         return
-            except MigrationLockTimeout:
-                yield busy
+                    time.sleep(0.1)
+            except OSError:
+                logger.warning(
+                    "Show Runtime install guard %s could not be locked",
+                    self._install_guard_path,
+                    exc_info=True,
+                )
+                yield unavailable
                 return
             except OSError:
                 # A lock file that cannot be created/opened (read-only or full

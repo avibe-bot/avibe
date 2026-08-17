@@ -408,7 +408,13 @@ class ManagedRuntimeManager:
                 self._install_file_lock_path.stat()
             except OSError:
                 return None
-            fd = os.open(self._install_file_lock_path, os.O_RDONLY)
+            try:
+                fd = os.open(self._install_file_lock_path, os.O_RDONLY)
+            except OSError:
+                # Existing but unopenable (ACLs/permissions): a preview cannot
+                # know whether an install is active — report it as busy rather
+                # than risking a misleading "0 entries" preview.
+                return self._reason("install_already_running")
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -429,7 +435,15 @@ class ManagedRuntimeManager:
                 removed.append(str(staging_dir))
 
         versions_dir = self.runtime_dir / "versions"
-        if not versions_dir.is_dir():
+        try:
+            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
+        except FileNotFoundError:
+            return {"ok": True, "removed": removed}
+        except OSError as exc:
+            # An uninspectable versions tree must not silently preview as
+            # empty (misleading "0 entries") — surface an inspection failure.
+            raise OSError(f"versions directory cannot be inspected: {versions_dir}") from exc
+        if not versions_is_dir:
             return {"ok": True, "removed": removed}
 
         install_dirs = {

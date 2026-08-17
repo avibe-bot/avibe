@@ -578,12 +578,16 @@ def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, 
         force_install=True,
     )
 
-    from storage.lock import MigrationFileLock
+    import builtins
 
-    def _unwritable_lock(self, *args, **kwargs):
-        raise OSError("read-only filesystem")
+    real_open = builtins.open if False else os.open
 
-    monkeypatch.setattr(MigrationFileLock, "acquire", _unwritable_lock)
+    def _unwritable_open(p, flags, *args, **kwargs):
+        if isinstance(p, Path) and p.name == ".install.lock":
+            raise OSError("read-only filesystem")
+        return real_open(p, flags, *args, **kwargs)
+
+    monkeypatch.setattr("os.open", _unwritable_open)
 
     command = manager._install_manifest_runtime()
 
