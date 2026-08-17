@@ -328,13 +328,28 @@ class MemoryInsightReader:
                 rows = list(
                     conn.execute(
                         f"""
-                        WITH request_origins AS MATERIALIZED (
+                        WITH candidate_calls AS MATERIALIZED (
+                            SELECT call.id, call.request_id
+                            FROM provider_call AS call
+                                INDEXED BY provider_call_request_id_idx
+                            WHERE typeof(call.request_id) = 'text'
+                              AND call.request_id != ''
+                              AND call.memcell_id IS NULL
+                              AND call.parent_type IS NOT 'memcell'
+                        ),
+                        candidate_requests AS MATERIALIZED (
+                            SELECT DISTINCT request_id
+                            FROM candidate_calls
+                        ),
+                        request_origins AS MATERIALIZED (
                             SELECT queue.add_request_id AS request_id,
                                    queue.principal_id AS principal_id,
                                    queue.project_ref AS project_id,
                                    queue.session_id AS session_id,
                                    queue.provider_timestamp_ms AS provider_timestamp_ms
                             FROM capture.memory_capture_queue AS queue
+                            JOIN candidate_requests AS candidate
+                              ON candidate.request_id = queue.add_request_id
                             WHERE typeof(queue.add_request_id) = 'text'
                               AND queue.add_request_id != ''
                               AND typeof(queue.principal_id) = 'text'
@@ -348,6 +363,8 @@ class MemoryInsightReader:
                                    queue.session_id AS session_id,
                                    queue.provider_timestamp_ms AS provider_timestamp_ms
                             FROM capture.memory_flush_settlements AS settlement
+                            JOIN candidate_requests AS candidate
+                              ON candidate.request_id = settlement.request_id
                             JOIN capture.memory_capture_queue AS queue
                               ON queue.provider_session_ref = settlement.provider_session_ref
                              AND queue.epoch = settlement.epoch
@@ -402,14 +419,11 @@ class MemoryInsightReader:
                                call.response_bytes, call.dropped_before,
                                request_scope.principal_id, request_scope.project_id
                         FROM request_scopes AS request_scope
-                        CROSS JOIN provider_call AS call
-                            INDEXED BY provider_call_request_id_idx
-                        WHERE call.request_id = request_scope.request_id
-                          AND typeof(call.request_id) = 'text'
-                          AND call.request_id != ''
-                          AND call.memcell_id IS NULL
-                          AND call.parent_type IS NOT 'memcell'
-                          AND NOT EXISTS (
+                        JOIN candidate_calls AS candidate_call
+                          ON candidate_call.request_id = request_scope.request_id
+                        JOIN provider_call AS call
+                          ON call.id = candidate_call.id
+                        WHERE NOT EXISTS (
                               SELECT 1 FROM linked_requests AS linked
                               WHERE linked.request_id = request_scope.request_id
                           )

@@ -417,6 +417,102 @@ def test_rejected_pre_memcell_call_is_scope_authorized_and_linked_calls_are_excl
     assert alice["sections"]["calls"]["status"] == "available"
 
 
+def test_unlinked_call_join_is_bounded_before_scanning_retained_history(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _insert_queue(
+        insight_paths,
+        "candidate",
+        ALICE,
+        session="candidate",
+        timestamp_ms=5_000,
+        add_request_id="candidate-request",
+    )
+    _insert_call(
+        insight_paths,
+        "candidate-call",
+        request_id="candidate-request",
+        started_at_ms=6_000,
+    )
+
+    history_size = 300
+    with sqlite3.connect(insight_paths.capture_db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id, provider_session_ref,
+                generation, principal_id, project_ref, provenance, occurred_at_ms,
+                provider_timestamp_ms, state, attempts, add_request_id, add_status,
+                created_at, completed_at
+            ) VALUES (?, 1, ?, ?, 1, ?, ?, 'user_input', ?, ?, 'delivered', 1,
+                      ?, 'accumulated', ?, ?)
+            """,
+            [
+                (
+                    f"history-{index}",
+                    f"history-{index}",
+                    ProviderSessionRef(
+                        principal_id=ALICE,
+                        epoch=1,
+                        project_ref=PROJECT,
+                        session_id=f"provider-history-{index}",
+                    ).serialize(),
+                    ALICE,
+                    PROJECT,
+                    index,
+                    index,
+                    f"history-request-{index}",
+                    "2026-08-04T00:00:00Z",
+                    "2026-08-04T00:00:01Z",
+                )
+                for index in range(history_size)
+            ],
+        )
+    with sqlite3.connect(insight_paths.system_db_path) as conn:
+        conn.executemany(
+            "INSERT INTO memcell VALUES (?, 'avibe', ?, 'session', 'user', "
+            "'message', '[]', ?, '{}', ?)",
+            [
+                (
+                    f"mc_history_{index}",
+                    PROJECT,
+                    _json([ALICE]),
+                    "2026-08-04T00:00:00+00:00",
+                )
+                for index in range(history_size)
+            ],
+        )
+
+    original_connect = sqlite3.connect
+    progress_counts: list[list[int]] = []
+
+    def bounded_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        database = str(args[0]) if args else str(kwargs.get("database", ""))
+        if database.startswith(insight_paths.call_log_db_path.absolute().as_uri()):
+            progress_count = [0]
+            progress_counts.append(progress_count)
+
+            def stop_expensive_query() -> int:
+                progress_count[0] += 1
+                return int(progress_count[0] > 100)
+
+            connection.set_progress_handler(stop_expensive_query, 1_000)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", bounded_connect)
+
+    result = MemoryInsightReader(insight_paths).list_unlinked_calls(
+        (ALICE, PROJECT),
+        20,
+    )
+
+    assert [call["id"] for call in result["calls"]] == ["candidate-call"]
+    assert result["sections"]["calls"]["status"] == "available"
+    assert progress_counts[-1][0] <= 100
+
+
 def test_unlinked_calls_fail_closed_for_cross_scope_request_id_collisions(
     insight_paths: MemoryInsightPaths,
 ) -> None:
