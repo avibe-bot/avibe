@@ -6,6 +6,7 @@ import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
@@ -600,29 +601,64 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
             )
 
     transport = runtime["shared_response_transport"]
-    assert transport["path_template"] == (
-        "/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/{resource_handle}"
-    )
+    assert transport["path_prefix_template"] == ("/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/")
+    assert transport["document_url_has_trailing_slash"] is True
+    assert transport["suffix_forms"] == {
+        "document_or_fallback": "<prefix>",
+        "opaque_asset": "<prefix>asset/{resource_handle}",
+        "page_api": "<prefix>api/{normalized_relative_api_path}",
+    }
+    assert transport["relative_page_api_resolution"] == ("fetch(./api/data)_resolves_to_same_prefix_api/data")
+    assert transport["page_api_namespace_mapping"] == "captured_page_api_only"
     assert transport["nested_import_rewrite"] == ("absolute_url_under_same_namespace_document_capability_prefix")
     assert transport["query_authority"] is False
     assert transport["cookie_authority"] is False
     assert transport["custom_request_header_required"] is False
     assert transport["capability_path_access_log_policy"].startswith("redact_")
-    path = next(
-        example["value"]["path"] for example in document["x-examples"] if example["name"] == "shared_module_request"
+    examples = {example["name"]: example["value"] for example in document["x-examples"]}
+    document_path = examples["shared_document_request"]["path"]
+    asset_path = examples["shared_module_request"]["path"]
+    api_path = examples["shared_page_api_request"]["path"]
+    assert document_path.endswith("/")
+    assert urljoin(f"https://show.example.test{document_path}", "./api/data") == (
+        f"https://show.example.test{api_path}"
     )
-    for surface in transport["protected_surfaces"]:
+    for surface in ("document", "fallback"):
         _validate(
             document,
             "#/$defs/SharedResourceRequest",
-            {"method": "GET", "surface": surface, "path": path},
+            {"method": "GET", "surface": surface, "path": document_path},
         )
-    for forbidden_path in (f"{path}?token=ambient", "/workspace/src/main.tsx", "/p/stable_alpha/main.ts"):
+    for surface in ("module", "style", "raw_asset"):
+        _validate(
+            document,
+            "#/$defs/SharedResourceRequest",
+            {"method": "GET", "surface": surface, "path": asset_path},
+        )
+    for method in ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+        _validate(
+            document,
+            "#/$defs/SharedResourceRequest",
+            {"method": method, "surface": "page_api", "path": f"{api_path}/nested-item"},
+        )
+    api_prefix = api_path.removesuffix("data")
+    for forbidden_path in (
+        f"{api_path}?token=ambient",
+        f"{api_prefix}",
+        f"{api_prefix}/data",
+        f"{api_prefix}./data",
+        f"{api_prefix}../data",
+        f"{api_prefix}%2e%2e/data",
+        f"{api_prefix}private%2Fdata",
+        f"{api_prefix}private%5Cdata",
+        "/workspace/src/main.tsx",
+        "/p/stable_alpha/main.ts",
+    ):
         with pytest.raises(ValidationError):
             _validate(
                 document,
                 "#/$defs/SharedResourceRequest",
-                {"method": "GET", "surface": "module", "path": forbidden_path},
+                {"method": "GET", "surface": "page_api", "path": forbidden_path},
             )
 
 

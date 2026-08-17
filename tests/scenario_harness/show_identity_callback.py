@@ -61,7 +61,8 @@ class ShowIdentityCallbackHarness:
     SESSION_LIFETIME = 2_592_000
 
     def __init__(self) -> None:
-        self.backend = StubShowIdentityBackend(now=self.NOW)
+        self.now = self.NOW
+        self.backend = StubShowIdentityBackend(now=self.now)
         self.browser_session_cookie: str | None = None
         self.records: dict[str, dict[str, object]] = {}
         self.emails = {"alice@example.com"}
@@ -84,7 +85,7 @@ class ShowIdentityCallbackHarness:
             record is None
             or record["instance_id"] != self.INSTANCE_ID
             or record["callback_origin"] != self.CALLBACK_ORIGIN
-            or int(record["expires_at"]) <= self.NOW
+            or int(record["expires_at"]) <= self.now
         ):
             return {"decision": "identity_login_required"}
         self.membership_checks += 1
@@ -97,20 +98,23 @@ class ShowIdentityCallbackHarness:
     def start_login(
         self,
         *,
+        state_overrides: dict[str, object] | None = None,
         assertion_overrides: dict[str, object] | None = None,
     ) -> dict[str, object]:
         self._flow_number += 1
         state = f"signed-state-{self._flow_number}"
         nonce = f"nonce-{self._flow_number}"
         correlation_secret = f"correlation-secret-{self._flow_number}"
-        self._signed_states = {
-            state: {
-                "instance_id": self.INSTANCE_ID,
-                "nonce": nonce,
-                "callback_origin": self.CALLBACK_ORIGIN,
-                "safe_return_path": "/p/stable_alpha/",
-            }
+        state_claims: dict[str, object] = {
+            "instance_id": self.INSTANCE_ID,
+            "nonce": nonce,
+            "callback_origin": self.CALLBACK_ORIGIN,
+            "safe_return_path": "/p/stable_alpha/",
+            "iat": self.now,
+            "exp": self.now + 300,
         }
+        state_claims.update(state_overrides or {})
+        self._signed_states = {state: state_claims}
         self._current_correlation_secret = correlation_secret
         self.events.append("local.signed_state_signer")
         authorize_request = {
@@ -144,7 +148,7 @@ class ShowIdentityCallbackHarness:
 
         self.events.append("local.signed_state_verifier")
         state = self._signed_states.get(form.get("state"))
-        if state is None:
+        if state is None or not self._valid_time_window(state):
             return {"decision": "identity_retry_required"}
 
         self.events.append("local.correlation_cookie_verifier")
@@ -160,7 +164,11 @@ class ShowIdentityCallbackHarness:
             "nonce": state["nonce"],
             "instance_id": self.INSTANCE_ID,
         }
-        if claims is None or any(claims.get(field) != value for field, value in expected.items()):
+        if (
+            claims is None
+            or not self._valid_time_window(claims)
+            or any(claims.get(field) != value for field, value in expected.items())
+        ):
             return {"decision": "identity_retry_required"}
 
         token = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
@@ -172,8 +180,8 @@ class ShowIdentityCallbackHarness:
             "callback_origin": self.CALLBACK_ORIGIN,
             "subject": claims["sub"],
             "normalized_verified_email": claims["verified_email"],
-            "created_at": self.NOW,
-            "expires_at": self.NOW + self.SESSION_LIFETIME,
+            "created_at": self.now,
+            "expires_at": self.now + self.SESSION_LIFETIME,
         }
         self.browser_session_cookie = token
         self._signed_states.clear()
@@ -191,6 +199,7 @@ class ShowIdentityCallbackHarness:
                 "http_only": True,
                 "same_site": "Lax",
                 "path": "/",
+                "maximum_age_seconds": self.SESSION_LIFETIME,
             },
         }
 
@@ -202,3 +211,12 @@ class ShowIdentityCallbackHarness:
 
     def remove_member(self) -> None:
         self.emails.remove("alice@example.com")
+
+    def advance_clock(self, seconds: int) -> None:
+        self.now += seconds
+        self.backend.now = self.now
+
+    def _valid_time_window(self, claims: dict[str, object]) -> bool:
+        issued_at = claims.get("iat")
+        expires_at = claims.get("exp")
+        return type(issued_at) is int and type(expires_at) is int and issued_at <= self.now < expires_at

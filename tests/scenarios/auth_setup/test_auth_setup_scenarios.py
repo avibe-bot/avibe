@@ -83,18 +83,17 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
         )
         self.assertEqual(callback["location"], "/p/stable_alpha/")
         self.assertEqual(
-            {
-                key: callback["set_cookie"][key]
-                for key in ("name", "host_only", "domain", "secure", "http_only", "same_site", "path")
-            },
+            callback["set_cookie"],
             {
                 "name": "__Host-avibe_show_identity_session",
+                "value": callback["set_cookie"]["value"],
                 "host_only": True,
                 "domain": None,
                 "secure": True,
                 "http_only": True,
                 "same_site": "Lax",
                 "path": "/",
+                "maximum_age_seconds": 2_592_000,
             },
         )
         self.assertEqual(len(callback["set_cookie"]["value"]), 43)
@@ -167,6 +166,32 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
             self.assertEqual(invalid.complete_login(flow)["decision"], "identity_retry_required")
             self.assertIn("local.assertion_verifier", invalid.events)
             self.assertFalse(invalid.records)
+
+        expired_state = ShowIdentityCallbackHarness()
+        flow = expired_state.start_login()
+        expired_state.advance_clock(300)
+        self.assertEqual(expired_state.complete_login(flow)["decision"], "identity_retry_required")
+        self.assertFalse(expired_state.records)
+        self.assertIsNone(expired_state.browser_session_cookie)
+
+        expired_assertion = ShowIdentityCallbackHarness()
+        flow = expired_assertion.start_login(assertion_overrides={"exp": expired_assertion.NOW})
+        self.assertEqual(expired_assertion.complete_login(flow)["decision"], "identity_retry_required")
+        self.assertFalse(expired_assertion.records)
+        self.assertIsNone(expired_assertion.browser_session_cookie)
+
+        for state_overrides, assertion_overrides in (
+            ({"iat": "not-an-integer"}, None),
+            (None, {"exp": True}),
+        ):
+            invalid_time = ShowIdentityCallbackHarness()
+            flow = invalid_time.start_login(
+                state_overrides=state_overrides,
+                assertion_overrides=assertion_overrides,
+            )
+            self.assertEqual(invalid_time.complete_login(flow)["decision"], "identity_retry_required")
+            self.assertFalse(invalid_time.records)
+            self.assertIsNone(invalid_time.browser_session_cookie)
 
 
 class _FakeNextTurnRuntime:
