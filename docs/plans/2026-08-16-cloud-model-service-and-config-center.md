@@ -462,13 +462,15 @@ required.
 `mode` ∈ `organization | platform`. `embedding_identity` is an opaque hash of the embedding slot's
 (base_url, model) and changes iff vector-space identity changes. It is `null` exactly when
 `capabilities.embedding` is false because the embedding slot itself is missing, disabled, or
-undecryptable. A chat-only degradation leaves the healthy embedding capability and identity intact;
-the released client pauses cloud memory through its existing `chat && embedding` pair predicate.
-Before serializing a saved scope, the endpoint consumes the shared saved-key effectiveness predicate
-for every enabled slot and immediately discards any plaintext. An enabled slot whose key cannot be
-decrypted is reported as unavailable and the response adds a per-slot reason map, for example
-`"degraded": { "asr": "model_service_key_unavailable" }`; `degraded` is omitted when no slot is
-degraded.
+unavailable through the shared effectiveness predicate. A chat-only degradation leaves the healthy
+embedding capability and identity intact; the released client pauses cloud memory through its
+existing `chat && embedding` pair predicate. Before serializing a saved scope, the endpoint consumes
+that predicate for every enabled slot and immediately discards any plaintext. It includes the
+platform scope's approved legacy-env recovery only when the normalized saved and env provider
+addresses match; organization scope never receives that recovery. A slot with neither decryptable
+saved custody nor eligible recovery is reported unavailable and the response adds a per-slot reason
+map, for example `"degraded": { "asr": "model_service_key_unavailable" }`; `degraded` is omitted
+when no slot is degraded.
 
 ### 8.3 Usage row
 
@@ -492,13 +494,14 @@ turns on.
 
 - `model_service_not_configured` (503) — resolved scope lacks an enabled slot for the capability.
 - `model_service_key_unavailable` (503) — an enabled save candidate cannot complete its managed
-  encrypt/decrypt round trip, or an enabled saved slot cannot be decrypted with the deployed
-  `MODEL_SERVICE_KEY_SECRET`. The failure is not overrideable by `force: true`, never maps to
-  `model_service_not_configured`, makes no upstream call, and persists no candidate change. For
-  saved-slot failures, status marks the affected capability false with the same reason. Each
-  unavailable transition emits one scrubbed high-priority Sentry event per scope/config
-  revision/capability; repeated failures at the same active edge emit none, and a successful
-  validation clears the edge so a later failure can emit again.
+  encrypt/decrypt round trip, or an enabled saved slot has neither decryptable custody nor an
+  eligible same-scope platform env recovery under the shared effectiveness predicate. The failure
+  is not overrideable by `force: true`, never maps to `model_service_not_configured`, makes no
+  upstream call, and persists no candidate change. For unrecovered saved-slot failures, status
+  marks the affected capability false with the same reason. Every saved-key decryption-failure
+  transition, including one masked by approved platform recovery, emits one scrubbed high-priority
+  Sentry event per scope/config revision/capability; repeated failures at the same active edge emit
+  none, and a successful managed-key validation clears the edge so a later failure can emit again.
 - `model_service_unavailable` (503) — quota **reservation** persistence failed on an
   enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
   never produces this error: the response is served and the un-settled reservation is reaped as a
@@ -526,8 +529,9 @@ turns on.
 3. No API response, log line, Sentry event, usage event, or error message ever contains a slot API
    key or its ciphertext; a `mak_` key appears exactly once — in the body of its own mint/rotate
    response (shown once by design) — and nowhere else; config reads expose only `has_api_key`.
-   Every enabled saved slot is decrypt-valid before persistence, and status reflects current
-   decryptability rather than ciphertext presence.
+   Every enabled saved slot is decrypt-valid before persistence, and status reflects the shared
+   runtime effectiveness result, including only the approved platform env recovery, rather than
+   ciphertext presence.
 4. The upstream model invoked is always the configured slot's model, regardless of any
    client-supplied model string (documented exception: the legacy env cleanup chain, until a
    platform config is saved — each attempt's actual model is metered per §6.6).
