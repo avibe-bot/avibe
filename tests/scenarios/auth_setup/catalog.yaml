@@ -260,6 +260,13 @@ scenarios:
     layer: scenario
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_organization_remote_session_recovers_and_revokes_without_oauth
+  - id: AUTH-SETUP-404
+    name: Verified limited Show Page identity completes local guest admission
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: show_identity
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_limited_show_identity_closed_loop_installs_guest_lease
   - id: AUTH-SETUP-210
     name: Lost Model Hub OAuth start response converges on one provider flow
     status: covered
