@@ -214,12 +214,16 @@ def should_run(conn: Connection, *, now: Optional[datetime] = None) -> bool:
 def try_acquire_lease(conn: Connection, *, now: Optional[datetime] = None) -> Optional[str]:
     """Best-effort cross-process lease. Returns the lease token or ``None``.
 
-    The write transaction serializes contenders on the database write lock;
-    the loser sees the winner's row and (failing that) the primary-key
-    IntegrityError, and simply does not run.
+    Takes the database writer lock up front (``BEGIN IMMEDIATE`` via a
+    prelude statement) so the read-decide-write sequence below is atomic
+    against other contenders: a deferred transaction could let two processes
+    both see an absent lease, then serialize in an order where the loser's
+    unconditional delete removes the winner's still-valid lease.
     """
     moment = now or _utc_now()
     token = uuid.uuid4().hex
+    # BEGIN IMMEDIATE equivalent: force the write lock before reading.
+    conn.exec_driver_sql("UPDATE state_meta SET updated_at = updated_at WHERE key = ?", (RETENTION_LEASE_KEY,))
     existing = _read_meta(conn, RETENTION_LEASE_KEY)
     if existing:
         expires = _parse_iso(str(existing.get("expires_at") or ""))

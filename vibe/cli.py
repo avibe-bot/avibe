@@ -15335,8 +15335,12 @@ def build_parser():
 
     data_parser = subparsers.add_parser(
         "data",
-        help="Run read-only queries against Avibe data",
-        description="Inspect local Avibe SQLite state with guarded read-only SQL.",
+        help="Inspect Avibe data, and run explicit trace-retention maintenance",
+        description=(
+            "Inspect local Avibe SQLite state with guarded read-only SQL, or run "
+            "explicit maintenance: `query` is read-only, while `retention --run` "
+            "deletes old internal trace events and may compact the database."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )

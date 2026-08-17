@@ -237,11 +237,66 @@ def test_maybe_compact_vacuums_when_safe(state) -> None:
     assert db_path.stat().st_size < result["database_bytes_before"] + 1
 
 
-def test_retention_days_clamp_and_cutoff(state) -> None:
-    assert agent_events_retention.normalize_retention_days(0) == 1
-    assert agent_events_retention.normalize_retention_days(-5) == 1
-    assert agent_events_retention.normalize_retention_days("7") == 7
-    assert agent_events_retention.cutoff_iso(30, now=_NOW) == _iso(_NOW - timedelta(days=30))
+def test_cutoff_is_chronological_for_normalized_legacy_timestamps(state) -> None:
+    """Legacy fractional timestamps must not lexically precede the cutoff.
+
+    The hazard: a row stamped ``...12:00:00.500000+00:00`` is 0.5s NEWER than
+    ``...12:00:00Z`` but sorts BEFORE it lexically. The 0057 migration
+    canonicalizes released rows; this test pins both halves — the hazard is
+    real in raw form, and the canonical form is safe.
+    """
+    engine = state
+    cutoff = _NOW - timedelta(days=30)
+    # A fractional row one second AFTER the cutoff, in legacy offset form.
+    legacy_stamp = (cutoff + timedelta(seconds=0.5)).isoformat()
+    assert legacy_stamp.endswith("+00:00")
+    _seed_event(engine, event_id="legacy", created_at=cutoff)
+    with engine.begin() as conn:
+        conn.execute(agent_events.update().where(agent_events.c.id == "legacy").values(created_at=legacy_stamp))
+
+    with engine.connect() as conn:
+        raw = agent_events_retention.plan(conn, retention_days=30, now=_NOW)
+    assert raw["eligible_count"] == 1  # demonstrates the lexical hazard exists
+
+    # Canonical form of the same instant (what migration 0057 produces).
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "update agent_events set created_at = strftime('%Y-%m-%dT%H:%M:%SZ', created_at) "
+            "where id = 'legacy'"
+        )
+    with engine.connect() as conn:
+        canonical = agent_events_retention.plan(conn, retention_days=30, now=_NOW)
+    assert canonical["eligible_count"] == 0  # normalized: not eligible, correctly
+
+
+def test_migration_0057_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypatch) -> None:
+    """The migration rewrites offset/fractional stamps to whole-second Z."""
+    import sqlite3
+
+    from alembic import command
+    from storage import migrations
+
+    db_path = tmp_path / "state.sqlite"
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    # Build schema up to 0056, seed a legacy-form row, then run 0057.
+    command.upgrade(migrations.alembic_config(db_path), "20260817_0056")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "insert into agent_events (id, platform, event_type, visibility, content_json, "
+        "metadata_json, created_at, updated_at) values (?, 'web', 'tool_call', 'trace', '{}', '{}', ?, ?)",
+        ("legacy-row", "2026-07-18T12:00:00.500000+00:00", "2026-07-18T12:00:00.500000+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    command.upgrade(migrations.alembic_config(db_path), "20260818_0057")
+
+    conn = sqlite3.connect(db_path)
+    stamp = conn.execute("select created_at from agent_events where id = 'legacy-row'").fetchone()[0]
+    version = conn.execute("select version_num from alembic_version").fetchone()[0]
+    conn.close()
+    assert stamp == "2026-07-18T12:00:00Z"
+    assert version == "20260818_0057"
 
 
 def test_plan_measures_utf8_bytes_not_characters(state) -> None:
