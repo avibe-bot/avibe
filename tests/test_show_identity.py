@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from urllib.parse import parse_qs, urlsplit
 
 import jwt
@@ -124,6 +125,8 @@ def test_show_identity_assertion_verifies_paired_issuer_instance_and_nonce(
     )
     assert identity.subject == "user-1"
     assert identity.normalized_email == "viewer@example.com"
+    assert identity.assertion_id == "assertion-1"
+    assert identity.expires_at == issued_at + 300
 
     with pytest.raises(show_identity.ShowIdentityError, match="invalid_assertion"):
         show_identity.verify_show_identity_assertion(
@@ -131,6 +134,73 @@ def test_show_identity_assertion_verifies_paired_issuer_instance_and_nonce(
             assertion,
             expected_nonce="other-nonce",
         )
+
+
+def test_show_identity_assertion_reports_jwks_outage(monkeypatch, tmp_path):
+    config = _identity_config(monkeypatch, tmp_path)
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    issued_at = int(time.time())
+    assertion = jwt.encode(
+        {
+            "iss": "https://backend.test",
+            "aud": "avibe-show-identity:vr_client_123",
+            "sub": "user-1",
+            "iat": issued_at,
+            "exp": issued_at + 300,
+            "jti": "unavailable-assertion",
+            "nonce": "nonce-1",
+            "instance_id": "inst_123",
+            "verified_email": "viewer@example.com",
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"typ": "JWT", "kid": "current"},
+    )
+
+    class UnavailableJwkClient:
+        def __init__(self, _uri, *, timeout):
+            assert timeout == 5
+
+        def get_signing_key_from_jwt(self, _token):
+            raise show_identity.PyJWKClientConnectionError("offline")
+
+    monkeypatch.setattr(show_identity, "PyJWKClient", UnavailableJwkClient)
+
+    with pytest.raises(show_identity.ShowIdentityError, match="identity_unavailable"):
+        show_identity.verify_show_identity_assertion(
+            config,
+            assertion,
+            expected_nonce="nonce-1",
+        )
+
+
+def test_verified_show_identity_is_consumed_atomically_once():
+    identity = show_identity.VerifiedShowIdentity(
+        subject="user-1",
+        normalized_email="viewer@example.com",
+        assertion_id=f"atomic-{time.time_ns()}",
+        expires_at=int(time.time()) + 300,
+    )
+    barrier = threading.Barrier(3)
+    outcomes: list[str] = []
+
+    def consume():
+        barrier.wait()
+        try:
+            show_identity.consume_verified_show_identity(identity)
+        except show_identity.ShowIdentityError as exc:
+            outcomes.append(exc.reason)
+        else:
+            outcomes.append("accepted")
+
+    threads = [threading.Thread(target=consume) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(outcomes) == ["accepted", "replayed_assertion"]
 
 
 def test_show_guest_lease_is_page_and_share_bound_without_live_membership_state(

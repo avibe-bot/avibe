@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +13,7 @@ from urllib.parse import quote, urlencode, urlsplit
 
 import jwt
 from jwt import PyJWKClient
+from jwt.exceptions import PyJWKClientConnectionError
 
 from config.v2_config import V2Config
 from core.show_pages import normalize_show_access_email, validate_share_id
@@ -24,8 +26,12 @@ ASSERTION_MAX_TTL_SECONDS = 10 * 60
 MAX_STATE_BYTES = 4096
 MAX_ASSERTION_BYTES = 16 * 1024
 MAX_CALLBACK_BODY_BYTES = 24 * 1024
+MAX_CONSUMED_ASSERTIONS = 4096
 _STATE_PREFIX = "vsi1"
 _LEASE_PREFIX = "vsl1"
+_STATE_PROCESS_SECRET = secrets.token_bytes(32)
+_CONSUMED_ASSERTIONS_LOCK = threading.Lock()
+_CONSUMED_ASSERTIONS: dict[str, int] = {}
 
 
 class ShowIdentityError(ValueError):
@@ -46,6 +52,8 @@ class ShowIdentityState:
 class VerifiedShowIdentity:
     subject: str
     normalized_email: str
+    assertion_id: str
+    expires_at: int
 
 
 @dataclass(frozen=True)
@@ -78,6 +86,14 @@ def _signature(secret: str, prefix: str, payload: str) -> str:
             hashlib.sha256,
         ).digest()
     )
+
+
+def _state_secret(secret: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        _STATE_PROCESS_SECRET,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _encode_signed_payload(secret: str, prefix: str, payload: dict[str, Any]) -> str:
@@ -178,7 +194,7 @@ def begin_show_identity_authorization(
     issued_at = int(time.time()) if now is None else int(now)
     nonce = secrets.token_urlsafe(32)
     state = _encode_signed_payload(
-        cloud.session_secret,
+        _state_secret(cloud.session_secret),
         _STATE_PREFIX,
         {
             "v": 1,
@@ -210,7 +226,7 @@ def read_show_identity_state(
 ) -> ShowIdentityState:
     cloud = _cloud(config)
     payload = _decode_signed_payload(
-        cloud.session_secret,
+        _state_secret(cloud.session_secret),
         _STATE_PREFIX,
         token,
         max_bytes=MAX_STATE_BYTES,
@@ -295,6 +311,8 @@ def verify_show_identity_assertion(
         )
     except ShowIdentityError:
         raise
+    except PyJWKClientConnectionError as exc:
+        raise ShowIdentityError("identity_unavailable") from exc
     except Exception as exc:
         raise ShowIdentityError("invalid_assertion") from exc
 
@@ -314,7 +332,29 @@ def verify_show_identity_assertion(
     return VerifiedShowIdentity(
         subject=claims["sub"],
         normalized_email=normalized_email,
+        assertion_id=claims["jti"],
+        expires_at=claims["exp"],
     )
+
+
+def consume_verified_show_identity(
+    identity: VerifiedShowIdentity,
+    *,
+    now: int | None = None,
+) -> None:
+    current_time = int(time.time()) if now is None else int(now)
+    retain_until = identity.expires_at + ASSERTION_CLOCK_LEEWAY_SECONDS
+    with _CONSUMED_ASSERTIONS_LOCK:
+        expired = [
+            assertion_id for assertion_id, expires_at in _CONSUMED_ASSERTIONS.items() if expires_at <= current_time
+        ]
+        for assertion_id in expired:
+            _CONSUMED_ASSERTIONS.pop(assertion_id, None)
+        if identity.assertion_id in _CONSUMED_ASSERTIONS:
+            raise ShowIdentityError("replayed_assertion")
+        if len(_CONSUMED_ASSERTIONS) >= MAX_CONSUMED_ASSERTIONS:
+            raise ShowIdentityError("identity_unavailable")
+        _CONSUMED_ASSERTIONS[identity.assertion_id] = retain_until
 
 
 def show_guest_cookie_name(share_id: str) -> str:

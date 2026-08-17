@@ -13265,9 +13265,32 @@ def _show_annotation_capability(
     }
 
 
+def _show_public_editor_context():
+    from vibe.authorization import context_from_session_payload, instance_owner_context
+
+    config = _load_remote_access_config()
+    if config is not None:
+        session = _resolved_remote_session_payload(config)
+        context = context_from_session_payload(session) if session is not None else None
+        if context is not None:
+            return context if context.has_role("editor") else None
+        if config.remote_access.vibe_cloud.enabled:
+            return None
+    if not (_is_local_request(config) or _is_loopback_origin_proxy_request()):
+        return None
+    return instance_owner_context()
+
+
 def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
-    from vibe import remote_access
     from vibe.authorization import context_from_session_payload
+
+    if public:
+        context = _show_public_editor_context()
+        if context is None:
+            return None
+        if context.is_remote:
+            return {"kind": "user", "email": context.email} if context.email else None
+        return {"kind": "local"}
 
     if not public:
         context = getattr(g, "authorization_context", None)
@@ -14911,6 +14934,14 @@ def _show_identity_error_response(error: str, status: int):
     return response
 
 
+def _show_identity_error_status(error: str, *, default: int = 400) -> int:
+    if error == "identity_unavailable":
+        return 503
+    if error == "identity_not_verified":
+        return 403
+    return default
+
+
 async def _show_identity_callback_fields() -> dict[str, str]:
     from vibe.show_identity import MAX_CALLBACK_BODY_BYTES, ShowIdentityError
 
@@ -14993,7 +15024,10 @@ async def complete_show_identity_login():
         if "error" in fields:
             if fields["error"] not in {"identity_not_verified", "identity_unavailable"}:
                 raise show_identity.ShowIdentityError("invalid_callback")
-            return _show_identity_error_response(fields["error"], 403)
+            return _show_identity_error_response(
+                fields["error"],
+                _show_identity_error_status(fields["error"]),
+            )
         identity = await asyncio.to_thread(
             show_identity.verify_show_identity_assertion,
             config,
@@ -15001,7 +15035,10 @@ async def complete_show_identity_login():
             expected_nonce=state.nonce,
         )
     except show_identity.ShowIdentityError as exc:
-        return _show_identity_error_response(exc.reason, 400)
+        return _show_identity_error_response(
+            exc.reason,
+            _show_identity_error_status(exc.reason),
+        )
     except Exception:
         logger.warning("Show identity callback failed", exc_info=True)
         return _show_identity_error_response("identity_unavailable", 503)
@@ -15018,10 +15055,18 @@ async def complete_show_identity_login():
             return redirect(state.return_target, code=303)
         if (
             access.access_mode != "limited"
+            or access.share_id != state.share_id
             or identity.normalized_email not in access.normalized_emails
         ):
             return _show_identity_error_response("show_access_forbidden", 403)
 
+        try:
+            show_identity.consume_verified_show_identity(identity)
+        except show_identity.ShowIdentityError as exc:
+            return _show_identity_error_response(
+                exc.reason,
+                _show_identity_error_status(exc.reason),
+            )
         # This browser-session lease intentionally has no live revision check:
         # membership changes affect new admissions, not a page already opened.
         lease = show_identity.make_show_guest_lease(
@@ -15076,7 +15121,7 @@ def redirect_public_show_page_to_canonical_path(share_id):
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def serve_public_show_page(share_id, asset_path):
-    from core.show_pages import ShowPageStore, ensure_show_page_dir
+    from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
     from vibe import show_identity
 
     config = _load_remote_access_config()
@@ -15092,6 +15137,24 @@ async def serve_public_show_page(share_id, asset_path):
         if page.visibility == "offline":
             return _show_page_offline_response()
         if not limited_guest and page.visibility == "limited":
+            if _is_show_page_spa_route_request(asset_path, request._request):
+                editor_context = _show_public_editor_context()
+                if editor_context is not None:
+                    try:
+                        store.require_access(
+                            page.session_id,
+                            user_context=editor_context,
+                        )
+                    except ShowPageError:
+                        pass
+                    else:
+                        private_target = f"/show/{quote(page.session_id, safe='')}/"
+                        if asset_path:
+                            private_target += quote(asset_path.lstrip("/"), safe="/@:-._~")
+                        query = urlsplit(request.full_path).query
+                        if query:
+                            private_target = f"{private_target}?{query}"
+                        return redirect(private_target)
             if request.method != "GET" or not _is_show_page_spa_route_request(
                 asset_path,
                 request._request,
@@ -15226,9 +15289,9 @@ async def serve_public_show_page(share_id, asset_path):
                     logger.debug("Show runtime unavailable; serving static public Show Page", exc_info=True)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
+        if limited_guest:
+            return _with_limited_show_policy(response)
         if request.method in {"GET", "HEAD"}:
-            if limited_guest:
-                return _with_limited_show_policy(response)
             if _is_show_runtime_immutable_asset_path(asset_path):
                 return response
             return _with_show_event_write_cookie(response, page.session_id, enabled=False)

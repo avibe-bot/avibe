@@ -499,12 +499,128 @@ def test_limited_show_page_uses_editor_route_and_redirects_guest_to_identity(
     assert state.return_target == f"/p/{share_id}/"
     assert query["nonce"] == [state.nonce]
 
+    editor_client = app.test_client()
+    editor_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "owner-1"),
+        domain="alex.avibe.bot",
+    )
+    editor_shared = editor_client.get(
+        f"/p/{share_id}/reports/daily?tab=1",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert editor_shared.status_code == 302
+    assert editor_shared.headers["Location"] == "/show/ses123/reports/daily?tab=1"
+
     asset = app.test_client().get(
         f"/p/{share_id}/app.js",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
     assert asset.status_code == 404
+
+
+def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    client = app.test_client()
+
+    login = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    state = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(login.headers["Location"]).query
+    )["state"][0]
+    unavailable = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": state, "error": "identity_unavailable"},
+    )
+    assert unavailable.status_code == 503
+    assert unavailable.get_json()["error"] == "identity_unavailable"
+
+    verifier_login = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    verifier_state = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(verifier_login.headers["Location"]).query
+    )["state"][0]
+
+    def unavailable_verifier(*_args, **_kwargs):
+        raise show_identity.ShowIdentityError("identity_unavailable")
+
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        unavailable_verifier,
+    )
+    verifier_unavailable = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": verifier_state, "assertion": "signed-assertion"},
+    )
+    assert verifier_unavailable.status_code == 503
+    assert verifier_unavailable.get_json()["error"] == "identity_unavailable"
+
+    next_login = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    next_state = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(next_login.headers["Location"]).query
+    )["state"][0]
+    original_get_access = ShowPageStore.get_access
+
+    def get_rotated_access(store, page_id):
+        access = original_get_access(store, page_id)
+        assert access is not None
+        return SimpleNamespace(
+            access_mode=access.access_mode,
+            share_id="rotated-share",
+            normalized_emails=access.normalized_emails,
+        )
+
+    monkeypatch.setattr(ShowPageStore, "get_access", get_rotated_access)
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        lambda *_args, **_kwargs: show_identity.VerifiedShowIdentity(
+            subject="viewer-1",
+            normalized_email="viewer@example.com",
+            assertion_id="rotated-assertion",
+            expires_at=int(ui_server.time.time()) + 300,
+        ),
+    )
+    rotated = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": next_state, "assertion": "signed-assertion"},
+    )
+    assert rotated.status_code == 403
+    assert rotated.get_json()["error"] == "show_access_forbidden"
+    assert "Set-Cookie" not in rotated.headers
 
 
 def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
@@ -527,6 +643,10 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             "/sessions/ses123/app/app.js": {
                 "content-type": "text/javascript; charset=utf-8"
             },
+            "/sessions/ses123/app/api/data": {
+                "content-type": "application/json",
+                "cache-control": "public, max-age=3600",
+            },
         },
     )
     verification_was_offloaded: list[bool] = []
@@ -541,6 +661,8 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
         return show_identity.VerifiedShowIdentity(
             subject="viewer-1",
             normalized_email="viewer@example.com",
+            assertion_id=f"assertion-{_kwargs['expected_nonce']}",
+            expires_at=int(ui_server.time.time()) + 300,
         )
 
     monkeypatch.setattr(
@@ -578,6 +700,18 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
         assert "Expires=" not in set_cookie
         assert "Max-Age=" not in set_cookie
 
+        replay = app.test_client().post(
+            show_identity.CALLBACK_PATH,
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            data={"state": query["state"][0], "assertion": "signed-assertion"},
+        )
+        assert replay.status_code == 400
+        assert replay.get_json()["error"] == "replayed_assertion"
+        assert show_identity.show_guest_cookie_name(share_id) not in replay.headers.get(
+            "Set-Cookie", ""
+        )
+
         page = client.get(
             f"/p/{share_id}/",
             base_url="https://alex.avibe.bot",
@@ -589,6 +723,17 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
         assert page.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
         assert b'"authenticated":false' in page.content
         assert b"__show/annotation.js" not in page.content
+
+        api_response = client.post(
+            f"/p/{share_id}/api/data",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers=csrf_headers(client, "https://alex.avibe.bot"),
+            json={"action": "refresh"},
+        )
+        assert api_response.status_code == 200
+        assert api_response.headers["Cache-Control"] == "private, no-store"
+        assert "Cookie" in api_response.headers["Vary"]
 
         events = client.get(
             f"/p/{share_id}/__show/events",
