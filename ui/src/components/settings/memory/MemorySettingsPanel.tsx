@@ -583,18 +583,21 @@ export const MemorySettingsPanel: React.FC<{
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       ) : null}
 
-      {customMode && maintenanceError ? (
+      {maintenanceError ? (
         <div className="rounded-xl border border-border bg-surface px-4 py-3 text-[12px] text-muted">{maintenanceError}</div>
       ) : null}
 
-      {customMode ? <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={() => void save()} disabled={busy}>
-            {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
-            {saving ? t('memory.settings.saving') : t('memory.settings.save')}
-          </Button>
-        </div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {customMode ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => void save()} disabled={busy}>
+              {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              {saving ? t('memory.settings.saving') : t('memory.settings.save')}
+            </Button>
+          </div>
+        ) : null}
         <Button
+          className={customMode ? undefined : 'ml-auto'}
           variant="destructive"
           size="sm"
           onClick={onClearAll}
@@ -603,7 +606,7 @@ export const MemorySettingsPanel: React.FC<{
           <Trash2 className="size-3.5" />
           {t('memory.clear.button')}
         </Button>
-      </div> : null}
+      </div>
 
       {customMode ? <div className="rounded-xl border border-border bg-surface p-4">
         <h3 className="mb-2 text-[13px] font-semibold text-foreground">{t('memory.settings.disclosureTitle')}</h3>

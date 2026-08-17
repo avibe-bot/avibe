@@ -180,6 +180,132 @@ def test_fresh_paired_install_gets_zero_config_cloud_memory_with_write_only_key(
     assert projected["cloud"]["has_model_access_key"] is True
 
 
+def test_unpairing_clears_cloud_runtime_and_reconciles_the_running_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_first",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+    config = _paired_config(current)
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    reconciled: list[MemoryConfig] = []
+
+    def reconcile(candidate: MemoryConfig) -> bool:
+        reconciled.append(deepcopy(candidate))
+        model_service._clear_apply_pending(candidate)  # noqa: SLF001
+        return True
+
+    monkeypatch.setattr(model_service, "_reconcile_candidate", reconcile)
+    monkeypatch.setattr(
+        model_service,
+        "_device_request",
+        lambda *_args: pytest.fail("unpaired sync must not call the backend"),
+    )
+
+    result = model_service.sync_model_service_once()
+    memory = V2Config.load().memory
+
+    assert result == {
+        "ok": True,
+        "configured": False,
+        "changed": True,
+        "apply_pending": False,
+    }
+    assert reconciled and reconciled[0].runtime_source() == "unavailable"
+    assert memory.enabled is True
+    assert memory.cloud.scope == "platform"
+    assert memory.cloud.model_access_key is None
+    assert memory.cloud.proxy_base_url is None
+    assert memory.cloud.source_instance_id == "instance-1"
+    assert memory.cloud.applied_embedding_identity == "emb-v1"
+    assert memory.cloud.organization_attached is False
+
+
+def test_managed_scope_is_persisted_before_first_key_mint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_config().save()
+
+    def device_request(_config: V2Config, method: str, _suffix: str) -> dict:
+        if method == "GET":
+            return _status(scope="organization")
+        persisted = V2Config.load().memory
+        assert persisted.settings_mode() == "organization"
+        assert persisted.cloud.organization_attached is True
+        assert persisted.cloud.model_access_key is None
+        raise model_service.ModelServiceResolutionError("mint_temporarily_unavailable")
+
+    monkeypatch.setattr(model_service, "_device_request", device_request)
+
+    with pytest.raises(
+        model_service.ModelServiceResolutionError,
+        match="mint_temporarily_unavailable",
+    ):
+        model_service.sync_model_service_once()
+
+    memory = V2Config.load().memory
+    assert memory.settings_mode() == "organization"
+    assert memory.cloud.organization_attached is True
+    assert memory.cloud.model_access_key is None
+    assert memory.enabled is False
+    assert memory.runtime_source() == "unavailable"
+
+
+def test_metadata_only_status_refresh_does_not_reconcile_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            revision=1,
+            model_access_key="mak_first",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+    _paired_config(current).save()
+    payload = _status(revision=2)
+    payload["capabilities"]["asr"] = True
+    payload["quota"]["enforced"] = True
+    monkeypatch.setattr(model_service, "_device_request", lambda *_args: payload)
+    monkeypatch.setattr(
+        model_service,
+        "_reconcile_candidate",
+        lambda _candidate: pytest.fail("metadata-only refresh must not reconcile"),
+    )
+
+    result = model_service.sync_model_service_once()
+    memory = V2Config.load().memory
+
+    assert result == {"ok": True, "configured": True, "changed": True}
+    assert memory.cloud.revision == 2
+    assert memory.cloud.capabilities.asr is True
+    assert memory.cloud.quota_enforced is True
+    assert memory.cloud.runtime_apply_pending is False
+
+
 def test_enterprise_attachment_pauses_custom_until_acknowledged() -> None:
     current = _manual_memory()
     status = model_service._status_from_payload(  # noqa: SLF001
@@ -226,6 +352,24 @@ def test_enterprise_attachment_pauses_custom_until_acknowledged() -> None:
         )
         is True
     )
+
+
+def test_canceling_enterprise_attachment_resumes_the_preserved_custom_runtime() -> None:
+    pending = _resolved(
+        _manual_memory(),
+        _status(scope="organization"),
+    )
+
+    canceled = _resolved(
+        pending,
+        _status(scope="platform", revision=2),
+    )
+
+    assert canceled.cloud.transition_notice_pending is False
+    assert canceled.cloud.organization_attached is False
+    assert canceled.recovery_intent is None
+    assert canceled.runtime_source() == "custom"
+    assert canceled.cloud.runtime_apply_pending is True
 
 
 def test_enterprise_transition_acknowledgement_cannot_edit_custom_endpoints() -> None:
@@ -334,6 +478,31 @@ def test_fresh_managed_instance_enables_when_organization_adds_memory_pair() -> 
     assert activated.enabled is True
     assert activated.cloud.organization_attached is True
     assert activated.cloud.applied_embedding_identity == "emb-org"
+    assert activated.runtime_source() == "cloud"
+    assert activated.recovery_intent is None
+
+
+def test_fresh_platform_instance_enables_when_memory_capabilities_recover() -> None:
+    waiting = _resolved(
+        MemoryConfig(),
+        _status(
+            scope="platform",
+            chat=False,
+            embedding=False,
+            identity=None,
+        ),
+    )
+
+    activated = _resolved(
+        waiting,
+        _status(scope="platform", identity="emb-platform", revision=2),
+        minted=_mint(),
+    )
+
+    assert waiting.mode == "platform"
+    assert waiting.enabled is False
+    assert activated.enabled is True
+    assert activated.cloud.applied_embedding_identity == "emb-platform"
     assert activated.runtime_source() == "cloud"
     assert activated.recovery_intent is None
 

@@ -162,6 +162,17 @@ def _status_needs_model_key(memory: MemoryConfig, status: ModelServiceStatus) ->
     return _memory_mode_after_initialization(memory) == "platform"
 
 
+def _runtime_state_signature(memory: MemoryConfig) -> tuple[object, ...]:
+    """Return only fields whose change requires sidecar reconciliation."""
+
+    return (
+        memory.enabled,
+        memory.recovery_intent,
+        memory.runtime_source(),
+        memory.runtime_processing(),
+    )
+
+
 def _resolved_memory(
     current: MemoryConfig,
     *,
@@ -180,8 +191,6 @@ def _resolved_memory(
         candidate.cloud.applied_embedding_identity = None
     if candidate.mode is None:
         candidate.mode = _memory_mode_after_initialization(candidate)
-        if candidate.mode == "platform" and status.memory_available():
-            candidate.enabled = True
 
     candidate.cloud.scope = status.scope  # type: ignore[assignment]
     candidate.cloud.capabilities = status.capabilities
@@ -204,9 +213,10 @@ def _resolved_memory(
                     and candidate.cloud.applied_embedding_identity != status.embedding_identity
                 ):
                     candidate.recovery_intent = "rebuild"
-                candidate.cloud.applied_embedding_identity = status.embedding_identity
-                if first_managed_activation:
-                    candidate.enabled = True
+                if candidate.cloud.model_access_key:
+                    candidate.cloud.applied_embedding_identity = status.embedding_identity
+                    if first_managed_activation:
+                        candidate.enabled = True
             elif candidate.cloud.transition_notice_pending:
                 candidate.recovery_intent = "rebuild"
             elif candidate.mode == "custom" and previous.custom_processing_complete():
@@ -220,8 +230,9 @@ def _resolved_memory(
                 ):
                     candidate.recovery_intent = "rebuild"
                 candidate.cloud.organization_attached = True
-                candidate.cloud.applied_embedding_identity = status.embedding_identity
-                candidate.enabled = True
+                if candidate.cloud.model_access_key:
+                    candidate.cloud.applied_embedding_identity = status.embedding_identity
+                    candidate.enabled = True
         elif candidate.cloud.organization_attached:
             # Keep the last applied identity while paused so re-enable can
             # distinguish an unchanged provider from one that needs rebuild.
@@ -238,9 +249,19 @@ def _resolved_memory(
             )
     else:
         was_organization_cloud = previous.cloud.scope == "organization" and previous.cloud.organization_attached
+        canceled_organization_transition = previous.cloud.transition_notice_pending
         candidate.cloud.organization_attached = False
         candidate.cloud.transition_notice_pending = False
-        if candidate.mode == "platform" and status.memory_available():
+        if canceled_organization_transition and candidate.recovery_intent == "rebuild":
+            candidate.recovery_intent = None
+        if (
+            candidate.mode == "platform"
+            and status.memory_available()
+            and candidate.cloud.model_access_key
+        ):
+            first_platform_activation = (
+                candidate.cloud.applied_embedding_identity is None
+            )
             if (
                 (was_organization_cloud or previous.cloud.scope == "platform")
                 and previous.cloud.applied_embedding_identity is not None
@@ -248,11 +269,50 @@ def _resolved_memory(
             ):
                 candidate.recovery_intent = "rebuild"
             candidate.cloud.applied_embedding_identity = status.embedding_identity
+            if first_platform_activation:
+                candidate.enabled = True
         elif was_organization_cloud:
             candidate.recovery_intent = "rebuild"
             candidate.cloud.applied_embedding_identity = None
 
-    candidate.cloud.runtime_apply_pending = current.cloud.runtime_apply_pending or candidate != current
+    candidate.cloud.runtime_apply_pending = (
+        current.cloud.runtime_apply_pending
+        or _runtime_state_signature(candidate) != _runtime_state_signature(current)
+    )
+    candidate.validate()
+    return candidate
+
+
+def _unpaired_memory(current: MemoryConfig) -> MemoryConfig:
+    """Pause cloud Memory while retaining its scope and identity baseline."""
+
+    cloud = current.cloud
+    had_cloud_state = bool(
+        cloud.scope
+        or cloud.model_access_key
+        or cloud.proxy_base_url
+        or cloud.source_instance_id
+        or cloud.organization_attached
+        or cloud.transition_notice_pending
+    )
+    if not had_cloud_state:
+        return current
+
+    candidate = deepcopy(current)
+    canceled_organization_transition = cloud.transition_notice_pending
+    candidate.cloud.capabilities = MemoryCloudCapabilities()
+    candidate.cloud.embedding_identity = None
+    candidate.cloud.revision = None
+    candidate.cloud.quota_enforced = False
+    candidate.cloud.model_access_key = None
+    candidate.cloud.proxy_base_url = None
+    candidate.cloud.transition_notice_pending = False
+    if canceled_organization_transition and candidate.recovery_intent == "rebuild":
+        candidate.recovery_intent = None
+    candidate.cloud.runtime_apply_pending = (
+        current.cloud.runtime_apply_pending
+        or _runtime_state_signature(candidate) != _runtime_state_signature(current)
+    )
     candidate.validate()
     return candidate
 
@@ -308,37 +368,62 @@ def sync_model_service_once(config: V2Config | None = None) -> dict[str, Any]:
         config = config or V2Config.load()
         credentials = config.remote_access.vibe_cloud.runtime_credentials()
         if credentials is None:
-            return {"ok": False, "configured": False}
+            current = V2Config.load().memory
+            candidate = _unpaired_memory(current)
+            if candidate == current and not current.cloud.runtime_apply_pending:
+                return {"ok": False, "configured": False, "changed": False}
+            changed = candidate != current
+            if changed:
+                candidate = _persist_candidate(current, candidate).memory
+            applied = _reconcile_candidate(candidate)
+            return {
+                "ok": applied,
+                "configured": False,
+                "changed": changed,
+                "apply_pending": not applied,
+            }
         backend_url, instance_id, _device_secret = credentials
         status = _status_from_payload(_device_request(config, "GET", "model-service"))
         current = V2Config.load().memory
-        current_key = current.cloud.model_access_key if current.cloud.source_instance_id == instance_id else None
-        minted = None
-        if _status_needs_model_key(current, status) and not current_key:
-            minted = _mint_from_payload(_device_request(config, "POST", "model-access-key"))
         candidate = _resolved_memory(
             current,
             status=status,
             instance_id=instance_id,
             proxy_base_url=f"{backend_url.rstrip('/')}/v1/model",
-            minted=minted,
+            minted=None,
         )
-        if candidate == current and not current.cloud.runtime_apply_pending:
-            return {"ok": True, "configured": True, "changed": False}
-        if candidate == current:
-            applied = _reconcile_candidate(current)
-            return {
-                "ok": applied,
-                "configured": True,
-                "changed": False,
-                "apply_pending": not applied,
-            }
-        saved = _persist_candidate(current, candidate).memory
-        applied = _reconcile_candidate(saved)
+        changed = candidate != current
+        if changed:
+            current = _persist_candidate(current, candidate).memory
+
+        current_key = current.cloud.model_access_key
+        if _status_needs_model_key(current, status) and not current_key:
+            try:
+                minted = _mint_from_payload(
+                    _device_request(config, "POST", "model-access-key")
+                )
+            except Exception:
+                if current.cloud.runtime_apply_pending:
+                    _reconcile_candidate(current)
+                raise
+            candidate = _resolved_memory(
+                current,
+                status=status,
+                instance_id=instance_id,
+                proxy_base_url=f"{backend_url.rstrip('/')}/v1/model",
+                minted=minted,
+            )
+            if candidate != current:
+                current = _persist_candidate(current, candidate).memory
+                changed = True
+
+        if not current.cloud.runtime_apply_pending:
+            return {"ok": True, "configured": True, "changed": changed}
+        applied = _reconcile_candidate(current)
         return {
             "ok": applied,
             "configured": True,
-            "changed": True,
+            "changed": changed,
             "apply_pending": not applied,
         }
     finally:

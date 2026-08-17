@@ -16,7 +16,7 @@ from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, 
 from storage.db import create_sqlite_engine
 from storage.models import remote_access_authorizations
 from tests.ui_server_test_helpers import remote_session_cookie
-from vibe import model_service, remote_access, ui_server
+from vibe import api, model_service, remote_access, ui_server
 from vibe import runtime
 
 
@@ -776,6 +776,34 @@ def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:
     assert saved_payload["remote_access"]["vibe_cloud"]["enabled"] is True
     assert saved_payload["remote_access"]["vibe_cloud"]["tunnel_token"] == "tunnel-token"
     assert saved_payload["remote_access"]["vibe_cloud"]["session_secret"]
+    assert refreshes == [True]
+
+
+def test_disabling_pairing_requests_an_immediate_model_service_refresh(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_id = "inst_123"
+    cloud.instance_secret = "instance-secret"
+    config.save()
+    refreshes: list[bool] = []
+    monkeypatch.setattr(
+        model_service,
+        "request_model_service_refresh",
+        lambda: refreshes.append(True),
+    )
+
+    saved = api.save_config(
+        {"remote_access": {"vibe_cloud": {"enabled": False}}},
+        validate_remote_access_network=False,
+    )
+
+    assert saved.remote_access.vibe_cloud.runtime_credentials() is None
     assert refreshes == [True]
 
 

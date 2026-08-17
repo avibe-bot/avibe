@@ -126,6 +126,36 @@ describe('MemorySettingsPanel', () => {
     expect(screen.queryByRole('button', { name: 'memory.settings.save' })).toBeNull();
   });
 
+  it.each([
+    ['platform', false],
+    ['organization', true],
+  ] as const)('keeps local Memory deletion available in %s mode', async (mode, managed) => {
+    const onClearAll = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{
+          ...legacySettings,
+          mode,
+          managed,
+          cloud_available: true,
+        }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={onClearAll}
+        clearing={false}
+      />,
+    );
+
+    const clear = screen.getByRole('button', { name: 'memory.clear.button' });
+    await user.click(clear);
+    expect(onClearAll).toHaveBeenCalledOnce();
+  });
+
   it('keeps fresh managed Memory unavailable until the organization provides the pair', () => {
     render(
       <MemorySettingsPanel

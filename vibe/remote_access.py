@@ -4260,12 +4260,6 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             remote_access_authorization_service.delete_for_instance(previous_instance_id)
         except Exception:
             logger.warning("Old remote authorization cleanup failed after pairing", exc_info=True)
-    try:
-        from vibe.model_service import request_model_service_refresh
-
-        request_model_service_refresh()
-    except Exception:
-        logger.warning("Cloud Model Service refresh could not be requested", exc_info=True)
     start_result = start(config)
     _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     return {**status(config), "ok": True, "pairing": {"ok": True}, "start": start_result}
