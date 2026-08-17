@@ -12,7 +12,7 @@ export const ModelHubInfoHint: React.FC<{
 }> = ({ label, content, className, align = 'start' }) => {
   const [open, setOpen] = React.useState(false);
   return (
-    <Popover open={open} onOpenChange={setOpen} modal>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
