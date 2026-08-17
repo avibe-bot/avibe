@@ -42,8 +42,25 @@ settle on surfaced errors rather than turn duration.
 - `modules/agents/opencode/poll_loop.py`: disabled timeout yields an infinite
   deadline; `wait_for` receives `None` for the infinite budget. Error-driven
   settlement, user stop, and shutdown cancellation are unchanged.
+- Poll-transport settlement: a persistent runtime outage (daemon unreachable,
+  non-200 responses) can no longer retry forever once the wall-clock deadline
+  is optional. Both poll loops settle the turn as a failed backend failure
+  after `_POLL_FAILURE_SETTLE_LIMIT` (10) consecutive polling errors and
+  best-effort abort the native session. The bound is on consecutive failures,
+  never on total duration: a successful poll resets the counter, so
+  intermittent blips never trip it.
 - UI: the Settings → Messaging field accepts `0` (minutes) and documents the
   disabled semantics; hint copy updated in en/zh.
+
+## Pre-1.18 runtimes
+
+Installations that upgrade Avibe while keeping an OpenCode binary older than
+the bounded-retry change re-expose themselves to the unbounded provider-retry
+hang #1190 documented. Avibe cannot reliably version-gate this: OpenCode is a
+user-supplied `cli_path`, and the bounded-retry policy landed mid-1.18.x line
+(build-date dependent), so a `< 1.18` check would be wrong in both directions.
+The cap remains fully functional as an explicit opt-in for those operators;
+the product default follows the supported runtime behavior.
 
 ## Scope
 
