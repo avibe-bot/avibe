@@ -3100,17 +3100,26 @@ class Controller:
         """Read the retention window from the persisted V2 config, failing closed.
 
         The controller's ``self.config`` is an ``AppCompatConfig`` shim without
-        the runtime section, so this reloads ``V2Config`` directly. A malformed
-        opt-out value (e.g. the string ``"false"``) disables the pass with a
-        warning rather than deleting traces against the user's intent.
+        the runtime section, so this reloads ``V2Config`` directly. Deletion is
+        irreversible, so every ambiguous state disables the automatic pass:
+        config recovery defaults (``load_warnings`` set — the persisted policy
+        is unknown), a malformed opt-out, or a malformed window (a shorter
+        default must never silently override a longer persisted policy).
         """
         try:
             from config.v2_config import V2Config
 
-            runtime_cfg = getattr(V2Config.load(), "runtime", None)
+            config = V2Config.load()
         except Exception:
-            logger.warning("Agent trace-event retention: config unreadable; using defaults", exc_info=True)
-            runtime_cfg = None
+            logger.warning("Agent trace-event retention: config unreadable; disabling automatic pass", exc_info=True)
+            return None
+        if getattr(config, "load_warnings", None):
+            logger.warning(
+                "Agent trace-event retention: config loaded with recovery warnings; "
+                "retention policy is unknown, disabling automatic pass"
+            )
+            return None
+        runtime_cfg = getattr(config, "runtime", None)
         enabled = getattr(runtime_cfg, "agent_events_trace_retention_enabled", True)
         if not isinstance(enabled, bool):
             logger.warning(
@@ -3123,11 +3132,11 @@ class Controller:
         days_value = getattr(runtime_cfg, "agent_events_trace_retention_days", None)
         if not isinstance(days_value, int) or isinstance(days_value, bool) or days_value < 1:
             logger.warning(
-                "Agent trace-event retention: agent_events_trace_retention_days is malformed (%r); using default",
+                "Agent trace-event retention: agent_events_trace_retention_days is malformed (%r); failing closed",
                 days_value,
             )
-            days_value = None
-        return {"days": days_value or 30}
+            return None
+        return {"days": days_value}
 
     def _run_agent_events_retention_pass(self) -> dict[str, Any]:
         """One maintenance pass on the worker thread (no VACUUM: manual-only).

@@ -52,7 +52,9 @@ def test_retention_config_rejects_malformed_days(monkeypatch) -> None:
         monkeypatch,
         SimpleNamespace(agent_events_trace_retention_enabled=True, agent_events_trace_retention_days="week"),
     )
-    assert controller._agent_events_retention_config() == {"days": 30}
+    # A malformed window must fail closed: substituting a shorter default could
+    # delete traces the (apparently) longer policy meant to keep.
+    assert controller._agent_events_retention_config() is None
 
 
 def test_retention_config_disabled(monkeypatch) -> None:
@@ -63,13 +65,25 @@ def test_retention_config_disabled(monkeypatch) -> None:
     assert controller._agent_events_retention_config() is None
 
 
-def test_retention_config_unreadable_falls_back_to_defaults(monkeypatch) -> None:
+def test_retention_config_unreadable_disables(monkeypatch) -> None:
     def _boom(cls):
         raise FileNotFoundError("no config")
 
     controller = Controller.__new__(Controller)
     monkeypatch.setattr("config.v2_config.V2Config.load", classmethod(_boom))
-    assert controller._agent_events_retention_config() == {"days": 30}
+    assert controller._agent_events_retention_config() is None
+
+
+def test_retention_config_recovery_defaults_disable(monkeypatch) -> None:
+    """V2Config.load() returns recovery defaults with load_warnings; the
+    persisted policy is unknown, so the automatic pass must not run."""
+    controller = Controller.__new__(Controller)
+    recovery = SimpleNamespace(
+        runtime=SimpleNamespace(agent_events_trace_retention_enabled=True, agent_events_trace_retention_days=30),
+        load_warnings=("Config JSON could not be parsed; using recovery defaults: x",),
+    )
+    monkeypatch.setattr("config.v2_config.V2Config.load", classmethod(lambda cls: recovery))
+    assert controller._agent_events_retention_config() is None
 
 
 def test_retention_pass_never_vacuums(monkeypatch) -> None:
