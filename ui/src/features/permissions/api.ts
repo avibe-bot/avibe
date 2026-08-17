@@ -55,11 +55,16 @@ export const getPermissions = (): Promise<PermissionsResponse> => (
 export const replaceAuthorizedUsers = (
   entries: AccessEntry[],
   revision: number,
+  instanceId: string,
 ): Promise<AuthorizedUsersWriteResponse> => permissionsRequest(
   '/api/permissions/authorized-users',
   {
     method: 'PUT',
-    body: JSON.stringify({ entries, if_match_revision: revision }),
+    body: JSON.stringify({
+      entries,
+      if_match_revision: revision,
+      if_match_instance_id: instanceId,
+    }),
   },
 );
 
@@ -68,11 +73,17 @@ export const updateProjectAccess = (
   mode: PermissionProject['access']['mode'],
   bindings: ProjectBinding[],
   revision: number,
+  instanceId: string,
 ): Promise<ProjectAccessWriteResponse> => permissionsRequest(
   `/api/permissions/projects/${encodeURIComponent(project.project_id)}/access`,
   {
     method: 'PUT',
-    body: JSON.stringify({ mode, bindings, if_match_revision: revision }),
+    body: JSON.stringify({
+      mode,
+      bindings,
+      if_match_revision: revision,
+      if_match_instance_id: instanceId,
+    }),
   },
 );
 

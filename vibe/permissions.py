@@ -49,6 +49,10 @@ class PermissionsNotPairedError(PermissionsError):
     pass
 
 
+class PermissionsPairingChangedError(PermissionsError):
+    pass
+
+
 class PermissionsUnavailableError(PermissionsError):
     pass
 
@@ -307,6 +311,15 @@ def _runtime_credentials(config: V2Config) -> tuple[str, str, str]:
     return credentials
 
 
+def _mutation_payload(payload: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    expected_instance_id = payload.get("if_match_instance_id")
+    if not isinstance(expected_instance_id, str) or not expected_instance_id:
+        raise PermissionsInvalidResponseError("invalid_request")
+    backend_payload = dict(payload)
+    del backend_payload["if_match_instance_id"]
+    return expected_instance_id, backend_payload
+
+
 def _cache_path() -> Path:
     return paths.get_state_dir() / CACHE_FILENAME
 
@@ -427,9 +440,12 @@ def _backend_request(
     suffix: str,
     payload: Mapping[str, Any] | None = None,
     *,
+    expected_instance_id: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[dict[str, Any], str]:
     backend_url, instance_id, instance_secret = _runtime_credentials(config)
+    if expected_instance_id is not None and expected_instance_id != instance_id:
+        raise PermissionsPairingChangedError("permissions_pairing_changed")
     endpoint = (
         f"{backend_url}/api/v1/instances/{quote(instance_id, safe='')}/permissions"
         f"/{suffix.lstrip('/')}"
@@ -493,7 +509,14 @@ def replace_authorized_users(
     config: V2Config | None = None,
 ) -> dict[str, Any]:
     config = config or V2Config.load()
-    payload_result, instance_id = _backend_request(config, "PUT", "authorized-users", payload)
+    expected_instance_id, backend_payload = _mutation_payload(payload)
+    payload_result, instance_id = _backend_request(
+        config,
+        "PUT",
+        "authorized-users",
+        backend_payload,
+        expected_instance_id=expected_instance_id,
+    )
     result = _validated_authorized_users_result(payload_result)
     _cache_mutation_result(
         instance_id,
@@ -511,11 +534,13 @@ def update_project_access(
     if not isinstance(project_id, str) or not project_id or "/" in project_id:
         raise PermissionsInvalidResponseError("invalid_project_id")
     config = config or V2Config.load()
+    expected_instance_id, backend_payload = _mutation_payload(payload)
     payload_result, instance_id = _backend_request(
         config,
         "PUT",
         f"projects/{quote(project_id, safe='')}/access",
-        payload,
+        backend_payload,
+        expected_instance_id=expected_instance_id,
     )
     result = _validated_project_result(payload_result, project_id)
     _cache_mutation_result(

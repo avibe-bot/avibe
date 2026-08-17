@@ -39,7 +39,11 @@ def test_permissions_003_viewer_mutation_fails_before_backend_contact(harness) -
     before = len(harness.backend_requests)
     write = viewer.put(
         "/api/permissions/authorized-users",
-        json={"entries": [], "if_match_revision": 0},
+        json={
+            "entries": [],
+            "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
+        },
         headers=harness.csrf(viewer, REMOTE_ORIGIN),
         base_url=REMOTE_ORIGIN,
     )
@@ -58,6 +62,7 @@ def test_permissions_004_instance_managed_write_advances_revision(harness) -> No
         json={
             "entries": [{"kind": "email", "value": "member@example.com", "role": "editor"}],
             "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
         },
         headers=harness.csrf(client),
     )
@@ -66,6 +71,7 @@ def test_permissions_004_instance_managed_write_advances_revision(harness) -> No
     assert response.get_json()["authorization_revision"] == 1
     assert harness.projection["access"]["entries"][0]["role"] == "editor"
     assert harness.projection["instance"]["authorization_revision"] == 1
+    assert "if_match_instance_id" not in harness.backend_requests[-1]["json"]
 
 
 def test_permissions_005_cloud_authority_is_readable_and_read_only(harness) -> None:
@@ -78,7 +84,11 @@ def test_permissions_005_cloud_authority_is_readable_and_read_only(harness) -> N
     read = client.get("/api/permissions")
     write = client.put(
         "/api/permissions/authorized-users",
-        json={"entries": [], "if_match_revision": 0},
+        json={
+            "entries": [],
+            "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
+        },
         headers=harness.csrf(client),
     )
 
@@ -117,6 +127,7 @@ def test_permissions_007_project_write_applies_then_acknowledges(harness) -> Non
                 }
             ],
             "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
         },
         headers=harness.csrf(client),
     )
@@ -139,6 +150,7 @@ def test_permissions_008_conflict_is_stable_and_non_mutating(harness) -> None:
         json={
             "entries": [{"kind": "email", "value": "stale@example.com", "role": "viewer"}],
             "if_match_revision": 3,
+            "if_match_instance_id": "inst-current",
         },
         headers=harness.csrf(client),
     )
@@ -149,7 +161,7 @@ def test_permissions_008_conflict_is_stable_and_non_mutating(harness) -> None:
     assert harness.projection["access"]["entries"] == []
 
 
-def test_permissions_009_target_injection_is_rejected_before_backend_contact(harness) -> None:
+def test_permissions_009_targeting_and_stale_pairing_are_rejected_before_backend(harness) -> None:
     """Scenario: PERMISSIONS-009."""
     client = harness.local_client()
     before = len(harness.backend_requests)
@@ -165,12 +177,30 @@ def test_permissions_009_target_injection_is_rejected_before_backend_contact(har
                 }
             ],
             "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
         },
         headers=harness.csrf(client),
     )
 
     assert response.status_code == 422
     assert response.get_json()["error"] == "invalid_request"
+    assert len(harness.backend_requests) == before
+
+    harness.config.remote_access.vibe_cloud.instance_id = "inst-repaired"
+    harness.config.remote_access.vibe_cloud.instance_secret = "repaired-device-secret"
+    harness.config.save()
+    stale_page = client.put(
+        "/api/permissions/authorized-users",
+        json={
+            "entries": [],
+            "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
+        },
+        headers=harness.csrf(client),
+    )
+
+    assert stale_page.status_code == 409
+    assert stale_page.get_json()["error"] == "permissions_pairing_changed"
     assert len(harness.backend_requests) == before
 
 

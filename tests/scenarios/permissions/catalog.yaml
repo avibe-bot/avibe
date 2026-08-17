@@ -84,13 +84,13 @@ scenarios:
     when: The owner submits the stale revision
     then: The API returns permission_revision_conflict and current_revision without mutation
   - id: PERMISSIONS-009
-    name: Browser cannot inject another target instance
+    name: Browser cannot target another instance or cross a pairing change
     status: covered
     kind: authorization
     layer: scenario
-    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_009_target_injection_is_rejected_before_backend_contact
-    given: The browser is authorized for the paired current instance
-    when: A mutation body includes another instance identifier
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_009_targeting_and_stale_pairing_are_rejected_before_backend
+    given: The browser loaded one paired current instance and may submit only a non-targeting match precondition
+    when: A mutation injects another target or the local pairing changes before the write
     then: The local API rejects it before Backend contact and all live requests remain exact-instance bound
   - id: PERMISSIONS-010
     name: Old Organization and Show Page Cloud-management paths are absent

@@ -2640,6 +2640,8 @@ def _permissions_error_response(error: Exception):
 
     if isinstance(error, permissions.PermissionsNotPairedError):
         return jsonify({"ok": False, "error": "permissions_not_paired"}), 409
+    if isinstance(error, permissions.PermissionsPairingChangedError):
+        return jsonify({"ok": False, "error": "permissions_pairing_changed"}), 409
     if isinstance(error, permissions.PermissionsUnavailableError):
         return jsonify(
             {"ok": False, "error": "permissions_unavailable", "offline": True}
@@ -2658,6 +2660,9 @@ def _permissions_mutation_payload(
     item_shapes: dict[str, frozenset[str]],
 ):
     if not isinstance(payload, dict) or set(payload) != allowed_keys:
+        return None
+    expected_instance_id = payload.get("if_match_instance_id")
+    if not isinstance(expected_instance_id, str) or not expected_instance_id:
         return None
     for field, allowed_item_keys in item_shapes.items():
         items = payload.get(field)
@@ -2703,7 +2708,7 @@ async def current_instance_permissions_authorized_users_put(
             raw_payload = None
         payload = _permissions_mutation_payload(
             raw_payload,
-            {"entries", "if_match_revision"},
+            {"entries", "if_match_revision", "if_match_instance_id"},
             {"entries": frozenset({"kind", "value", "role"})},
         )
         if payload is None:
@@ -2735,7 +2740,7 @@ async def current_instance_permissions_project_access_put(
             raw_payload = None
         payload = _permissions_mutation_payload(
             raw_payload,
-            {"mode", "bindings", "if_match_revision"},
+            {"mode", "bindings", "if_match_revision", "if_match_instance_id"},
             {
                 "bindings": frozenset(
                     {"principal_kind", "principal_value", "access_role"}

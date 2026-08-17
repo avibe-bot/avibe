@@ -52,6 +52,7 @@ import {
   hasDuplicateProjectBindings,
   normalizePrincipal,
   projectMode,
+  requiresAccessNarrowing,
   requiresProjectNarrowing,
   type ProjectAccessMode,
 } from './policy';
@@ -251,11 +252,16 @@ function AccessEntryDialog({
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
   const [refreshRequired, setRefreshRequired] = useState(false);
+  const [confirmNarrowing, setConfirmNarrowing] = useState(false);
   const originalEntry = useRef<AccessEntry | null>(null);
+  const baselineEntry = useRef<AccessEntry | null>(null);
+  const expectedInstanceId = useRef('');
 
   useEffect(() => {
     if (open && !initialized.current) {
       originalEntry.current = editing ?? null;
+      baselineEntry.current = editing ?? null;
+      expectedInstanceId.current = response.projection.instance.id;
       setKind(editing?.kind ?? 'email');
       setValue(editing?.value ?? '');
       setRole(editing?.role ?? 'viewer');
@@ -263,6 +269,7 @@ function AccessEntryDialog({
       setError(undefined);
       setConflict(false);
       setRefreshRequired(false);
+      setConfirmNarrowing(false);
     }
     initialized.current = open;
   }, [editing, open, response]);
@@ -288,21 +295,40 @@ function AccessEntryDialog({
       setError('permissions_refresh_failed');
       return false;
     }
+    if (latest.response.projection.instance.id !== expectedInstanceId.current) {
+      setRefreshRequired(true);
+      setError('permissions_pairing_changed');
+      return false;
+    }
+    baselineEntry.current = originalKey === null
+      ? null
+      : latest.response.projection.access.entries.find(
+          (entry) => accessEntryKey(entry) === originalKey,
+        ) ?? null;
     setRevision(latest.response.projection.instance.authorization_revision);
     setRefreshRequired(false);
     setError(undefined);
     return true;
   };
 
-  const commit = async () => {
+  const validateDraft = (): boolean => {
     if (!candidate.value || hasDuplicateAccessEntries(nextEntries)) {
       setError(candidate.value ? 'duplicate_access_principal' : 'invalid_request');
-      return;
+      return false;
     }
+    return true;
+  };
+
+  const commit = async () => {
+    if (!validateDraft()) return;
     setSaving(true);
     setError(undefined);
     try {
-      const result = await replaceAuthorizedUsers(nextEntries, revision);
+      const result = await replaceAuthorizedUsers(
+        nextEntries,
+        revision,
+        expectedInstanceId.current,
+      );
       onSaved(result);
       onOpenChange(false);
     } catch (caught) {
@@ -313,6 +339,7 @@ function AccessEntryDialog({
       }
     } finally {
       setSaving(false);
+      setConfirmNarrowing(false);
     }
   };
 
@@ -326,14 +353,21 @@ function AccessEntryDialog({
       }
       return;
     }
+    if (!validateDraft()) return;
+    if (requiresAccessNarrowing(baselineEntry.current, candidate)) {
+      setError(undefined);
+      setConfirmNarrowing(true);
+      return;
+    }
     await commit();
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t(editing ? 'permissions.access.editTitle' : 'permissions.access.addTitle')}</DialogTitle>
+          <DialogTitle>{t(editingKey === null ? 'permissions.access.addTitle' : 'permissions.access.editTitle')}</DialogTitle>
           <DialogDescription>{t('permissions.access.dialogBody')}</DialogDescription>
         </DialogHeader>
         {conflict ? (
@@ -342,7 +376,9 @@ function AccessEntryDialog({
             icon={AlertTriangle}
             title={t('permissions.states.conflictTitle')}
             body={t(refreshRequired
-              ? 'permissions.states.conflictRefreshBody'
+              ? error === 'permissions_pairing_changed'
+                ? 'permissions.states.pairingChangedBody'
+                : 'permissions.states.conflictRefreshBody'
               : 'permissions.states.conflictBody')}
           />
         ) : null}
@@ -398,19 +434,30 @@ function AccessEntryDialog({
             {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
           </Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </DialogContent>
+      </Dialog>
+      <ConfirmDialog
+        open={confirmNarrowing}
+        onOpenChange={setConfirmNarrowing}
+        title={t('permissions.access.narrowTitle')}
+        description={t('permissions.access.narrowBody')}
+        confirmLabel={t('permissions.actions.save')}
+        onConfirm={commit}
+      />
+    </>
   );
 }
 
 function ProjectAccessDialog({
   project,
+  instanceId,
   groups,
   onOpenChange,
   onRefresh,
   onSaved,
 }: {
   project: PermissionProject | null;
+  instanceId: string;
   groups: DirectoryGroup[];
   onOpenChange: (open: boolean) => void;
   onRefresh: AuthoritativeRefresh;
@@ -427,11 +474,13 @@ function ProjectAccessDialog({
   const [refreshRequired, setRefreshRequired] = useState(false);
   const [confirmNarrowing, setConfirmNarrowing] = useState(false);
   const baseline = useRef<PermissionProject | null>(null);
+  const expectedInstanceId = useRef('');
   const open = Boolean(project);
 
   useEffect(() => {
     if (project && !initialized.current) {
       baseline.current = project;
+      expectedInstanceId.current = instanceId;
       setMode(projectMode(project));
       setBindings(project.access.bindings);
       setRevision(project.access.revision);
@@ -441,7 +490,7 @@ function ProjectAccessDialog({
       setConfirmNarrowing(false);
     }
     initialized.current = open;
-  }, [open, project]);
+  }, [instanceId, open, project]);
 
   const activeGroups = groups.filter((group) => !group.archived_at);
   const wireBindings = mode === 'restricted'
@@ -461,6 +510,11 @@ function ProjectAccessDialog({
     if (latest.kind !== 'ready') {
       setRefreshRequired(true);
       setError('permissions_refresh_failed');
+      return false;
+    }
+    if (latest.response.projection.instance.id !== expectedInstanceId.current) {
+      setRefreshRequired(true);
+      setError('permissions_pairing_changed');
       return false;
     }
     const authoritative = latest.response.projection.projects.find(
@@ -491,6 +545,7 @@ function ProjectAccessDialog({
         mode,
         wireBindings,
         revision,
+        expectedInstanceId.current,
       );
       onSaved(result);
       onOpenChange(false);
@@ -544,7 +599,7 @@ function ProjectAccessDialog({
             <DialogTitle>{t('permissions.projects.dialogTitle', { name: project?.display_name })}</DialogTitle>
             <DialogDescription>{t('permissions.projects.dialogBody')}</DialogDescription>
           </DialogHeader>
-          {conflict ? <Notice tone="warning" icon={AlertTriangle} title={t('permissions.states.conflictTitle')} body={t(refreshRequired ? 'permissions.states.conflictRefreshBody' : 'permissions.states.conflictBody')} /> : null}
+          {conflict ? <Notice tone="warning" icon={AlertTriangle} title={t('permissions.states.conflictTitle')} body={t(refreshRequired ? error === 'permissions_pairing_changed' ? 'permissions.states.pairingChangedBody' : 'permissions.states.conflictRefreshBody' : 'permissions.states.conflictBody')} /> : null}
           {error ? <Notice tone="danger" icon={ShieldX} title={t('permissions.states.errorTitle')} body={t(`permissions.errors.${error}`, { defaultValue: t('permissions.errors.generic') })} /> : null}
           <div className="space-y-5">
             <div className="space-y-1.5">
@@ -643,6 +698,7 @@ export function PermissionsPage() {
   const [editingAccess, setEditingAccess] = useState<string | null | undefined>(undefined);
   const [editingProject, setEditingProject] = useState<PermissionProject | null>(null);
   const [removingAccess, setRemovingAccess] = useState<string | null>(null);
+  const [removalInstanceId, setRemovalInstanceId] = useState<string | null>(null);
   const [removalConflict, setRemovalConflict] = useState(false);
   const [removalRefreshRequired, setRemovalRefreshRequired] = useState(false);
   const [removalError, setRemovalError] = useState<string>();
@@ -741,18 +797,24 @@ export function PermissionsPage() {
 
   const closeRemoval = () => {
     setRemovingAccess(null);
+    setRemovalInstanceId(null);
     setRemovalConflict(false);
     setRemovalRefreshRequired(false);
     setRemovalError(undefined);
   };
 
   const refreshRemovalConflict = async (): Promise<boolean> => {
-    if (removingAccess === null) return false;
+    if (removingAccess === null || removalInstanceId === null) return false;
     const latest = await refreshReady();
     setRemovalConflict(true);
     if (latest.kind !== 'ready') {
       setRemovalRefreshRequired(true);
       setRemovalError('permissions_refresh_failed');
+      return false;
+    }
+    if (latest.response.projection.instance.id !== removalInstanceId) {
+      setRemovalRefreshRequired(true);
+      setRemovalError('permissions_pairing_changed');
       return false;
     }
     const targetExists = latest.response.projection.access.entries.some(
@@ -768,7 +830,7 @@ export function PermissionsPage() {
   };
 
   const removeAccess = async () => {
-    if (removingAccess === null) return;
+    if (removingAccess === null || removalInstanceId === null) return;
     if (removalRefreshRequired) {
       await refreshRemovalConflict();
       return;
@@ -785,7 +847,11 @@ export function PermissionsPage() {
     );
     setRemovalError(undefined);
     try {
-      const result = await replaceAuthorizedUsers(entries, projection.instance.authorization_revision);
+      const result = await replaceAuthorizedUsers(
+        entries,
+        projection.instance.authorization_revision,
+        removalInstanceId,
+      );
       updateResponse((current) => ({
         ...current,
         projection: {
@@ -882,7 +948,15 @@ export function PermissionsPage() {
             <Badge variant="secondary">{t('permissions.roles.owner')}</Badge>
           </div>
           {projection.access.entries.length === 0 ? (
-            <EmptyState icon={Users} title={t('permissions.access.emptyTitle')} body={t('permissions.access.emptyBody')} />
+            <EmptyState
+              icon={projection.instance.access_mode === 'public' ? Globe2 : Users}
+              title={t(projection.instance.access_mode === 'public'
+                ? 'permissions.access.publicTitle'
+                : 'permissions.access.emptyTitle')}
+              body={t(projection.instance.access_mode === 'public'
+                ? 'permissions.access.publicBody'
+                : 'permissions.access.emptyBody')}
+            />
           ) : (
             <div className="overflow-hidden rounded-lg border border-border bg-card">
               {projection.access.entries.map((entry) => {
@@ -897,7 +971,7 @@ export function PermissionsPage() {
                     <Badge variant="secondary">{t(`permissions.principals.${entry.kind}`)}</Badge>
                     <Badge variant={entry.role === 'editor' ? 'success' : 'secondary'}>{entry.role === 'editor' ? <Pencil className="size-3" /> : <Eye className="size-3" />}{t(`permissions.roles.${entry.role}`)}</Badge>
                     <div className="flex justify-end gap-1">
-                      {editable ? <><Button size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => { setRemovingAccess(entryKey); setRemovalConflict(false); setRemovalRefreshRequired(false); setRemovalError(undefined); }}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
+                      {editable ? <><Button size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => { setRemovingAccess(entryKey); setRemovalInstanceId(projection.instance.id); setRemovalConflict(false); setRemovalRefreshRequired(false); setRemovalError(undefined); }}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
                     </div>
                   </div>
                 );
@@ -952,6 +1026,7 @@ export function PermissionsPage() {
       />
       <ProjectAccessDialog
         project={editingProject}
+        instanceId={projection.instance.id}
         groups={groups}
         onOpenChange={(open) => { if (!open) setEditingProject(null); }}
         onRefresh={refreshReady}
@@ -979,7 +1054,9 @@ export function PermissionsPage() {
             icon={AlertTriangle}
             title={t('permissions.states.conflictTitle')}
             body={t(removalRefreshRequired
-              ? 'permissions.states.conflictRefreshBody'
+              ? removalError === 'permissions_pairing_changed'
+                ? 'permissions.states.pairingChangedBody'
+                : 'permissions.states.conflictRefreshBody'
               : 'permissions.states.conflictBody')}
           />
         ) : null}

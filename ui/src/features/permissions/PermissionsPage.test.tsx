@@ -9,6 +9,7 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 import { PermissionsApiError } from './api';
 import { PermissionsPage } from './PermissionsPage';
+import { requiresAccessNarrowing } from './policy';
 import type { PermissionsResponse } from './types';
 
 const api = vi.hoisted(() => ({
@@ -131,6 +132,18 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
   });
 
+  it('describes public access instead of claiming an owner-only empty policy', async () => {
+    const publicPolicy = response();
+    publicPolicy.projection.instance.access_mode = 'public';
+    api.getPermissions.mockResolvedValue(publicPolicy);
+
+    renderPage();
+
+    expect(await screen.findByText('permissions.access.publicTitle')).toBeTruthy();
+    expect(screen.getByText('permissions.access.publicBody')).toBeTruthy();
+    expect(screen.queryByText('permissions.access.emptyBody')).toBeNull();
+  });
+
   it('lets a Viewer read policy while keeping mutation controls absent', async () => {
     renderPage(false);
 
@@ -210,6 +223,26 @@ describe('PermissionsPage state model', () => {
 });
 
 describe('PermissionsPage conflict handling', () => {
+  it('classifies both principal replacement and role downgrade as access narrowing', () => {
+    const editor = { kind: 'email', value: 'editor@example.com', role: 'editor' } as const;
+
+    expect(requiresAccessNarrowing(editor, {
+      kind: 'email',
+      value: 'replacement@example.com',
+      role: 'editor',
+    })).toBe(true);
+    expect(requiresAccessNarrowing(editor, {
+      kind: 'email',
+      value: 'editor@example.com',
+      role: 'viewer',
+    })).toBe(true);
+    expect(requiresAccessNarrowing(editor, {
+      kind: 'email',
+      value: 'editor@example.com',
+      role: 'editor',
+    })).toBe(false);
+  });
+
   it('reconciles an access draft by principal after the authoritative list is reordered', async () => {
     const initial = response();
     initial.projection.access.entries = [
@@ -256,6 +289,7 @@ describe('PermissionsPage conflict handling', () => {
         { kind: 'email', value: 'alpha@example.com', role: 'viewer' },
       ],
       5,
+      'inst-123',
     ]);
   });
 
@@ -287,6 +321,40 @@ describe('PermissionsPage conflict handling', () => {
     }).getAttribute('aria-checked')).toBe('true');
     expect(screen.getByText('owner@example.com')).toBeTruthy();
     expect(api.replaceAuthorizedUsers).toHaveBeenCalledOnce();
+  });
+
+  it('confirms an access-role reduction before committing it', async () => {
+    const initial = response();
+    initial.projection.access.entries = [
+      { kind: 'email', value: 'editor@example.com', role: 'editor' },
+    ];
+    api.getPermissions.mockResolvedValueOnce(initial);
+    api.replaceAuthorizedUsers.mockResolvedValueOnce({
+      ok: true,
+      authorization_revision: 5,
+      entries: [{ kind: 'email', value: 'editor@example.com', role: 'viewer' }],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'permissions.actions.editAccess' }));
+    await user.click(screen.getByRole('radio', { name: 'permissions.roles.viewer' }));
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+
+    const narrowingTitle = await screen.findByText('permissions.access.narrowTitle');
+    const narrowingDialog = narrowingTitle.closest('[role="dialog"]');
+    expect(narrowingDialog).toBeTruthy();
+    expect(api.replaceAuthorizedUsers).not.toHaveBeenCalled();
+    await user.click(within(narrowingDialog as HTMLElement).getByRole('button', {
+      name: 'permissions.actions.save',
+    }));
+
+    await waitFor(() => expect(api.replaceAuthorizedUsers).toHaveBeenCalledOnce());
+    expect(api.replaceAuthorizedUsers).toHaveBeenCalledWith(
+      [{ kind: 'email', value: 'editor@example.com', role: 'viewer' }],
+      4,
+      'inst-123',
+    );
   });
 
   it('re-resolves an access removal by principal after a conflict reorders the list', async () => {
@@ -335,6 +403,7 @@ describe('PermissionsPage conflict handling', () => {
     expect(api.replaceAuthorizedUsers.mock.calls[1]).toEqual([
       [{ kind: 'email', value: 'beta@example.com', role: 'viewer' }],
       5,
+      'inst-123',
     ]);
   });
 
@@ -389,6 +458,7 @@ describe('PermissionsPage conflict handling', () => {
       'owner_only',
       [],
       1,
+      'inst-123',
     );
   });
 
@@ -451,6 +521,7 @@ describe('PermissionsPage conflict handling', () => {
         access_role: 'editor',
       }],
       2,
+      'inst-123',
     ]);
   });
 

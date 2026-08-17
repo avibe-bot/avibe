@@ -18,6 +18,20 @@ export function hasDuplicateAccessEntries(entries: AccessEntry[]): boolean {
   return new Set(keys).size !== keys.length;
 }
 
+export function requiresAccessNarrowing(
+  current: AccessEntry | null,
+  next: AccessEntry,
+): boolean {
+  if (!current) return false;
+  if (
+    current.kind !== next.kind
+    || normalizePrincipal(current.kind, current.value) !== normalizePrincipal(next.kind, next.value)
+  ) {
+    return true;
+  }
+  return current.role === 'editor' && next.role === 'viewer';
+}
+
 export function hasDuplicateProjectBindings(bindings: ProjectBinding[]): boolean {
   const keys = bindings.map((binding) => (
     `${binding.principal_kind}:${normalizePrincipal(binding.principal_kind, binding.principal_value)}`

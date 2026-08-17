@@ -360,6 +360,47 @@ def test_permissions_rejects_backend_projection_for_another_instance(monkeypatch
         permissions.get_current_permissions(_config())
 
 
+def test_permissions_mutations_reject_a_changed_pairing_before_backend_contact(
+    monkeypatch,
+) -> None:
+    backend_calls = []
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *args, **kwargs: backend_calls.append((args, kwargs)),
+    )
+    changed_config = _config("inst-new")
+
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        permissions.replace_authorized_users(
+            {
+                "entries": [],
+                "if_match_revision": 0,
+                "if_match_instance_id": "inst-old",
+            },
+            changed_config,
+        )
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        permissions.update_project_access(
+            "project-1",
+            {
+                "mode": "inherit",
+                "bindings": [],
+                "if_match_revision": 0,
+                "if_match_instance_id": "inst-old",
+            },
+            changed_config,
+        )
+
+    assert backend_calls == []
+
+
 @pytest.mark.parametrize(("path", "replacement"), MALFORMED_PROJECTION_CASES)
 def test_permissions_rejects_each_malformed_nested_projection_before_caching(
     monkeypatch,
@@ -415,7 +456,11 @@ def test_invalid_mutation_result_cannot_replace_the_valid_cache(monkeypatch) -> 
 
     with pytest.raises(permissions.PermissionsInvalidResponseError):
         permissions.replace_authorized_users(
-            {"entries": [], "if_match_revision": 3},
+            {
+                "entries": [],
+                "if_match_revision": 3,
+                "if_match_instance_id": "inst-123",
+            },
             config,
         )
 
@@ -455,7 +500,11 @@ def test_mutation_result_is_sanitized_before_cache_write(monkeypatch) -> None:
     permissions.get_current_permissions(config)
 
     result = permissions.replace_authorized_users(
-        {"entries": [], "if_match_revision": 3},
+        {
+            "entries": [],
+            "if_match_revision": 3,
+            "if_match_instance_id": "inst-123",
+        },
         config,
     )
     backend_available = False
@@ -490,7 +539,11 @@ def test_older_mutation_result_cannot_mix_its_payload_into_a_newer_cache(monkeyp
     config = _config()
     permissions.get_current_permissions(config)
     permissions.replace_authorized_users(
-        {"entries": stale_entries, "if_match_revision": 3},
+        {
+            "entries": stale_entries,
+            "if_match_revision": 3,
+            "if_match_instance_id": "inst-123",
+        },
         config,
     )
     backend_available = False
@@ -530,7 +583,11 @@ def test_authorized_users_mutation_refreshes_offline_cache(monkeypatch) -> None:
     permissions.get_current_permissions(config)
 
     permissions.replace_authorized_users(
-        {"entries": updated_entries, "if_match_revision": 3},
+        {
+            "entries": updated_entries,
+            "if_match_revision": 3,
+            "if_match_instance_id": "inst-123",
+        },
         config,
     )
     permissions._cache_projection("inst-123", live)  # noqa: SLF001
@@ -583,7 +640,12 @@ def test_project_access_mutation_refreshes_offline_cache(monkeypatch) -> None:
 
     permissions.update_project_access(
         "project-1",
-        {"mode": "owner_only", "bindings": [], "if_match_revision": 1},
+        {
+            "mode": "owner_only",
+            "bindings": [],
+            "if_match_revision": 1,
+            "if_match_instance_id": "inst-123",
+        },
         config,
     )
     backend_available = False
@@ -629,6 +691,7 @@ def test_permissions_same_origin_routes_reject_non_contract_entry_fields(monkeyp
                 }
             ],
             "if_match_revision": 3,
+            "if_match_instance_id": "inst-123",
         },
         headers=headers,
     )
@@ -653,7 +716,12 @@ def test_permissions_same_origin_routes_forward_revision_and_conflict(monkeypatc
     monkeypatch.setattr(permissions, "update_project_access", update)
     response = client.put(
         "/api/permissions/projects/project-1/access",
-        json={"mode": "inherit", "bindings": [], "if_match_revision": 6},
+        json={
+            "mode": "inherit",
+            "bindings": [],
+            "if_match_revision": 6,
+            "if_match_instance_id": "inst-123",
+        },
         headers=headers,
     )
 
@@ -665,5 +733,35 @@ def test_permissions_same_origin_routes_forward_revision_and_conflict(monkeypatc
     }
     assert captured == {
         "project_id": "project-1",
-        "payload": {"mode": "inherit", "bindings": [], "if_match_revision": 6},
+        "payload": {
+            "mode": "inherit",
+            "bindings": [],
+            "if_match_revision": 6,
+            "if_match_instance_id": "inst-123",
+        },
+    }
+
+
+def test_permissions_same_origin_route_surfaces_a_changed_pairing(monkeypatch) -> None:
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    def replace(_payload):
+        raise permissions.PermissionsPairingChangedError("permissions_pairing_changed")
+
+    monkeypatch.setattr(permissions, "replace_authorized_users", replace)
+    response = client.put(
+        "/api/permissions/authorized-users",
+        json={
+            "entries": [],
+            "if_match_revision": 3,
+            "if_match_instance_id": "inst-old",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "ok": False,
+        "error": "permissions_pairing_changed",
     }
