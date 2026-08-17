@@ -740,6 +740,47 @@ def test_fresh_platform_instance_enables_when_memory_capabilities_recover() -> N
     assert activated.recovery_intent is None
 
 
+def test_org_release_preserves_disabled_memory_until_platform_capabilities_recover() -> None:
+    organization = MemoryConfig(
+        enabled=False,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="organization",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-org",
+            applied_embedding_identity="emb-org",
+            model_access_key="mak_first",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+            organization_attached=True,
+        ),
+    )
+
+    released = _resolved(
+        organization,
+        _status(
+            scope="platform",
+            chat=False,
+            embedding=False,
+            identity=None,
+            revision=2,
+        ),
+    )
+    resumed = _resolved(
+        released,
+        _status(scope="platform", identity="emb-platform", revision=3),
+    )
+
+    assert released.enabled is False
+    assert released.cloud.applied_embedding_identity == "emb-org"
+    assert released.runtime_source() == "unavailable"
+    assert released.recovery_intent == "rebuild"
+    assert resumed.enabled is False
+    assert resumed.cloud.applied_embedding_identity == "emb-platform"
+    assert resumed.runtime_source() == "cloud"
+    assert resumed.recovery_intent == "rebuild"
+
+
 def test_capability_removal_pauses_and_resume_checks_last_applied_identity() -> None:
     attached = MemoryConfig(
         enabled=True,
@@ -1041,3 +1082,49 @@ def test_mak_rotation_does_not_change_embedding_identity_and_rolls_back_on_apply
 def test_mak_response_requires_the_frozen_one_time_shape(payload: dict) -> None:
     with pytest.raises(model_service.ModelServiceResolutionError):
         model_service._mint_from_payload(payload)  # noqa: SLF001
+
+
+def test_pairing_refresh_notifies_the_ui_worker_across_processes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_config().save()
+    monkeypatch.setattr("vibe.runtime.read_status", lambda: {"ui_pid": 4242})
+    requests: list[tuple[str, str, dict[str, str]]] = []
+
+    class Response:
+        def __init__(self, payload: dict, status: int = 200) -> None:
+            self.status = status
+            self._body = json.dumps(payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self._body
+
+    def urlopen(request, *, timeout: float):
+        headers = {key.lower(): value for key, value in request.header_items()}
+        requests.append((request.get_method(), request.full_url, headers))
+        assert timeout == 0.75
+        if request.full_url.endswith("/status"):
+            return Response({"ui_pid": 4242})
+        return Response({"ok": True})
+
+    monkeypatch.setattr(model_service.urllib.request, "urlopen", urlopen)
+    model_service._REFRESH_EVENT.clear()  # noqa: SLF001
+
+    model_service.request_model_service_refresh()
+
+    assert model_service._REFRESH_EVENT.is_set()  # noqa: SLF001
+    assert [(method, url) for method, url, _headers in requests] == [
+        ("GET", "http://127.0.0.1:5123/status"),
+        ("POST", "http://127.0.0.1:5123/api/model-service/refresh"),
+    ]
+    assert requests[-1][2]["x-vibe-show-client"] == "cli"
+    assert requests[-1][2]["x-vibe-show-cli-token"]
+    model_service._REFRESH_EVENT.clear()  # noqa: SLF001

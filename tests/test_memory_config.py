@@ -360,15 +360,25 @@ def test_memory_rebuild_request_never_downgrades_recovery(
         {"transition_rebuild_owned": True},
     ],
 )
+@pytest.mark.parametrize(
+    ("mode", "recovery_intent", "runtime_source"),
+    [
+        ("custom", "factory_reset", "custom"),
+        ("platform", None, "unavailable"),
+    ],
+)
 def test_disk_load_recovers_only_a_malformed_memory_cloud_cache(
     tmp_path,
     cloud: object,
+    mode: str,
+    recovery_intent: MemoryRecoveryIntent | None,
+    runtime_source: str,
 ) -> None:
     config_path = tmp_path / "config.json"
     memory = {
         "enabled": True,
-        "mode": "custom",
-        "recovery_intent": "factory_reset",
+        "mode": mode,
+        "recovery_intent": recovery_intent,
         "processing": _complete_processing(),
         "cloud": cloud,
     }
@@ -381,12 +391,15 @@ def test_disk_load_recovers_only_a_malformed_memory_cloud_cache(
     loaded = V2Config.load(config_path)
 
     assert loaded.memory.enabled is True
-    assert loaded.memory.mode == "custom"
+    assert loaded.memory.mode == mode
     assert loaded.memory.custom_processing_complete() is True
     assert loaded.memory.processing.llm.api_key == "llm-key"
     assert loaded.memory.processing.embedding.api_key == "embed-key"
-    assert loaded.memory.recovery_intent == "factory_reset"
+    assert loaded.memory.recovery_intent == recovery_intent
     assert loaded.memory.cloud == MemoryCloudConfig()
+    assert loaded.memory.runtime_source() == runtime_source
+    assert loaded.memory.cloud_runtime_selected() is (mode == "platform")
+    assert loaded.memory.settings_mode() == mode
     assert any("memory.cloud" in warning for warning in loaded.load_warnings)
     assert json.loads(config_path.read_text(encoding="utf-8"))["memory"]["cloud"] == cloud
 

@@ -298,6 +298,9 @@ export const MemorySettingsPanel: React.FC<{
             failure.diagnostic?.provider_error_code,
           ),
         );
+        if (!customMode && typeof patch.enabled === 'boolean') {
+          setEnabledDraft(settings.enabled);
+        }
         // Confirmed rebuild keeps the candidate on failure. Exit the confirm
         // modal so a second click cannot re-submit a now-non-identity patch;
         // Retry rebuild is the recovery control under the pending marker.
@@ -315,6 +318,9 @@ export const MemorySettingsPanel: React.FC<{
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
+      if (!customMode && typeof patch.enabled === 'boolean') {
+        setEnabledDraft(settings.enabled);
+      }
       setConfirmRebuildOpen(false);
       setPendingPatch(null);
       onReloadSettings();
@@ -608,10 +614,13 @@ export const MemorySettingsPanel: React.FC<{
         </Button>
       </div>
 
-      {customMode ? <div className="rounded-xl border border-border bg-surface p-4">
+      <div className="rounded-xl border border-border bg-surface p-4">
         <h3 className="mb-2 text-[13px] font-semibold text-foreground">{t('memory.settings.disclosureTitle')}</h3>
         <ul className="flex flex-col gap-1.5">
-          {(t('memory.settings.disclosure', { returnObjects: true }) as string[]).map((line, idx) => (
+          {(t(
+            customMode ? 'memory.settings.disclosure' : 'memory.settings.cloudDisclosure',
+            { returnObjects: true },
+          ) as string[]).map((line, idx) => (
             <li key={idx} className="flex gap-2 text-[11.5px] leading-snug text-muted">
               <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
               {line}
@@ -620,11 +629,15 @@ export const MemorySettingsPanel: React.FC<{
           {settings.im_attachment_capture_available === true ? (
             <li className="flex gap-2 text-[11.5px] leading-snug text-muted">
               <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
-              {t('memory.settings.disclosureAttachment')}
+              {t(
+                customMode
+                  ? 'memory.settings.disclosureAttachment'
+                  : 'memory.settings.cloudDisclosureAttachment',
+              )}
             </li>
           ) : null}
         </ul>
-      </div> : null}
+      </div>
 
       <ConfirmDialog
         open={confirmRebuildOpen}

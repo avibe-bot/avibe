@@ -5,9 +5,13 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import logging
+import os
 import threading
 from typing import Any, Mapping
+import urllib.error
+import urllib.request
 
 from config.v2_config import (
     MemoryCloudCapabilities,
@@ -20,6 +24,7 @@ from config.v2_config import (
 logger = logging.getLogger(__name__)
 
 MODEL_SERVICE_POLL_SECONDS = 60
+MODEL_SERVICE_REFRESH_PATH = "/api/model-service/refresh"
 _SYNC_LOCK = threading.Lock()
 _WORKER_LOCK = threading.Lock()
 _REFRESH_EVENT = threading.Event()
@@ -285,7 +290,9 @@ def _resolved_memory(
                 candidate.enabled = True
         elif was_organization_cloud:
             candidate.arm_rebuild_if_idle()
-            candidate.cloud.applied_embedding_identity = None
+            # The applied identity is also the durable "not fresh" baseline.
+            # Keep it across an unavailable release so later capability recovery
+            # cannot silently override an explicit user opt-out.
 
     candidate.cloud.runtime_apply_pending = (
         current.cloud.runtime_apply_pending
@@ -568,8 +575,64 @@ def ensure_model_access_key(config: V2Config | None = None) -> V2Config:
         return _persist_candidate(current, candidate)
 
 
+def _model_service_ui_origins(config: V2Config) -> tuple[str, ...]:
+    """Reuse the tunnel's canonical route to the local UI process."""
+
+    from vibe import remote_access
+
+    return (remote_access.origin_service_for_pairing(config),)
+
+
+def _notify_ui_model_service_refresh(config: V2Config) -> bool:
+    """Wake the UI-owned worker when pairing changes in another process."""
+
+    from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
+    from vibe import runtime
+
+    try:
+        ui_pid = int(runtime.read_status().get("ui_pid"))
+    except (TypeError, ValueError):
+        return False
+    if ui_pid == os.getpid():
+        return False
+
+    headers = {"X-Vibe-Show-Client": "cli"}
+    for origin in _model_service_ui_origins(config):
+        try:
+            status_request = urllib.request.Request(
+                f"{origin}/status",
+                method="GET",
+                headers=headers,
+            )
+            with urllib.request.urlopen(status_request, timeout=0.75) as response:
+                status = json.loads(response.read().decode("utf-8"))
+            if int(status.get("ui_pid")) != ui_pid:
+                continue
+            refresh_request = urllib.request.Request(
+                f"{origin}{MODEL_SERVICE_REFRESH_PATH}",
+                data=b"{}",
+                method="POST",
+                headers={
+                    **headers,
+                    "Content-Type": "application/json",
+                    SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token(),
+                },
+            )
+            with urllib.request.urlopen(refresh_request, timeout=0.75) as response:
+                return response.status == 200
+        except (OSError, TypeError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+            continue
+    return False
+
+
 def request_model_service_refresh() -> None:
     _REFRESH_EVENT.set()
+    try:
+        _notify_ui_model_service_refresh(V2Config.load())
+    except Exception:
+        # The in-process event remains authoritative when the UI is this process;
+        # a stopped or unavailable UI has no sleeping worker to wake.
+        logger.debug("Cloud Model Service UI refresh notification was unavailable", exc_info=True)
 
 
 def _worker_loop(initial_config: V2Config | None) -> None:

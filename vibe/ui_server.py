@@ -74,6 +74,7 @@ from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.message_types import types_with
+from vibe.model_service import MODEL_SERVICE_REFRESH_PATH
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
@@ -577,7 +578,11 @@ def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
 def _is_mutation_guard_exempt() -> bool:
     if request.path in {"/auth/callback", "/auth/organization/callback", "/auth/organization/start"}:
         return True
-    if _is_cli_show_event_request() or _is_cli_session_activity_request():
+    if (
+        _is_cli_show_event_request()
+        or _is_cli_session_activity_request()
+        or _is_cli_model_service_refresh_request()
+    ):
         return True
     return (
         request.path == "/e2e/simulate-interaction"
@@ -609,6 +614,10 @@ def _is_cli_session_activity_request() -> bool:
         _cli_local_event_token_ok()
         and re.fullmatch(r"/api/sessions/[^/]+/cli-activity", request.path or "") is not None
     )
+
+
+def _is_cli_model_service_refresh_request() -> bool:
+    return _cli_local_event_token_ok() and request.path == MODEL_SERVICE_REFRESH_PATH
 
 
 def _is_show_api_mutation() -> bool:
@@ -2948,6 +2957,16 @@ def status():
         runtime.write_status("stopped", "process not running", None, payload.get("ui_pid"))
         payload = json.loads(runtime.render_status(detect_extra_processes=False))
     return jsonify(payload)
+
+
+@app.route(MODEL_SERVICE_REFRESH_PATH, methods=["POST"])
+def model_service_refresh():
+    if not _is_cli_model_service_refresh_request():
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    from vibe.model_service import request_model_service_refresh
+
+    request_model_service_refresh()
+    return jsonify({"ok": True})
 
 
 @app.websocket("/ws/echo")

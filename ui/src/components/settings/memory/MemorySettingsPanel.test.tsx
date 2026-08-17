@@ -101,6 +101,8 @@ describe('MemorySettingsPanel', () => {
     expect(screen.getByText('memory.settings.avibeCloudTitle')).toBeTruthy();
     expect(screen.getByText('memory.settings.avibeCloudFree')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'memory.settings.useCustomEndpoints' })).toBeTruthy();
+    expect(screen.getByText('memory.settings.disclosureTitle')).toBeTruthy();
+    expect(screen.getByText('memory.settings.cloudDisclosureAttachment')).toBeTruthy();
     expect(screen.queryByText('memory.settings.llmTitle')).toBeNull();
     expect(screen.queryByRole('button', { name: 'memory.settings.save' })).toBeNull();
   });
@@ -122,6 +124,8 @@ describe('MemorySettingsPanel', () => {
 
     expect(screen.getByText('memory.settings.organizationManaged')).toBeTruthy();
     expect(screen.getByRole('switch', { name: 'memory.settings.enableLabel' })).toBeTruthy();
+    expect(screen.getByText('memory.settings.disclosureTitle')).toBeTruthy();
+    expect(screen.getByText('memory.settings.cloudDisclosureAttachment')).toBeTruthy();
     expect(screen.queryByText('memory.settings.llmTitle')).toBeNull();
     expect(screen.queryByRole('button', { name: 'memory.settings.save' })).toBeNull();
   });
@@ -299,6 +303,42 @@ describe('MemorySettingsPanel', () => {
 
     await user.click(screen.getByRole('switch', { name: 'memory.settings.enableLabel' }));
     await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ enabled: false }));
+  });
+
+  it.each([
+    ['platform', false],
+    ['organization', true],
+  ] as const)('restores a failed immediate toggle in %s mode', async (mode, managed) => {
+    api.saveMemorySettings.mockResolvedValue({
+      status: 'failed',
+      error: 'memory_llm_unavailable',
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{
+          ...legacySettings,
+          enabled: false,
+          mode,
+          managed,
+          cloud_available: true,
+        }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const toggle = screen.getByRole('switch', { name: 'memory.settings.enableLabel' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    await user.click(toggle);
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ enabled: true }));
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
   });
 
   it('hides multimodal configuration until IM attachment capture is available', () => {

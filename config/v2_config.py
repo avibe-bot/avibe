@@ -1951,7 +1951,9 @@ class MemoryConfig:
             # A pending enterprise transition is deliberately fenced on the
             # last applied custom identity until the user confirms the rebuild.
             return self.cloud.organization_attached
-        return self.cloud.scope == "platform" and self.mode == "platform"
+        # Mode owns the runtime source. A missing or recovered cloud cache must
+        # pause platform Memory, never expose saved custom endpoints as fallback.
+        return self.mode == "platform"
 
     def runtime_source(self) -> Literal["cloud", "custom", "unavailable"]:
         if self.cloud_runtime_selected():
@@ -1972,7 +1974,7 @@ class MemoryConfig:
             ):
                 return "custom"
             return "organization"
-        if self.cloud.scope == "platform" and self.mode == "platform":
+        if self.mode == "platform":
             return "platform"
         return "custom"
 

@@ -86,6 +86,22 @@ describe('Memory UI copy contracts', () => {
     }
   });
 
+  it.each(['en', 'zh'] as const)('keeps local-data disclosure in cloud modes in %s', (language) => {
+    const settings = BUNDLES[language].memory.settings;
+    const disclosure = settings.cloudDisclosure.join('\n');
+
+    expect(disclosure).toMatch(/5,000/);
+    if (language === 'en') {
+      expect(disclosure).toContain('raw messages and attachment copies');
+      expect(disclosure).toContain('Turning Memory off pauses it');
+      expect(settings.cloudDisclosureAttachment).toContain('cloud model service');
+    } else {
+      expect(disclosure).toContain('原始消息和附件副本');
+      expect(disclosure).toContain('关闭记忆只是暂停记录');
+      expect(settings.cloudDisclosureAttachment).toContain('云端模型服务');
+    }
+  });
+
   it.each(['en', 'zh'] as const)('keeps staged IM attachment disclosure separate in %s', (language) => {
     const settings = BUNDLES[language].memory.settings;
     const baseDisclosure = settings.disclosure.join('\n');
