@@ -201,9 +201,13 @@ export const SettingsPlatformsPage: React.FC = () => {
     try {
       let savedConfig: any;
       try {
-        // Patch-write shape: the platform section this card owns plus
-        // the enabled list — not a full-config round-trip.
-        savedConfig = await saveConfig({ ...nextData, platforms: { enabled: enabledPlatforms } });
+        // Patch-write shape: ONLY the platform section this card owns.
+        // The enabled list must never ride along as a stale snapshot —
+        // replacing it wholesale would drop platforms another process
+        // enabled (e.g. WeChat QR confirmation). Enablement changes go
+        // through the list-operation verb below, which mutates the
+        // lock-fresh persisted list.
+        savedConfig = await saveConfig(nextData);
       } catch {
         showToast(t('common.saveFailed'), 'error');
         return;
