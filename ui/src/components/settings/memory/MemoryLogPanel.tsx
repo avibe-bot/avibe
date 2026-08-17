@@ -24,6 +24,7 @@ import type {
   MemoryLogSourceStatus,
   MemoryLogStep,
   MemoryProviderCall,
+  MemoryUnlinkedCallListResult,
 } from '../../../context/ApiContext';
 import {
   MEMORY_LOG_ENTRY_LIMIT,
@@ -31,12 +32,14 @@ import {
   memoryLogEnumLabel,
   prepareJsonPreview,
 } from './memoryLog';
+import { formatMemoryStatusRuntimeFact } from './memoryStatusPresentation';
 import { useMemoryResource } from './useMemoryResource';
 
 const PreviewJson = React.lazy(() => import('../../ui/preview-json'));
 
 type MemoryLogListOk = Extract<MemoryLogListResult, { status: 'ok' }>;
 type MemoryLogDetailOk = Extract<MemoryLogDetailResult, { status: 'ok' }>;
+type MemoryUnlinkedCallListOk = Extract<MemoryUnlinkedCallListResult, { status: 'ok' }>;
 type MemoryLogPage = MemoryLogListOk & { requested_cursor: string | null };
 
 type MemoryLogListState = {
@@ -220,6 +223,94 @@ export const MemoryLogListContent: React.FC<{
         </Button>
       ) : null}
     </div>
+  );
+};
+
+export const UnlinkedProviderCallsContent: React.FC<{
+  result: MemoryUnlinkedCallListOk | null;
+  loading: boolean;
+  loaded: boolean;
+  error: string | null;
+  forbidden: boolean;
+}> = ({ result, loading, loaded, error, forbidden }) => {
+  const { t } = useTranslation();
+  const retentionDays = result
+    ? Math.max(1, Math.floor(result.retention.max_age_ms / (24 * 60 * 60 * 1000)))
+    : null;
+  const recorderIncomplete = result?.recorder.state !== 'active';
+  const recorderState = result
+    ? formatMemoryStatusRuntimeFact(t, 'recorder', 'state', result.recorder.state)
+    : null;
+  const recorderReason = result?.recorder.reason
+    ? formatMemoryStatusRuntimeFact(t, 'recorder', 'reason', result.recorder.reason)
+    : null;
+
+  return (
+    <section className="flex flex-col gap-2" aria-labelledby="memory-unlinked-calls-title">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 id="memory-unlinked-calls-title" className="text-[12.5px] font-semibold text-foreground">
+          {t('memory.log.unlinkedTitle')}
+        </h4>
+        {result ? <Badge variant="secondary">{t('memory.log.providerCalls', { count: result.calls.length })}</Badge> : null}
+      </div>
+      {forbidden ? (
+        <div className="rounded-md border border-border bg-surface px-4 py-3 text-[12px] text-muted">
+          {t('memory.log.forbidden')}
+        </div>
+      ) : !loaded && !result ? (
+        <div className="flex items-center gap-2 px-1 py-3 text-[12px] text-muted">
+          <Loader2 className="size-3.5 animate-spin" />
+          {t('memory.log.unlinkedLoading')}
+        </div>
+      ) : (
+        <>
+          {error ? (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-[12px] text-destructive-ink">
+              {error}
+            </div>
+          ) : null}
+          {result ? <SectionNotices sections={result.sections} /> : null}
+          {result && recorderIncomplete ? (
+            <div className="rounded-md border border-gold/30 bg-gold/[0.06] px-3 py-2 text-[11.5px] text-muted" role="status">
+              {recorderReason
+                ? t('memory.log.unlinkedRecorderIncompleteWithReason', { state: recorderState, reason: recorderReason })
+                : t('memory.log.unlinkedRecorderIncomplete', { state: recorderState })}
+            </div>
+          ) : null}
+          {result ? (
+            <div className="text-[11px] text-muted" role="note">
+              {t('memory.log.unlinkedRetention', {
+                days: retentionDays,
+                maxRows: result.retention.max_rows,
+              })}
+            </div>
+          ) : null}
+          {result?.calls.length ? (
+            <div className="flex flex-col gap-3">
+              {result.calls.map((call) => (
+                <div key={call.id} className="flex min-w-0 flex-col gap-1.5">
+                  <MemoryLogScope project_id={call.project_id} principal_id={call.principal_id} />
+                  <ProviderCallRow call={call} />
+                </div>
+              ))}
+            </div>
+          ) : result && !error ? (
+            <div className="rounded-md border border-dashed border-border bg-surface px-4 py-4 text-center text-[12px] text-muted">
+              {t('memory.log.unlinkedEmpty')}
+            </div>
+          ) : null}
+          {result?.truncated ? (
+            <div className="text-[11px] text-muted" role="status">{t('memory.log.unlinkedTruncated')}</div>
+          ) : null}
+          {loading && result ? (
+            <div className="flex items-center gap-1.5 text-[11px] text-muted">
+              <Loader2 className="size-3 animate-spin" />
+              {t('memory.log.unlinkedLoading')}
+            </div>
+          ) : null}
+        </>
+      )}
+    </section>
   );
 };
 
@@ -415,6 +506,12 @@ export const MemoryLogPanel: React.FC<{
     failureMessageKey: 'memory.log.loadFailed',
     clearErrorOnReload: true,
   });
+  const readUnlinked = useCallback(() => api.getMemoryLogUnlinked(20), [api]);
+  const unlinkedRead = useMemoryResource<MemoryUnlinkedCallListOk>({
+    read: readUnlinked,
+    failureMessageKey: 'memory.log.unlinkedLoadFailed',
+    clearErrorOnReload: true,
+  });
   const readDetail = useCallback((memcellId: string) => api.getMemoryLogEntry(memcellId), [api]);
   const detailRead = useMemoryResource<MemoryLogDetailOk, [string]>({
     read: readDetail,
@@ -424,10 +521,12 @@ export const MemoryLogPanel: React.FC<{
   });
 
   const { data: listPage, reload: reloadList } = listRead;
+  const { reload: reloadUnlinked } = unlinkedRead;
   const { reload: reloadDetail } = detailRead;
   useEffect(() => {
     void reloadList(null);
-  }, [refreshToken, reloadList]);
+    void reloadUnlinked();
+  }, [refreshToken, reloadList, reloadUnlinked]);
   useEffect(() => {
     if (selected) void reloadDetail(selected);
   }, [refreshToken, reloadDetail, selected]);
@@ -468,21 +567,35 @@ export const MemoryLogPanel: React.FC<{
           <MemoryLogDetail detail={selectedDetail} onBack={() => setSelected(null)} />
         )
       ) : (
-        <MemoryLogListContent
-          entries={entries}
-          sections={sections}
-          loading={listRead.loading}
-          loaded={listRead.loaded}
-          error={listRead.error}
-          forbidden={listRead.forbidden}
-          nextCursor={nextCursor}
-          limitReached={entries.length >= MEMORY_LOG_ENTRY_LIMIT && nextCursor !== null}
-          onOpen={openDetail}
-          onRefresh={() => void listRead.reload(null)}
-          onLoadMore={() => {
-            if (nextCursor && entries.length < MEMORY_LOG_ENTRY_LIMIT) void listRead.reload(nextCursor);
-          }}
-        />
+        <>
+          <UnlinkedProviderCallsContent
+            result={unlinkedRead.data}
+            loading={unlinkedRead.loading}
+            loaded={unlinkedRead.loaded}
+            error={unlinkedRead.error}
+            forbidden={unlinkedRead.forbidden}
+          />
+          <div className="border-t border-border pt-3">
+            <MemoryLogListContent
+              entries={entries}
+              sections={sections}
+              loading={listRead.loading || unlinkedRead.loading}
+              loaded={listRead.loaded}
+              error={listRead.error}
+              forbidden={listRead.forbidden}
+              nextCursor={nextCursor}
+              limitReached={entries.length >= MEMORY_LOG_ENTRY_LIMIT && nextCursor !== null}
+              onOpen={openDetail}
+              onRefresh={() => {
+                void listRead.reload(null);
+                void unlinkedRead.reload();
+              }}
+              onLoadMore={() => {
+                if (nextCursor && entries.length < MEMORY_LOG_ENTRY_LIMIT) void listRead.reload(nextCursor);
+              }}
+            />
+          </div>
+        </>
       )}
     </div>
   );

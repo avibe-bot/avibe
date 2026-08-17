@@ -929,6 +929,11 @@ def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch,
                 user_key="avibe:remote:user-1",
                 socket_path=socket_path,
             )
+            await internal_client.memory_log_unlinked(
+                limit=20,
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
             await internal_client.memory_log_entry(
                 "mc_1",
                 user_key="avibe:remote:user-1",
@@ -939,6 +944,7 @@ def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch,
 
     assert [(request.url.path, dict(request.url.params)) for request in captured] == [
         ("/internal/memory/log", {"cursor": "opaque_cursor", "limit": "17"}),
+        ("/internal/memory/log/unlinked", {"limit": "20"}),
         ("/internal/memory/log/entry", {"memcell_id": "mc_1"}),
     ]
     for request in captured:

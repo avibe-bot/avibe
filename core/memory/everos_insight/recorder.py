@@ -573,6 +573,15 @@ def initialize_call_log(db_path: Path) -> None:
         _initialize_schema(conn)
 
 
+def call_log_retention_policy() -> dict[str, int]:
+    """Return the product-visible bounds for retained provider-call evidence."""
+
+    return {
+        "max_age_ms": _RETENTION_AGE_MS,
+        "max_rows": _RETENTION_ROWS,
+    }
+
+
 def record_preflight_call(
     db_path: Path,
     *,

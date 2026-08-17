@@ -46,7 +46,12 @@ from core.memory.everos import (
     ProviderHealthSnapshot,
 )
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
-from core.memory.everos_insight.recorder import clear_call_log, maintain_call_log, record_preflight_call
+from core.memory.everos_insight.recorder import (
+    call_log_retention_policy,
+    clear_call_log,
+    maintain_call_log,
+    record_preflight_call,
+)
 from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.maintenance import (
@@ -2112,6 +2117,41 @@ class MemoryRuntime:
             effective_mode=effective_mode,
             warnings=unique_warnings,
         )
+
+    async def log_unlinked_calls_payload(
+        self,
+        principal_id: str,
+        project_id: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        payload = await self._run_insight_read(
+            lambda: reader.list_unlinked_calls((principal_id, project_id), limit)
+        )
+        return self._with_call_log_coverage(payload)
+
+    async def admin_log_unlinked_calls_payload(
+        self,
+        limit: int,
+    ) -> dict[str, Any]:
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        payload = await self._run_insight_read(
+            lambda: reader.list_admin_unlinked_calls(limit)
+        )
+        return self._with_call_log_coverage(payload)
+
+    def _with_call_log_coverage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("status") != "ok":
+            return payload
+        return {
+            **payload,
+            "recorder": dict(self._recorder_health),
+            "retention": call_log_retention_policy(),
+        }
 
     async def log_entries_payload(
         self,

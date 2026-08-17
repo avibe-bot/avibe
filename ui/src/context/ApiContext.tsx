@@ -574,6 +574,7 @@ export type ApiContextType = {
   ) => Promise<MemoryListResult>;
   listMemoryProjects: () => Promise<{ status: 'ok'; projects: Array<{ id: string; kind: 'default' | 'named' | 'all' }> } | { status: 'failed'; error?: string }>;
   getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
+  getMemoryLogUnlinked: (limit?: number) => Promise<MemoryUnlinkedCallListResult>;
   getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
   clearMemory: () => Promise<MemoryClearResult>;
   factoryResetMemory: () => Promise<MemoryFactoryResetResult>;
@@ -2141,6 +2142,22 @@ export type MemoryProviderCall = {
   dropped_before: number;
 };
 
+export type MemoryUnlinkedProviderCall = MemoryProviderCall & {
+  principal_id: string;
+  project_id: string;
+};
+
+export type MemoryUnlinkedCallListResult =
+  | {
+      status: 'ok';
+      calls: MemoryUnlinkedProviderCall[];
+      truncated: boolean;
+      sections: MemoryLogSections;
+      recorder: { state: string; reason: string | null };
+      retention: { max_age_ms: number; max_rows: number };
+    }
+  | MemoryFailure;
+
 export type MemoryLogCurrentState =
   | {
       status: 'available';
@@ -3421,6 +3438,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (cursor) query.set('cursor', cursor);
       return getJson(`/api/memory/log?${query.toString()}`, { handleError: false });
     },
+    getMemoryLogUnlinked: (limit = 20) =>
+      getJson(`/api/memory/log/unlinked?limit=${encodeURIComponent(String(limit))}`, { handleError: false }),
     getMemoryLogEntry: (memcellId) =>
       getJson(`/api/memory/log/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),

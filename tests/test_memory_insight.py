@@ -338,6 +338,200 @@ def _insert_call(paths: MemoryInsightPaths, call_id: str, **values: object) -> N
         )
 
 
+def test_rejected_pre_memcell_call_is_scope_authorized_and_linked_calls_are_excluded(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_queue(
+        insight_paths,
+        "alice-unlinked",
+        ALICE,
+        session="alice-unlinked",
+        timestamp_ms=4_000,
+        add_request_id="request-alice-unlinked",
+    )
+    _insert_call(
+        insight_paths,
+        "call-alice-unlinked",
+        request_id="request-alice-unlinked",
+        stage="boundary",
+        status="error",
+        started_at_ms=5_000,
+    )
+    with sqlite3.connect(insight_paths.capture_db_path) as conn:
+        conn.execute(
+            "UPDATE memory_capture_queue SET state = 'dead', "
+            "last_error = 'memory_provider_response_invalid' "
+            "WHERE add_request_id = 'request-alice-unlinked'"
+        )
+    _insert_queue(
+        insight_paths,
+        "bob-unlinked",
+        BOB,
+        session="bob-unlinked",
+        timestamp_ms=3_000,
+        add_request_id="request-bob-unlinked",
+    )
+    _insert_call(
+        insight_paths,
+        "call-bob-unlinked",
+        request_id="request-bob-unlinked",
+        stage="boundary",
+        started_at_ms=4_000,
+    )
+    _insert_queue(
+        insight_paths,
+        "alice-linked",
+        ALICE,
+        session="alice-linked",
+        timestamp_ms=2_000,
+        add_request_id="request-alice-linked",
+    )
+    _insert_memcell(
+        insight_paths,
+        "mc_alice_linked",
+        ALICE,
+        timestamp_ms=2_100,
+        message_ids=["m_alice-linked_2000_000"],
+    )
+    _insert_call(
+        insight_paths,
+        "call-alice-linked",
+        request_id="request-alice-linked",
+        stage="boundary",
+    )
+
+    reader = MemoryInsightReader(insight_paths)
+    alice = reader.list_unlinked_calls((ALICE, PROJECT), 20)
+    bob = reader.list_unlinked_calls((BOB, PROJECT), 20)
+    admin = reader.list_admin_unlinked_calls(20)
+
+    assert [(call["id"], call["principal_id"], call["project_id"]) for call in alice["calls"]] == [
+        ("call-alice-unlinked", ALICE, PROJECT)
+    ]
+    assert [call["id"] for call in bob["calls"]] == ["call-bob-unlinked"]
+    assert [call["id"] for call in admin["calls"]] == [
+        "call-alice-unlinked",
+        "call-bob-unlinked",
+    ]
+    assert alice["truncated"] is False
+    assert alice["sections"]["calls"]["status"] == "available"
+
+
+def test_unlinked_calls_fail_closed_for_cross_scope_request_id_collisions(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    for owner, session in ((ALICE, "alice-collision"), (BOB, "bob-collision")):
+        _insert_queue(
+            insight_paths,
+            session,
+            owner,
+            session=session,
+            timestamp_ms=2_000,
+            add_request_id="shared-request",
+        )
+    _insert_call(insight_paths, "call-collision", request_id="shared-request")
+
+    reader = MemoryInsightReader(insight_paths)
+
+    assert reader.list_unlinked_calls((ALICE, PROJECT), 20)["calls"] == []
+    assert reader.list_unlinked_calls((BOB, PROJECT), 20)["calls"] == []
+    assert reader.list_admin_unlinked_calls(20)["calls"] == []
+
+
+def test_unlinked_calls_keep_existing_projection_redaction_and_bounds(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_queue(
+        insight_paths,
+        "bounded-unlinked",
+        ALICE,
+        session="bounded-unlinked",
+        timestamp_ms=2_000,
+        add_request_id="request-bounded-unlinked",
+    )
+    secret = "secret-value"
+    huge = "x" * 20_000
+    _insert_call(
+        insight_paths,
+        "call-bounded-unlinked",
+        request_id="request-bounded-unlinked",
+        request_json=_json({"authorization": secret, "prompt": huge}),
+        response_json=_json({"answer": huge}),
+        request_bytes=len(huge),
+        response_bytes=len(huge),
+    )
+
+    result = MemoryInsightReader(
+        insight_paths,
+        exact_redaction_values=(secret,),
+    ).list_unlinked_calls((ALICE, PROJECT), 20)
+
+    call = result["calls"][0]
+    encoded = json.dumps(call, ensure_ascii=False, separators=(",", ":"))
+    assert secret not in encoded
+    assert "[REDACTED]" in encoded
+    assert set(call["request"]) == {"excerpt", "omitted_bytes"}
+    assert set(call["response"]) == {"excerpt", "omitted_bytes"}
+    assert len(_json(call["request"]).encode()) <= 12_000
+    assert len(_json(call["response"]).encode()) <= 12_000
+
+
+def test_unlinked_calls_are_bounded_and_report_truncation(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_queue(
+        insight_paths,
+        "many-unlinked",
+        ALICE,
+        session="many-unlinked",
+        timestamp_ms=2_000,
+        add_request_id="request-many-unlinked",
+    )
+    huge = "x" * 20_000
+    for index in range(21):
+        _insert_call(
+            insight_paths,
+            f"call-many-{index:02d}",
+            request_id="request-many-unlinked",
+            started_at_ms=10_000 + index,
+            request_json=_json({"prompt": huge}),
+            response_json=_json({"answer": huge}),
+            request_bytes=len(huge),
+            response_bytes=len(huge),
+        )
+
+    result = MemoryInsightReader(insight_paths).list_unlinked_calls(
+        (ALICE, PROJECT),
+        20,
+    )
+
+    assert len(result["calls"]) == 20
+    assert result["truncated"] is True
+    assert result["calls"][0]["id"] == "call-many-20"
+    assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) <= 1_000_000
+
+
+def test_unlinked_calls_report_unavailable_call_log_source(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    insight_paths.call_log_db_path.unlink()
+
+    result = MemoryInsightReader(insight_paths).list_unlinked_calls(
+        (ALICE, PROJECT),
+        20,
+    )
+
+    assert result["calls"] == []
+    assert result["truncated"] is False
+    assert result["sections"]["everos"]["status"] == "available"
+    assert result["sections"]["capture"]["status"] == "available"
+    assert result["sections"]["calls"] == {
+        "status": "unavailable",
+        "reason": "missing",
+        "observed_at": None,
+    }
+
+
 def test_installation_preflight_calls_exclude_conversation_linked_rows(
     insight_paths: MemoryInsightPaths,
 ) -> None:
