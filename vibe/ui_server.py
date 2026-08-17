@@ -2436,6 +2436,7 @@ def enforce_show_page_email_scope():
             _SHOW_RUNTIME_PUBLIC_CLIENT_SHIM_PATH,
             _SHOW_RUNTIME_PUBLIC_REACT_REFRESH_SHIM_PATH,
             "/auth/callback",
+            "/auth/show-identity/callback",
             "/auth/logout",
             "/health",
         }

@@ -1030,6 +1030,11 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
         query = urllib.parse.parse_qs(
             urllib.parse.urlsplit(login.headers["Location"]).query
         )
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            _show_page_email_cookie(config),
+            domain="alex.avibe.bot",
+        )
         callback = client.post(
             show_identity.CALLBACK_PATH,
             base_url="https://alex.avibe.bot",
@@ -1046,6 +1051,11 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
         assert "SameSite=Lax" in set_cookie
         assert "Expires=" not in set_cookie
         assert "Max-Age=" not in set_cookie
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            "",
+            domain="alex.avibe.bot",
+        )
 
         replay = app.test_client().post(
             show_identity.CALLBACK_PATH,
