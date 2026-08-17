@@ -136,10 +136,11 @@ def test_config_load_neutralizes_legacy_opencode_turn_timeout_default(
 ) -> None:
     """The shipped 5400-second cap is the old default's echo, not a choice.
 
-    Seeding every persisted shape proves the property in one pass: the legacy
-    default value loads as disabled, while an explicit custom value and an
-    absent key keep their meaning. A different value written later cannot be
-    silently rewritten because only the exact legacy constant matches.
+    Seeding every persisted shape proves the property in one pass: a legacy
+    payload (marker absent) with the default echo loads as disabled, while the
+    same value carrying the provenance marker — the shape every post-change
+    save writes — is an explicit choice that survives. An explicit custom value
+    and an absent key keep their meaning.
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -147,20 +148,34 @@ def test_config_load_neutralizes_legacy_opencode_turn_timeout_default(
     from vibe import api
 
     base = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
-    cases = {
-        90 * 60: 0,  # legacy default echo -> disabled
-        7200: 7200,  # explicit operator choice survives
-        0: 0,  # explicit opt-out survives
-    }
-    for index, (persisted, expected) in enumerate(cases.items()):
+    # A genuine pre-change payload carries the echo value and no provenance
+    # marker; a post-change save always carries the marker.
+    cases = [
+        (
+            {
+                "active_turn_timeout_seconds": 90 * 60,
+                "legacy_turn_timeout_neutralized": True,
+            },
+            None,
+            90 * 60,
+        ),
+        ({"active_turn_timeout_seconds": 7200}, None, 7200),
+        ({"active_turn_timeout_seconds": 0}, None, 0),
+        ({"active_turn_timeout_seconds": 90 * 60}, "legacy", 0),
+        ({"active_turn_timeout_seconds": 7200}, "legacy", 7200),
+    ]
+    for index, (override, legacy_shape, expected) in enumerate(cases):
         payload = copy.deepcopy(base)
-        payload["agents"]["opencode"]["active_turn_timeout_seconds"] = persisted
+        payload["agents"]["opencode"].update(override)
+        if legacy_shape:
+            payload["agents"]["opencode"].pop("legacy_turn_timeout_neutralized", None)
         config_path = tmp_path / f"config-{index}.json"
         config_path.write_text(json.dumps(payload), encoding="utf-8")
 
         loaded = V2Config.load(config_path=config_path)
 
         assert loaded.agents.opencode.active_turn_timeout_seconds == expected
+        assert loaded.agents.opencode.legacy_turn_timeout_neutralized is True
 
     payload = copy.deepcopy(base)
     payload["agents"]["opencode"].pop("active_turn_timeout_seconds", None)

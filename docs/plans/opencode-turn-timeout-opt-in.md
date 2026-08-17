@@ -38,7 +38,11 @@ settle on surfaced errors rather than turn duration.
 - `config/v2_config.py`: `DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 0`,
   `LEGACY_DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60`, and
   `_migrate_opencode_active_turn_timeout_on_load` wired into the load
-  migration chain (in-memory only; idempotent).
+  migration chain. The migration is a one-time neutralization guarded by the
+  `legacy_turn_timeout_neutralized` provenance marker: a legacy payload (no
+  marker) with the echo value loads as disabled, while any config saved under
+  the opt-in semantics carries the marker, so a deliberate 5400-second choice
+  saved afterwards survives every later load.
 - `modules/agents/opencode/poll_loop.py`: disabled timeout yields an infinite
   deadline; `wait_for` receives `None` for the infinite budget. Error-driven
   settlement, user stop, and shutdown cancellation are unchanged.

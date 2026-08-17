@@ -900,14 +900,16 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
 
 
 def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
-    """Neutralize the legacy wall-clock default echo on reload.
+    """Neutralize the legacy wall-clock default echo on reload, once.
 
     Configs saved while the cap shipped carry
     ``agents.opencode.active_turn_timeout_seconds: 5400`` because a settings
     save materializes the whole section. That value names the old default, not
     an operator's choice, so exactly that value rewrites to the disabled
-    default. Idempotent: once rewritten (or never present) the pattern never
-    matches again.
+    default. ``legacy_turn_timeout_neutralized`` is the provenance marker: a
+    config written under the opt-in semantics carries it, so a deliberate
+    5400-second choice saved afterwards survives every later load. Idempotent:
+    once rewritten (or never eligible) the pattern never matches again.
     """
 
     agents = payload.get("agents")
@@ -915,6 +917,8 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
         return payload
     opencode = agents.get("opencode")
     if not isinstance(opencode, dict):
+        return payload
+    if "legacy_turn_timeout_neutralized" in opencode:
         return payload
     if (
         opencode.get("active_turn_timeout_seconds")
@@ -927,6 +931,7 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
     migrated_opencode["active_turn_timeout_seconds"] = (
         DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     )
+    migrated_opencode["legacy_turn_timeout_neutralized"] = True
     migrated_agents["opencode"] = migrated_opencode
     migrated["agents"] = migrated_agents
     return migrated
@@ -2090,6 +2095,11 @@ class OpenCodeConfig:
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
     active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
+    # Provenance for the legacy-default neutralization: once this config has
+    # been written (or migrated) under the opt-in semantics the key is present,
+    # and a deliberate ``active_turn_timeout_seconds == 5400`` saved afterwards
+    # is an explicit operator choice the load migration must preserve.
+    legacy_turn_timeout_neutralized: bool = True
     # Provider the user picked in Settings → Backends → OpenCode. The provider
     # catalog itself lives in ~/.config/opencode/opencode.json (OpenCode's own
     # state file). Stays ``None`` until the user explicitly chooses so legacy
