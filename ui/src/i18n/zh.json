@@ -4630,6 +4630,7 @@
       "applyingBody": "一个或多个项目策略正在等待当前 Avibe 确认。",
       "conflictTitle": "此策略已在其他位置更改",
       "conflictBody": "你的草稿已保留，并已加载最新修订。请检查草稿后明确重试。",
+      "conflictRefreshBody": "你的草稿已保留，但无法加载最新修订。请先刷新，再重试更改。",
       "errorTitle": "无法保存权限"
     },
     "sync": {
@@ -4658,6 +4659,7 @@
     "errors": {
       "generic": "Avibe 无法完成此次权限请求。",
       "permissions_unavailable": "权限服务当前不可用。",
+      "permissions_refresh_failed": "无法加载最新的权威策略。请先重试刷新，再保存更改。",
       "permission_authority_cloud": "此策略由 Avibe Cloud 管理，无法在此修改。",
       "instance_access_forbidden": "当前 Avibe 角色无权修改权限。",
       "cloud_policy_unavailable": "当前 Cloud 策略暂时不可用。",

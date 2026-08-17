@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
@@ -80,7 +80,7 @@ const response = (overrides: Partial<PermissionsResponse> = {}): PermissionsResp
 });
 
 function renderPage(canManage = true) {
-  render(
+  return render(
     <InstanceAuthorizationContext.Provider value={{
       remote: true,
       instanceKind: 'organization',
@@ -95,6 +95,7 @@ function renderPage(canManage = true) {
 }
 
 beforeEach(() => {
+  api.getPermissions.mockReset();
   api.getPermissions.mockResolvedValue(response());
   api.replaceAuthorizedUsers.mockReset();
   api.updateProjectAccess.mockReset();
@@ -103,6 +104,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe('PermissionsPage state model', () => {
@@ -156,6 +158,55 @@ describe('PermissionsPage state model', () => {
     expect(await screen.findByText('permissions.states.unavailableTitle')).toBeTruthy();
     expect(screen.queryByText('permissions.states.deniedTitle')).toBeNull();
   });
+
+  it('refreshes a live applying policy until it converges', async () => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    const inSync = response();
+    api.getPermissions
+      .mockResolvedValueOnce(applying)
+      .mockResolvedValueOnce(inSync);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByText('permissions.states.applyingTitle')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not poll cached offline policy and cleans up a live refresh timer', async () => {
+    vi.useFakeTimers();
+    const cached = response({ source: 'cache', offline: true, cached_at: 123 });
+    cached.projection.policy_sync.status = 'applying';
+    cached.projection.projects[0]!.sync.status = 'pending';
+    api.getPermissions.mockResolvedValueOnce(cached);
+
+    const cachedPage = renderPage();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(api.getPermissions).toHaveBeenCalledOnce();
+    cachedPage.unmount();
+
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    api.getPermissions.mockReset();
+    api.getPermissions.mockResolvedValue(applying);
+    const livePage = renderPage();
+    await act(async () => { await Promise.resolve(); });
+    livePage.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(api.getPermissions).toHaveBeenCalledOnce();
+  });
 });
 
 describe('PermissionsPage conflict handling', () => {
@@ -208,6 +259,36 @@ describe('PermissionsPage conflict handling', () => {
     ]);
   });
 
+  it('keeps an access draft mounted when the conflict refresh fails', async () => {
+    const initial = response();
+    initial.projection.access.entries = [
+      { kind: 'email', value: 'viewer@example.com', role: 'viewer' },
+    ];
+    api.getPermissions
+      .mockResolvedValueOnce(initial)
+      .mockRejectedValueOnce(new PermissionsApiError(503, {
+        error: 'cloud_policy_unavailable',
+      }));
+    api.replaceAuthorizedUsers.mockRejectedValueOnce(new PermissionsApiError(409, {
+      error: 'permission_revision_conflict',
+      current_revision: 5,
+    }));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'permissions.actions.editAccess' }));
+    await user.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+
+    expect(await screen.findByText('permissions.states.conflictRefreshBody')).toBeTruthy();
+    expect(screen.getByText('permissions.errors.permissions_refresh_failed')).toBeTruthy();
+    expect(screen.getByRole('radio', {
+      name: 'permissions.roles.editor',
+    }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText('owner@example.com')).toBeTruthy();
+    expect(api.replaceAuthorizedUsers).toHaveBeenCalledOnce();
+  });
+
   it('re-resolves an access removal by principal after a conflict reorders the list', async () => {
     const initial = response();
     initial.projection.access.entries = [
@@ -257,6 +338,33 @@ describe('PermissionsPage conflict handling', () => {
     ]);
   });
 
+  it('surfaces a non-conflict access deletion error inside the confirmation flow', async () => {
+    const initial = response();
+    initial.projection.access.entries = [
+      { kind: 'email', value: 'viewer@example.com', role: 'viewer' },
+    ];
+    api.getPermissions.mockResolvedValueOnce(initial);
+    api.replaceAuthorizedUsers.mockRejectedValueOnce(new PermissionsApiError(403, {
+      error: 'permission_authority_cloud',
+    }));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', {
+      name: 'permissions.actions.removeAccess',
+    }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', {
+      name: 'permissions.actions.removeAccess',
+    }));
+
+    expect(await within(dialog).findByText(
+      'permissions.errors.permission_authority_cloud',
+    )).toBeTruthy();
+    expect(within(dialog).getByText('permissions.states.errorTitle')).toBeTruthy();
+    expect(api.replaceAuthorizedUsers).toHaveBeenCalledOnce();
+  });
+
   it('sends owner-only as the exact Backend access mode', async () => {
     api.updateProjectAccess.mockResolvedValue({
       ok: true,
@@ -284,9 +392,11 @@ describe('PermissionsPage conflict handling', () => {
     );
   });
 
-  it('keeps the Project draft, refreshes the revision, and requires explicit retry', async () => {
+  it('re-runs Project narrowing preflight against the refreshed baseline', async () => {
     const latest = response();
     latest.projection.projects[0]!.access.revision = 2;
+    latest.projection.projects[0]!.access.mode = 'inherit';
+    latest.projection.projects[0]!.access.bindings = [];
     api.getPermissions
       .mockResolvedValueOnce(response())
       .mockResolvedValueOnce(latest);
@@ -323,6 +433,14 @@ describe('PermissionsPage conflict handling', () => {
     const retry = screen.getByRole('button', { name: 'permissions.actions.retrySave' });
     await user.click(retry);
 
+    const narrowingTitle = await screen.findByText('permissions.projects.narrowTitle');
+    const narrowingDialog = narrowingTitle.closest('[role="dialog"]');
+    expect(narrowingDialog).toBeTruthy();
+    expect(api.updateProjectAccess).toHaveBeenCalledOnce();
+    await user.click(within(narrowingDialog as HTMLElement).getByRole('button', {
+      name: 'permissions.actions.save',
+    }));
+
     await waitFor(() => expect(api.updateProjectAccess).toHaveBeenCalledTimes(2));
     expect(api.updateProjectAccess.mock.calls[1]).toEqual([
       expect.objectContaining({ project_id: 'project-1' }),
@@ -334,5 +452,32 @@ describe('PermissionsPage conflict handling', () => {
       }],
       2,
     ]);
+  });
+
+  it('keeps a Project draft mounted when the conflict refresh fails', async () => {
+    api.getPermissions
+      .mockResolvedValueOnce(response())
+      .mockRejectedValueOnce(new PermissionsApiError(503, {
+        error: 'cloud_policy_unavailable',
+      }));
+    api.updateProjectAccess.mockRejectedValueOnce(new PermissionsApiError(409, {
+      error: 'permission_revision_conflict',
+      current_revision: 2,
+    }));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('tab', { name: 'permissions.tabs.projects' }));
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+    await user.selectOptions(screen.getByLabelText('permissions.fields.role'), 'editor');
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+
+    expect(await screen.findByText('permissions.states.conflictRefreshBody')).toBeTruthy();
+    expect(screen.getByText('permissions.errors.permissions_refresh_failed')).toBeTruthy();
+    expect((screen.getByLabelText('permissions.fields.role') as HTMLSelectElement).value).toBe(
+      'editor',
+    );
+    expect(screen.getByText('Launch Plan')).toBeTruthy();
+    expect(api.updateProjectAccess).toHaveBeenCalledOnce();
   });
 });

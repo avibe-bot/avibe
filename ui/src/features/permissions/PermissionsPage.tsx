@@ -77,6 +77,16 @@ type PageLoadResult = {
   response: PermissionsResponse | null;
 };
 
+type AuthoritativeRefreshResult =
+  | { kind: 'ready'; response: PermissionsResponse }
+  | { kind: 'offline' }
+  | { kind: 'failed' };
+
+type AuthoritativeRefresh = () => Promise<AuthoritativeRefreshResult>;
+
+const POLICY_REFRESH_INTERVAL_MS = 2_000;
+const POLICY_REFRESH_MAX_ATTEMPTS = 30;
+
 async function fetchPermissionsPage(): Promise<PageLoadResult> {
   try {
     const response = await getPermissions();
@@ -96,6 +106,21 @@ async function fetchPermissionsPage(): Promise<PageLoadResult> {
     };
   }
 }
+
+const projectionIsApplying = (response: PermissionsResponse): boolean => (
+  response.projection.policy_sync.status === 'applying'
+  || response.projection.projects.some((project) => (
+    project.sync.status === 'pending' || project.sync.status === 'applying'
+  ))
+);
+
+const shouldRefreshPolicy = (response: PermissionsResponse): boolean => (
+  response.source === 'live' && !response.offline && projectionIsApplying(response)
+);
+
+const mutationErrorCode = (caught: unknown): string => (
+  caught instanceof PermissionsApiError ? caught.code : 'permissions_unavailable'
+);
 
 const principalIcon = (kind: PrincipalKind) => {
   if (kind === 'organization_group') return Users;
@@ -201,14 +226,14 @@ function AccessEntryDialog({
   editingKey,
   response,
   onOpenChange,
-  onReload,
+  onRefresh,
   onSaved,
 }: {
   open: boolean;
   editingKey: string | null;
   response: PermissionsResponse;
   onOpenChange: (open: boolean) => void;
-  onReload: () => Promise<PermissionsResponse | null>;
+  onRefresh: AuthoritativeRefresh;
   onSaved: (result: Awaited<ReturnType<typeof replaceAuthorizedUsers>>) => void;
 }) {
   const { t } = useTranslation();
@@ -225,6 +250,7 @@ function AccessEntryDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
+  const [refreshRequired, setRefreshRequired] = useState(false);
   const originalEntry = useRef<AccessEntry | null>(null);
 
   useEffect(() => {
@@ -236,6 +262,7 @@ function AccessEntryDialog({
       setRevision(response.projection.instance.authorization_revision);
       setError(undefined);
       setConflict(false);
+      setRefreshRequired(false);
     }
     initialized.current = open;
   }, [editing, open, response]);
@@ -253,6 +280,20 @@ function AccessEntryDialog({
     ? [...entries, candidate]
     : entries.map((entry, index) => (index === authoritativeIndex ? candidate : entry));
 
+  const refreshConflict = async (): Promise<boolean> => {
+    const latest = await onRefresh();
+    setConflict(true);
+    if (latest.kind !== 'ready') {
+      setRefreshRequired(true);
+      setError('permissions_refresh_failed');
+      return false;
+    }
+    setRevision(latest.response.projection.instance.authorization_revision);
+    setRefreshRequired(false);
+    setError(undefined);
+    return true;
+  };
+
   const commit = async () => {
     if (!candidate.value || hasDuplicateAccessEntries(nextEntries)) {
       setError(candidate.value ? 'duplicate_access_principal' : 'invalid_request');
@@ -266,15 +307,26 @@ function AccessEntryDialog({
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
-        const latest = await onReload();
-        if (latest) setRevision(latest.projection.instance.authorization_revision);
-        setConflict(true);
+        await refreshConflict();
       } else {
-        setError(caught instanceof PermissionsApiError ? caught.code : 'permissions_unavailable');
+        setError(mutationErrorCode(caught));
       }
     } finally {
       setSaving(false);
     }
+  };
+
+  const save = async () => {
+    if (refreshRequired) {
+      setSaving(true);
+      try {
+        await refreshConflict();
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+    await commit();
   };
 
   return (
@@ -289,7 +341,9 @@ function AccessEntryDialog({
             tone="warning"
             icon={AlertTriangle}
             title={t('permissions.states.conflictTitle')}
-            body={t('permissions.states.conflictBody')}
+            body={t(refreshRequired
+              ? 'permissions.states.conflictRefreshBody'
+              : 'permissions.states.conflictBody')}
           />
         ) : null}
         {error ? (
@@ -339,7 +393,7 @@ function AccessEntryDialog({
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={saving || !candidate.value} onClick={() => void commit()}>
+          <Button variant="brand" disabled={saving || !candidate.value} onClick={() => void save()}>
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
             {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
           </Button>
@@ -353,13 +407,13 @@ function ProjectAccessDialog({
   project,
   groups,
   onOpenChange,
-  onReload,
+  onRefresh,
   onSaved,
 }: {
   project: PermissionProject | null;
   groups: DirectoryGroup[];
   onOpenChange: (open: boolean) => void;
-  onReload: () => Promise<PermissionsResponse | null>;
+  onRefresh: AuthoritativeRefresh;
   onSaved: (result: Awaited<ReturnType<typeof updateProjectAccess>>) => void;
 }) {
   const { t } = useTranslation();
@@ -370,6 +424,7 @@ function ProjectAccessDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
+  const [refreshRequired, setRefreshRequired] = useState(false);
   const [confirmNarrowing, setConfirmNarrowing] = useState(false);
   const baseline = useRef<PermissionProject | null>(null);
   const open = Boolean(project);
@@ -382,6 +437,7 @@ function ProjectAccessDialog({
       setRevision(project.access.revision);
       setError(undefined);
       setConflict(false);
+      setRefreshRequired(false);
       setConfirmNarrowing(false);
     }
     initialized.current = open;
@@ -397,6 +453,29 @@ function ProjectAccessDialog({
   const invalid = mode === 'restricted' && (
     wireBindings.length === 0 || wireBindings.some((binding) => !binding.principal_value)
   );
+
+  const refreshConflict = async (): Promise<boolean> => {
+    if (!project) return false;
+    const latest = await onRefresh();
+    setConflict(true);
+    if (latest.kind !== 'ready') {
+      setRefreshRequired(true);
+      setError('permissions_refresh_failed');
+      return false;
+    }
+    const authoritative = latest.response.projection.projects.find(
+      (item) => item.project_id === project.project_id,
+    );
+    if (!authoritative) {
+      onOpenChange(false);
+      return false;
+    }
+    baseline.current = authoritative;
+    setRevision(authoritative.access.revision);
+    setRefreshRequired(false);
+    setError(undefined);
+    return true;
+  };
 
   const commit = async () => {
     if (!project || invalid) return;
@@ -417,17 +496,9 @@ function ProjectAccessDialog({
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
-        const latest = await onReload();
-        const authoritative = latest?.projection.projects.find((item) => item.project_id === project.project_id);
-        if (authoritative) {
-          baseline.current = authoritative;
-          setRevision(authoritative.access.revision);
-        } else if (caught.currentRevision !== undefined) {
-          setRevision(caught.currentRevision);
-        }
-        setConflict(true);
+        await refreshConflict();
       } else {
-        setError(caught instanceof PermissionsApiError ? caught.code : 'permissions_unavailable');
+        setError(mutationErrorCode(caught));
       }
     } finally {
       setSaving(false);
@@ -435,14 +506,23 @@ function ProjectAccessDialog({
     }
   };
 
-  const save = () => {
+  const save = async () => {
     if (!project || invalid) return;
+    if (refreshRequired) {
+      setSaving(true);
+      try {
+        await refreshConflict();
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     const current = baseline.current ?? project;
     if (requiresProjectNarrowing(projectMode(current), current.access.bindings, mode, wireBindings)) {
       setConfirmNarrowing(true);
       return;
     }
-    void commit();
+    await commit();
   };
 
   const addBinding = () => {
@@ -464,7 +544,7 @@ function ProjectAccessDialog({
             <DialogTitle>{t('permissions.projects.dialogTitle', { name: project?.display_name })}</DialogTitle>
             <DialogDescription>{t('permissions.projects.dialogBody')}</DialogDescription>
           </DialogHeader>
-          {conflict ? <Notice tone="warning" icon={AlertTriangle} title={t('permissions.states.conflictTitle')} body={t('permissions.states.conflictBody')} /> : null}
+          {conflict ? <Notice tone="warning" icon={AlertTriangle} title={t('permissions.states.conflictTitle')} body={t(refreshRequired ? 'permissions.states.conflictRefreshBody' : 'permissions.states.conflictBody')} /> : null}
           {error ? <Notice tone="danger" icon={ShieldX} title={t('permissions.states.errorTitle')} body={t(`permissions.errors.${error}`, { defaultValue: t('permissions.errors.generic') })} /> : null}
           <div className="space-y-5">
             <div className="space-y-1.5">
@@ -536,7 +616,7 @@ function ProjectAccessDialog({
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-            <Button variant="brand" disabled={saving || invalid} onClick={conflict ? () => void commit() : save}>
+            <Button variant="brand" disabled={saving || invalid} onClick={() => void save()}>
               {saving ? <Loader2 className="size-4 animate-spin" /> : null}
               {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
             </Button>
@@ -563,21 +643,64 @@ export function PermissionsPage() {
   const [editingAccess, setEditingAccess] = useState<string | null | undefined>(undefined);
   const [editingProject, setEditingProject] = useState<PermissionProject | null>(null);
   const [removingAccess, setRemovingAccess] = useState<string | null>(null);
+  const [removalConflict, setRemovalConflict] = useState(false);
+  const [removalRefreshRequired, setRemovalRefreshRequired] = useState(false);
+  const [removalError, setRemovalError] = useState<string>();
   const [search, setSearch] = useState('');
+  const mounted = useRef(true);
 
-  const load = useCallback(async (): Promise<PermissionsResponse | null> => {
+  const loadPage = useCallback(async (): Promise<void> => {
     const result = await fetchPermissionsPage();
-    setState(result.state);
-    return result.response;
+    if (mounted.current) setState(result.state);
+  }, []);
+
+  const refreshReady = useCallback(async (): Promise<AuthoritativeRefreshResult> => {
+    const result = await fetchPermissionsPage();
+    if (!result.response) return { kind: 'failed' };
+    if (result.response.source !== 'live' || result.response.offline) {
+      return { kind: 'offline' };
+    }
+    if (mounted.current) setState({ kind: 'ready', response: result.response });
+    return { kind: 'ready', response: result.response };
   }, []);
 
   useEffect(() => {
     let active = true;
+    mounted.current = true;
     void fetchPermissionsPage().then((result) => {
       if (active) setState(result.state);
     });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      mounted.current = false;
+    };
   }, []);
+
+  const livePolicyIsApplying = state.kind === 'ready' && shouldRefreshPolicy(state.response);
+
+  useEffect(() => {
+    if (!livePolicyIsApplying) return undefined;
+    let active = true;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const schedule = () => {
+      timer = setTimeout(() => { void poll(); }, POLICY_REFRESH_INTERVAL_MS);
+    };
+    const poll = async () => {
+      attempts += 1;
+      const result = await refreshReady();
+      if (!active || result.kind === 'offline') return;
+      if (result.kind === 'ready' && !shouldRefreshPolicy(result.response)) return;
+      if (attempts < POLICY_REFRESH_MAX_ATTEMPTS) schedule();
+    };
+
+    schedule();
+    return () => {
+      active = false;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [livePolicyIsApplying, refreshReady]);
 
   if (state.kind === 'loading') {
     return (
@@ -594,7 +717,7 @@ export function PermissionsPage() {
     return (
       <div className="space-y-5">
         <EmptyState icon={state.offline ? WifiOff : CloudOff} title={t('permissions.states.unavailableTitle')} body={t('permissions.states.unavailableBody')} />
-        <div className="flex justify-center"><Button variant="outline" onClick={() => void load()}><RefreshCw className="size-4" />{t('common.retry')}</Button></div>
+        <div className="flex justify-center"><Button variant="outline" onClick={() => void loadPage()}><RefreshCw className="size-4" />{t('common.retry')}</Button></div>
       </div>
     );
   }
@@ -605,8 +728,7 @@ export function PermissionsPage() {
   const editable = capabilities.can_manage_instance
     && projection.instance.local_mutation_allowed
     && !response.offline;
-  const applying = projection.policy_sync.status === 'applying'
-    || projection.projects.some((project) => ['pending', 'applying'].includes(project.sync.status));
+  const applying = projectionIsApplying(response);
   const filteredProjects = projection.projects.filter((project) => (
     `${project.display_name} ${project.project_id}`.toLowerCase().includes(search.trim().toLowerCase())
   ));
@@ -617,18 +739,51 @@ export function PermissionsPage() {
       : current);
   };
 
+  const closeRemoval = () => {
+    setRemovingAccess(null);
+    setRemovalConflict(false);
+    setRemovalRefreshRequired(false);
+    setRemovalError(undefined);
+  };
+
+  const refreshRemovalConflict = async (): Promise<boolean> => {
+    if (removingAccess === null) return false;
+    const latest = await refreshReady();
+    setRemovalConflict(true);
+    if (latest.kind !== 'ready') {
+      setRemovalRefreshRequired(true);
+      setRemovalError('permissions_refresh_failed');
+      return false;
+    }
+    const targetExists = latest.response.projection.access.entries.some(
+      (entry) => accessEntryKey(entry) === removingAccess,
+    );
+    if (!targetExists) {
+      closeRemoval();
+      return false;
+    }
+    setRemovalRefreshRequired(false);
+    setRemovalError(undefined);
+    return true;
+  };
+
   const removeAccess = async () => {
     if (removingAccess === null) return;
+    if (removalRefreshRequired) {
+      await refreshRemovalConflict();
+      return;
+    }
     const targetExists = projection.access.entries.some(
       (entry) => accessEntryKey(entry) === removingAccess,
     );
     if (!targetExists) {
-      setRemovingAccess(null);
+      closeRemoval();
       return;
     }
     const entries = projection.access.entries.filter(
       (entry) => accessEntryKey(entry) !== removingAccess,
     );
+    setRemovalError(undefined);
     try {
       const result = await replaceAuthorizedUsers(entries, projection.instance.authorization_revision);
       updateResponse((current) => ({
@@ -639,9 +794,13 @@ export function PermissionsPage() {
           access: { ...current.projection.access, entries: result.entries },
         },
       }));
-      setRemovingAccess(null);
+      closeRemoval();
     } catch (caught) {
-      if (isRevisionConflict(caught)) await load();
+      if (isRevisionConflict(caught)) {
+        await refreshRemovalConflict();
+      } else {
+        setRemovalError(mutationErrorCode(caught));
+      }
     }
   };
 
@@ -738,7 +897,7 @@ export function PermissionsPage() {
                     <Badge variant="secondary">{t(`permissions.principals.${entry.kind}`)}</Badge>
                     <Badge variant={entry.role === 'editor' ? 'success' : 'secondary'}>{entry.role === 'editor' ? <Pencil className="size-3" /> : <Eye className="size-3" />}{t(`permissions.roles.${entry.role}`)}</Badge>
                     <div className="flex justify-end gap-1">
-                      {editable ? <><Button size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => setRemovingAccess(entryKey)}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
+                      {editable ? <><Button size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => { setRemovingAccess(entryKey); setRemovalConflict(false); setRemovalRefreshRequired(false); setRemovalError(undefined); }}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
                     </div>
                   </div>
                 );
@@ -781,7 +940,7 @@ export function PermissionsPage() {
         editingKey={editingAccess ?? null}
         response={response}
         onOpenChange={(open) => { if (!open) setEditingAccess(undefined); }}
-        onReload={load}
+        onRefresh={refreshReady}
         onSaved={(result) => updateResponse((current) => ({
           ...current,
           projection: {
@@ -795,7 +954,7 @@ export function PermissionsPage() {
         project={editingProject}
         groups={groups}
         onOpenChange={(open) => { if (!open) setEditingProject(null); }}
-        onReload={load}
+        onRefresh={refreshReady}
         onSaved={(result) => updateResponse((current) => ({
           ...current,
           projection: {
@@ -807,13 +966,34 @@ export function PermissionsPage() {
       />
       <ConfirmDialog
         open={removingAccess !== null}
-        onOpenChange={(open) => { if (!open) setRemovingAccess(null); }}
+        onOpenChange={(open) => { if (!open) closeRemoval(); }}
         title={t('permissions.access.removeTitle')}
         description={t('permissions.access.removeBody')}
         destructive
         confirmLabel={t('permissions.actions.removeAccess')}
         onConfirm={removeAccess}
-      />
+      >
+        {removalConflict ? (
+          <Notice
+            tone="warning"
+            icon={AlertTriangle}
+            title={t('permissions.states.conflictTitle')}
+            body={t(removalRefreshRequired
+              ? 'permissions.states.conflictRefreshBody'
+              : 'permissions.states.conflictBody')}
+          />
+        ) : null}
+        {removalError ? (
+          <Notice
+            tone="danger"
+            icon={ShieldX}
+            title={t('permissions.states.errorTitle')}
+            body={t(`permissions.errors.${removalError}`, {
+              defaultValue: t('permissions.errors.generic'),
+            })}
+          />
+        ) : null}
+      </ConfirmDialog>
     </div>
   );
 }

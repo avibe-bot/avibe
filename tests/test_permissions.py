@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 import requests
@@ -61,6 +62,159 @@ def _projection(instance_id: str = "inst-123") -> dict:
             "resources": {"active": 0, "error": 0, "offline": 0, "applying": 0, "in_sync": 0},
         },
     }
+
+
+def _complete_projection(instance_id: str = "inst-123") -> dict:
+    projection = _projection(instance_id)
+    projection["access"]["entries"] = [
+        {"kind": "email", "value": "viewer@example.com", "role": "viewer"}
+    ]
+    projection["directory"] = {
+        "members": [
+            {
+                "id": "member-1",
+                "email": "member@example.com",
+                "organization_role": "member",
+                "group_ids": ["group-1"],
+            }
+        ],
+        "groups": [
+            {
+                "id": "group-1",
+                "name": "Launch Team",
+                "archived_at": None,
+            }
+        ],
+    }
+    projection["projects"] = [
+        {
+            "project_id": "project-1",
+            "organization_id": "org-1",
+            "display_name": "Launch Plan",
+            "access": {
+                "mode": "restricted",
+                "revision": 2,
+                "bindings": [
+                    {
+                        "principal_kind": "organization_group",
+                        "principal_value": "group-1",
+                        "access_role": "viewer",
+                    }
+                ],
+            },
+            "sync": {
+                "status": "in_sync",
+                "desired_access_revision": 2,
+                "applied_access_revision": 2,
+                "last_synced_at": "2026-08-17T12:00:00.000Z",
+                "last_sync_error": "previous error",
+            },
+        }
+    ]
+    projection["policy_sync"] = {
+        "status": "in_sync",
+        "projects": {"active": 1, "error": 0, "offline": 0, "applying": 0, "in_sync": 1},
+        "resources": {"active": 0, "error": 0, "offline": 0, "applying": 0, "in_sync": 0},
+    }
+    return projection
+
+
+_MISSING = object()
+
+
+def _replace_nested(value: dict, path: tuple[str | int, ...], replacement: object) -> None:
+    parent: Any = value
+    for key in path[:-1]:
+        parent = parent[key]
+    key = path[-1]
+    if replacement is _MISSING:
+        del parent[key]
+    else:
+        parent[key] = replacement
+
+
+MALFORMED_PROJECTION_CASES = [
+    pytest.param(("schema_version",), True, id="schema-version"),
+    pytest.param(("instance",), None, id="instance-container"),
+    pytest.param(("instance", "id"), 123, id="instance-id"),
+    pytest.param(("instance", "access_mode"), "private", id="instance-access-mode"),
+    pytest.param(("instance", "permission_authority"), "local", id="permission-authority"),
+    pytest.param(("instance", "local_mutation_allowed"), 1, id="local-mutation-flag"),
+    pytest.param(("instance", "authorization_revision"), True, id="authorization-revision"),
+    pytest.param(("capabilities",), None, id="capabilities-container"),
+    pytest.param(("capabilities", 0), "unsupported", id="capability-value"),
+    pytest.param(("access",), None, id="access-container"),
+    pytest.param(("access", "owner"), None, id="owner-container"),
+    pytest.param(("access", "owner", "email"), 123, id="owner-email"),
+    pytest.param(("access", "owner", "role"), "viewer", id="owner-role"),
+    pytest.param(("access", "entries"), None, id="access-entries-container"),
+    pytest.param(("access", "entries", 0), "entry", id="access-entry-container"),
+    pytest.param(("access", "entries", 0, "kind"), "user", id="access-entry-kind"),
+    pytest.param(("access", "entries", 0, "value"), 123, id="access-entry-value"),
+    pytest.param(("access", "entries", 0, "role"), "owner", id="access-entry-role"),
+    pytest.param(("directory",), None, id="directory-container"),
+    pytest.param(("directory", "members"), None, id="members-container"),
+    pytest.param(("directory", "members", 0), "member", id="member-container"),
+    pytest.param(("directory", "members", 0, "id"), 123, id="member-id"),
+    pytest.param(("directory", "members", 0, "email"), 123, id="member-email"),
+    pytest.param(
+        ("directory", "members", 0, "organization_role"),
+        "viewer",
+        id="member-organization-role",
+    ),
+    pytest.param(("directory", "members", 0, "group_ids"), None, id="member-groups"),
+    pytest.param(("directory", "members", 0, "group_ids", 0), 123, id="member-group-id"),
+    pytest.param(("directory", "groups"), None, id="groups-container"),
+    pytest.param(("directory", "groups", 0), "group", id="group-container"),
+    pytest.param(("directory", "groups", 0, "id"), 123, id="group-id"),
+    pytest.param(("directory", "groups", 0, "name"), 123, id="group-name"),
+    pytest.param(("directory", "groups", 0, "archived_at"), 123, id="group-archived-at"),
+    pytest.param(("projects",), None, id="projects-container"),
+    pytest.param(("projects", 0), "project", id="project-container"),
+    pytest.param(("projects", 0, "project_id"), 123, id="project-id"),
+    pytest.param(("projects", 0, "organization_id"), 123, id="project-organization-id"),
+    pytest.param(("projects", 0, "display_name"), 123, id="project-display-name"),
+    pytest.param(("projects", 0, "access"), None, id="project-access-container"),
+    pytest.param(("projects", 0, "access", "mode"), "public", id="project-access-mode"),
+    pytest.param(("projects", 0, "access", "revision"), True, id="project-access-revision"),
+    pytest.param(("projects", 0, "access", "bindings"), None, id="bindings-container"),
+    pytest.param(("projects", 0, "access", "bindings", 0), "binding", id="binding-container"),
+    pytest.param(
+        ("projects", 0, "access", "bindings", 0, "principal_kind"),
+        "user",
+        id="binding-kind",
+    ),
+    pytest.param(
+        ("projects", 0, "access", "bindings", 0, "principal_value"),
+        123,
+        id="binding-value",
+    ),
+    pytest.param(
+        ("projects", 0, "access", "bindings", 0, "access_role"),
+        "owner",
+        id="binding-role",
+    ),
+    pytest.param(("projects", 0, "sync"), None, id="project-sync-container"),
+    pytest.param(("projects", 0, "sync", "status"), "unknown", id="project-sync-status"),
+    pytest.param(
+        ("projects", 0, "sync", "desired_access_revision"),
+        True,
+        id="desired-access-revision",
+    ),
+    pytest.param(
+        ("projects", 0, "sync", "applied_access_revision"),
+        -1,
+        id="applied-access-revision",
+    ),
+    pytest.param(("projects", 0, "sync", "last_synced_at"), 123, id="last-synced-at"),
+    pytest.param(("projects", 0, "sync", "last_sync_error"), None, id="last-sync-error"),
+    pytest.param(("policy_sync",), None, id="policy-sync-container"),
+    pytest.param(("policy_sync", "status"), "pending", id="policy-sync-status"),
+    pytest.param(("policy_sync", "projects"), None, id="project-counts-container"),
+    pytest.param(("policy_sync", "resources"), None, id="resource-counts-container"),
+    pytest.param(("policy_sync", "projects", "active"), True, id="sync-count-value"),
+    pytest.param(("policy_sync", "resources", "in_sync"), _MISSING, id="sync-count-required-field"),
+]
 
 
 class _Response:
@@ -204,6 +358,147 @@ def test_permissions_rejects_backend_projection_for_another_instance(monkeypatch
 
     with pytest.raises(permissions.PermissionsInvalidResponseError, match="permissions_instance_mismatch"):
         permissions.get_current_permissions(_config())
+
+
+@pytest.mark.parametrize(("path", "replacement"), MALFORMED_PROJECTION_CASES)
+def test_permissions_rejects_each_malformed_nested_projection_before_caching(
+    monkeypatch,
+    path: tuple[str | int, ...],
+    replacement: object,
+) -> None:
+    malformed = _complete_projection()
+    _replace_nested(malformed, path, replacement)
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, malformed),
+    )
+
+    with pytest.raises(permissions.PermissionsInvalidResponseError):
+        permissions.get_current_permissions(_config())
+
+    assert not permissions._cache_path().exists()  # noqa: SLF001
+
+
+def test_permissions_ignores_a_malformed_offline_cache(monkeypatch) -> None:
+    malformed = _complete_projection()
+    malformed["projects"][0]["sync"] = None
+    permissions._write_cache("inst-123", malformed)  # noqa: SLF001
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError()),
+    )
+
+    with pytest.raises(permissions.PermissionsUnavailableError):
+        permissions.get_current_permissions(_config())
+
+
+def test_invalid_mutation_result_cannot_replace_the_valid_cache(monkeypatch) -> None:
+    live = _complete_projection()
+
+    def request(method, _url, **_kwargs):
+        if method == "GET":
+            return _Response(200, live)
+        return _Response(
+            200,
+            {
+                "ok": True,
+                "entries": [{"kind": "email", "value": "bad@example.com", "role": "owner"}],
+                "authorization_revision": 4,
+            },
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+    config = _config()
+    permissions.get_current_permissions(config)
+
+    with pytest.raises(permissions.PermissionsInvalidResponseError):
+        permissions.replace_authorized_users(
+            {"entries": [], "if_match_revision": 3},
+            config,
+        )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection == live
+
+
+def test_mutation_result_is_sanitized_before_cache_write(monkeypatch) -> None:
+    live = _projection()
+    backend_available = True
+
+    def request(method, _url, **_kwargs):
+        if method == "GET":
+            if not backend_available:
+                raise requests.ConnectionError()
+            return _Response(200, live)
+        return _Response(
+            200,
+            {
+                "ok": True,
+                "authorization_revision": 4,
+                "entries": [
+                    {
+                        "kind": "email",
+                        "value": "new@example.com",
+                        "role": "editor",
+                        "future": "preserved",
+                        "api_token": "must-not-persist",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+    config = _config()
+    permissions.get_current_permissions(config)
+
+    result = permissions.replace_authorized_users(
+        {"entries": [], "if_match_revision": 3},
+        config,
+    )
+    backend_available = False
+    cached = permissions.get_current_permissions(config)
+
+    assert result["entries"][0]["future"] == "preserved"
+    assert "api_token" not in result["entries"][0]
+    assert cached.projection["access"]["entries"] == result["entries"]
+
+
+def test_older_mutation_result_cannot_mix_its_payload_into_a_newer_cache(monkeypatch) -> None:
+    live = _complete_projection()
+    live["instance"]["authorization_revision"] = 5
+    backend_available = True
+    stale_entries = [{"kind": "email", "value": "stale@example.com", "role": "viewer"}]
+
+    def request(method, _url, **_kwargs):
+        if method == "GET":
+            if not backend_available:
+                raise requests.ConnectionError()
+            return _Response(200, live)
+        return _Response(
+            200,
+            {
+                "ok": True,
+                "entries": stale_entries,
+                "authorization_revision": 4,
+            },
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+    config = _config()
+    permissions.get_current_permissions(config)
+    permissions.replace_authorized_users(
+        {"entries": stale_entries, "if_match_revision": 3},
+        config,
+    )
+    backend_available = False
+
+    cached = permissions.get_current_permissions(config)
+
+    assert cached.projection["instance"]["authorization_revision"] == 5
+    assert cached.projection["access"]["entries"] == live["access"]["entries"]
 
 
 def test_authorized_users_mutation_refreshes_offline_cache(monkeypatch) -> None:

@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, NoReturn
 from urllib.parse import quote
 
 import requests
@@ -23,6 +23,20 @@ CACHE_SCHEMA_VERSION = 1
 CACHE_FILENAME = "permissions_projection.json"
 DEFAULT_TIMEOUT_SECONDS = 8.0
 _SENSITIVE_KEY_PARTS = ("secret", "token", "credential")
+_ACCESS_MODES = frozenset({"allowlist", "public"})
+_PERMISSION_AUTHORITIES = frozenset({"instance", "cloud"})
+_PERMISSION_CAPABILITIES = frozenset(
+    {"instance.permissions.read", "instance.permissions.mutate"}
+)
+_PRINCIPAL_KINDS = frozenset({"email", "email_domain", "organization_group"})
+_ACCESS_ROLES = frozenset({"viewer", "editor"})
+_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
+_PROJECT_ACCESS_MODES = frozenset({"inherit", "restricted", "owner_only"})
+_PROJECT_SYNC_STATUSES = frozenset(
+    {"in_sync", "pending", "applying", "offline", "error", "deleted"}
+)
+_POLICY_SYNC_STATUSES = frozenset({"none", "in_sync", "applying", "offline", "error"})
+_SYNC_COUNT_KEYS = ("active", "error", "offline", "applying", "in_sync")
 logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.RLock()
 
@@ -86,26 +100,204 @@ def _strip_sensitive(value: Any) -> Any:
     raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
 
 
+def _invalid_response() -> NoReturn:
+    raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
+
+
+def _require_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        _invalid_response()
+    return value
+
+
+def _require_list(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        _invalid_response()
+    return value
+
+
+def _require_keys(value: Mapping[str, Any], *keys: str) -> None:
+    if any(key not in value for key in keys):
+        _invalid_response()
+
+
+def _require_string(value: Any, *, nullable: bool = False) -> None:
+    if value is None and nullable:
+        return
+    if not isinstance(value, str):
+        _invalid_response()
+
+
+def _require_enum(value: Any, allowed: frozenset[str]) -> None:
+    if not isinstance(value, str) or value not in allowed:
+        _invalid_response()
+
+
+def _require_nonnegative_integer(value: Any) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        _invalid_response()
+
+
+def _validate_access_entries(value: Any) -> list[Any]:
+    entries = _require_list(value)
+    for item in entries:
+        entry = _require_mapping(item)
+        _require_keys(entry, "kind", "value", "role")
+        _require_enum(entry["kind"], _PRINCIPAL_KINDS)
+        _require_string(entry["value"])
+        _require_enum(entry["role"], _ACCESS_ROLES)
+    return entries
+
+
+def _validate_project(value: Any) -> dict[str, Any]:
+    project = _require_mapping(value)
+    _require_keys(project, "project_id", "organization_id", "display_name", "access", "sync")
+    _require_string(project["project_id"])
+    _require_string(project["organization_id"], nullable=True)
+    _require_string(project["display_name"])
+
+    access = _require_mapping(project["access"])
+    _require_keys(access, "mode", "revision", "bindings")
+    _require_enum(access["mode"], _PROJECT_ACCESS_MODES)
+    _require_nonnegative_integer(access["revision"])
+    for item in _require_list(access["bindings"]):
+        binding = _require_mapping(item)
+        _require_keys(binding, "principal_kind", "principal_value", "access_role")
+        _require_enum(binding["principal_kind"], _PRINCIPAL_KINDS)
+        _require_string(binding["principal_value"])
+        _require_enum(binding["access_role"], _ACCESS_ROLES)
+
+    sync = _require_mapping(project["sync"])
+    _require_keys(
+        sync,
+        "status",
+        "desired_access_revision",
+        "applied_access_revision",
+        "last_synced_at",
+    )
+    _require_enum(sync["status"], _PROJECT_SYNC_STATUSES)
+    _require_nonnegative_integer(sync["desired_access_revision"])
+    _require_nonnegative_integer(sync["applied_access_revision"])
+    _require_string(sync["last_synced_at"], nullable=True)
+    if "last_sync_error" in sync:
+        _require_string(sync["last_sync_error"])
+    return project
+
+
+def _validate_sync_counts(value: Any) -> None:
+    counts = _require_mapping(value)
+    _require_keys(counts, *_SYNC_COUNT_KEYS)
+    for key in _SYNC_COUNT_KEYS:
+        _require_nonnegative_integer(counts[key])
+
+
 def _validated_projection(payload: Any, instance_id: str) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
-        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
+        _invalid_response()
     sanitized = _strip_sensitive(payload)
-    if not isinstance(sanitized, dict) or sanitized.get("schema_version") != 1:
-        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
-    instance = sanitized.get("instance")
-    if not isinstance(instance, dict) or instance.get("id") != instance_id:
+    projection = _require_mapping(sanitized)
+    _require_keys(
+        projection,
+        "schema_version",
+        "instance",
+        "capabilities",
+        "access",
+        "directory",
+        "projects",
+        "policy_sync",
+    )
+    if (
+        not isinstance(projection["schema_version"], int)
+        or isinstance(projection["schema_version"], bool)
+        or projection["schema_version"] != 1
+    ):
+        _invalid_response()
+
+    instance = _require_mapping(projection["instance"])
+    _require_keys(
+        instance,
+        "id",
+        "access_mode",
+        "permission_authority",
+        "local_mutation_allowed",
+        "authorization_revision",
+    )
+    if not isinstance(instance["id"], str):
+        _invalid_response()
+    if instance["id"] != instance_id:
         raise PermissionsInvalidResponseError("permissions_instance_mismatch")
-    if instance.get("permission_authority") not in {"instance", "cloud"}:
-        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
-    if not isinstance(instance.get("local_mutation_allowed"), bool):
-        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
-    revision = instance.get("authorization_revision")
-    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
-        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
-    for key in ("capabilities", "access", "directory", "projects", "policy_sync"):
-        if key not in sanitized:
-            raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
-    return sanitized
+    _require_enum(instance["access_mode"], _ACCESS_MODES)
+    _require_enum(instance["permission_authority"], _PERMISSION_AUTHORITIES)
+    if not isinstance(instance["local_mutation_allowed"], bool):
+        _invalid_response()
+    _require_nonnegative_integer(instance["authorization_revision"])
+
+    capabilities = _require_list(projection["capabilities"])
+    for capability in capabilities:
+        _require_enum(capability, _PERMISSION_CAPABILITIES)
+    if (
+        "instance.permissions.read" not in capabilities
+        or len(capabilities) != len(set(capabilities))
+    ):
+        _invalid_response()
+
+    access = _require_mapping(projection["access"])
+    _require_keys(access, "owner", "entries")
+    owner = _require_mapping(access["owner"])
+    _require_keys(owner, "email", "role")
+    _require_string(owner["email"], nullable=True)
+    if owner["role"] != "owner":
+        _invalid_response()
+    _validate_access_entries(access["entries"])
+
+    directory = _require_mapping(projection["directory"])
+    _require_keys(directory, "members", "groups")
+    for item in _require_list(directory["members"]):
+        member = _require_mapping(item)
+        _require_keys(member, "id", "email", "organization_role", "group_ids")
+        _require_string(member["id"])
+        _require_string(member["email"])
+        _require_enum(member["organization_role"], _ORGANIZATION_ROLES)
+        for group_id in _require_list(member["group_ids"]):
+            _require_string(group_id)
+    for item in _require_list(directory["groups"]):
+        group = _require_mapping(item)
+        _require_keys(group, "id", "name", "archived_at")
+        _require_string(group["id"])
+        _require_string(group["name"])
+        _require_string(group["archived_at"], nullable=True)
+
+    for project in _require_list(projection["projects"]):
+        _validate_project(project)
+
+    policy_sync = _require_mapping(projection["policy_sync"])
+    _require_keys(policy_sync, "status", "projects", "resources")
+    _require_enum(policy_sync["status"], _POLICY_SYNC_STATUSES)
+    _validate_sync_counts(policy_sync["projects"])
+    _validate_sync_counts(policy_sync["resources"])
+    return projection
+
+
+def _validated_authorized_users_result(payload: Any) -> dict[str, Any]:
+    result = _require_mapping(_strip_sensitive(payload))
+    _require_keys(result, "ok", "entries", "authorization_revision")
+    if result["ok"] is not True:
+        _invalid_response()
+    _validate_access_entries(result["entries"])
+    _require_nonnegative_integer(result["authorization_revision"])
+    return result
+
+
+def _validated_project_result(payload: Any, project_id: str) -> dict[str, Any]:
+    result = _require_mapping(_strip_sensitive(payload))
+    _require_keys(result, "ok", "project", "authorization_revision")
+    if result["ok"] is not True:
+        _invalid_response()
+    project = _validate_project(result["project"])
+    if project["project_id"] != project_id:
+        _invalid_response()
+    _require_nonnegative_integer(result["authorization_revision"])
+    return result
 
 
 def _runtime_credentials(config: V2Config) -> tuple[str, str, str]:
@@ -174,26 +366,20 @@ def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
     )
 
 
-def _cache_projection(instance_id: str, projection: dict[str, Any]) -> None:
+def _cache_projection(instance_id: str, projection: Any) -> None:
+    validated = _validated_projection(projection, instance_id)
     with _CACHE_LOCK:
         cached = _read_cache(instance_id)
         if (
             cached is not None
             and cached.projection["instance"]["authorization_revision"]
-            > projection["instance"]["authorization_revision"]
+            > validated["instance"]["authorization_revision"]
         ):
             return
         try:
-            _write_cache(instance_id, projection)
+            _write_cache(instance_id, validated)
         except OSError:
             logger.warning("Unable to cache the current Permissions projection", exc_info=True)
-
-
-def _mutation_revision(result: Mapping[str, Any]) -> int:
-    revision = result.get("authorization_revision")
-    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
-        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
-    return revision
 
 
 def _cache_mutation_result(
@@ -209,11 +395,13 @@ def _cache_mutation_result(
             return
         projection = cached.projection
         current_revision = projection["instance"]["authorization_revision"]
+        if authorization_revision < current_revision:
+            return
         projection = {
             **projection,
             "instance": {
                 **projection["instance"],
-                "authorization_revision": max(current_revision, authorization_revision),
+                "authorization_revision": authorization_revision,
             },
         }
         if access_entries is not None:
@@ -305,14 +493,12 @@ def replace_authorized_users(
     config: V2Config | None = None,
 ) -> dict[str, Any]:
     config = config or V2Config.load()
-    result, instance_id = _backend_request(config, "PUT", "authorized-users", payload)
-    entries = result.get("entries")
-    if not isinstance(entries, list):
-        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
+    payload_result, instance_id = _backend_request(config, "PUT", "authorized-users", payload)
+    result = _validated_authorized_users_result(payload_result)
     _cache_mutation_result(
         instance_id,
-        _mutation_revision(result),
-        access_entries=entries,
+        result["authorization_revision"],
+        access_entries=result["entries"],
     )
     return result
 
@@ -325,19 +511,17 @@ def update_project_access(
     if not isinstance(project_id, str) or not project_id or "/" in project_id:
         raise PermissionsInvalidResponseError("invalid_project_id")
     config = config or V2Config.load()
-    result, instance_id = _backend_request(
+    payload_result, instance_id = _backend_request(
         config,
         "PUT",
         f"projects/{quote(project_id, safe='')}/access",
         payload,
     )
-    project = result.get("project")
-    if not isinstance(project, Mapping) or project.get("project_id") != project_id:
-        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
+    result = _validated_project_result(payload_result, project_id)
     _cache_mutation_result(
         instance_id,
-        _mutation_revision(result),
-        project=project,
+        result["authorization_revision"],
+        project=result["project"],
     )
     return result
 

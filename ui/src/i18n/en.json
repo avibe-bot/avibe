@@ -4630,6 +4630,7 @@
       "applyingBody": "One or more Project policies are waiting for this Avibe to acknowledge them.",
       "conflictTitle": "This policy changed elsewhere",
       "conflictBody": "Your draft was kept. The latest revision is loaded; review the draft and retry explicitly.",
+      "conflictRefreshBody": "Your draft was kept, but the latest revision could not be loaded. Refresh it before retrying the change.",
       "errorTitle": "Unable to save Permissions"
     },
     "sync": {
@@ -4658,6 +4659,7 @@
     "errors": {
       "generic": "Avibe could not complete this Permissions request.",
       "permissions_unavailable": "The Permissions service is unavailable.",
+      "permissions_refresh_failed": "The latest authoritative policy could not be loaded. Retry the refresh before saving.",
       "permission_authority_cloud": "This policy is managed by Avibe Cloud and cannot be changed here.",
       "instance_access_forbidden": "Your current Avibe role cannot change Permissions.",
       "cloud_policy_unavailable": "The current Cloud policy is temporarily unavailable.",
