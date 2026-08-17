@@ -3880,65 +3880,75 @@ class AgentAuthService:
             await self._clear_codex_api_key_for_oauth()
         try:
             config = getattr(self.controller, "config", None)
-            target = getattr(getattr(config, "agents", None), backend, None)
-            saver = getattr(config, "save", None) if config is not None else None
-            if target is None or not callable(saver):
-                from config.v2_config import V2Config
-
-                loaded = V2Config.load()
-                target = getattr(getattr(loaded, "agents", None), backend, None)
-            if target is None:
-                return
-            # An explicit OAuth save must also flip ``auth_mode_set``
-            # for Claude — otherwise a successful OAuth flow on a
-            # legacy install never trips the marker (auth_mode was
-            # already "oauth" from the schema default), so
-            # ``build_claude_subprocess_env`` keeps preserving env-var
-            # auth and the OAuth credentials are ignored at launch.
-            needs_mode_write = getattr(target, "auth_mode", None) != auth_mode
-            needs_marker_write = (
-                backend == "claude"
-                and not bool(getattr(target, "auth_mode_set", False))
-            )
-            needs_codex_oauth_cleanup = (
-                backend == "codex"
-                and auth_mode == "oauth"
-                and (
-                    bool(getattr(target, "api_key", None))
-                    or bool(getattr(target, "base_url", None))
-                    or getattr(target, "oauth_relay_marker", None) is not None
-                    or captured_codex_relay is not None
-                    or observed_codex_api_key_auth
-                )
-            )
-            # Relay-marker retention semantics for the OAuth transition:
-            #   fresh capture           → overwrite (latest relay wins)
-            #   official-key transition → clear (the user deliberately
-            #                            left relay auth; a stale marker
-            #                            would resurface and reroute a
-            #                            future key to the old relay)
-            #   repeated pure-OAuth     → retain (nothing new observed;
-            #                            the earlier capture stays valid)
-            if captured_codex_relay is not None:
-                resolved_codex_relay_marker: dict | None = captured_codex_relay
-            elif observed_codex_api_key_auth:
-                resolved_codex_relay_marker = None
-            else:
-                resolved_codex_relay_marker = getattr(target, "oauth_relay_marker", None)
-            if not needs_mode_write and not needs_marker_write and not needs_codex_oauth_cleanup:
-                return
 
             # Persisted write: cross-process patch transaction (#1458
-            # stage ③) — load fresh inside the file lock, assign only
-            # the auth fields, save. The relay-marker pre-persist above
-            # stays a SEPARATE durable boundary: it must land before the
-            # external ~/.codex cleanup, which no config transaction can
-            # span.
+            # stage ③) — load fresh inside the file lock, compute the
+            # needs/marker decisions FROM that lock-fresh snapshot, apply
+            # only the auth fields, save. Decisions computed outside the
+            # lock could race an auth save from the other process (e.g.
+            # a stale target reading "already explicit OAuth" while the
+            # UI API just persisted API-key mode — the early no-op path
+            # would leave the API-key mode selected after a successful
+            # OAuth flow, or restore an older relay marker over a fresh
+            # one). The relay-marker pre-persist above stays a SEPARATE
+            # durable boundary: it must land before the external ~/.codex
+            # cleanup, which no config transaction can span.
             from config.v2_config import update_config_fields
 
+            applied: dict[str, Any] = {}
+
             def _apply_auth_fields(cfg) -> None:
+                # An explicit OAuth save must also flip ``auth_mode_set``
+                # for Claude — otherwise a successful OAuth flow on a
+                # legacy install never trips the marker (auth_mode was
+                # already "oauth" from the schema default), so
+                # ``build_claude_subprocess_env`` keeps preserving
+                # env-var auth and the OAuth credentials are ignored at
+                # launch.
                 cfg_target = getattr(getattr(cfg, "agents", None), backend, None)
                 if cfg_target is None:
+                    applied["skip"] = True
+                    return
+                needs_mode_write = getattr(cfg_target, "auth_mode", None) != auth_mode
+                needs_marker_write = (
+                    backend == "claude"
+                    and not bool(getattr(cfg_target, "auth_mode_set", False))
+                )
+                needs_codex_oauth_cleanup = (
+                    backend == "codex"
+                    and auth_mode == "oauth"
+                    and (
+                        bool(getattr(cfg_target, "api_key", None))
+                        or bool(getattr(cfg_target, "base_url", None))
+                        or getattr(cfg_target, "oauth_relay_marker", None) is not None
+                        or captured_codex_relay is not None
+                        or observed_codex_api_key_auth
+                    )
+                )
+                # Relay-marker retention semantics for the OAuth
+                # transition, computed from the lock-fresh snapshot:
+                #   fresh capture           → overwrite (latest relay wins)
+                #   official-key transition → clear (the user deliberately
+                #                            left relay auth; a stale marker
+                #                            would resurface and reroute a
+                #                            future key to the old relay)
+                #   repeated pure-OAuth     → retain (nothing new observed;
+                #                            the earlier capture stays valid)
+                if captured_codex_relay is not None:
+                    resolved_codex_relay_marker: dict | None = captured_codex_relay
+                elif observed_codex_api_key_auth:
+                    resolved_codex_relay_marker = None
+                else:
+                    resolved_codex_relay_marker = getattr(cfg_target, "oauth_relay_marker", None)
+
+                applied["needs_mode_write"] = needs_mode_write
+                applied["needs_marker_write"] = needs_marker_write
+                applied["needs_codex_oauth_cleanup"] = needs_codex_oauth_cleanup
+                applied["resolved_marker"] = resolved_codex_relay_marker
+                applied["skip"] = not (
+                    needs_mode_write or needs_marker_write or needs_codex_oauth_cleanup
+                )
+                if applied["skip"]:
                     return
                 if needs_mode_write:
                     cfg_target.auth_mode = auth_mode
@@ -3955,25 +3965,28 @@ class AgentAuthService:
 
             update_config_fields(_apply_auth_fields)
 
+            if applied.get("skip"):
+                return
+
             def _mirroronto(obj) -> None:
                 if obj is None:
                     return
-                if needs_mode_write:
+                if applied["needs_mode_write"]:
                     setattr(obj, "auth_mode", auth_mode)
-                if needs_marker_write:
+                if applied["needs_marker_write"]:
                     setattr(obj, "auth_mode_set", True)
-                if needs_codex_oauth_cleanup:
+                if applied["needs_codex_oauth_cleanup"]:
                     setattr(obj, "api_key", None)
                     setattr(obj, "base_url", None)
-                    setattr(obj, "oauth_relay_marker", resolved_codex_relay_marker)
+                    setattr(obj, "oauth_relay_marker", applied["resolved_marker"])
 
             # Mirror onto the controller's LIVE config objects so the
-            # running process observes the transition without a reload
-            # (previous behavior: target was mutated and saved). The
-            # legacy compat projection (top-level ``config.<backend>``)
+            # running process observes the transition without a reload.
+            # The controller's own agents object is mirrored when present;
+            # the legacy compat projection (top-level ``config.<backend>``)
             # is mirrored too when present.
-            _mirroronto(target)
             if config is not None:
+                _mirroronto(getattr(getattr(config, "agents", None), backend, None))
                 _mirroronto(getattr(config, backend, None))
         except Exception as err:  # noqa: BLE001
             logger.warning(

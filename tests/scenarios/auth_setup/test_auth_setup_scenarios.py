@@ -2656,6 +2656,15 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         self.harness.controller.config.agents.codex = self.codex_cfg
         self.harness.controller.config.save = lambda: None
+        # Seed the real (isolated) config with the api_key pre-state: the
+        # transaction computes its needs/marker decisions from the
+        # lock-fresh file, so the transition must be warranted on disk.
+        from config.v2_config import V2Config
+
+        real_cfg = V2Config.default()
+        real_cfg.agents.codex.auth_mode = "api_key"
+        real_cfg.agents.codex.api_key = "sk-relay"
+        real_cfg.save()
 
     def _api_module(self):
         from vibe import api as vibe_api

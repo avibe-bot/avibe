@@ -1349,11 +1349,17 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             timeout=service.setup_timeout_seconds,
         )
         cleanup.assert_called()
-        self.assertEqual(controller.config.agents.claude.auth_mode, "oauth")
-        self.assertTrue(controller.config.agents.claude.auth_mode_set)
         # The persisted write goes through the cross-process config
-        # transaction (which writes the file directly), not the stub's
-        # save(); the live mirror above is the in-memory contract.
+        # transaction; the live mirror fires only for fields the
+        # transaction decided to change, computed from the lock-fresh
+        # snapshot. The stub claude starts without auth_mode_set, so the
+        # marker mirror applies; auth_mode itself is asserted on the
+        # persisted file (the fresh snapshot already said "oauth").
+        self.assertTrue(controller.config.agents.claude.auth_mode_set)
+        from config.v2_config import V2Config as _V2
+
+        self.assertEqual(_V2.load().agents.claude.auth_mode, "oauth")
+        self.assertTrue(_V2.load().agents.claude.auth_mode_set)
         service._refresh_backend_runtime.assert_awaited_once_with("claude")
         service._disconnect_claude_client.assert_awaited_once_with(flow.claude_client)
         self.assertIn("login is active again", controller.im_client.sent_messages[0][1].lower())

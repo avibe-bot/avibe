@@ -127,7 +127,10 @@ export const SettingsPlatformsPage: React.FC = () => {
     setRestartPhase('saving');
     try {
       try {
-        const savedConfig = await saveConfig({ ...config, platforms: { enabled: nextEnabled } });
+        // Patch-write shape: only the section this page owns — a
+        // full-snapshot round-trip would overwrite concurrent changes
+        // from other processes (installer cli_path updates, auth saves).
+        const savedConfig = await saveConfig({ platforms: { enabled: nextEnabled } });
         showApplyResult(savedConfig);
       } catch {
         showToast(t('common.saveFailed'), 'error');
@@ -191,6 +194,8 @@ export const SettingsPlatformsPage: React.FC = () => {
     try {
       let savedConfig: any;
       try {
+        // Patch-write shape: the platform section this card owns plus
+        // the enabled list — not a full-config round-trip.
         savedConfig = await saveConfig({ ...nextData, platforms: { enabled: enabledPlatforms } });
       } catch {
         showToast(t('common.saveFailed'), 'error');
@@ -213,7 +218,7 @@ export const SettingsPlatformsPage: React.FC = () => {
       }
       const nextEnabled = [...enabledPlatforms, platform];
       try {
-        savedConfig = await saveConfig({ ...savedConfig, platforms: { enabled: nextEnabled } });
+        savedConfig = await saveConfig({ platforms: { enabled: nextEnabled } });
       } catch {
         showToast(t('platform.restartFailed'), 'error');
         return;

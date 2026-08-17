@@ -337,7 +337,6 @@ def test_codex_oauth_success_clears_api_key_state(
         'base_url = "https://relay.example/v1"\n',
         encoding="utf-8",
     )
-    saves: list[str] = []
     codex_cfg = SimpleNamespace(
         auth_mode="api_key",
         api_key="sk-old",
@@ -347,8 +346,18 @@ def test_codex_oauth_success_clears_api_key_state(
     service.controller.config = SimpleNamespace(
         language="en",
         agents=SimpleNamespace(codex=codex_cfg),
-        save=lambda: saves.append("saved"),
+        save=lambda: None,
     )
+    # Seed the real (isolated) config with the api_key pre-state: the
+    # transaction computes its decisions from the lock-fresh file, not
+    # the live fake, so the transition must be warranted on disk too.
+    from config.v2_config import V2Config
+
+    real_cfg = V2Config.default()
+    real_cfg.agents.codex.auth_mode = "api_key"
+    real_cfg.agents.codex.api_key = "sk-old"
+    real_cfg.agents.codex.base_url = "https://relay.example/v1"
+    real_cfg.save()
 
     _run(service._invoke_post_web_success_hook("codex"))
 
