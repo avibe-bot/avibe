@@ -361,7 +361,8 @@
     "opencodeEmptyResponse": "OpenCode 已结束，但没有产出模型回复。Provider：{provider}；模型：{model}；推理强度：{variant}。这次运行里 OpenCode 没有暴露服务商错误。",
     "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}",
     "opencodeBackendError": "OpenCode 错误：{error}",
-    "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。"
+        "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。",
+        "opencodePollTransportFailure": "OpenCode 连续 {count} 次轮询失败，运行时不可达；原生 Turn 已中止并记为失败。"
   },
   "success": {
     "settingsUpdated": "设置更新成功！",

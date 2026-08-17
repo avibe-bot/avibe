@@ -3857,7 +3857,11 @@ scenarios:
     # accepted Turn has a bounded wall-clock owner: expiry aborts the exact native
     # session, emits one failed terminal result, admits the same-Session successor,
     # and lets a different OpenCode Agent waiting on that shared provider continue.
-    # The timeout never enters the empty successful-result fallback.
+    # The timeout never enters the empty successful-result fallback. Since the
+    # upstream runtime bounds its own retries and surfaces the exhausted error, the
+    # cap is an explicit opt-in (nonzero config); this scenario exercises the
+    # opted-in lifecycle only, and the default-disabled deadline has its own unit
+    # coverage beside the poll loop.
     test: tests/test_agent_service.py::test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime
   - id: HFR-434
     name: an OpenCode steer at the native terminal boundary stays reconcilable
