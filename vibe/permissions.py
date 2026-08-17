@@ -129,6 +129,13 @@ def _require_string(value: Any, *, nullable: bool = False) -> None:
         _invalid_response()
 
 
+def _require_nonempty_string(value: Any, *, nullable: bool = False) -> None:
+    if value is None and nullable:
+        return
+    if not isinstance(value, str) or not value.strip():
+        _invalid_response()
+
+
 def _require_enum(value: Any, allowed: frozenset[str]) -> None:
     if not isinstance(value, str) or value not in allowed:
         _invalid_response()
@@ -149,7 +156,7 @@ def _validate_access_entries(value: Any) -> list[Any]:
         entry = _require_mapping(item)
         _require_keys(entry, "kind", "value", "role")
         _require_enum(entry["kind"], _PRINCIPAL_KINDS)
-        _require_string(entry["value"])
+        _require_nonempty_string(entry["value"])
         _require_enum(entry["role"], _ACCESS_ROLES)
     return entries
 
@@ -157,8 +164,8 @@ def _validate_access_entries(value: Any) -> list[Any]:
 def _validate_project(value: Any) -> dict[str, Any]:
     project = _require_mapping(value)
     _require_keys(project, "project_id", "organization_id", "display_name", "access", "sync")
-    _require_string(project["project_id"])
-    _require_string(project["organization_id"], nullable=True)
+    _require_nonempty_string(project["project_id"])
+    _require_nonempty_string(project["organization_id"], nullable=True)
     _require_string(project["display_name"])
 
     access = _require_mapping(project["access"])
@@ -169,7 +176,7 @@ def _validate_project(value: Any) -> dict[str, Any]:
         binding = _require_mapping(item)
         _require_keys(binding, "principal_kind", "principal_value", "access_role")
         _require_enum(binding["principal_kind"], _PRINCIPAL_KINDS)
-        _require_string(binding["principal_value"])
+        _require_nonempty_string(binding["principal_value"])
         _require_enum(binding["access_role"], _ACCESS_ROLES)
 
     sync = _require_mapping(project["sync"])
@@ -227,8 +234,7 @@ def _validated_projection(payload: Any, instance_id: str) -> dict[str, Any]:
         "local_mutation_allowed",
         "authorization_revision",
     )
-    if not isinstance(instance["id"], str):
-        _invalid_response()
+    _require_nonempty_string(instance["id"])
     if instance["id"] != instance_id:
         raise PermissionsInvalidResponseError("permissions_instance_mismatch")
     _require_enum(instance["access_mode"], _ACCESS_MODES)
@@ -251,7 +257,7 @@ def _validated_projection(payload: Any, instance_id: str) -> dict[str, Any]:
     _require_keys(access, "owner", "entries")
     owner = _require_mapping(access["owner"])
     _require_keys(owner, "email", "role")
-    _require_string(owner["email"], nullable=True)
+    _require_nonempty_string(owner["email"], nullable=True)
     if owner["role"] != "owner":
         _invalid_response()
     _validate_access_entries(access["entries"])
@@ -261,15 +267,15 @@ def _validated_projection(payload: Any, instance_id: str) -> dict[str, Any]:
     for item in _require_list(directory["members"]):
         member = _require_mapping(item)
         _require_keys(member, "id", "email", "organization_role", "group_ids")
-        _require_string(member["id"])
-        _require_string(member["email"])
+        _require_nonempty_string(member["id"])
+        _require_nonempty_string(member["email"])
         _require_enum(member["organization_role"], _ORGANIZATION_ROLES)
         for group_id in _require_list(member["group_ids"]):
-            _require_string(group_id)
+            _require_nonempty_string(group_id)
     for item in _require_list(directory["groups"]):
         group = _require_mapping(item)
         _require_keys(group, "id", "name", "archived_at")
-        _require_string(group["id"])
+        _require_nonempty_string(group["id"])
         _require_string(group["name"])
         _require_string(group["archived_at"], nullable=True)
 

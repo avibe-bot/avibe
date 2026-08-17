@@ -122,14 +122,26 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
   });
 
-  it('keeps cached offline policy distinct from a live empty policy', async () => {
-    api.getPermissions.mockResolvedValue(response({ source: 'cache', offline: true, cached_at: 123 }));
+  it('keeps cached policy distinct and can recover it without a page reload', async () => {
+    const cached = response({ source: 'cache', offline: true, cached_at: 123 });
+    api.getPermissions
+      .mockResolvedValueOnce(cached)
+      .mockResolvedValueOnce(response());
+    const user = userEvent.setup();
 
     renderPage();
 
     expect(await screen.findByText('permissions.states.offlineTitle')).toBeTruthy();
     expect(screen.getByText('permissions.access.emptyTitle')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.refresh' }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('permissions.states.offlineTitle')).toBeNull();
+    });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', { name: 'permissions.actions.addAccess' })).toBeTruthy();
   });
 
   it('describes public access instead of claiming an owner-only empty policy', async () => {
@@ -331,6 +343,14 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(api.getPermissions).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.refresh' }));
+      await Promise.resolve();
+    });
+
+    expect(api.getPermissions).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText('permissions.states.offlineTitle')).toBeNull();
   });
 
   it.each([
@@ -581,13 +601,21 @@ describe('PermissionsPage state model', () => {
     const cached = response({ source: 'cache', offline: true, cached_at: 123 });
     cached.projection.policy_sync.status = 'applying';
     cached.projection.projects[0]!.sync.status = 'pending';
-    api.getPermissions.mockResolvedValueOnce(cached);
+    api.getPermissions.mockResolvedValue(cached);
 
     const cachedPage = renderPage();
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     expect(api.getPermissions).toHaveBeenCalledOnce();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.refresh' }));
+      await Promise.resolve();
+    });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('permissions.states.offlineTitle')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
     cachedPage.unmount();
 
     const applying = response();

@@ -123,6 +123,22 @@ def _complete_projection(instance_id: str = "inst-123") -> dict:
 _MISSING = object()
 
 
+NONEMPTY_PROJECTION_STRING_PATHS = [
+    pytest.param(("access", "owner", "email"), id="owner-email"),
+    pytest.param(("access", "entries", 0, "value"), id="access-principal"),
+    pytest.param(("directory", "members", 0, "id"), id="member-id"),
+    pytest.param(("directory", "members", 0, "email"), id="member-email"),
+    pytest.param(("directory", "members", 0, "group_ids", 0), id="member-group-id"),
+    pytest.param(("directory", "groups", 0, "id"), id="group-id"),
+    pytest.param(("projects", 0, "project_id"), id="project-id"),
+    pytest.param(("projects", 0, "organization_id"), id="project-organization-id"),
+    pytest.param(
+        ("projects", 0, "access", "bindings", 0, "principal_value"),
+        id="project-principal",
+    ),
+]
+
+
 def _replace_nested(value: dict, path: tuple[str | int, ...], replacement: object) -> None:
     parent: Any = value
     for key in path[:-1]:
@@ -637,6 +653,36 @@ def test_permissions_rejects_each_malformed_nested_projection_before_caching(
     assert not permissions._cache_path().exists()  # noqa: SLF001
 
 
+@pytest.mark.parametrize("path", NONEMPTY_PROJECTION_STRING_PATHS)
+@pytest.mark.parametrize("replacement", ["", " \t"], ids=["empty", "whitespace"])
+def test_permissions_rejects_blank_projection_identifiers_and_principals(
+    monkeypatch,
+    path: tuple[str | int, ...],
+    replacement: str,
+) -> None:
+    malformed = _complete_projection()
+    _replace_nested(malformed, path, replacement)
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, malformed),
+    )
+
+    with pytest.raises(permissions.PermissionsInvalidResponseError):
+        permissions.get_current_permissions(_config())
+
+    assert not permissions._cache_path().exists()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("instance_id", ["", " \t"], ids=["empty", "whitespace"])
+def test_permissions_rejects_a_blank_matching_instance_identifier(instance_id: str) -> None:
+    with pytest.raises(permissions.PermissionsInvalidResponseError):
+        permissions._validated_projection(  # noqa: SLF001
+            _complete_projection(instance_id),
+            instance_id,
+        )
+
+
 def test_permissions_preserves_additive_backend_capabilities_live_and_offline(
     monkeypatch,
 ) -> None:
@@ -658,9 +704,39 @@ def test_permissions_preserves_additive_backend_capabilities_live_and_offline(
     assert cached.projection["capabilities"] == projection["capabilities"]
 
 
+def test_permissions_preserves_nullable_projection_fields(monkeypatch) -> None:
+    projection = _complete_projection()
+    projection["access"]["owner"]["email"] = None
+    projection["projects"][0]["organization_id"] = None
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, projection),
+    )
+
+    result = permissions.get_current_permissions(_config())
+
+    assert result.projection["access"]["owner"]["email"] is None
+    assert result.projection["projects"][0]["organization_id"] is None
+
+
 def test_permissions_ignores_a_malformed_offline_cache(monkeypatch) -> None:
     malformed = _complete_projection()
     malformed["projects"][0]["sync"] = None
+    permissions._write_cache("inst-123", malformed)  # noqa: SLF001
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError()),
+    )
+
+    with pytest.raises(permissions.PermissionsUnavailableError):
+        permissions.get_current_permissions(_config())
+
+
+def test_permissions_ignores_blank_identifiers_in_the_offline_cache(monkeypatch) -> None:
+    malformed = _complete_projection()
+    malformed["projects"][0]["project_id"] = " \t"
     permissions._write_cache("inst-123", malformed)  # noqa: SLF001
     monkeypatch.setattr(
         permissions.requests,

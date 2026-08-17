@@ -998,7 +998,18 @@ export function PermissionsPage() {
       </div>
 
       {response.offline ? (
-        <Notice tone="warning" icon={WifiOff} title={t('permissions.states.offlineTitle')} body={t('permissions.states.offlineBody')} />
+        <Notice
+          tone="warning"
+          icon={WifiOff}
+          title={t('permissions.states.offlineTitle')}
+          body={t('permissions.states.offlineBody')}
+          action={(
+            <Button size="sm" variant="outline" onClick={() => void refreshReady()}>
+              <RefreshCw className="size-3.5" />
+              {t('permissions.actions.refresh')}
+            </Button>
+          )}
+        />
       ) : projection.instance.permission_authority === 'cloud' ? (
         <Notice
           tone="info"
