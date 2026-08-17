@@ -205,7 +205,9 @@ scope per instance behind them.
   instance, and config revision, using only scrubbed metadata. Emission is transition-deduplicated
   by scope, config revision, and capability so status polling cannot create one event per instance
   per minute; the first observing instance remains a context tag but is not part of the
-  deduplication key. Both adapters atomically upsert `available`/`unavailable` state in a shared
+  deduplication key. Explicit admin verification uses the fixed non-customer
+  `model-service-probe` context when there is no calling instance. Both adapters atomically upsert
+  `available`/`unavailable` state in a shared
   transition table; only a successfully persisted transition to `unavailable` grants permission
   to emit the outage event. A successful managed decrypt attempts the `available` transition on
   every call. If that recovery write fails, the usable call still proceeds, the write is retried
@@ -574,7 +576,9 @@ turns on.
 - **M1 — Config Center core + enterprise voice (backend only)**: schema migrations; key custody;
   org/platform config APIs; platform-admin gate + plan lever; resolution + metering middleware
   wired into all existing voice routes (incl. realtime + cleanup); usage dashboards (shared panel,
-  two mounts); env→platform-scope seeding (env fallback retained until platform config saved).
+  two mounts); env→platform-scope seeding (ordinary env fallback ends when platform config is
+  saved; the address-matched emergency recovery in §8.2 remains available for an undecryptable
+  saved key).
   Acceptance: invariants 1–4, 6 hold on staging (`dev.avibe.tech`); an enterprise org with its own
   DashScope key sees its voice usage in its dashboard and the platform pool records none of it.
 - **M2 — memory over the cloud**: `mak_` mint/rotate; OpenAI-compatible proxy (chat / embeddings /
