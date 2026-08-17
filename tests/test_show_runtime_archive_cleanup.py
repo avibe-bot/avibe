@@ -450,6 +450,159 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
     assert command is not None and command[-1].endswith("cli.js")
 
 
+def test_partial_removal_reports_removed_and_failed_counts(monkeypatch, capsys) -> None:
+    from vibe import cli as vibe_cli
+
+    parser = vibe_cli.build_parser()
+    args = parser.parse_args(["runtime", "clean"])
+
+    class FakeRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {
+                    "outcome": "partial",
+                    "candidate_count": 3,
+                    "removed_count": 2,
+                    "removed_bytes": 2048,
+                    "failed_count": 1,
+                    "skipped_reason": "archive_removal_failed",
+                },
+            }
+
+    monkeypatch.setattr(vibe_cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(
+        vibe_cli,
+        "_clean_git_runtime",
+        lambda *, keep_previous, dry_run=False: {"ok": True, "removed": []},
+    )
+
+    assert vibe_cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "2" in captured.out  # successful removal total still reported
+    assert "1" in captured.err  # failed count reported as a warning
+    assert "skipped" not in captured.out.lower() or "2" in captured.out
+
+
+def test_archive_cache_status_reports_stale_plan_failure(tmp_path: Path, monkeypatch) -> None:
+    """A stale-plan phase failure returns the structured inspection report."""
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+
+    def _boom(*args, **kwargs):
+        raise OSError("directory disappeared")
+
+    monkeypatch.setattr(manager, "_clean_manifest_install_dirs", _boom)
+    report = manager.archive_cache_status()
+
+    assert report.get("skipped_reason") == "archive_inspection_failed"
+
+
+def test_candidate_stat_failure_is_an_inspection_failure(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(2), b"stale")
+
+    import errno
+
+    def _stat_boom(self):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(Path, "lstat", _stat_boom)
+    result = manager.clean()
+
+    assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
+
+
+def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, monkeypatch) -> None:
+    from core import show_runtime as module
+
+    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
+    manifest_payload = {
+        "schema_version": 1,
+        "runtime_version": "v2",
+        "archives": {"test": {"name": "n.tgz", "url": "file:///n.tgz", "sha256": _sha(1)}},
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    manager = ShowRuntimeManager(
+        runtime_dir=tmp_path / "show-runtime",
+        offline=True,
+        runtime_source="manifest-cache",
+        manifest_path=manifest_path,
+        force_install=True,
+    )
+
+    from storage.lock import MigrationFileLock
+
+    def _unwritable_lock(self, *args, **kwargs):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(MigrationFileLock, "acquire", _unwritable_lock)
+
+    command = manager._install_manifest_runtime()
+
+    assert command is None
+    assert manager._install_reason == "runtime_install_already_running"
+
+
+def test_lock_fallback_enforces_manifest_node_requirement(tmp_path: Path, monkeypatch) -> None:
+    from core import show_runtime as module
+
+    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
+    manifest_payload = {
+        "schema_version": 1,
+        "runtime_version": "v2",
+        "minimum_node": "99.0.0",
+        "archives": {"test": {"name": "n.tgz", "url": "file:///n.tgz", "sha256": _sha(1)}},
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    manager = ShowRuntimeManager(
+        runtime_dir=tmp_path / "show-runtime",
+        offline=True,
+        runtime_source="manifest-cache",
+        manifest_path=manifest_path,
+    )
+    manifest = manager._load_runtime_manifest()
+    assert manifest is not None
+    archive = manifest.archives["test"]
+    install_dir = manager._manifest_install_dir(manifest, archive)
+    install_dir.mkdir(parents=True, exist_ok=True)
+    (install_dir / ".vibe-show-runtime.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest-cache",
+                "manifest_sha256": manifest.digest,
+                "runtime_version": manifest.runtime_version,
+                "platform": "test",
+                "archive_name": archive.name,
+                "archive_sha256": archive.sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cli_path = install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+    cli_path.parent.mkdir(parents=True, exist_ok=True)
+    cli_path.write_text("runtime", encoding="utf-8")
+
+    from storage.lock import MigrationFileLock
+
+    def _unwritable_lock(self, *args, **kwargs):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(MigrationFileLock, "acquire", _unwritable_lock)
+
+    command = manager._reuse_verified_manifest_command()
+
+    # The installed files verify, but Node is below the manifest minimum, so
+    # the fallback must not hand back an unusable command.
+    assert command is None
+
+
 def test_dry_run_reports_inspection_failure_instead_of_raising(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))

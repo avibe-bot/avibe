@@ -14134,7 +14134,28 @@ def cmd_runtime(args) -> int:
             language = _configured_cli_language()
             archives = payload.get("archives") or {}
             skipped_reason = str(archives.get("skipped_reason") or "")
-            if skipped_reason:
+            outcome = str(archives.get("outcome") or "")
+            if outcome == "partial":
+                # Some archives were removed, others were not: report both
+                # totals plus the failure count, never a bare skip line.
+                prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
+                removed = payload.get("removed") or []
+                print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+                archive_count = int(archives.get("removed_count") or 0)
+                archive_bytes = int(archives.get("removed_bytes") or 0)
+                print(
+                    i18n_t(
+                        f"{prefix_key}Archives",
+                        language,
+                        count=archive_count,
+                        size=_format_byte_size(archive_bytes),
+                    )
+                )
+                print(
+                    i18n_t("runtime.clean.partiallyRemoved", language, failed=int(archives.get("failed_count") or 0)),
+                    file=sys.stderr,
+                )
+            elif skipped_reason:
                 # A skipped/failed cleanup is not a completed zero-removal
                 # cleanup; say so instead of printing placeholder counts.
                 print(i18n_t("runtime.clean.skipped", language, reason=skipped_reason), file=sys.stderr)
@@ -14152,15 +14173,6 @@ def cmd_runtime(args) -> int:
                         size=_format_byte_size(archive_bytes),
                     )
                 )
-                if int(archives.get("failed_count") or 0):
-                    print(
-                        i18n_t(
-                            "runtime.clean.partiallyRemoved",
-                            language,
-                            failed=int(archives["failed_count"]),
-                        ),
-                        file=sys.stderr,
-                    )
                 if git.get("ok") is False and git.get("reason"):
                     print(i18n_t("runtime.clean.gitSkipped", language, reason=git["reason"]), file=sys.stderr)
                 else:

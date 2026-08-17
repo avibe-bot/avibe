@@ -71,6 +71,10 @@ _ARCHIVE_CLEANUP_OUTCOMES = frozenset({"cleaned", "partial", "skipped"})
 
 class _ArchiveMetadataError(Exception):
     """A retained install's metadata could not be read; destructive cleanup must abort."""
+
+
+class _ArchiveInspectionError(Exception):
+    """The archive cache itself could not be inspected; cleanup must abort."""
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
@@ -793,13 +797,18 @@ class ShowRuntimeManager:
 
         Simulates the install-dir cleanup a real ``clean(keep_previous=...)``
         would perform, so the reported candidates match what reclamation would
-        actually remove.
+        actually remove. Failures in either phase return the structured
+        inspection-failure report so Doctor can render them.
         """
-        stale_plan = self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=True)
-        return self._clean_downloaded_archives(
-            dry_run=True,
-            skip_metadata_under={Path(path) for path in stale_plan},
-        )
+        try:
+            stale_plan = self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=True)
+            return self._clean_downloaded_archives(
+                dry_run=True,
+                skip_metadata_under={Path(path) for path in stale_plan},
+            )
+        except Exception:
+            logger.warning("Show Runtime archive cache inspection failed", exc_info=True)
+            return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
 
     def _protected_archive_sha256s(self, skip_metadata_under: set[Path] | None = None) -> set[str]:
         """SHA-256 digests of archives the current and retained installs still need.
@@ -870,8 +879,12 @@ class ShowRuntimeManager:
                 continue
             try:
                 stat_result = path.lstat()
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError as exc:
+                # An entry that cannot be inspected must not silently read as
+                # "no candidates"; surface it as an inspection failure.
+                raise _ArchiveInspectionError(f"archive is not stat-able: {path}") from exc
             if not stat.S_ISREG(stat_result.st_mode):
                 continue
             if stat_result.st_mtime > mtime_floor:
@@ -900,9 +913,6 @@ class ShowRuntimeManager:
             try:
                 protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
                 candidates = self._archive_cleanup_candidates(protected)
-            except _ArchiveMetadataError:
-                logger.warning("Show Runtime archive cleanup inspection failed", exc_info=True)
-                return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
             except Exception:
                 logger.warning("Show Runtime archive cleanup inspection failed", exc_info=True)
                 return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
@@ -1187,7 +1197,11 @@ class ShowRuntimeManager:
             if not acquired:
                 self._install_reason = "runtime_install_already_running"
                 # An untakeable lock (busy or unavailable) must not break a
-                # prepare that already has a verified install to reuse.
+                # non-forced prepare that already has a verified install to
+                # reuse. A forced reinstall that cannot run is a failure —
+                # reporting success would hide that the repair never happened.
+                if self.force_install:
+                    return None
                 return self._reuse_verified_manifest_command()
             return self._install_manifest_runtime_locked()
 
@@ -1197,6 +1211,10 @@ class ShowRuntimeManager:
             node = _resolve_node_command()
             manifest = self._load_runtime_manifest()
             if not node or not manifest:
+                return None
+            # Mirror the normal install path: an unsupported Node version must
+            # not be reported as a usable runtime.
+            if not self._manifest_node_supported(node, manifest):
                 return None
             archive = self._manifest_archive_for_platform(manifest)
             if not archive:
