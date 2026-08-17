@@ -10,8 +10,10 @@ import pytest
 from config.v2_config import (
     AgentsConfig,
     CONFIG_LOCK,
+    MemoryCloudConfig,
     MemoryConfig,
     MemoryEndpointConfig,
+    MemoryRecoveryIntent,
     RuntimeConfig,
     SlackConfig,
     V2Config,
@@ -326,6 +328,67 @@ def test_memory_config_rejects_unknown_recovery_intent(intent: object) -> None:
 def test_memory_config_accepts_factory_reset_recovery_intent() -> None:
     config = V2Config.from_payload(_payload({"recovery_intent": "factory_reset"}))
     assert config.memory.recovery_intent == "factory_reset"
+
+
+@pytest.mark.parametrize(
+    ("initial", "expected", "armed"),
+    [
+        (None, "rebuild", True),
+        ("rebuild", "rebuild", False),
+        ("factory_reset", "factory_reset", False),
+    ],
+)
+def test_memory_rebuild_request_never_downgrades_recovery(
+    initial: MemoryRecoveryIntent | None,
+    expected: MemoryRecoveryIntent,
+    armed: bool,
+) -> None:
+    memory = MemoryConfig(recovery_intent=initial)
+
+    assert memory.arm_rebuild_if_idle() is armed
+    assert memory.recovery_intent == expected
+
+
+@pytest.mark.parametrize(
+    "cloud",
+    [
+        [],
+        {"capabilities": []},
+        {"scope": "unsupported"},
+        {"proxy_base_url": 7},
+        {"model_access_key": 7},
+        {"transition_rebuild_owned": True},
+    ],
+)
+def test_disk_load_recovers_only_a_malformed_memory_cloud_cache(
+    tmp_path,
+    cloud: object,
+) -> None:
+    config_path = tmp_path / "config.json"
+    memory = {
+        "enabled": True,
+        "mode": "custom",
+        "recovery_intent": "factory_reset",
+        "processing": _complete_processing(),
+        "cloud": cloud,
+    }
+    payload = _payload(memory)
+
+    with pytest.raises((TypeError, ValueError)):
+        V2Config.from_payload(payload)
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.enabled is True
+    assert loaded.memory.mode == "custom"
+    assert loaded.memory.custom_processing_complete() is True
+    assert loaded.memory.processing.llm.api_key == "llm-key"
+    assert loaded.memory.processing.embedding.api_key == "embed-key"
+    assert loaded.memory.recovery_intent == "factory_reset"
+    assert loaded.memory.cloud == MemoryCloudConfig()
+    assert any("memory.cloud" in warning for warning in loaded.load_warnings)
+    assert json.loads(config_path.read_text(encoding="utf-8"))["memory"]["cloud"] == cloud
 
 
 def test_memory_transition_rebuild_owner_round_trips(tmp_path) -> None:

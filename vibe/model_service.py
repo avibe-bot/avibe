@@ -198,7 +198,7 @@ def _adopt_cloud_embedding_identity(
     baseline = previous.cloud.applied_embedding_identity
     first_activation = baseline is None
     if previous.cloud_runtime_selected() and baseline is not None and baseline != identity:
-        candidate.recovery_intent = "rebuild"
+        candidate.arm_rebuild_if_idle()
     candidate.cloud.applied_embedding_identity = identity
     return first_activation
 
@@ -244,13 +244,11 @@ def _resolved_memory(
                     if first_managed_activation:
                         candidate.enabled = True
             elif candidate.cloud.transition_notice_pending:
-                if candidate.recovery_intent is None:
-                    candidate.recovery_intent = "rebuild"
+                if candidate.arm_rebuild_if_idle():
                     candidate.cloud.transition_rebuild_owned = True
             elif candidate.mode == "custom" and previous.custom_processing_complete():
                 candidate.cloud.transition_notice_pending = True
-                if candidate.recovery_intent is None:
-                    candidate.recovery_intent = "rebuild"
+                if candidate.arm_rebuild_if_idle():
                     candidate.cloud.transition_rebuild_owned = True
             else:
                 candidate.cloud.organization_attached = True
@@ -286,7 +284,7 @@ def _resolved_memory(
             if first_platform_activation:
                 candidate.enabled = True
         elif was_organization_cloud:
-            candidate.recovery_intent = "rebuild"
+            candidate.arm_rebuild_if_idle()
             candidate.cloud.applied_embedding_identity = None
 
     candidate.cloud.runtime_apply_pending = (

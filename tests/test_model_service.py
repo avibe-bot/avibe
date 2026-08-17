@@ -784,6 +784,36 @@ def test_capability_removal_pauses_and_resume_checks_last_applied_identity() -> 
     assert changed_identity.recovery_intent == "rebuild"
 
 
+@pytest.mark.parametrize("scope", ["platform", "organization"])
+def test_cloud_identity_adoption_preserves_a_pending_factory_reset(
+    scope: str,
+) -> None:
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        recovery_intent="factory_reset",
+        cloud=MemoryCloudConfig(
+            scope=scope,
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_first",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+            organization_attached=scope == "organization",
+        ),
+    )
+
+    changed_identity = _resolved(
+        current,
+        _status(scope=scope, identity="emb-v2", revision=2),
+    )
+
+    assert changed_identity.cloud.applied_embedding_identity == "emb-v2"
+    assert changed_identity.recovery_intent == "factory_reset"
+    assert changed_identity.cloud.runtime_apply_pending is True
+
+
 def test_platform_to_organization_upstream_change_is_an_identity_change() -> None:
     platform = MemoryConfig(
         enabled=True,

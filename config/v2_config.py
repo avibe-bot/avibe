@@ -1059,6 +1059,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     match = re.search(r"Config '([^']+)'", message)
     if match:
         path = match.group(1)
+        if path == "memory.cloud" or path.startswith("memory.cloud."):
+            return "memory.cloud"
         if path.startswith("memory.processing.rerank"):
             return "memory.rerank"
         if path.startswith("memory.processing.multimodal"):
@@ -1206,6 +1208,12 @@ def _reset_recoverable_config_section(
         if not isinstance(processing, dict):
             return False
         processing.pop("multimodal", None)
+        return True
+    if section == "memory.cloud":
+        memory = payload.get("memory")
+        if not isinstance(memory, dict):
+            return False
+        memory["cloud"] = {}
         return True
     if section == "runtime":
         # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
@@ -1721,13 +1729,19 @@ class MemoryEndpointConfig:
     api_key: Optional[str] = field(default=None, repr=False)
 
     def validate(self, *, name: str) -> None:
-        self.base_url = _validate_memory_url(self.base_url, name=name)
+        self.base_url = _validate_memory_url(
+            self.base_url,
+            path=f"memory.processing.{name}.base_url",
+        )
         self.model = _validate_memory_text(
             self.model,
             name=f"memory.processing.{name}.model",
             maximum=_MEMORY_MAX_MODEL_BYTES,
         )
-        self.api_key = _validate_memory_key(self.api_key, name=name)
+        self.api_key = _validate_memory_key(
+            self.api_key,
+            path=f"memory.processing.{name}.api_key",
+        )
 
     def complete(self) -> bool:
         return bool(self.base_url and self.model and self.api_key)
@@ -1842,12 +1856,12 @@ class MemoryCloudConfig:
         if self.proxy_base_url is not None:
             self.proxy_base_url = _validate_memory_url(
                 self.proxy_base_url,
-                name="cloud.proxy",
+                path="memory.cloud.proxy_base_url",
             )
         if self.model_access_key is not None:
             self.model_access_key = _validate_memory_key(
                 self.model_access_key,
-                name="cloud.model_access_key",
+                path="memory.cloud.model_access_key",
             )
             if not self.model_access_key.startswith("mak_"):
                 raise ValueError("Config 'memory.cloud.model_access_key' is invalid")
@@ -1923,6 +1937,14 @@ class MemoryConfig:
 
     def custom_processing_complete(self) -> bool:
         return self.processing.llm.complete() and self.processing.embedding.complete()
+
+    def arm_rebuild_if_idle(self) -> bool:
+        """Request an embedding rebuild without downgrading a stronger recovery."""
+
+        if self.recovery_intent is not None:
+            return False
+        self.recovery_intent = "rebuild"
+        return True
 
     def cloud_runtime_selected(self) -> bool:
         if self.cloud.scope == "organization":
@@ -2009,18 +2031,18 @@ class MemoryConfig:
         return bool(self.processing.multimodal and self.processing.multimodal.complete())
 
 
-def _validate_memory_url(value: object, *, name: str) -> Optional[str]:
+def _validate_memory_url(value: object, *, path: str) -> Optional[str]:
     if value is None or value == "":
         return None
     if not isinstance(value, str):
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' must be a string")
+        raise ValueError(f"Config '{path}' must be a string")
     candidate = value.strip()
     if (
         not candidate
         or len(candidate.encode("utf-8")) > _MEMORY_MAX_URL_BYTES
         or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
     ):
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+        raise ValueError(f"Config '{path}' is invalid")
     parsed = urlsplit(candidate)
     if (
         parsed.scheme not in {"http", "https"}
@@ -2030,20 +2052,20 @@ def _validate_memory_url(value: object, *, name: str) -> Optional[str]:
         or parsed.query
         or parsed.fragment
     ):
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+        raise ValueError(f"Config '{path}' is invalid")
     try:
         port = parsed.port
     except ValueError as exc:
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid") from exc
+        raise ValueError(f"Config '{path}' is invalid") from exc
     if port is not None and not 1 <= port <= 65535:
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+        raise ValueError(f"Config '{path}' is invalid")
     if parsed.scheme == "http":
         try:
             loopback = ipaddress.ip_address(parsed.hostname).is_loopback
         except ValueError:
             loopback = False
         if not loopback:
-            raise ValueError(f"Config 'memory.processing.{name}.base_url' requires HTTPS")
+            raise ValueError(f"Config '{path}' requires HTTPS")
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
 
 
@@ -2063,17 +2085,17 @@ def _validate_memory_text(value: object, *, name: str, maximum: int) -> Optional
     return candidate
 
 
-def _validate_memory_key(value: object, *, name: str) -> Optional[str]:
+def _validate_memory_key(value: object, *, path: str) -> Optional[str]:
     if value is None or value == "":
         return None
     if not isinstance(value, str):
-        raise ValueError(f"Config 'memory.processing.{name}.api_key' must be a string")
+        raise ValueError(f"Config '{path}' must be a string")
     if (
         len(value.encode("utf-8")) > _MEMORY_MAX_API_KEY_BYTES
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
         or _looks_like_ui_mask(value)
     ):
-        raise ValueError(f"Config 'memory.processing.{name}.api_key' is invalid")
+        raise ValueError(f"Config '{path}' is invalid")
     return value
 
 
