@@ -48,8 +48,10 @@ receipt. After a lost response, read current state and decide whether another
 Apply is necessary.
 
 Email normalization is ASCII surrounding-whitespace trim, ASCII lowercase,
-syntax validation, deduplication, and lexical sort. The canonical set is persisted
-only in Avibe. Settings reads require owner or existing sharing-control authority,
+syntax validation, deduplication, and lexical sort. Syntax means exactly one `@`,
+a dot-atom local part with no leading, trailing, or consecutive dot, and lowercase
+DNS-style domain labels with no leading or trailing hyphen. The canonical set is
+persisted only in Avibe. Settings reads require owner or existing sharing-control authority,
 are delivered with `Cache-Control: private, no-store`, and never leave local Avibe.
 Their explicit request is `{page_id}` and their result is `{show_access}`. The
 authorized route, controller request, and returned `show_access.page_id` must be
@@ -90,10 +92,12 @@ callback origin. Starting a newer flow replaces the prior flow; a stale, replaye
 or expired callback returns a fixed retry result. This intentionally does not
 promise simultaneous flow success.
 
-An unknown signing key permits at most one issuer-coalesced forced JWKS refresh
-for that login attempt. Refresh is scoped by the paired issuer, never by an
-attacker-selected `kid`. Failure asks the visitor to sign in again. Version 1 does
-not promise seamless key rotation or previous-key overlap.
+A known signing key is cached for at most 300 seconds. Once older, it is fetched
+once from the paired issuer before assertion validation; fetch failure returns
+`identity_retry_required`. An unknown signing key likewise permits at most one
+issuer-coalesced forced JWKS refresh for that login attempt. Refresh is scoped by
+the paired issuer, never by an attacker-selected `kid`. Version 1 defines no
+background refresh, seamless key rotation, or previous-key overlap.
 
 The resulting local session uses one host-only Secure, HttpOnly, SameSite=Lax
 `__Host-avibe_show_identity_session` cookie at Path `/`. Its value is 32 random
@@ -128,9 +132,14 @@ Ordinary private editor edits keep the private graph identity and never create,
 build, or rebase a shared graph. Shared context has no HMR.
 
 For `/p`, Avibe authorizes only the new top-level navigation or manual refresh,
-then requests an opaque shared document capability. It is bound to instance, page,
-share, admitted revision, namespace, and document. User code receives no session
-ID, workspace/source path, identity material, HMR, or annotation bootstrap.
+then requests an opaque shared document capability. The internal admission carries
+`source_session_id`, and the shared graph key binds it with page, share, admitted
+revision, and context. The source Session ID never enters browser-visible data.
+The capability is bound to instance, page, share, admitted revision, namespace,
+and document. Capture returns either that capability or one fixed sanitized
+`shared_runtime_unavailable`, `snapshot_too_large`, `capacity_exhausted`,
+`capture_timeout`, or `reload_required` result. User code receives no session ID,
+workspace/source path, identity material, HMR, or annotation bootstrap.
 
 The trusted `/p/<share_id>/` shell places arbitrary page code in an iframe with
 exact sandbox token `allow-scripts`, without `allow-same-origin`. Its CSP includes
@@ -140,9 +149,13 @@ emitted. Shared code cannot reach the shell's cookies, storage, DOM, local APIs,
 HMR, annotations, or another share's capability.
 
 Shared document, module, style, raw-asset, fallback, and page-API responses use
-the opaque document capability and credentialless CORS. They never accept ambient
-identity, allow credentials, or set cookies, and they use `Referrer-Policy:
-no-referrer` so the capability is not propagated to unrelated requests.
+one browser-compatible path prefix:
+`/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/{resource_handle}`.
+Nested imports are rewritten to absolute URLs under that same prefix. The opaque
+resource handle is never a source path; query strings, cookies, ambient identity,
+and custom request headers confer no authority. Capability-bearing path segments
+are redacted from access logs. Responses use credentialless CORS, never set
+cookies, and use `Referrer-Policy: no-referrer`.
 
 Admission is intentionally not continuous authorization. The document capability
 continues while its Runtime namespace and document handle exist. Membership, mode,
@@ -166,10 +179,11 @@ permission monitor, or formal pin/reclaim race protocol.
 
 ## Cache Boundary
 
-All limited responses are `private, no-store`. Public shell, document, fallback,
-API, error, and redirect surfaces are also non-cacheable. This includes every
-access-dependent resource-viewer or resource-editor redirect from `/p` to
-canonical `/show`. A separately named, versioned asset may use
+All limited responses are `private, no-store`. Every non-versioned public shell,
+document, module, style, raw-asset, fallback, page-API, error, and redirect surface
+is also non-cacheable. This includes every access-dependent resource-viewer or
+resource-editor redirect from `/p` to canonical `/show`. A separately named,
+content-addressed versioned asset may use
 `public, max-age=31536000, immutable` only when it contains public bytes and no
 page-private or identity data.
 

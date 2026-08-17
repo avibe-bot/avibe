@@ -68,6 +68,10 @@
     },
     "key_lookup": {
       "current_rs256_key_only_required": true,
+      "known_key_cache_ttl_seconds": 300,
+      "known_kid_at_or_before_cache_ttl": "validate_with_cached_paired_issuer_key",
+      "known_kid_older_than_cache_ttl": "refetch_paired_issuer_jwks_once_before_validation",
+      "known_key_refetch_failure": "identity_retry_required",
       "unknown_kid_forced_refresh_scope": "paired_issuer_per_login_attempt",
       "maximum_forced_refreshes_per_login_attempt": 1,
       "refresh_is_coalesced_by_issuer": true,
@@ -132,6 +136,12 @@
       "logout": "delete_presented_record_and_expire_presented_cookie",
       "later_limited_navigation": "validate_identity_session_then_reresolve_current_local_show_access_and_membership_once",
       "session_forbidden_authority": ["page_id", "share_id", "page_membership", "instance_role", "resource_authority"]
+    },
+    "reference_evidence": {
+      "scenario": "AUTH-SETUP-401",
+      "harness": "tests/scenario_harness/show_identity_callback.py",
+      "closed_loop": ["authorize_request", "backend_form_post", "local_callback", "signed_state_check", "correlation_cookie_check", "assertion_binding_check", "digest_only_identity_session", "later_limited_navigation"],
+      "production_crypto_browser_conformance": "future_backend_avibe_and_browser_lanes"
     },
     "backend_forbidden_behavior": ["receive_local_whitelist", "decide_page_membership", "derive_instance_role", "create_instance_access_context"],
     "privileged_surfaces_never_granted_by_identity_session": ["show", "workbench", "resource_api", "hmr", "annotations", "agents"]
@@ -221,7 +231,7 @@
         "jti": {"type": "string", "minLength": 1, "maxLength": 256},
         "nonce": {"type": "string", "minLength": 1, "maxLength": 256},
         "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
-        "verified_email": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+$"}
+        "verified_email": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"}
       }
     },
     "IdentitySessionToken": {
@@ -265,7 +275,7 @@
         "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "callback_origin": {"type": "string", "format": "uri", "pattern": "^https://[^/?#]+$"},
         "subject": {"type": "string", "minLength": 1, "maxLength": 512},
-        "normalized_verified_email": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+$"},
+        "normalized_verified_email": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"},
         "created_at": {"type": "integer"},
         "expires_at": {"type": "integer"}
       }

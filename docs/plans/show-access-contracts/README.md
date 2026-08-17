@@ -17,6 +17,10 @@ with machine-readable ownership, interface, policy, and example metadata.
 stable writer replaces these fields atomically. The Backend never receives or
 evaluates the email set.
 
+Email syntax is deliberately pragmatic ASCII: exactly one `@`, a dot-atom local
+part without leading, trailing, or consecutive dots, and lowercase DNS-style
+domain labels without leading or trailing hyphens.
+
 The three modes are closed:
 
 - `private`: `/p` is disabled. A prior share binding may remain stored but is inactive.
@@ -27,7 +31,10 @@ Limited and public preserve the same share binding unless the owner explicitly
 replaces it. `Apply` uses `expected_revision`; it has no hosted operation and no
 durable mutation receipt. After a lost response, the client reads current state.
 
-The Backend returns only a short-lived RS256 identity assertion. That assertion
+The Backend returns only a short-lived RS256 identity assertion. A known signing
+key is cached for at most 300 seconds; an older cached key is fetched once from
+the paired issuer before validation, and fetch failure asks the visitor to retry.
+That assertion
 does not contain page, share, membership, role, or resource-access claims. The
 local identity session is one host-only `__Host-` cookie containing 32 random
 bytes plus a local record keyed only by the token's SHA-256 digest. It lasts a
@@ -46,7 +53,13 @@ Avibe cookies or storage, local APIs, session IDs, or source paths. Shared code
 runs in a sandboxed opaque-origin iframe. Worker, SharedWorker, and Service Worker
 are unsupported in version 1. Protected shared resources use an opaque document
 capability and credentialless CORS; they never accept ambient identity or cookies.
-Private editor edits never create, build, or rebase a shared graph.
+Private editor edits never create, build, or rebase a shared graph. Shared graph
+keys include the internal source Session ID, but that value never crosses the
+browser boundary. Every protected resource uses one versioned opaque path with
+namespace, document, capability, and opaque resource-handle segments; nested
+imports are rewritten under the same prefix and those segments are redacted from
+access logs. Shared capture returns either a capability or one fixed sanitized
+failure result.
 
 `/show` uses private Runtime context. Resource-editor authority is checked when
 an HMR/annotation connection is admitted. Permission changes do not require an
@@ -58,7 +71,8 @@ The focused tests validate all three schemas and examples, exact interface field
 closed vocabularies, local-only membership, identity-only claims and session
 record, Runtime protocol constants, keyed-context fail-closed behavior, admission
 lifetime, worker denial, and cache boundaries. `AUTH-SETUP-401` supplies a small
-closed-loop contract scenario from limited entry through identity callback and a
+closed-loop contract scenario through the stub Backend authorize and `form_post`
+boundaries, signed-state/cookie/assertion checks, digest-only local session, and a
 later membership-rechecked navigation.
 
 This repository does not yet prove production Avibe, Backend, Runtime, browser,

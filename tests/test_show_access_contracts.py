@@ -27,6 +27,11 @@ ARTIFACTS = {
     "identity": CONTRACTS / "identity-auth.json",
     "runtime": CONTRACTS / "runtime-containment.json",
 }
+NORMALIZED_EMAIL_PATTERN = (
+    r"^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -54,10 +59,24 @@ def _canonical_emails(values: list[str]) -> list[str]:
         if not value.isascii():
             raise ValueError("invalid email")
         value = value.translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
-        if not re.fullmatch(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+", value):
+        if not re.fullmatch(NORMALIZED_EMAIL_PATTERN, value):
             raise ValueError("invalid email")
         canonical.append(value)
     return sorted(set(canonical))
+
+
+def _known_key_cache_decision(
+    policy: dict[str, Any],
+    *,
+    cached_at: int,
+    now: int,
+    refetch_succeeds: bool,
+) -> tuple[str, int]:
+    if now - cached_at <= policy["known_key_cache_ttl_seconds"]:
+        return "validate_with_cached_key", 0
+    if refetch_succeeds:
+        return "validate_with_refetched_key", 1
+    return policy["known_key_refetch_failure"], 1
 
 
 def _serve_settings_read(
@@ -240,14 +259,43 @@ def test_apply_reuses_show_access_mode_invariants() -> None:
 
 def test_canonical_email_algorithm_is_executable_and_examples_are_canonical() -> None:
     document = _load(ARTIFACTS["show"])
+    assert document["x-contract"]["normalization"]["syntax"] == (
+        "one_at; dot_atom_local_without_edge_or_consecutive_dot; lowercase_dns_labels_without_edge_hyphen"
+    )
     assert _canonical_emails([" Bob@Example.COM ", "alice@example.com", "bob@example.com"]) == [
         "alice@example.com",
         "bob@example.com",
     ]
-    with pytest.raises(ValueError):
-        _canonical_emails(["not-an-email"])
-    with pytest.raises(ValueError):
-        _canonical_emails(["\u00e5l\u00eece@example.com"])
+    for malformed in (
+        "not-an-email",
+        "\u00e5l\u00eece@example.com",
+        "a@.",
+        "a@-",
+        ".a@example.com",
+        "a.@example.com",
+        "a..b@example.com",
+        "a@-example.com",
+        "a@example-.com",
+        "a@example..com",
+    ):
+        with pytest.raises(ValueError):
+            _canonical_emails([malformed])
+
+    identity = _load(ARTIFACTS["identity"])
+    assert document["$defs"]["NormalizedEmail"]["pattern"] == NORMALIZED_EMAIL_PATTERN
+    assert identity["$defs"]["IdentityAssertionClaims"]["properties"]["verified_email"]["pattern"] == (
+        NORMALIZED_EMAIL_PATTERN
+    )
+    assert identity["$defs"]["IdentitySessionRecord"]["properties"]["normalized_verified_email"]["pattern"] == (
+        NORMALIZED_EMAIL_PATTERN
+    )
+    for malformed in ("a@.", "a@-", ".a@example.com"):
+        with pytest.raises(ValidationError):
+            _validate(
+                identity,
+                "#/$defs/IdentityAssertionClaims",
+                {**identity["x-examples"][1]["value"], "verified_email": malformed},
+            )
 
     for example in document["x-examples"]:
         value = example["value"]
@@ -320,6 +368,20 @@ def test_identity_flow_has_one_fixed_lifetime_and_latest_flow_wins() -> None:
     assert key_lookup["refresh_is_coalesced_by_issuer"] is True
     assert key_lookup["refresh_is_not_keyed_by_untrusted_kid"] is True
     assert key_lookup["seamless_rotation_or_previous_key_overlap_required"] is False
+    assert key_lookup["known_key_cache_ttl_seconds"] == 300
+    assert key_lookup["known_kid_older_than_cache_ttl"] == ("refetch_paired_issuer_jwks_once_before_validation")
+    assert _known_key_cache_decision(key_lookup, cached_at=100, now=400, refetch_succeeds=False) == (
+        "validate_with_cached_key",
+        0,
+    )
+    assert _known_key_cache_decision(key_lookup, cached_at=100, now=401, refetch_succeeds=True) == (
+        "validate_with_refetched_key",
+        1,
+    )
+    assert _known_key_cache_decision(key_lookup, cached_at=100, now=401, refetch_succeeds=False) == (
+        "identity_retry_required",
+        1,
+    )
 
     claims = next(
         example["value"]
@@ -428,6 +490,13 @@ def test_shared_runtime_admission_fails_closed_without_keyed_context() -> None:
 def test_repeated_private_edits_never_build_or_rebase_shared_graphs() -> None:
     isolation = _load(ARTIFACTS["runtime"])["x-contract"]["context_isolation"]
     assert isolation["private_graph_key"] != isolation["shared_graph_key"]
+    assert isolation["shared_graph_key"] == [
+        "source_session_id",
+        "page_id",
+        "share_id",
+        "admitted_revision",
+        "shared",
+    ]
     assert isolation["lifecycle"] == "private_and_shared_graphs_are_independent"
     assert isolation["shared_build_trigger"] == ("successful_new_navigation_or_manual_refresh_admission_only")
 
@@ -487,6 +556,76 @@ def test_shared_browser_boundary_denies_privileged_surfaces_and_all_workers() ->
     assert transport["ambient_identity_or_cookie_authority"] is False
 
 
+def test_shared_admission_result_and_protected_resource_wire_are_closed() -> None:
+    document = _load(ARTIFACTS["runtime"])
+    runtime = document["x-contract"]
+    interfaces = {interface["id"]: interface for interface in runtime["interfaces"]}
+    assert interfaces["shared_document_admission"]["result"] == "#/$defs/SharedAdmissionResult"
+    assert interfaces["shared_protected_resource"]["request"] == "#/$defs/SharedResourceRequest"
+
+    admissions = [
+        example["value"] for example in document["x-examples"] if example["schema_ref"] == "#/$defs/SharedAdmission"
+    ]
+    assert admissions
+    assert all(admission["source_session_id"] == "session-1" for admission in admissions)
+    assert runtime["shared_admission"]["source_session_id_visibility"] == (
+        "trusted_internal_only_never_browser_exposed"
+    )
+    assert "source_session_id" not in document["$defs"]["SharedDocumentCapability"]["properties"]
+    missing_session = deepcopy(admissions[0])
+    missing_session.pop("source_session_id")
+    with pytest.raises(ValidationError):
+        _validate(document, "#/$defs/SharedAdmission", missing_session)
+
+    failures = runtime["shared_admission"]["result"]["failures"]
+    assert set(failures) == {
+        "shared_runtime_unavailable",
+        "snapshot_too_large",
+        "capacity_exhausted",
+        "capture_timeout",
+        "reload_required",
+    }
+    for code, response in failures.items():
+        _validate(
+            document,
+            "#/$defs/SharedAdmissionResult",
+            {"outcome": "failure", "code": code, **response},
+        )
+        assert all(forbidden not in response["body"] for forbidden in ("/", "workspace", "source", "stack"))
+        with pytest.raises(ValidationError):
+            _validate(
+                document,
+                "#/$defs/SharedAdmissionResult",
+                {"outcome": "failure", "code": code, "http_status": 418, "body": response["body"]},
+            )
+
+    transport = runtime["shared_response_transport"]
+    assert transport["path_template"] == (
+        "/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/{resource_handle}"
+    )
+    assert transport["nested_import_rewrite"] == ("absolute_url_under_same_namespace_document_capability_prefix")
+    assert transport["query_authority"] is False
+    assert transport["cookie_authority"] is False
+    assert transport["custom_request_header_required"] is False
+    assert transport["capability_path_access_log_policy"].startswith("redact_")
+    path = next(
+        example["value"]["path"] for example in document["x-examples"] if example["name"] == "shared_module_request"
+    )
+    for surface in transport["protected_surfaces"]:
+        _validate(
+            document,
+            "#/$defs/SharedResourceRequest",
+            {"method": "GET", "surface": surface, "path": path},
+        )
+    for forbidden_path in (f"{path}?token=ambient", "/workspace/src/main.tsx", "/p/stable_alpha/main.ts"):
+        with pytest.raises(ValidationError):
+            _validate(
+                document,
+                "#/$defs/SharedResourceRequest",
+                {"method": "GET", "surface": "module", "path": forbidden_path},
+            )
+
+
 def test_private_editor_authority_is_connection_admission_only() -> None:
     editor = _load(ARTIFACTS["runtime"])["x-contract"]["private_editor"]
     assert editor["surface"] == "/show/<session_id>/"
@@ -526,10 +665,24 @@ def test_cache_and_runtime_release_boundaries_are_closed() -> None:
     release = runtime["release_gate"]
 
     assert cache["limited_all_surfaces"] == "private, no-store"
-    assert cache["public_access_dependent_redirects"] == {
-        "surfaces": ["resource_viewer_p_to_canonical_show", "resource_editor_p_to_canonical_show"],
+    assert cache["public_non_versioned_surfaces"] == {
+        "surfaces": [
+            "shell",
+            "document",
+            "module",
+            "style",
+            "raw_asset",
+            "fallback",
+            "page_api",
+            "error",
+            "redirect",
+        ],
         "response_headers": {"Cache-Control": "private, no-store"},
     }
+    assert cache["public_access_dependent_redirects"] == [
+        "resource_viewer_p_to_canonical_show",
+        "resource_editor_p_to_canonical_show",
+    ]
     assert cache["public_versioned_asset_exception"] == "public, max-age=31536000, immutable"
     assert cache["public_versioned_asset_constraint"] == (
         "contains_only_public_bytes_and_no_identity_or_page_private_data"
@@ -547,6 +700,10 @@ def test_plan_and_readme_keep_contract_evidence_distinct_from_production() -> No
     assert "does not yet prove production Avibe, Backend, Runtime, browser" in readme
     assert "SHOW-LIVE-" not in plan
     assert "scenario-bindings" not in readme
+    identity = _load(ARTIFACTS["identity"])["x-contract"]["reference_evidence"]
+    assert identity["scenario"] == "AUTH-SETUP-401"
+    assert identity["harness"] == "tests/scenario_harness/show_identity_callback.py"
+    assert identity["production_crypto_browser_conformance"].startswith("future_")
 
 
 def test_superseded_contract_and_scenario_artifacts_are_absent() -> None:
@@ -566,6 +723,8 @@ def test_superseded_contract_and_scenario_artifacts_are_absent() -> None:
     scenario_index = Path("tests/scenarios/INDEX.yaml").read_text(encoding="utf-8")
     auth_catalog = Path("tests/scenarios/auth_setup/catalog.yaml").read_text(encoding="utf-8")
     assert "test_show_identity_scenario.py" not in scenario_index
+    assert "tests/scenario_harness/show_identity_callback.py" in scenario_index
+    assert "tests/scenario_harness/show_identity_callback.py" in auth_catalog
     assert "AUTH-SETUP-404" not in auth_catalog
     assert "ShowIdentityLimitedPageScenarioTests::test_identity_session_rechecks_limited_membership_on_navigation" in (
         auth_catalog

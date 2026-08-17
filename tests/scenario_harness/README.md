@@ -23,6 +23,8 @@ Current contents:
   Config, adapter, persistence, and exact-route fixtures for Model Hub scenarios
 - `model_hub_native_oauth.py`
   Native OAuth flow harness for Model Hub subscription scenarios
+- `show_identity_callback.py`
+  Stub Backend and local callback boundary for identity-only limited Show Page login
 
 Recommended layering:
 

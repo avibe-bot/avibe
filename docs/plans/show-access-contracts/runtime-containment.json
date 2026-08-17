@@ -28,7 +28,14 @@
         "consumer": "vibe-show-runtime.SharedDocumentCapture",
         "delivery": "trusted_internal_request",
         "request": "#/$defs/SharedAdmission",
-        "result": "#/$defs/SharedDocumentCapability"
+        "result": "#/$defs/SharedAdmissionResult"
+      },
+      {
+        "id": "shared_protected_resource",
+        "producer": "shared_browser_document",
+        "consumer": "vibe-show-runtime.SharedProtectedResource",
+        "delivery": "versioned_opaque_path_without_ambient_authority",
+        "request": "#/$defs/SharedResourceRequest"
       },
       {
         "id": "private_editor_connection",
@@ -45,7 +52,19 @@
       "private": "deny",
       "keyed_context_supported": "required_before_any_shared_runtime_work",
       "keyed_context_unsupported": "shared_runtime_unavailable_without_legacy_graph_access",
-      "keyed_context_transient_unknown": "bounded_probe_then_shared_runtime_unavailable_without_upstream"
+      "keyed_context_transient_unknown": "bounded_probe_then_shared_runtime_unavailable_without_upstream",
+      "source_session_id_visibility": "trusted_internal_only_never_browser_exposed",
+      "result": {
+        "success": "SharedDocumentCapability",
+        "failures": {
+          "shared_runtime_unavailable": {"http_status": 503, "body": "shared runtime unavailable"},
+          "snapshot_too_large": {"http_status": 413, "body": "shared page unavailable"},
+          "capacity_exhausted": {"http_status": 503, "body": "shared runtime busy"},
+          "capture_timeout": {"http_status": 504, "body": "shared page timed out"},
+          "reload_required": {"http_status": 409, "body": "reload required"}
+        },
+        "failure_body_forbidden_data": ["workspace_path", "source_path", "diagnostic", "stack_trace"]
+      }
     },
     "top_level_route_decision": {
       "resource_viewer_or_editor": "redirect_to_canonical_show_without_shared_runtime_admission",
@@ -54,7 +73,7 @@
     },
     "context_isolation": {
       "private_graph_key": ["session_id", "private"],
-      "shared_graph_key": ["session_id", "page_id", "share_id", "admitted_revision", "shared"],
+      "shared_graph_key": ["source_session_id", "page_id", "share_id", "admitted_revision", "shared"],
       "lifecycle": "private_and_shared_graphs_are_independent",
       "shared_build_trigger": "successful_new_navigation_or_manual_refresh_admission_only",
       "ordinary_private_editor_edit": "keeps_private_graph_identity_and_never_creates_builds_or_rebases_shared_graph",
@@ -90,6 +109,14 @@
     "shared_response_transport": {
       "protected_surfaces": ["document", "module", "style", "raw_asset", "fallback", "page_api"],
       "authorization": "opaque_document_capability",
+      "carrier": "versioned_opaque_path_prefix",
+      "path_template": "/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/{resource_handle}",
+      "nested_import_rewrite": "absolute_url_under_same_namespace_document_capability_prefix",
+      "resource_handle": "opaque_non_path_source_identifier",
+      "query_authority": false,
+      "cookie_authority": false,
+      "custom_request_header_required": false,
+      "capability_path_access_log_policy": "redact_namespace_document_capability_and_resource_handle_segments",
       "access_control_allow_origin": "*",
       "access_control_allow_credentials": false,
       "set_cookie_allowed": false,
@@ -107,11 +134,11 @@
     },
     "cache_policy": {
       "limited_all_surfaces": "private, no-store",
-      "public_shell_document_fallback_api_errors": "private, no-store",
-      "public_access_dependent_redirects": {
-        "surfaces": ["resource_viewer_p_to_canonical_show", "resource_editor_p_to_canonical_show"],
+      "public_non_versioned_surfaces": {
+        "surfaces": ["shell", "document", "module", "style", "raw_asset", "fallback", "page_api", "error", "redirect"],
         "response_headers": {"Cache-Control": "private, no-store"}
       },
+      "public_access_dependent_redirects": ["resource_viewer_p_to_canonical_show", "resource_editor_p_to_canonical_show"],
       "public_versioned_asset_exception": "public, max-age=31536000, immutable",
       "public_versioned_asset_constraint": "contains_only_public_bytes_and_no_identity_or_page_private_data"
     },
@@ -136,9 +163,12 @@
   "x-examples": [
     {"name": "private_envelope", "schema_ref": "#/$defs/RuntimeEnvelope", "value": {"protocol": 1, "context": "private"}},
     {"name": "shared_envelope", "schema_ref": "#/$defs/RuntimeEnvelope", "value": {"protocol": 1, "context": "shared"}},
-    {"name": "shared_admission", "schema_ref": "#/$defs/SharedAdmission", "value": {"instance_id": "instance-1", "page_id": "page:alpha", "share_id": "stable_alpha", "admitted_revision": 5, "audience": "limited", "identity_subject": "user-1"}},
-    {"name": "public_anonymous_admission", "schema_ref": "#/$defs/SharedAdmission", "value": {"instance_id": "instance-1", "page_id": "page:alpha", "share_id": "stable_alpha", "admitted_revision": 6, "audience": "public", "identity_subject": null}},
-    {"name": "document_capability", "schema_ref": "#/$defs/SharedDocumentCapability", "value": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"}}
+    {"name": "shared_admission", "schema_ref": "#/$defs/SharedAdmission", "value": {"source_session_id": "session-1", "instance_id": "instance-1", "page_id": "page:alpha", "share_id": "stable_alpha", "admitted_revision": 5, "audience": "limited", "identity_subject": "user-1"}},
+    {"name": "public_anonymous_admission", "schema_ref": "#/$defs/SharedAdmission", "value": {"source_session_id": "session-1", "instance_id": "instance-1", "page_id": "page:alpha", "share_id": "stable_alpha", "admitted_revision": 6, "audience": "public", "identity_subject": null}},
+    {"name": "document_capability", "schema_ref": "#/$defs/SharedDocumentCapability", "value": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"}},
+    {"name": "shared_admission_success", "schema_ref": "#/$defs/SharedAdmissionResult", "value": {"outcome": "success", "capability": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"}}},
+    {"name": "shared_admission_unavailable", "schema_ref": "#/$defs/SharedAdmissionResult", "value": {"outcome": "failure", "code": "shared_runtime_unavailable", "http_status": 503, "body": "shared runtime unavailable"}},
+    {"name": "shared_module_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "GET", "surface": "module", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/res_opaque_01"}}
   ],
   "$defs": {
     "RuntimeEnvelope": {
@@ -150,8 +180,9 @@
     "SharedAdmission": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["instance_id", "page_id", "share_id", "admitted_revision", "audience", "identity_subject"],
+      "required": ["source_session_id", "instance_id", "page_id", "share_id", "admitted_revision", "audience", "identity_subject"],
       "properties": {
+        "source_session_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "page_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "share_id": {"type": "string", "minLength": 3, "maxLength": 64},
@@ -168,6 +199,47 @@
         "namespace_id": {"type": "string", "minLength": 16, "maxLength": 256},
         "document_id": {"type": "string", "minLength": 16, "maxLength": 256},
         "capability": {"type": "string", "minLength": 43, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$"}
+      }
+    },
+    "SharedAdmissionResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome", "capability"],
+          "properties": {
+            "outcome": {"const": "success"},
+            "capability": {"$ref": "#/$defs/SharedDocumentCapability"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome", "code", "http_status", "body"],
+          "properties": {
+            "outcome": {"const": "failure"},
+            "code": {"enum": ["shared_runtime_unavailable", "snapshot_too_large", "capacity_exhausted", "capture_timeout", "reload_required"]},
+            "http_status": {"enum": [409, 413, 503, 504]},
+            "body": {"enum": ["shared runtime unavailable", "shared page unavailable", "shared runtime busy", "shared page timed out", "reload required"]}
+          },
+          "allOf": [
+            {"if": {"properties": {"code": {"const": "shared_runtime_unavailable"}}}, "then": {"properties": {"http_status": {"const": 503}, "body": {"const": "shared runtime unavailable"}}}},
+            {"if": {"properties": {"code": {"const": "snapshot_too_large"}}}, "then": {"properties": {"http_status": {"const": 413}, "body": {"const": "shared page unavailable"}}}},
+            {"if": {"properties": {"code": {"const": "capacity_exhausted"}}}, "then": {"properties": {"http_status": {"const": 503}, "body": {"const": "shared runtime busy"}}}},
+            {"if": {"properties": {"code": {"const": "capture_timeout"}}}, "then": {"properties": {"http_status": {"const": 504}, "body": {"const": "shared page timed out"}}}},
+            {"if": {"properties": {"code": {"const": "reload_required"}}}, "then": {"properties": {"http_status": {"const": 409}, "body": {"const": "reload required"}}}}
+          ]
+        }
+      ]
+    },
+    "SharedResourceRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "surface", "path"],
+      "properties": {
+        "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]},
+        "surface": {"enum": ["document", "module", "style", "raw_asset", "fallback", "page_api"]},
+        "path": {"type": "string", "pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$"}
       }
     }
   }

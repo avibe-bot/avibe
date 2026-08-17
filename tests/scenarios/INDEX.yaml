@@ -156,6 +156,8 @@ capabilities:
     scenario_tests:
       - tests/scenarios/auth_setup/test_auth_setup_scenarios.py
       - tests/test_claude_agent_sessions.py
+    harness:
+      - tests/scenario_harness/show_identity_callback.py
     unit_or_contract_tests:
       - tests/test_agent_auth_service.py
       - tests/test_cloud_management.py

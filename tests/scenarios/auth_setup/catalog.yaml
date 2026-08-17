@@ -9,6 +9,7 @@ capability:
     - tests/scenario_harness/core.py
     - tests/scenario_harness/auth_setup.py
     - tests/scenario_harness/model_hub_native_oauth.py
+    - tests/scenario_harness/show_identity_callback.py
 status_legend:
   covered: scenario coverage exists
   partial: unit or contract coverage exists but the closed loop is incomplete

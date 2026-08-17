@@ -81,6 +81,7 @@
     },
     "normalization": {
       "steps": ["trim_ascii_surrounding_whitespace", "ascii_lowercase", "reject_invalid_email", "deduplicate", "sort_lexicographically"],
+      "syntax": "one_at; dot_atom_local_without_edge_or_consecutive_dot; lowercase_dns_labels_without_edge_hyphen",
       "persistence": "canonical_array_only"
     },
     "forbidden_concepts": ["availability", "grant_revision", "grant_commitment", "hosted_grant", "prepare_commit", "cleanup", "migration", "mutation_receipt"]
@@ -130,7 +131,7 @@
   "$defs": {
     "PageId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
     "ShareId": {"type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,62}[A-Za-z0-9]$"},
-    "NormalizedEmail": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+$"},
+    "NormalizedEmail": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"},
     "ShowAccess": {
       "type": "object",
       "additionalProperties": false,

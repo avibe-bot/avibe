@@ -1,6 +1,4 @@
 import asyncio
-import base64
-import hashlib
 import json
 import os
 import sys
@@ -43,6 +41,7 @@ from tests.scenario_harness.organization_management import (
     REMOTE_ORIGIN,
     OrganizationManagementScenarioHarness,
 )
+from tests.scenario_harness.show_identity_callback import ShowIdentityCallbackHarness
 from storage import remote_access_authorization_service
 from vibe import cloud_management
 from tests.scenario_harness.model_hub_native_oauth import (
@@ -63,111 +62,23 @@ from vibe import remote_access, ui_server
 from vibe.ui_server import app
 
 
-class _ShowIdentityLimitedPageFlow:
-    CALLBACK_ORIGIN = "https://show.example.test"
-    INSTANCE_ID = "instance-1"
-    NOW = 1_786_935_600
-    SESSION_LIFETIME = 2_592_000
-
-    def __init__(self) -> None:
-        self.cookie: str | None = None
-        self.records: dict[str, dict[str, object]] = {}
-        self.emails = {"alice@example.com"}
-        self.revision = 5
-        self.loaded_documents: set[str] = set()
-        self.membership_checks = 0
-
-    def navigate(self, path: str = "/p/stable_alpha/") -> dict[str, str]:
-        if path != "/p/stable_alpha/":
-            return {"decision": "not_found"}
-        if self.cookie is None:
-            return {"decision": "identity_login_required"}
-        digest = hashlib.sha256(self.cookie.encode("ascii")).hexdigest()
-        record = self.records.get(digest)
-        if (
-            record is None
-            or record["instance_id"] != self.INSTANCE_ID
-            or record["callback_origin"] != self.CALLBACK_ORIGIN
-            or int(record["expires_at"]) <= self.NOW
-        ):
-            return {"decision": "identity_login_required"}
-        self.membership_checks += 1
-        if record["normalized_verified_email"] not in self.emails:
-            return {"decision": "denied_not_current_member"}
-        document_id = f"document-{len(self.loaded_documents) + 1}"
-        self.loaded_documents.add(document_id)
-        return {"decision": "admitted_shared", "document_id": document_id}
-
-    def login(self) -> dict[str, object]:
-        authorize_request = {
-            "state": "signed-state-1",
-            "nonce": "nonce-1",
-            "redirect_uri": f"{self.CALLBACK_ORIGIN}/auth/show-identity/callback",
-        }
-        form_post = {
-            "method": "POST",
-            "path": "/auth/show-identity/callback",
-            "state": authorize_request["state"],
-            "assertion_claims": {
-                "iss": "https://avibe.example.test",
-                "aud": "avibe-show-identity:oauth-client-1",
-                "sub": "user-1",
-                "iat": self.NOW,
-                "exp": self.NOW + 300,
-                "jti": "jti-1",
-                "nonce": authorize_request["nonce"],
-                "instance_id": self.INSTANCE_ID,
-                "verified_email": "alice@example.com",
-            },
-        }
-        token = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
-        digest = hashlib.sha256(token.encode("ascii")).hexdigest()
-        self.records[digest] = {
-            "token_sha256": digest,
-            "instance_id": self.INSTANCE_ID,
-            "callback_origin": self.CALLBACK_ORIGIN,
-            "subject": form_post["assertion_claims"]["sub"],
-            "normalized_verified_email": form_post["assertion_claims"]["verified_email"],
-            "created_at": self.NOW,
-            "expires_at": self.NOW + self.SESSION_LIFETIME,
-        }
-        self.cookie = token
-        return {
-            "authorize_request": authorize_request,
-            "form_post": form_post,
-            "location": "/p/stable_alpha/",
-            "set_cookie": {
-                "name": "__Host-avibe_show_identity_session",
-                "value": token,
-                "host_only": True,
-                "domain": None,
-                "secure": True,
-                "http_only": True,
-                "same_site": "Lax",
-                "path": "/",
-            },
-        }
-
-    def remove_member(self) -> None:
-        self.emails.remove("alice@example.com")
-        self.revision += 1
-
-
 class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
     def test_identity_session_rechecks_limited_membership_on_navigation(self):
         """Scenario: AUTH-SETUP-401"""
-        flow = _ShowIdentityLimitedPageFlow()
+        flow = ShowIdentityCallbackHarness()
         self.assertEqual(flow.navigate()["decision"], "identity_login_required")
 
-        callback = flow.login()
-        self.assertEqual(set(callback["authorize_request"]), {"state", "nonce", "redirect_uri"})
+        login = flow.start_login()
+        self.assertEqual(set(login["authorize_request"]), {"state", "nonce", "redirect_uri"})
         self.assertEqual(
-            (callback["form_post"]["method"], callback["form_post"]["path"]),
+            (login["form_post"]["method"], login["form_post"]["path"]),
             ("POST", "/auth/show-identity/callback"),
         )
+        callback = flow.complete_login(login)
+        self.assertEqual(callback["decision"], "return_to_share")
         self.assertTrue(
             {"page_id", "share_id", "page_membership", "instance_role"}.isdisjoint(
-                callback["form_post"]["assertion_claims"]
+                flow.backend.assertions[login["form_post"]["form"]["assertion"]]
             )
         )
         self.assertEqual(callback["location"], "/p/stable_alpha/")
@@ -186,8 +97,20 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
                 "path": "/",
             },
         )
-        self.assertEqual(len(base64.urlsafe_b64decode(callback["set_cookie"]["value"] + "=")), 32)
+        self.assertEqual(len(callback["set_cookie"]["value"]), 43)
         self.assertNotIn(callback["set_cookie"]["value"], flow.records)
+        self.assertEqual(
+            flow.events[1:8],
+            [
+                "local.signed_state_signer",
+                "backend.authorize",
+                "local.callback_http_boundary",
+                "local.signed_state_verifier",
+                "local.correlation_cookie_verifier",
+                "local.assertion_verifier",
+                "local.identity_session_digest_store",
+            ],
+        )
 
         returned = flow.navigate()
         later = flow.navigate()
@@ -219,6 +142,31 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
                 "expires_at",
             },
         )
+
+        bad_state = ShowIdentityCallbackHarness()
+        flow = bad_state.start_login()
+        flow["form_post"]["form"]["state"] = "tampered-state"
+        self.assertEqual(bad_state.complete_login(flow)["decision"], "identity_retry_required")
+        self.assertNotIn("local.correlation_cookie_verifier", bad_state.events)
+        self.assertFalse(bad_state.records)
+
+        bad_cookie = ShowIdentityCallbackHarness()
+        flow = bad_cookie.start_login()
+        flow["correlation_cookie"] = "wrong-secret"
+        self.assertEqual(bad_cookie.complete_login(flow)["decision"], "identity_retry_required")
+        self.assertNotIn("local.assertion_verifier", bad_cookie.events)
+        self.assertFalse(bad_cookie.records)
+
+        for field, value in (
+            ("iss", "https://attacker.example"),
+            ("aud", "avibe-show-identity:other-client"),
+            ("nonce", "other-nonce"),
+        ):
+            invalid = ShowIdentityCallbackHarness()
+            flow = invalid.start_login(assertion_overrides={field: value})
+            self.assertEqual(invalid.complete_login(flow)["decision"], "identity_retry_required")
+            self.assertIn("local.assertion_verifier", invalid.events)
+            self.assertFalse(invalid.records)
 
 
 class _FakeNextTurnRuntime:
