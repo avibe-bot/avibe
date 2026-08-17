@@ -5495,6 +5495,37 @@ def test_private_show_page_rewrites_absolute_runtime_redirect_location(monkeypat
     assert response.headers["location"] == "/show/ses123/foo/?x=1#top"
 
 
+@pytest.mark.parametrize(
+    "external_location",
+    [
+        "https://example.test/show/ses123/foo?x=1#top",
+        "https://example.test/sessions/ses123/app/foo?x=1#top",
+    ],
+)
+def test_public_show_page_preserves_external_redirect_location(monkeypatch, tmp_path, external_location):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager(
+        body=b"",
+        status_code=302,
+        extra_headers={"location": external_location},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/foo",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            follow_redirects=False,
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == external_location
+
+
 def test_show_runtime_manager_reports_missing_command(tmp_path):
     manager = ShowRuntimeManager(
         command="definitely-missing-avibe-show-runtime",
@@ -7384,6 +7415,33 @@ def test_public_show_page_rewrites_runtime_redirect_location(monkeypatch, tmp_pa
 
     assert response.status_code == 302
     assert response.headers["location"] == f"/p/{share_id}/foo/"
+
+
+def test_public_show_page_rewrites_runtime_source_map_headers(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager(
+        body=b"export default true",
+        extra_headers={
+            "content-type": "text/javascript",
+            "sourcemap": "/show/ses123/src/App.tsx.map?x=1",
+            "x-sourcemap": "https://example.test/show/ses123/external.map",
+        },
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/src/App.tsx",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.headers["sourcemap"] == f"/p/{share_id}/src/App.tsx.map?x=1"
+    assert response.headers["x-sourcemap"] == "https://example.test/show/ses123/external.map"
 
 
 @pytest.mark.parametrize("asset_path", ["docs/", "robots"])

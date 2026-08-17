@@ -14343,12 +14343,11 @@ async def _show_page_runtime_response(
         for key, value in proxied.headers.items()
         if key.lower() in _SHOW_RUNTIME_RESPONSE_HEADER_ALLOWLIST
     }
-    if location := response_headers.get("location"):
-        response_headers["location"] = _rewrite_show_runtime_location(
-            session_id,
-            location,
-            external_prefix=external_prefix,
-        )
+    _rewrite_show_runtime_url_headers(
+        response_headers,
+        session_id=session_id,
+        external_prefix=external_prefix,
+    )
     response_headers["X-Content-Type-Options"] = "nosniff"
     response_headers["Referrer-Policy"] = "no-referrer"
     content = proxied.content
@@ -14762,8 +14761,27 @@ def _inject_show_runtime_config(
     return html.encode("utf-8")
 
 
-def _rewrite_show_runtime_location(session_id: str, location: str, *, external_prefix: str | None = None) -> str:
-    parsed = urlsplit(location)
+def _rewrite_show_runtime_url_headers(
+    headers: dict[str, str],
+    *,
+    session_id: str,
+    external_prefix: str | None,
+) -> None:
+    for header in ("location", "sourcemap", "x-sourcemap"):
+        value = _response_header(headers, header)
+        if value is None:
+            continue
+        _set_response_header(
+            headers,
+            header,
+            _rewrite_show_runtime_url(session_id, value, external_prefix=external_prefix),
+        )
+
+
+def _rewrite_show_runtime_url(session_id: str, value: str, *, external_prefix: str | None = None) -> str:
+    parsed = urlsplit(value)
+    if (parsed.scheme or parsed.netloc) and not _is_local_show_runtime_url(parsed):
+        return value
     internal_prefix = f"/sessions/{quote(session_id, safe='')}/app"
     private_prefix = f"/show/{quote(session_id, safe='')}"
     resolved_external_prefix = (external_prefix or private_prefix).rstrip("/")
@@ -14778,8 +14796,22 @@ def _rewrite_show_runtime_location(session_id: str, location: str, *, external_p
         suffix = parsed.path[len(private_prefix) :].lstrip("/")
         public_path = f"{resolved_external_prefix}/{suffix}"
     else:
-        return location
+        return value
     return urlunsplit(("", "", public_path, parsed.query, parsed.fragment))
+
+
+def _is_local_show_runtime_url(parsed) -> bool:
+    if parsed.scheme.lower() != "http":
+        return False
+    hostname = parsed.hostname
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _with_show_event_write_cookie(response: Response, session_id: str, *, enabled: bool) -> Response:
