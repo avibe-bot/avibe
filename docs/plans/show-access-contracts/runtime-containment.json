@@ -35,7 +35,7 @@
         "producer": "shared_browser_document",
         "consumer": "vibe-show-runtime.SharedProtectedResource",
         "delivery": "versioned_opaque_path_without_ambient_authority",
-        "request": "#/$defs/SharedResourceRequest"
+        "request": "#/$defs/SharedBrowserRequest"
       },
       {
         "id": "private_editor_connection",
@@ -100,7 +100,7 @@
       "user_document_container": "sandboxed_opaque_origin_iframe",
       "iframe_sandbox_tokens_exact": ["allow-scripts"],
       "allow_same_origin": false,
-      "csp_required_directives": {"worker-src": "'none'", "object-src": "'none'", "base-uri": "'none'"},
+      "csp_required_directives": {"worker-src": "'none'", "object-src": "'none'", "base-uri": "<server_owned_capability_prefix>"},
       "unsupported_worker_kinds": ["Worker", "SharedWorker", "ServiceWorker"],
       "worker_attempt_outcome": "shared_worker_unsupported",
       "service_worker_allowed_header_emitted": false,
@@ -118,16 +118,24 @@
         "page_api": "<prefix>api/{normalized_relative_api_path}"
       },
       "document_url_has_trailing_slash": true,
-      "relative_page_api_resolution": "fetch(./api/data)_resolves_to_same_prefix_api/data",
+      "fallback_document_base_url": "strip_page_authored_base_elements_then_inject_exact_capability_root_before_page_content",
+      "relative_url_resolution": "modules_styles_raw_assets_and_fetch(./api/data)_resolve_from_exact_capability_root_on_root_and_history_documents",
       "page_api_namespace_mapping": "captured_page_api_only",
       "top_level_history_mapping": {
         "browser_url": "/p/<share_id>/{normalized_relative_history_path}",
         "protected_request": "<prefix>history/{normalized_relative_history_path}",
         "preserve_browser_url": true
       },
-      "history_and_api_path_segments": "one_or_more_ascii_alnum_underscore_or_hyphen_segments",
+      "history_and_api_path_segments": "one_or_more_segments_using_ascii_letters_digits_underscore_hyphen_dot_or_at_sign",
       "history_and_api_forbidden_syntax": ["dot_segments", "empty_segments", "encoded_separator", "encoded_traversal", "query", "raw_source_path"],
       "nested_import_rewrite": "absolute_url_under_same_namespace_document_capability_prefix",
+      "page_api_content_type": "optional_normalized_media_type_only",
+      "page_api_body": "optional_base64_with_declared_decoded_length",
+      "page_api_body_length_invariant": "decoded_bytes == body.length_bytes <= maximum_page_api_body_bytes",
+      "maximum_page_api_body_bytes": 1048576,
+      "oversized_page_api_request": {"http_status": 413, "body": "request too large"},
+      "forwarded_page_api_metadata_exact": ["content_type", "body"],
+      "forbidden_ambient_request_metadata": ["cookie", "authorization", "arbitrary_headers"],
       "resource_handle": "opaque_non_path_source_identifier",
       "query_authority": false,
       "cookie_authority": false,
@@ -184,10 +192,10 @@
     {"name": "document_capability", "schema_ref": "#/$defs/SharedDocumentCapability", "value": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"}},
     {"name": "shared_admission_success", "schema_ref": "#/$defs/SharedAdmissionResult", "value": {"outcome": "success", "capability": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"}}},
     {"name": "shared_admission_unavailable", "schema_ref": "#/$defs/SharedAdmissionResult", "value": {"outcome": "failure", "code": "shared_runtime_unavailable", "http_status": 503, "body": "shared runtime unavailable"}},
-    {"name": "shared_document_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "GET", "surface": "document", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/"}},
-    {"name": "shared_history_fallback_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "GET", "surface": "fallback", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/history/reports/daily"}},
-    {"name": "shared_module_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "GET", "surface": "module", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/asset/res_opaque_01"}},
-    {"name": "shared_page_api_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "POST", "surface": "page_api", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/api/data"}}
+    {"name": "shared_document_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "document", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/"}},
+    {"name": "shared_history_fallback_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "fallback", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/history/users/alice@example.com"}},
+    {"name": "shared_module_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "GET", "surface": "module", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/asset/res_opaque_01"}},
+    {"name": "shared_page_api_request", "schema_ref": "#/$defs/SharedBrowserRequest", "value": {"method": "POST", "surface": "page_api", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/api/data", "content_type": "application/json", "body": {"encoding": "base64", "data": "eyJwaW5nIjp0cnVlfQ==", "length_bytes": 13}}}
   ],
   "$defs": {
     "RuntimeEnvelope": {
@@ -257,28 +265,76 @@
         }
       ]
     },
-    "SharedResourceRequest": {
+    "CapabilityRootPath": {
+      "type": "string",
+      "pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/$"
+    },
+    "HistoryFallbackPath": {
+      "type": "string",
+      "pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/history/(?!\\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+)*$"
+    },
+    "OpaqueAssetPath": {
+      "type": "string",
+      "pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/asset/[A-Za-z0-9_-]+$"
+    },
+    "PageApiPath": {
+      "type": "string",
+      "pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/api/(?!\\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9_@.-]+)*$"
+    },
+    "SharedRequestBody": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["method", "surface", "path"],
+      "required": ["encoding", "data", "length_bytes"],
       "properties": {
-        "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]},
-        "surface": {"enum": ["document", "module", "style", "raw_asset", "fallback", "page_api"]},
-        "path": {
-          "type": "string",
-          "oneOf": [
-            {"pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/$"},
-            {"pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/history/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"},
-            {"pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/asset/[A-Za-z0-9_-]+$"},
-            {"pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/api/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"}
-          ]
+        "encoding": {"const": "base64"},
+        "data": {"type": "string", "maxLength": 1398104, "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"},
+        "length_bytes": {"type": "integer", "minimum": 0, "maximum": 1048576}
+      }
+    },
+    "SharedBrowserRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "surface", "path"],
+          "properties": {
+            "method": {"enum": ["GET", "HEAD"]},
+            "surface": {"const": "document"},
+            "path": {"$ref": "#/$defs/CapabilityRootPath"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "surface", "path"],
+          "properties": {
+            "method": {"enum": ["GET", "HEAD"]},
+            "surface": {"const": "fallback"},
+            "path": {"oneOf": [{"$ref": "#/$defs/CapabilityRootPath"}, {"$ref": "#/$defs/HistoryFallbackPath"}]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "surface", "path"],
+          "properties": {
+            "method": {"enum": ["GET", "HEAD"]},
+            "surface": {"enum": ["module", "style", "raw_asset"]},
+            "path": {"$ref": "#/$defs/OpaqueAssetPath"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "surface", "path"],
+          "properties": {
+            "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]},
+            "surface": {"const": "page_api"},
+            "path": {"$ref": "#/$defs/PageApiPath"},
+            "content_type": {"type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+(?:; charset=[a-z0-9._-]+)?$"},
+            "body": {"$ref": "#/$defs/SharedRequestBody"}
+          }
         }
-      },
-      "allOf": [
-        {"if": {"properties": {"surface": {"const": "document"}}}, "then": {"properties": {"path": {"pattern": "/$"}}}},
-        {"if": {"properties": {"surface": {"const": "fallback"}}}, "then": {"properties": {"path": {"oneOf": [{"pattern": "/$"}, {"pattern": "/history/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"}]}}}},
-        {"if": {"properties": {"surface": {"enum": ["module", "style", "raw_asset"]}}}, "then": {"properties": {"path": {"pattern": "/asset/[A-Za-z0-9_-]+$"}}}},
-        {"if": {"properties": {"surface": {"const": "page_api"}}}, "then": {"properties": {"path": {"pattern": "/api/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"}}}}
       ]
     }
   }

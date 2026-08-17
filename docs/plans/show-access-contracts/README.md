@@ -41,9 +41,11 @@ bytes plus a local record keyed only by the token's SHA-256 digest. It lasts a
 fixed 30 days without sliding refresh and proves identity only. Page admission
 remains a fresh local decision at each new top-level navigation or manual refresh.
 The pending-flow cookie is scoped to `/auth/show-identity`, so local login start
-and callback see the same opaque browser handle. Each presented handle owns at
-most one pending record; a repeat start replaces it without affecting another
-browser handle.
+and callback see the same opaque browser value. Login start signs that value's
+SHA-256 digest into the 300-second state and stores no pending-flow record. A
+newer start overwrites the browser cookie, so an older callback fails while
+separate browser cookie jars remain independent. HTTP requests carry only the
+cookie name/value pair; attributes exist only on `Set-Cookie` projections.
 
 After admission, the opaque document capability remains valid for that loaded
 document and its subresources while its Runtime namespace and document handle
@@ -62,10 +64,15 @@ keys include the internal source Session ID, but that value never crosses the
 browser boundary. Every protected resource uses one versioned opaque path with
 URL-safe namespace, document, and capability segments. The document root ends in
 `/`; opaque assets use `asset/`, page APIs use `api/`, and nested-route reloads use
-`history/` with the same safe relative-path grammar. Nested imports are rewritten
-under the same prefix and capability segments are redacted from access logs. A
-limited admission always includes a nonempty verified subject. Shared capture
-returns either a capability or one fixed sanitized failure result.
+`history/` with the same safe relative-path grammar, including the existing `.`
+and `@` route characters. The transformed fallback document establishes the
+capability root as its base URL, so relative APIs and assets do not inherit the
+nested history path. Page-API requests carry only method, safe path, optional
+normalized content type, and an optional base64 body bounded to 1 MiB; ambient
+headers are excluded. Nested imports are rewritten under the same prefix and
+capability segments are redacted from access logs. A limited admission always
+includes a nonempty verified subject. Shared capture returns either a capability
+or one fixed sanitized failure result.
 
 `/show` uses private Runtime context. Resource-editor authority is checked when
 an HMR/annotation connection is admitted. Permission changes do not require an

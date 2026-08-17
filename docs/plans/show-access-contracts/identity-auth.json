@@ -12,10 +12,10 @@
         "id": "show_identity_login_start",
         "producer": "show_identity_browser",
         "consumer": "avibe.local_http.GET /auth/show-identity/start",
-        "delivery": "browser_navigation_with_optional_pending_flow_cookie",
-        "request_cookie": "#/$defs/PendingFlowCookie",
+        "delivery": "browser_navigation_with_optional_cookie_pair",
+        "request_cookie": "#/$defs/PendingFlowCookiePair",
         "request_cookie_optional_on_first_start": true,
-        "result_cookie": "#/$defs/PendingFlowCookie"
+        "result_cookie": "#/$defs/PendingFlowSetCookie"
       },
       {
         "id": "show_identity_authorize",
@@ -29,7 +29,9 @@
         "producer": "avibe-backend.ShowIdentityAssertionIssuer",
         "consumer": "avibe.local_http.POST /auth/show-identity/callback",
         "delivery": "form_post",
-        "request": "#/$defs/CallbackForm"
+        "request": "#/$defs/CallbackForm",
+        "request_cookie": "#/$defs/PendingFlowCookiePair",
+        "correlation_cookie_expiry": "#/$defs/PendingFlowExpiredSetCookie"
       },
       {
         "id": "show_identity_session_cookie",
@@ -89,14 +91,14 @@
       "seamless_rotation_or_previous_key_overlap_required": false
     },
     "local_flow": {
-      "active_flow_cardinality": "one_per_browser_and_configured_callback_origin",
+      "active_flow_cardinality": "one_browser_correlation_cookie_per_configured_callback_origin",
       "latest_login_start_replaces_previous": true,
       "start_path": "/auth/show-identity/start",
       "shared_cookie_path": "/auth/show-identity",
       "state_and_pending_flow_cookie_lifetime_seconds": 300,
       "post_expiry_grace_seconds": 0,
-      "stale_or_replayed_callback": "identity_retry_required",
-      "expired_flow_cleanup": "replace_or_delete_single_active_flow",
+      "stale_or_cookie_less_callback": "identity_retry_required",
+      "server_replay_ledger": false,
       "signed_state": "#/$defs/SignedStateClaims",
       "pending_flow_cookie": {
         "name": "__Secure-avibe_show_identity_flow",
@@ -110,22 +112,21 @@
         "maximum_age_seconds": 300,
         "visible_to": ["login_start", "form_post_callback"]
       },
-      "pending_flow_store": {
-        "key": "sha256_utf8_of_pending_flow_cookie_value",
-        "browser_correlation": "opaque_pending_flow_cookie_handle",
-        "value_fields_exact": ["flow_id", "signed_state_digest", "expires_at"],
-        "maximum_pending_flows_per_browser": 1,
-        "start_without_valid_handle": "mint_handle_and_create_one_pending_flow",
-        "start_with_current_handle": "atomically_replace_that_handle_pending_flow",
-        "different_browser_handles": "independent",
-        "callback_consumption": "delete_only_matching_handle_pending_flow"
-      },
+      "request_cookie_wire": "#/$defs/PendingFlowCookiePair",
+      "set_cookie_wire": "#/$defs/PendingFlowSetCookie",
+      "callback_expiry_wire": "#/$defs/PendingFlowExpiredSetCookie",
+      "correlation": "signed_state.pending_flow_cookie_sha256 == sha256_utf8(request_cookie.value)",
+      "server_pending_flow_records": 0,
+      "start": "mint_and_overwrite_browser_cookie_then_sign_its_digest_into_state",
+      "repeated_cookie_less_starts": "allocate_zero_durable_or_in_memory_pending_flow_records",
+      "different_browsers": "independent_browser_cookie_jars",
+      "matching_callback_consumption": "expire_only_the_matching_browser_cookie",
       "callback_checks_in_order": [
         "exact_configured_origin_and_fixed_path",
-        "signed_state_valid_and_is_current_active_flow",
-        "pending_flow_cookie_handle_matches_current_flow",
+        "signed_state_signature_and_fixed_expiry",
+        "request_cookie_name_and_value_digest_match_signed_state",
         "assertion_rs256_signature_issuer_audience_instance_nonce_and_expiry",
-        "consume_current_flow_once",
+        "expire_matching_browser_correlation_cookie",
         "create_or_replace_identity_only_session",
         "reresolve_safe_return_share"
       ],
@@ -162,7 +163,7 @@
     "reference_evidence": {
       "scenario": "AUTH-SETUP-401",
       "harness": "tests/scenario_harness/show_identity_callback.py",
-      "closed_loop": ["login_start_pending_flow_cookie", "authorize_request", "backend_form_post", "local_callback", "signed_state_check", "pending_flow_cookie_check", "assertion_binding_check", "digest_only_identity_session", "later_limited_navigation"],
+      "closed_loop": ["login_start_pending_flow_set_cookie", "authorize_request", "backend_form_post", "local_callback_cookie_pair", "stateless_signed_state_check", "cookie_digest_check_and_expiry", "assertion_binding_check", "digest_only_identity_session", "later_limited_navigation"],
       "production_crypto_browser_conformance": "future_backend_avibe_and_browser_lanes"
     },
     "backend_forbidden_behavior": ["receive_local_whitelist", "decide_page_membership", "derive_instance_role", "create_instance_access_context"],
@@ -187,12 +188,22 @@
     {
       "name": "signed_state_claims",
       "schema_ref": "#/$defs/SignedStateClaims",
-      "value": {"flow_id": "flow-1", "instance_id": "instance-1", "nonce": "nonce-value", "callback_origin": "https://show.example.test", "safe_return_path": "/p/stable_alpha/", "iat": 1786935600, "exp": 1786935900}
+      "value": {"instance_id": "instance-1", "nonce": "nonce-value", "callback_origin": "https://show.example.test", "safe_return_path": "/p/stable_alpha/", "pending_flow_cookie_sha256": "0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a", "iat": 1786935600, "exp": 1786935900}
     },
     {
-      "name": "pending_flow_cookie",
-      "schema_ref": "#/$defs/PendingFlowCookie",
-      "value": {"name": "__Secure-avibe_show_identity_flow", "value": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "host_only": true, "domain": null, "secure": true, "http_only": true, "same_site": "None", "path": "/auth/show-identity", "maximum_age_seconds": 300}
+      "name": "pending_flow_cookie_pair",
+      "schema_ref": "#/$defs/PendingFlowCookiePair",
+      "value": {"name": "__Secure-avibe_show_identity_flow", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+    },
+    {
+      "name": "pending_flow_set_cookie",
+      "schema_ref": "#/$defs/PendingFlowSetCookie",
+      "value": {"name": "__Secure-avibe_show_identity_flow", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "host_only": true, "domain": null, "secure": true, "http_only": true, "same_site": "None", "path": "/auth/show-identity", "maximum_age_seconds": 300}
+    },
+    {
+      "name": "pending_flow_expired_set_cookie",
+      "schema_ref": "#/$defs/PendingFlowExpiredSetCookie",
+      "value": {"name": "__Secure-avibe_show_identity_flow", "value": "", "host_only": true, "domain": null, "secure": true, "http_only": true, "same_site": "None", "path": "/auth/show-identity", "maximum_age_seconds": 0}
     },
     {
       "name": "identity_session_cookie",
@@ -234,13 +245,13 @@
     "SignedStateClaims": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["flow_id", "instance_id", "nonce", "callback_origin", "safe_return_path", "iat", "exp"],
+      "required": ["instance_id", "nonce", "callback_origin", "safe_return_path", "pending_flow_cookie_sha256", "iat", "exp"],
       "properties": {
-        "flow_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "nonce": {"type": "string", "minLength": 1, "maxLength": 256},
         "callback_origin": {"type": "string", "format": "uri", "pattern": "^https://[^/?#]+$"},
         "safe_return_path": {"type": "string", "minLength": 4, "maxLength": 2048, "pattern": "^/p/[A-Za-z0-9_-]+/$"},
+        "pending_flow_cookie_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "iat": {"type": "integer"},
         "exp": {"type": "integer"}
       }
@@ -267,7 +278,16 @@
       "maxLength": 43,
       "pattern": "^[A-Za-z0-9_-]{43}$"
     },
-    "PendingFlowCookie": {
+    "PendingFlowCookiePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": {"const": "__Secure-avibe_show_identity_flow"},
+        "value": {"$ref": "#/$defs/IdentitySessionToken"}
+      }
+    },
+    "PendingFlowSetCookie": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "value", "host_only", "domain", "secure", "http_only", "same_site", "path", "maximum_age_seconds"],
@@ -281,6 +301,22 @@
         "same_site": {"const": "None"},
         "path": {"const": "/auth/show-identity"},
         "maximum_age_seconds": {"const": 300}
+      }
+    },
+    "PendingFlowExpiredSetCookie": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "host_only", "domain", "secure", "http_only", "same_site", "path", "maximum_age_seconds"],
+      "properties": {
+        "name": {"const": "__Secure-avibe_show_identity_flow"},
+        "value": {"const": ""},
+        "host_only": {"const": true},
+        "domain": {"type": "null"},
+        "secure": {"const": true},
+        "http_only": {"const": true},
+        "same_site": {"const": "None"},
+        "path": {"const": "/auth/show-identity"},
+        "maximum_age_seconds": {"const": 0}
       }
     },
     "IdentitySessionCookie": {

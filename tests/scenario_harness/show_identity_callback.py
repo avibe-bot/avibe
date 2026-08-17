@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
+import json
 from copy import deepcopy
 from typing import Any
 
@@ -60,6 +62,7 @@ class ShowIdentityCallbackHarness:
     NOW = 1_786_935_600
     SESSION_LIFETIME = 2_592_000
     DEFAULT_BROWSER = "browser-a"
+    STATE_SIGNING_KEY = b"show-identity-contract-state-key"
 
     def __init__(self) -> None:
         self.now = self.NOW
@@ -73,16 +76,10 @@ class ShowIdentityCallbackHarness:
         self.events: list[str] = []
         self._flow_number = 0
         self._session_number = 0
-        self._signed_states: dict[str, dict[str, object]] = {}
-        self._pending_flows: dict[str, dict[str, object]] = {}
 
     @property
     def browser_session_cookie(self) -> str | None:
         return self.browser_session_cookies.get(self.DEFAULT_BROWSER)
-
-    @property
-    def pending_flow_count(self) -> int:
-        return len(self._pending_flows)
 
     def navigate(
         self,
@@ -118,32 +115,24 @@ class ShowIdentityCallbackHarness:
         browser_id: str = DEFAULT_BROWSER,
         state_overrides: dict[str, object] | None = None,
         assertion_overrides: dict[str, object] | None = None,
+        accept_set_cookie: bool = True,
     ) -> dict[str, object]:
         self._flow_number += 1
-        state = f"signed-state-{self._flow_number}"
-        flow_id = f"flow-{self._flow_number}"
         nonce = f"nonce-{self._flow_number}"
-        pending_flow_cookie = self.browser_pending_flow_cookies.get(browser_id)
-        if pending_flow_cookie is None:
-            pending_flow_cookie = self._opaque_token("pending-flow", browser_id, self._flow_number)
+        pending_flow_cookie = self._opaque_token("pending-flow", browser_id, self._flow_number)
+        if accept_set_cookie:
             self.browser_pending_flow_cookies[browser_id] = pending_flow_cookie
         state_claims: dict[str, object] = {
-            "flow_id": flow_id,
             "instance_id": self.INSTANCE_ID,
             "nonce": nonce,
             "callback_origin": self.CALLBACK_ORIGIN,
             "safe_return_path": "/p/stable_alpha/",
+            "pending_flow_cookie_sha256": hashlib.sha256(pending_flow_cookie.encode("ascii")).hexdigest(),
             "iat": self.now,
             "exp": self.now + 300,
         }
         state_claims.update(state_overrides or {})
-        self._signed_states[state] = state_claims
-        pending_digest = hashlib.sha256(pending_flow_cookie.encode("ascii")).hexdigest()
-        self._pending_flows[pending_digest] = {
-            "flow_id": flow_id,
-            "signed_state_digest": hashlib.sha256(state.encode("ascii")).hexdigest(),
-            "expires_at": self.now + 300,
-        }
+        state = self._sign_state(state_claims)
         self.events.append("local.signed_state_signer")
         authorize_request = {
             "state": state,
@@ -158,7 +147,7 @@ class ShowIdentityCallbackHarness:
         return {
             "browser_id": browser_id,
             "authorize_request": authorize_request,
-            "pending_flow_cookie": pending_flow_cookie,
+            "pending_flow_request_cookie": self._pending_flow_cookie_pair(pending_flow_cookie),
             "pending_flow_set_cookie": self._pending_flow_cookie_projection(pending_flow_cookie),
             "form_post": form_post,
         }
@@ -167,7 +156,7 @@ class ShowIdentityCallbackHarness:
         self,
         form_post: dict[str, Any],
         *,
-        pending_flow_cookie: str | None,
+        request_cookie: dict[str, object] | None,
         browser_id: str = DEFAULT_BROWSER,
     ) -> dict[str, object]:
         self.events.append("local.callback_http_boundary")
@@ -178,22 +167,16 @@ class ShowIdentityCallbackHarness:
             return {"decision": "identity_retry_required"}
 
         self.events.append("local.signed_state_verifier")
-        state = self._signed_states.get(form.get("state"))
+        state = self._verify_state(form.get("state"))
         if state is None or not self._valid_time_window(state):
             return {"decision": "identity_retry_required"}
 
         self.events.append("local.pending_flow_cookie_verifier")
-        if not isinstance(pending_flow_cookie, str):
+        if not self._valid_pending_flow_cookie_pair(request_cookie):
             return {"decision": "identity_retry_required"}
+        pending_flow_cookie = str(request_cookie["value"])
         pending_digest = hashlib.sha256(pending_flow_cookie.encode("ascii")).hexdigest()
-        pending = self._pending_flows.get(pending_digest)
-        signed_state_digest = hashlib.sha256(form["state"].encode("ascii")).hexdigest()
-        if (
-            pending is None
-            or pending["signed_state_digest"] != signed_state_digest
-            or pending["flow_id"] != state.get("flow_id")
-            or int(pending["expires_at"]) <= self.now
-        ):
+        if not hmac.compare_digest(pending_digest, str(state.get("pending_flow_cookie_sha256", ""))):
             return {"decision": "identity_retry_required"}
 
         self.events.append("local.assertion_verifier")
@@ -212,6 +195,9 @@ class ShowIdentityCallbackHarness:
         ):
             return {"decision": "identity_retry_required"}
 
+        if self.browser_pending_flow_cookies.get(browser_id) == pending_flow_cookie:
+            self.browser_pending_flow_cookies.pop(browser_id, None)
+        self.events.append("local.pending_flow_cookie_expiry")
         self._session_number += 1
         token = self._opaque_token("identity-session", browser_id, self._session_number)
         digest = hashlib.sha256(token.encode("ascii")).hexdigest()
@@ -226,13 +212,11 @@ class ShowIdentityCallbackHarness:
             "expires_at": self.now + self.SESSION_LIFETIME,
         }
         self.browser_session_cookies[browser_id] = token
-        self._signed_states.pop(form["state"], None)
-        self._pending_flows.pop(pending_digest, None)
-        self.browser_pending_flow_cookies.pop(browser_id, None)
         self.events.append("local.identity_session_set_cookie")
         return {
             "decision": "return_to_share",
             "location": state["safe_return_path"],
+            "expire_pending_flow_cookie": self._expired_pending_flow_cookie_projection(),
             "set_cookie": {
                 "name": "__Host-avibe_show_identity_session",
                 "value": token,
@@ -247,10 +231,14 @@ class ShowIdentityCallbackHarness:
         }
 
     def complete_login(self, flow: dict[str, object]) -> dict[str, object]:
+        browser_id = str(flow["browser_id"])
+        pending_flow_cookie = self.browser_pending_flow_cookies.get(browser_id)
         return self.post_callback(
             flow["form_post"],
-            pending_flow_cookie=flow["pending_flow_cookie"],
-            browser_id=flow["browser_id"],
+            request_cookie=(
+                self._pending_flow_cookie_pair(pending_flow_cookie) if pending_flow_cookie is not None else None
+            ),
+            browser_id=browser_id,
         )
 
     def remove_member(self) -> None:
@@ -263,12 +251,58 @@ class ShowIdentityCallbackHarness:
     def _valid_time_window(self, claims: dict[str, object]) -> bool:
         issued_at = claims.get("iat")
         expires_at = claims.get("exp")
-        return type(issued_at) is int and type(expires_at) is int and issued_at <= self.now < expires_at
+        return (
+            type(issued_at) is int
+            and type(expires_at) is int
+            and expires_at - issued_at == 300
+            and issued_at <= self.now < expires_at
+        )
 
     @staticmethod
     def _opaque_token(purpose: str, browser_id: str, sequence: int) -> str:
         material = hashlib.sha256(f"{purpose}:{browser_id}:{sequence}".encode()).digest()
         return base64.urlsafe_b64encode(material).rstrip(b"=").decode("ascii")
+
+    @classmethod
+    def _sign_state(cls, claims: dict[str, object]) -> str:
+        payload = json.dumps(claims, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        payload_segment = base64.urlsafe_b64encode(payload).rstrip(b"=")
+        signature = hmac.new(cls.STATE_SIGNING_KEY, payload_segment, hashlib.sha256).digest()
+        signature_segment = base64.urlsafe_b64encode(signature).rstrip(b"=")
+        return f"{payload_segment.decode('ascii')}.{signature_segment.decode('ascii')}"
+
+    @classmethod
+    def _verify_state(cls, value: object) -> dict[str, object] | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            payload_segment, signature_segment = value.split(".")
+            expected = hmac.new(cls.STATE_SIGNING_KEY, payload_segment.encode("ascii"), hashlib.sha256).digest()
+            supplied = base64.urlsafe_b64decode(signature_segment + "=" * (-len(signature_segment) % 4))
+            if not hmac.compare_digest(expected, supplied):
+                return None
+            payload = base64.urlsafe_b64decode(payload_segment + "=" * (-len(payload_segment) % 4))
+            claims = json.loads(payload)
+        except (UnicodeEncodeError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+        return claims if isinstance(claims, dict) else None
+
+    @staticmethod
+    def _pending_flow_cookie_pair(value: str) -> dict[str, str]:
+        return {"name": "__Secure-avibe_show_identity_flow", "value": value}
+
+    @staticmethod
+    def _valid_pending_flow_cookie_pair(value: object) -> bool:
+        if not isinstance(value, dict) or set(value) != {"name", "value"}:
+            return False
+        token = value.get("value")
+        return (
+            value.get("name") == "__Secure-avibe_show_identity_flow"
+            and isinstance(token, str)
+            and token.isascii()
+            and len(token) == 43
+            and all(character.isalnum() or character in "_-" for character in token)
+        )
 
     @staticmethod
     def _pending_flow_cookie_projection(value: str) -> dict[str, object]:
@@ -282,4 +316,18 @@ class ShowIdentityCallbackHarness:
             "same_site": "None",
             "path": "/auth/show-identity",
             "maximum_age_seconds": 300,
+        }
+
+    @staticmethod
+    def _expired_pending_flow_cookie_projection() -> dict[str, object]:
+        return {
+            "name": "__Secure-avibe_show_identity_flow",
+            "value": "",
+            "host_only": True,
+            "domain": None,
+            "secure": True,
+            "http_only": True,
+            "same_site": "None",
+            "path": "/auth/show-identity",
+            "maximum_age_seconds": 0,
         }

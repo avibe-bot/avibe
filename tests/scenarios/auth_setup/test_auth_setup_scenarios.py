@@ -74,7 +74,7 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
             login["pending_flow_set_cookie"],
             {
                 "name": "__Secure-avibe_show_identity_flow",
-                "value": login["pending_flow_cookie"],
+                "value": login["pending_flow_request_cookie"]["value"],
                 "host_only": True,
                 "domain": None,
                 "secure": True,
@@ -82,6 +82,13 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
                 "same_site": "None",
                 "path": "/auth/show-identity",
                 "maximum_age_seconds": 300,
+            },
+        )
+        self.assertEqual(
+            login["pending_flow_request_cookie"],
+            {
+                "name": "__Secure-avibe_show_identity_flow",
+                "value": login["pending_flow_set_cookie"]["value"],
             },
         )
         self.assertEqual(
@@ -96,6 +103,20 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
             )
         )
         self.assertEqual(callback["location"], "/p/stable_alpha/")
+        self.assertEqual(
+            callback["expire_pending_flow_cookie"],
+            {
+                "name": "__Secure-avibe_show_identity_flow",
+                "value": "",
+                "host_only": True,
+                "domain": None,
+                "secure": True,
+                "http_only": True,
+                "same_site": "None",
+                "path": "/auth/show-identity",
+                "maximum_age_seconds": 0,
+            },
+        )
         self.assertEqual(
             callback["set_cookie"],
             {
@@ -113,7 +134,7 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
         self.assertEqual(len(callback["set_cookie"]["value"]), 43)
         self.assertNotIn(callback["set_cookie"]["value"], flow.records)
         self.assertEqual(
-            flow.events[1:8],
+            flow.events[1:10],
             [
                 "local.signed_state_signer",
                 "backend.authorize",
@@ -121,7 +142,9 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
                 "local.signed_state_verifier",
                 "local.pending_flow_cookie_verifier",
                 "local.assertion_verifier",
+                "local.pending_flow_cookie_expiry",
                 "local.identity_session_digest_store",
+                "local.identity_session_set_cookie",
             ],
         )
 
@@ -165,7 +188,7 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
 
         bad_cookie = ShowIdentityCallbackHarness()
         flow = bad_cookie.start_login()
-        flow["pending_flow_cookie"] = "wrong-secret"
+        bad_cookie.browser_pending_flow_cookies[bad_cookie.DEFAULT_BROWSER] = "A" * 43
         self.assertEqual(bad_cookie.complete_login(flow)["decision"], "identity_retry_required")
         self.assertNotIn("local.assertion_verifier", bad_cookie.events)
         self.assertFalse(bad_cookie.records)
@@ -174,30 +197,45 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
         browser_a_first = concurrent.start_login(browser_id="browser-a")
         browser_b = concurrent.start_login(browser_id="browser-b")
         browser_a_latest = concurrent.start_login(browser_id="browser-a")
-        self.assertEqual(
-            browser_a_first["pending_flow_cookie"],
-            browser_a_latest["pending_flow_cookie"],
+        self.assertNotEqual(
+            browser_a_first["pending_flow_request_cookie"],
+            browser_a_latest["pending_flow_request_cookie"],
         )
         self.assertNotEqual(
-            browser_a_latest["pending_flow_cookie"],
-            browser_b["pending_flow_cookie"],
+            browser_a_latest["pending_flow_request_cookie"],
+            browser_b["pending_flow_request_cookie"],
         )
-        self.assertEqual(concurrent.pending_flow_count, 2)
         self.assertEqual(
             concurrent.complete_login(browser_a_first)["decision"],
             "identity_retry_required",
         )
-        self.assertEqual(concurrent.pending_flow_count, 2)
         self.assertEqual(concurrent.complete_login(browser_b)["decision"], "return_to_share")
-        self.assertEqual(concurrent.pending_flow_count, 1)
         self.assertEqual(
             concurrent.complete_login(browser_a_latest)["decision"],
             "return_to_share",
         )
-        self.assertEqual(concurrent.pending_flow_count, 0)
+        self.assertFalse(concurrent.browser_pending_flow_cookies)
         self.assertEqual(
             concurrent.navigate(browser_id="browser-b")["decision"],
             "admitted_shared",
+        )
+
+        cookie_less = ShowIdentityCallbackHarness()
+        for _ in range(100):
+            cookie_less.start_login(accept_set_cookie=False)
+        self.assertFalse(cookie_less.browser_pending_flow_cookies)
+        self.assertFalse(cookie_less.records)
+        self.assertFalse(hasattr(cookie_less, "_pending_flows"))
+        self.assertFalse(hasattr(cookie_less, "_signed_states"))
+
+        response_projection_is_not_a_request_cookie = ShowIdentityCallbackHarness()
+        flow = response_projection_is_not_a_request_cookie.start_login()
+        self.assertEqual(
+            response_projection_is_not_a_request_cookie.post_callback(
+                flow["form_post"],
+                request_cookie=flow["pending_flow_set_cookie"],
+            )["decision"],
+            "identity_retry_required",
         )
         self.assertEqual(
             concurrent.navigate(browser_id="browser-a")["decision"],
@@ -230,7 +268,9 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
 
         for state_overrides, assertion_overrides in (
             ({"iat": "not-an-integer"}, None),
+            ({"exp": ShowIdentityCallbackHarness.NOW + 301}, None),
             (None, {"exp": True}),
+            (None, {"exp": ShowIdentityCallbackHarness.NOW + 301}),
         ):
             invalid_time = ShowIdentityCallbackHarness()
             flow = invalid_time.start_login(

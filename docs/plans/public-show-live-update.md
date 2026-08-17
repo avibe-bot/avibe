@@ -88,12 +88,16 @@ membership, role, page, or share claims.
 
 Assertion, signed state, and pending-flow-cookie lifetimes are fixed at 300 seconds
 with no post-expiry grace. One login flow is current for a browser and configured
-callback origin. Starting a newer flow replaces the prior flow; a stale, replayed,
+callback origin. Starting a newer flow replaces the prior flow; a stale, cookie-less,
 or expired callback returns a fixed retry result. This intentionally does not
 promise simultaneous flow success. The opaque pending-flow cookie uses Path
-`/auth/show-identity`, so both local login start and callback receive it. The local
-store keeps at most one pending record for that handle; another browser has a
-different handle and an independent record.
+`/auth/show-identity`, so both local login start and callback receive it. Login
+start signs the cookie value's SHA-256 digest into the state and stores no pending
+flow. Callback receives the HTTP cookie name/value pair, validates its digest,
+and expires the matching cookie before creating the identity session. Repeated
+cookie-less starts therefore allocate no durable or in-memory pending records;
+separate browser cookie jars remain independent. Version 1 adds no server replay
+ledger; ordinary replay fails because the matching browser cookie was expired.
 
 A known signing key is cached for at most 300 seconds. Once older, it is fetched
 once from the paired issuer before assertion validation; fetch failure returns
@@ -159,12 +163,22 @@ one browser-compatible path prefix:
 `/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/`. The root is
 the document, opaque assets use `asset/<handle>`, relative page APIs use
 `api/<safe-path>`, and a nested `/p` reload uses `history/<safe-path>`. API and
-history paths share the same normalized segment grammar and reject empty, dot, or
-encoded traversal segments. Nested imports are rewritten to absolute URLs under
-the same prefix. The opaque resource handle is never a source path; query strings,
-cookies, ambient identity, and custom request headers confer no authority.
-Capability-bearing path segments are redacted from access logs. Responses use
-credentialless CORS, never set cookies, and use `Referrer-Policy: no-referrer`.
+history paths accept practical segments containing ASCII letters, digits,
+underscore, hyphen, dot, and at-sign while rejecting empty or exact dot segments,
+encoded separators/traversal, queries, and raw source paths. The transformed
+fallback document removes page-authored base elements and establishes the exact
+capability root as its base URL, so relative APIs, modules, styles, and raw assets
+resolve identically on root and nested history documents. Nested imports are also
+rewritten to absolute URLs under that prefix.
+
+Page-API requests form one closed union carrying method, protected path, optional
+normalized content type, and an optional base64 body whose decoded length is at
+most 1 MiB and must equal its declared length. Oversize requests receive the fixed
+sanitized `413 request too large` result. Cookies, Authorization, and arbitrary
+ambient headers are not part of this wire. The opaque resource handle is never a
+source path; query strings and ambient identity confer no authority. Capability-
+bearing path segments are redacted from access logs. Responses use credentialless
+CORS, never set cookies, and use `Referrer-Policy: no-referrer`.
 
 Admission is intentionally not continuous authorization. The document capability
 continues while its Runtime namespace and document handle exist. Membership, mode,

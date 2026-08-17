@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -78,6 +79,17 @@ def _known_key_cache_decision(
     if refetch_succeeds:
         return "validate_with_refetched_key", 1
     return policy["known_key_refetch_failure"], 1
+
+
+def _decode_shared_request_body(transport: dict[str, Any], body: dict[str, Any]) -> bytes:
+    if body["encoding"] != "base64":
+        raise ValueError("unsupported body encoding")
+    decoded = base64.b64decode(body["data"], validate=True)
+    if len(decoded) != body["length_bytes"]:
+        raise ValueError("body length mismatch")
+    if len(decoded) > transport["maximum_page_api_body_bytes"]:
+        raise ValueError("request too large")
+    return decoded
 
 
 def _serve_settings_read(
@@ -359,25 +371,22 @@ def test_identity_flow_has_one_fixed_lifetime_and_latest_flow_wins() -> None:
     assert contract["assertion"]["clock_skew_seconds"] == 0
     assert flow["state_and_pending_flow_cookie_lifetime_seconds"] == 300
     assert flow["post_expiry_grace_seconds"] == 0
-    assert flow["active_flow_cardinality"] == "one_per_browser_and_configured_callback_origin"
+    assert flow["active_flow_cardinality"] == "one_browser_correlation_cookie_per_configured_callback_origin"
     assert flow["latest_login_start_replaces_previous"] is True
-    assert flow["stale_or_replayed_callback"] == "identity_retry_required"
+    assert flow["stale_or_cookie_less_callback"] == "identity_retry_required"
+    assert flow["server_replay_ledger"] is False
     assert flow["start_path"] == "/auth/show-identity/start"
     assert flow["shared_cookie_path"] == "/auth/show-identity"
     assert flow["pending_flow_cookie"]["maximum_age_seconds"] == 300
     assert flow["pending_flow_cookie"]["same_site"] == "None"
     assert flow["pending_flow_cookie"]["path"] == "/auth/show-identity"
     assert flow["pending_flow_cookie"]["visible_to"] == ["login_start", "form_post_callback"]
-    assert flow["pending_flow_store"] == {
-        "key": "sha256_utf8_of_pending_flow_cookie_value",
-        "browser_correlation": "opaque_pending_flow_cookie_handle",
-        "value_fields_exact": ["flow_id", "signed_state_digest", "expires_at"],
-        "maximum_pending_flows_per_browser": 1,
-        "start_without_valid_handle": "mint_handle_and_create_one_pending_flow",
-        "start_with_current_handle": "atomically_replace_that_handle_pending_flow",
-        "different_browser_handles": "independent",
-        "callback_consumption": "delete_only_matching_handle_pending_flow",
-    }
+    assert flow["server_pending_flow_records"] == 0
+    assert flow["request_cookie_wire"] == "#/$defs/PendingFlowCookiePair"
+    assert flow["set_cookie_wire"] == "#/$defs/PendingFlowSetCookie"
+    assert flow["callback_expiry_wire"] == "#/$defs/PendingFlowExpiredSetCookie"
+    assert flow["repeated_cookie_less_starts"] == ("allocate_zero_durable_or_in_memory_pending_flow_records")
+    assert "pending_flow_store" not in flow
     assert flow["callback_checks_in_order"][-1] == "reresolve_safe_return_share"
     assert key_lookup["maximum_forced_refreshes_per_login_attempt"] == 1
     assert key_lookup["refresh_is_coalesced_by_issuer"] is True
@@ -408,17 +417,25 @@ def test_identity_flow_has_one_fixed_lifetime_and_latest_flow_wins() -> None:
         for example in _load(ARTIFACTS["identity"])["x-examples"]
         if example["name"] == "signed_state_claims"
     )
-    pending_flow_cookie = next(
-        example["value"]
-        for example in _load(ARTIFACTS["identity"])["x-examples"]
-        if example["name"] == "pending_flow_cookie"
-    )
+    examples = {example["name"]: example["value"] for example in _load(ARTIFACTS["identity"])["x-examples"]}
+    pending_flow_cookie = examples["pending_flow_cookie_pair"]
+    pending_flow_set_cookie = examples["pending_flow_set_cookie"]
+    expired_cookie = examples["pending_flow_expired_set_cookie"]
     assert claims["exp"] - claims["iat"] == 300
     assert state["exp"] - state["iat"] == 300
-    _validate(_load(ARTIFACTS["identity"]), "#/$defs/PendingFlowCookie", pending_flow_cookie)
-    callback_only_cookie = {**pending_flow_cookie, "path": "/auth/show-identity/callback"}
+    assert (
+        state["pending_flow_cookie_sha256"] == hashlib.sha256(pending_flow_cookie["value"].encode("ascii")).hexdigest()
+    )
+    assert pending_flow_set_cookie["value"] == pending_flow_cookie["value"]
+    document = _load(ARTIFACTS["identity"])
+    _validate(document, "#/$defs/PendingFlowCookiePair", pending_flow_cookie)
+    _validate(document, "#/$defs/PendingFlowSetCookie", pending_flow_set_cookie)
+    _validate(document, "#/$defs/PendingFlowExpiredSetCookie", expired_cookie)
     with pytest.raises(ValidationError):
-        _validate(_load(ARTIFACTS["identity"]), "#/$defs/PendingFlowCookie", callback_only_cookie)
+        _validate(document, "#/$defs/PendingFlowCookiePair", pending_flow_set_cookie)
+    callback_only_cookie = {**pending_flow_set_cookie, "path": "/auth/show-identity/callback"}
+    with pytest.raises(ValidationError):
+        _validate(document, "#/$defs/PendingFlowSetCookie", callback_only_cookie)
 
 
 def test_identity_session_wire_is_minimal_fixed_lifetime_and_identity_only() -> None:
@@ -431,11 +448,13 @@ def test_identity_session_wire_is_minimal_fixed_lifetime_and_identity_only() -> 
         "id": "show_identity_login_start",
         "producer": "show_identity_browser",
         "consumer": "avibe.local_http.GET /auth/show-identity/start",
-        "delivery": "browser_navigation_with_optional_pending_flow_cookie",
-        "request_cookie": "#/$defs/PendingFlowCookie",
+        "delivery": "browser_navigation_with_optional_cookie_pair",
+        "request_cookie": "#/$defs/PendingFlowCookiePair",
         "request_cookie_optional_on_first_start": True,
-        "result_cookie": "#/$defs/PendingFlowCookie",
+        "result_cookie": "#/$defs/PendingFlowSetCookie",
     }
+    assert interfaces["show_identity_form_post"]["request_cookie"] == "#/$defs/PendingFlowCookiePair"
+    assert interfaces["show_identity_form_post"]["correlation_cookie_expiry"] == ("#/$defs/PendingFlowExpiredSetCookie")
     assert interfaces["show_identity_session_cookie"]["result"] == "#/$defs/IdentitySessionCookie"
     assert interfaces["show_identity_session_lookup"]["request"] == "#/$defs/IdentitySessionLookup"
     assert interfaces["show_identity_session_lookup"]["result"] == "#/$defs/IdentitySessionRecord"
@@ -569,6 +588,7 @@ def test_shared_browser_boundary_denies_privileged_surfaces_and_all_workers() ->
     assert boundary["iframe_sandbox_tokens_exact"] == ["allow-scripts"]
     assert boundary["allow_same_origin"] is False
     assert boundary["csp_required_directives"]["worker-src"] == "'none'"
+    assert boundary["csp_required_directives"]["base-uri"] == "<server_owned_capability_prefix>"
     assert boundary["unsupported_worker_kinds"] == ["Worker", "SharedWorker", "ServiceWorker"]
     assert boundary["worker_attempt_outcome"] == "shared_worker_unsupported"
     assert boundary["service_worker_allowed_header_emitted"] is False
@@ -594,7 +614,7 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     runtime = document["x-contract"]
     interfaces = {interface["id"]: interface for interface in runtime["interfaces"]}
     assert interfaces["shared_document_admission"]["result"] == "#/$defs/SharedAdmissionResult"
-    assert interfaces["shared_protected_resource"]["request"] == "#/$defs/SharedResourceRequest"
+    assert interfaces["shared_protected_resource"]["request"] == "#/$defs/SharedBrowserRequest"
 
     admissions = [
         example["value"] for example in document["x-examples"] if example["schema_ref"] == "#/$defs/SharedAdmission"
@@ -662,7 +682,12 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
         "opaque_asset": "<prefix>asset/{resource_handle}",
         "page_api": "<prefix>api/{normalized_relative_api_path}",
     }
-    assert transport["relative_page_api_resolution"] == ("fetch(./api/data)_resolves_to_same_prefix_api/data")
+    assert transport["fallback_document_base_url"] == (
+        "strip_page_authored_base_elements_then_inject_exact_capability_root_before_page_content"
+    )
+    assert transport["relative_url_resolution"] == (
+        "modules_styles_raw_assets_and_fetch(./api/data)_resolve_from_exact_capability_root_on_root_and_history_documents"
+    )
     assert transport["page_api_namespace_mapping"] == "captured_page_api_only"
     assert transport["nested_import_rewrite"] == ("absolute_url_under_same_namespace_document_capability_prefix")
     assert transport["query_authority"] is False
@@ -673,52 +698,90 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     document_path = examples["shared_document_request"]["path"]
     history_path = examples["shared_history_fallback_request"]["path"]
     asset_path = examples["shared_module_request"]["path"]
-    api_path = examples["shared_page_api_request"]["path"]
+    api_request = examples["shared_page_api_request"]
+    api_path = api_request["path"]
     assert document_path.endswith("/")
     assert urljoin(f"https://show.example.test{document_path}", "./api/data") == (
         f"https://show.example.test{api_path}"
     )
-    assert urljoin(f"https://show.example.test{document_path}", "history/reports/daily") == (
-        f"https://show.example.test{history_path}"
-    )
+    assert urljoin(f"https://show.example.test{history_path}", "./api/data") != (f"https://show.example.test{api_path}")
+    injected_base_url = f"https://show.example.test{document_path}"
+    assert urljoin(injected_base_url, "./api/data") == f"https://show.example.test{api_path}"
     assert transport["top_level_history_mapping"] == {
         "browser_url": "/p/<share_id>/{normalized_relative_history_path}",
         "protected_request": "<prefix>history/{normalized_relative_history_path}",
         "preserve_browser_url": True,
     }
-    top_level_url = "/p/stable_alpha/reports/daily"
+    top_level_url = "/p/stable_alpha/users/alice@example.com"
     relative_history_path = top_level_url.removeprefix("/p/stable_alpha/")
     assert history_path == f"{document_path}history/{relative_history_path}"
     for surface in ("document", "fallback"):
         _validate(
             document,
-            "#/$defs/SharedResourceRequest",
+            "#/$defs/SharedBrowserRequest",
             {"method": "GET", "surface": surface, "path": document_path},
         )
     _validate(
         document,
-        "#/$defs/SharedResourceRequest",
+        "#/$defs/SharedBrowserRequest",
         {"method": "GET", "surface": "fallback", "path": history_path},
+    )
+    history_prefix = history_path.removesuffix("users/alice@example.com")
+    _validate(
+        document,
+        "#/$defs/SharedBrowserRequest",
+        {"method": "GET", "surface": "fallback", "path": f"{history_prefix}reports/daily"},
     )
     with pytest.raises(ValidationError):
         _validate(
             document,
-            "#/$defs/SharedResourceRequest",
+            "#/$defs/SharedBrowserRequest",
             {"method": "GET", "surface": "document", "path": history_path},
         )
     for surface in ("module", "style", "raw_asset"):
         _validate(
             document,
-            "#/$defs/SharedResourceRequest",
+            "#/$defs/SharedBrowserRequest",
             {"method": "GET", "surface": surface, "path": asset_path},
         )
     for method in ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
         _validate(
             document,
-            "#/$defs/SharedResourceRequest",
+            "#/$defs/SharedBrowserRequest",
             {"method": method, "surface": "page_api", "path": f"{api_path}/nested-item"},
         )
     api_prefix = api_path.removesuffix("data")
+    _validate(
+        document,
+        "#/$defs/SharedBrowserRequest",
+        {"method": "GET", "surface": "page_api", "path": f"{api_prefix}users/alice@example.com"},
+    )
+    _validate(document, "#/$defs/SharedBrowserRequest", api_request)
+    assert api_request["content_type"] == "application/json"
+    assert _decode_shared_request_body(transport, api_request["body"]) == b'{"ping":true}'
+    assert transport["maximum_page_api_body_bytes"] == 1_048_576
+    assert transport["oversized_page_api_request"] == {"http_status": 413, "body": "request too large"}
+    assert transport["forwarded_page_api_metadata_exact"] == ["content_type", "body"]
+    assert transport["forbidden_ambient_request_metadata"] == ["cookie", "authorization", "arbitrary_headers"]
+    mismatched_body = {**api_request["body"], "length_bytes": api_request["body"]["length_bytes"] - 1}
+    with pytest.raises(ValueError, match="body length mismatch"):
+        _decode_shared_request_body(transport, mismatched_body)
+    oversized_body = {"encoding": "base64", "data": "", "length_bytes": 1_048_577}
+    with pytest.raises(ValidationError):
+        _validate(document, "#/$defs/SharedRequestBody", oversized_body)
+    for forbidden_field in ("cookie", "authorization", "headers"):
+        with pytest.raises(ValidationError):
+            _validate(
+                document,
+                "#/$defs/SharedBrowserRequest",
+                {**api_request, forbidden_field: "ambient"},
+            )
+    with pytest.raises(ValidationError):
+        _validate(
+            document,
+            "#/$defs/SharedBrowserRequest",
+            {**api_request, "content_type": "Application/JSON"},
+        )
     for forbidden_path in (
         f"{api_path}?token=ambient",
         f"{api_prefix}",
@@ -734,11 +797,10 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
         with pytest.raises(ValidationError):
             _validate(
                 document,
-                "#/$defs/SharedResourceRequest",
+                "#/$defs/SharedBrowserRequest",
                 {"method": "GET", "surface": "page_api", "path": forbidden_path},
             )
 
-    history_prefix = history_path.removesuffix("reports/daily")
     for forbidden_path in (
         history_prefix,
         f"{history_prefix}/daily",
@@ -751,7 +813,7 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
         with pytest.raises(ValidationError):
             _validate(
                 document,
-                "#/$defs/SharedResourceRequest",
+                "#/$defs/SharedBrowserRequest",
                 {"method": "GET", "surface": "fallback", "path": forbidden_path},
             )
 
