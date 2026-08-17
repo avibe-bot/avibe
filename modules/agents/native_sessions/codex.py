@@ -5,7 +5,14 @@ import os
 import sqlite3
 from pathlib import Path
 
-from .base import NativeSessionProvider, build_tail_preview, dt_from_ts, normalize_title_text, read_json_lines
+from .base import (
+    NativeSessionProvider,
+    build_tail_preview,
+    derive_first_prompt_title,
+    dt_from_ts,
+    normalize_title_text,
+    read_json_lines,
+)
 from .types import BackendSessionTitle, NativeResumeSession
 
 logger = logging.getLogger(__name__)
@@ -145,10 +152,9 @@ class CodexNativeSessionProvider(NativeSessionProvider):
             first_user_value = None
         stored_first_user_message = normalize_title_text(str(first_user_value or ""))
         if has_first_user_message_column and stored_first_user_message:
-            fallback_first_user_message = normalize_title_text(first_user_message)
-            derived = normalize_title_text(first_user_message or stored_first_user_message, limit=10)
-            if derived:
-                return BackendSessionTitle(title=derived, source="derived_first_prompt", confidence="low")
+            derived = derive_first_prompt_title(first_user_message or stored_first_user_message)
+            if derived is not None:
+                return derived
 
         title = normalize_title_text(str(title_value or ""))
         if not title or self.is_placeholder_title(title):
