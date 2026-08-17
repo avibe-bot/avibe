@@ -6679,9 +6679,15 @@ def cmd_data_retention(args):
         language = _configured_cli_language()
         days_override = getattr(args, "days", None)
         # The configured window is the default; --days overrides for this call.
+        # A recovered/unreadable config must not silently run with substituted
+        # defaults: deletion is irreversible, so the run refuses unless the
+        # user supplies an explicit --days window.
         retention_days = agent_events_retention.DEFAULT_RETENTION_DAYS
+        config_recovered = False
         try:
             config = V2Config.load()
+            if getattr(config, "load_warnings", None):
+                config_recovered = True
             runtime_cfg = getattr(config, "runtime", None)
             retention_days = int(
                 getattr(runtime_cfg, "agent_events_trace_retention_days", None)
@@ -6690,9 +6696,18 @@ def cmd_data_retention(args):
             enabled = bool(getattr(runtime_cfg, "agent_events_trace_retention_enabled", True))
         except Exception:
             enabled = True
+            config_recovered = True
         if days_override is not None:
             retention_days = int(days_override)
+            config_recovered = False
+        if config_recovered and getattr(args, "run", False):
+            print(
+                i18n_t("data.retention.configRecovered", language),
+                file=sys.stderr,
+            )
+            return 1
 
+        exit_code = 0
         if getattr(args, "run", False):
             payload = agent_events_retention.run_once(
                 engine,
@@ -6700,16 +6715,27 @@ def cmd_data_retention(args):
                 force=True,
                 compact=not bool(getattr(args, "no_compact", False)),
             )
+            if str(payload.get("status")) == "busy":
+                # Nothing was deleted; automation must see the run as failed.
+                exit_code = 1
         else:
             payload = {"mode": "plan", "enabled": enabled, **agent_events_retention.retention_status(engine, retention_days=retention_days)}
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
             _print_data_retention_human(payload, language)
-        return 0
+        return exit_code
     except Exception as exc:  # noqa: BLE001
         print(i18n_t("data.retention.error", _configured_cli_language(), error=str(exc)), file=sys.stderr)
         return 1
+
+
+_COMPACTION_REASON_KEYS = {
+    "checkpoint_busy": "data.retention.compactionReasonCheckpointBusy",
+    "post_checkpoint_busy": "data.retention.compactionReasonCheckpointBusy",
+    "insufficient_free_space": "data.retention.compactionReasonFreeSpace",
+    "free_space_unknown": "data.retention.compactionReasonFreeSpace",
+}
 
 
 def _print_data_retention_human(payload: dict, language: str) -> None:
@@ -6751,7 +6777,13 @@ def _print_data_retention_human(payload: dict, language: str) -> None:
         if compaction_status == "vacuumed":
             print(i18n_t("data.retention.compacted", language, size=_format_byte_size(int(compaction.get("reclaimed_bytes") or 0))))
         elif compaction_status == "deferred":
-            print(i18n_t("data.retention.compactionDeferred", language, reason=str(compaction.get("reason") or "")))
+            print(
+                i18n_t(
+                    "data.retention.compactionDeferred",
+                    language,
+                    reason=i18n_t(_COMPACTION_REASON_KEYS.get(str(compaction.get("reason")), "data.retention.compactionReasonOther"), language),
+                )
+            )
         elif compaction_status == "skipped":
             print(i18n_t("data.retention.compactionSkipped", language))
     elif status == "not_due":

@@ -144,6 +144,32 @@ def _delete_batch(conn: Connection, cutoff: str, batch_rows: int) -> int:
     return int(result.rowcount or 0)
 
 
+def renew_lease(conn: Connection, token: str, *, now: Optional[datetime] = None) -> bool:
+    """Extend this runner's lease while work remains active.
+
+    Called between batches and around compaction: a run lasting past the TTL
+    keeps its lease refreshed, so a second runner cannot treat it as expired
+    and overlap. No-op when the stored token no longer matches (the lease was
+    already replaced); the caller treats that as lost ownership.
+    """
+    stored = _read_meta(conn, RETENTION_LEASE_KEY)
+    if not stored or stored.get("token") != token:
+        return False
+    moment = now or _utc_now()
+    conn.execute(
+        state_meta.update()
+        .where(state_meta.c.key == RETENTION_LEASE_KEY)
+        .values(
+            value_json=json.dumps(
+                {"token": token, "expires_at": _iso(moment + timedelta(seconds=LEASE_TTL_SECONDS))},
+                sort_keys=True,
+            ),
+            updated_at=_iso(moment),
+        )
+    )
+    return True
+
+
 def run_retention(
     engine: Engine,
     *,
@@ -152,11 +178,13 @@ def run_retention(
     max_batches: Optional[int] = None,
     between_batches: Optional[Callable[[], None]] = None,
     now: Optional[datetime] = None,
+    lease_token: Optional[str] = None,
 ) -> dict[str, Any]:
     """Delete eligible rows in bounded batches, one transaction per batch.
 
     ``between_batches`` runs after each committed batch (test hook for
-    simulating concurrent writers between transactions).
+    simulating concurrent writers between transactions). With ``lease_token``
+    the lease is renewed between batches so long runs stay owned.
     """
     cutoff = cutoff_iso(retention_days, now=now)
     deleted_rows = 0
@@ -164,6 +192,10 @@ def run_retention(
     while max_batches is None or batches < max_batches:
         with engine.begin() as conn:
             removed = _delete_batch(conn, cutoff, batch_rows)
+            if lease_token is not None and not renew_lease(conn, lease_token):
+                # Ownership lost (lease replaced past expiry + contention):
+                # stop rather than keep deleting beside another runner.
+                break
         batches += 1
         if removed == 0:
             break
@@ -386,7 +418,7 @@ def run_once(
 
     started = time.monotonic()
     try:
-        result = run_retention(engine, retention_days=retention_days, now=moment)
+        result = run_retention(engine, retention_days=retention_days, now=moment, lease_token=token)
         finished = moment + timedelta(seconds=round(time.monotonic() - started, 3))
         with engine.begin() as conn:
             _write_meta(
@@ -404,6 +436,10 @@ def run_once(
         compaction: dict[str, Any] = {"status": "not_attempted"}
         if compact:
             compaction = maybe_compact(engine, db_path=db_path)
+            # VACUUM can outlast a lease TTL; renew before reporting so the
+            # marker write below cannot race a replacement runner.
+            with engine.begin() as conn:
+                renew_lease(conn, token)
         return {
             "status": "ok",
             "deleted_rows": result["deleted_rows"],

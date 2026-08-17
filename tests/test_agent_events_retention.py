@@ -324,7 +324,58 @@ def test_release_lease_removes_only_the_owned_token(state) -> None:
         assert agent_events_retention._read_meta(conn, agent_events_retention.RETENTION_LEASE_KEY) is None
 
 
+def test_run_once_busy_exit_and_lease_renewal(state, monkeypatch) -> None:
+    """The CLI treats busy as failure; long runs renew their lease."""
+    engine = state
+    payload = "r" * 500
+    for i in range(6):
+        _seed_event(engine, event_id=f"old-{i}", created_at=datetime(2026, 5, 1, tzinfo=timezone.utc), payload=payload + f"-{i}")
+
+    # Lease renewal between batches keeps ownership past the original TTL.
+    from storage import agent_events_retention as module
+
+    renewed: list[str] = []
+    original_renew = module.renew_lease
+
+    def _tracked_renew(conn, token, *, now=None):
+        ok = original_renew(conn, token, now=now)
+        renewed.append(ok)
+        return ok
+
+    monkeypatch.setattr(module, "renew_lease", _tracked_renew)
+    result = module.run_once(engine, retention_days=30, force=True, compact=False, now=_NOW)
+    assert result["status"] == "ok" and result["deleted_rows"] == 6
+    assert renewed and all(renewed)  # renewed after each batch, always owned
+
+    # busy -> the run deleted nothing; the CLI maps this to a nonzero exit.
+    with engine.begin() as conn:
+        foreign = module.try_acquire_lease(conn, now=_NOW)
+    assert foreign
+    busy = module.run_once(engine, retention_days=30, force=True, compact=False, now=_NOW)
+    assert busy["status"] == "busy"
+    with engine.begin() as conn:
+        module.release_lease(conn, foreign)
+
+
 def test_run_once_rechecks_cadence_under_lease(state, monkeypatch) -> None:
+    """A runner finishing between the gate and lease acquisition must win."""
+    engine = state
+    from storage import agent_events_retention as module
+
+    with engine.begin() as conn:
+        module._write_meta(
+            conn,
+            module.RETENTION_MARKER_KEY,
+            {"finished_at": module._iso(_NOW), "deleted_rows": 9},
+            now=_NOW,
+        )
+    gate_results = iter([True, False])
+    monkeypatch.setattr(module, "should_run", lambda conn, *, now=None: next(gate_results))
+    result = module.run_once(engine, retention_days=30, force=False, compact=False, now=_NOW)
+    assert result["status"] == "not_due"
+    with engine.connect() as conn:
+        assert module.get_last_run(conn)["deleted_rows"] == 9
+        assert module._read_meta(conn, module.RETENTION_LEASE_KEY) is None
     """A runner finishing between the gate and lease acquisition must win."""
     engine = state
     from storage import agent_events_retention as module

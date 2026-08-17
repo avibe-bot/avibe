@@ -896,6 +896,10 @@
   },
   "data": {
     "retention": {
+      "configRecovered": "The Avibe config could not be read (recovery defaults active); the retention policy is unknown. Re-run with an explicit --days window to delete anything.",
+      "compactionReasonCheckpointBusy": "the database is busy with concurrent readers/writers",
+      "compactionReasonFreeSpace": "there is not enough free disk space to rewrite the database safely",
+      "compactionReasonOther": "compaction was not safe to run",
       "error": "Trace retention command failed: {error}",
       "plan": "{count} trace row(s) older than {days} day(s) are eligible ({size} of payload text).",
       "lastRun": "Last retention run: {at}, deleted {rows} row(s).",
