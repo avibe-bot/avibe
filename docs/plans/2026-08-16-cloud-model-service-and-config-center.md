@@ -202,7 +202,10 @@ scope per instance behind them.
   All read APIs return `has_api_key: true/false`, never the value. Keys and ciphertext never enter
   API responses, logs, Sentry, or usage events. Missing or invalid key-secret material is reported
   as a high-priority Sentry event tagged by scope, capability, and instance, using only scrubbed
-  metadata.
+  metadata. Emission is transition-deduplicated by scope, config revision, and capability so
+  status polling cannot create one event per instance per minute; the first observing instance
+  remains a context tag but is not part of the deduplication key. A successful validation clears
+  that transition so a later outage at the same revision alerts again.
 
 ### 6.3 APIs
 
