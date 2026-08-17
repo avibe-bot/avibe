@@ -878,6 +878,29 @@ def test_authorization_revision_device_contract_is_monotonic(monkeypatch, tmp_pa
     assert remote_access.current_authorization_revision(config) == 42
 
 
+def test_authorization_revision_sync_rejects_an_unpersisted_watermark(
+    monkeypatch,
+    tmp_path,
+):
+    config = _paired_config(tmp_path)
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda *_args, **_kwargs: {"authorization_revision": 42},
+    )
+    monkeypatch.setattr(
+        remote_access.runtime,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+    )
+
+    assert remote_access.sync_authorization_revision_once(config) == {
+        "ok": False,
+        "error": "authorization_revision_sync_failed",
+    }
+    assert remote_access.current_authorization_revision(config) == 41
+
+
 def test_paired_session_requires_signed_current_revision(monkeypatch, tmp_path):
     """I1057-AC4: unsigned, missing, and stale authorization versions fail closed."""
 

@@ -711,7 +711,12 @@ def current_authorization_revision(
     return revision
 
 
-def _replace_authorization_revision(config: V2Config, value: Any) -> int:
+def _install_authorization_revision(
+    config: V2Config,
+    value: Any,
+    *,
+    persistence_required: bool,
+) -> int:
     global _AUTHORIZATION_REVISION_CACHE
 
     revision = _normalize_authorization_revision(value)
@@ -747,8 +752,16 @@ def _replace_authorization_revision(config: V2Config, value: Any) -> int:
             "authorization_revision": revision,
             "source_updated_at": source_updated_at,
         }
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        runtime.write_json(state_path, payload)
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            runtime.write_json(state_path, payload)
+        except OSError:
+            if persistence_required:
+                raise
+            logger.warning(
+                "Authorization revision acknowledgement could not be persisted",
+                exc_info=True,
+            )
         _AUTHORIZATION_REVISION_CACHE = (
             state_path,
             instance_id,
@@ -768,11 +781,23 @@ def _replace_authorization_revision(config: V2Config, value: Any) -> int:
     return revision
 
 
+def _replace_authorization_revision(config: V2Config, value: Any) -> int:
+    return _install_authorization_revision(
+        config,
+        value,
+        persistence_required=True,
+    )
+
+
 def acknowledge_authorization_revision(config: V2Config, value: Any) -> int:
     """Record a mutation acknowledgement without regressing a newer watermark."""
 
     try:
-        return _replace_authorization_revision(config, value)
+        return _install_authorization_revision(
+            config,
+            value,
+            persistence_required=False,
+        )
     except ValueError as exc:
         if str(exc) != "authorization_revision_regressed":
             raise

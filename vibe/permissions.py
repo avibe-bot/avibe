@@ -360,7 +360,7 @@ def _write_cache(instance_id: str, projection: dict[str, Any]) -> None:
         prefix=f".{cache_path.name}.",
     )
     try:
-        os.fchmod(fd, 0o600)
+        # mkstemp creates the file owner-private without relying on Unix-only APIs.
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = -1
             json.dump(envelope, handle, ensure_ascii=True, separators=(",", ":"))

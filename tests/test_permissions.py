@@ -294,7 +294,8 @@ def test_permissions_offline_cache_is_sanitized_and_exact_instance_bound(monkeyp
     cache = json.loads(permissions._cache_path().read_text(encoding="utf-8"))  # noqa: SLF001
     assert "must-not-persist" not in json.dumps(cache)
     assert cache["projection"]["debug"] == {"note": "kept"}
-    assert permissions._cache_path().stat().st_mode & 0o777 == 0o600  # noqa: SLF001
+    if permissions.os.name == "posix":
+        assert permissions._cache_path().stat().st_mode & 0o777 == 0o600  # noqa: SLF001
 
     monkeypatch.setattr(
         permissions.requests,
@@ -307,6 +308,44 @@ def test_permissions_offline_cache_is_sanitized_and_exact_instance_bound(monkeyp
 
     with pytest.raises(permissions.PermissionsUnavailableError):
         permissions.get_current_permissions(_config("inst-other"))
+
+
+def test_permissions_cache_remains_atomic_without_os_fchmod(monkeypatch) -> None:
+    monkeypatch.delattr(permissions.os, "fchmod", raising=False)
+    projection = _complete_projection()
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, projection),
+    )
+
+    result = permissions.get_current_permissions(_config())
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert result.source == "live"
+    assert cached is not None
+    assert cached.projection == projection
+
+    newer = _complete_projection()
+    newer["instance"]["authorization_revision"] = 4
+    monkeypatch.setattr(
+        permissions.os,
+        "replace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, newer),
+    )
+
+    live = permissions.get_current_permissions(_config())
+    retained = permissions._read_cache("inst-123")  # noqa: SLF001
+
+    assert live.projection == newer
+    assert retained is not None
+    assert retained.projection == projection
+    cache_path = permissions._cache_path()  # noqa: SLF001
+    assert list(cache_path.parent.glob(f".{cache_path.name}.*")) == []
 
 
 @pytest.mark.parametrize(
@@ -912,6 +951,101 @@ def test_permissions_mutations_advance_and_publish_the_authorization_watermark(
         ("authorization.changed", {"instance_authorization_revision": 4}),
         ("authorization.changed", {"instance_authorization_revision": 5}),
     ]
+
+
+@pytest.mark.parametrize("operation", ("authorized_users", "project_access"))
+def test_committed_permissions_mutations_survive_watermark_persistence_failure(
+    monkeypatch,
+    operation: str,
+) -> None:
+    config = _config()
+    projection = _complete_projection()
+    permissions._cache_projection("inst-123", projection)  # noqa: SLF001
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+    remote_access._replace_authorization_revision(config, 3)  # noqa: SLF001
+    published = []
+    monkeypatch.setattr(
+        broker,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    monkeypatch.setattr(
+        remote_access.runtime,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+    )
+    updated_entries = [
+        {"kind": "email", "value": "new@example.com", "role": "editor"}
+    ]
+    updated_project = {
+        **projection["projects"][0],
+        "access": {
+            **projection["projects"][0]["access"],
+            "revision": 3,
+        },
+    }
+
+    def request(_method, url, **_kwargs):
+        if url.endswith("/authorized-users"):
+            return _Response(
+                200,
+                {
+                    "ok": True,
+                    "entries": updated_entries,
+                    "authorization_revision": 4,
+                },
+            )
+        return _Response(
+            200,
+            {
+                "ok": True,
+                "project": updated_project,
+                "authorization_revision": 4,
+            },
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+
+    if operation == "authorized_users":
+        result = permissions.replace_authorized_users(
+            {
+                "entries": updated_entries,
+                "if_match_revision": 3,
+                "if_match_instance_id": "inst-123",
+            },
+            config,
+        )
+    else:
+        result = permissions.update_project_access(
+            "project-1",
+            {
+                "mode": "restricted",
+                "bindings": updated_project["access"]["bindings"],
+                "if_match_revision": 2,
+                "if_match_instance_id": "inst-123",
+            },
+            config,
+        )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    persisted = json.loads(
+        remote_access._authorization_revision_state_path().read_text(encoding="utf-8")  # noqa: SLF001
+    )
+    assert result["authorization_revision"] == 4
+    assert remote_access.current_authorization_revision(config) == 4
+    assert persisted["authorization_revision"] == 3
+    assert remote_access.acknowledge_authorization_revision(config, 4) == 4
+    assert remote_access.acknowledge_authorization_revision(config, 3) == 4
+    assert remote_access.current_authorization_revision(config) == 4
+    assert published == [
+        ("authorization.changed", {"instance_authorization_revision": 4})
+    ]
+    assert cached is not None
+    assert cached.projection["instance"]["authorization_revision"] == 4
+    if operation == "authorized_users":
+        assert cached.projection["access"]["entries"] == updated_entries
+    else:
+        assert cached.projection["projects"] == [updated_project]
 
 
 def test_out_of_order_mutation_acknowledgement_keeps_the_newer_watermark_epoch(
