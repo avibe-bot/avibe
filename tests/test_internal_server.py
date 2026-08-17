@@ -8492,3 +8492,247 @@ def test_build_session_context_respects_explicit_channel_override(monkeypatch, t
     context = internal_server._build_session_context(session["id"], channel_id="D_EXPLICIT")
 
     assert context.channel_id == "D_EXPLICIT"
+
+
+def test_show_access_settings_read_returns_controller_snapshot(monkeypatch):
+    from core import show_pages
+
+    captured: list[str] = []
+
+    class _Store:
+        def get_access(self, page_id):
+            captured.append(page_id)
+            return show_pages.ShowAccess(
+                page_id=page_id,
+                access_mode="limited",
+                share_id="stable-link",
+                revision=7,
+                normalized_emails=("alice@example.com", "bob@example.com"),
+            )
+
+        def close(self):
+            captured.append("closed")
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/show-access/settings-read",
+                json={"page_id": "ses-show-access"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "show_access": {
+            "page_id": "ses-show-access",
+            "access_mode": "limited",
+            "share_id": "stable-link",
+            "revision": 7,
+            "normalized_emails": ["alice@example.com", "bob@example.com"],
+        }
+    }
+    assert captured == ["ses-show-access", "closed"]
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "error"),
+    [
+        (
+            "/internal/show-access/settings-read",
+            {"page_id": "ses-show-access", "extra": True},
+            "invalid_show_access_settings_request",
+        ),
+        (
+            "/internal/show-access/apply",
+            {
+                "page_id": "ses-show-access",
+                "expected_revision": True,
+                "target_access_mode": "limited",
+                "target_share_id": "stable-link",
+                "target_emails": ["guest@example.com"],
+            },
+            "invalid_show_access_apply_request",
+        ),
+    ],
+)
+def test_show_access_internal_routes_reject_malformed_payloads(path, payload, error):
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(path, json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": error}
+
+
+@pytest.mark.parametrize("status", ["conflict", "share_id_taken"])
+def test_show_access_apply_preserves_atomic_result_status(monkeypatch, status):
+    from core import show_pages
+
+    captured: dict = {}
+
+    class _Store:
+        def apply_access(self, page_id, **kwargs):
+            captured.update(page_id=page_id, **kwargs)
+            return show_pages.ShowAccessApplyResult(
+                status=status,
+                show_access=show_pages.ShowAccess(
+                    page_id=page_id,
+                    access_mode="public",
+                    share_id="current-link",
+                    revision=9,
+                    normalized_emails=(),
+                ),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+    payload = {
+        "page_id": "ses-show-access",
+        "expected_revision": 8,
+        "target_access_mode": "limited",
+        "target_share_id": "candidate-link",
+        "target_emails": ["guest@example.com"],
+    }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/show-access/apply", json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": status,
+        "show_access": {
+            "page_id": "ses-show-access",
+            "access_mode": "public",
+            "share_id": "current-link",
+            "revision": 9,
+            "normalized_emails": [],
+        },
+    }
+    assert captured == {
+        "page_id": "ses-show-access",
+        "expected_revision": 8,
+        "target_access_mode": "limited",
+        "target_share_id": "candidate-link",
+        "target_emails": ["guest@example.com"],
+    }
+
+
+def test_show_access_internal_identity_mismatch_fails_closed(monkeypatch):
+    from core import show_pages
+
+    class _Store:
+        def get_access(self, _page_id):
+            return show_pages.ShowAccess(
+                page_id="ses-other",
+                access_mode="limited",
+                share_id="secret-link",
+                revision=2,
+                normalized_emails=("secret@example.com",),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/show-access/settings-read",
+                json={"page_id": "ses-show-access"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "ok": False,
+        "error": "show_access_internal_failure",
+    }
+    assert "secret@example.com" not in response.text
+
+
+def test_show_access_apply_serializes_controller_writes(monkeypatch):
+    from core import show_pages
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    calls: list[str] = []
+    calls_lock = threading.Lock()
+
+    class _Store:
+        def apply_access(self, page_id, **_kwargs):
+            with calls_lock:
+                calls.append(page_id)
+                call_number = len(calls)
+            if call_number == 1:
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+            return show_pages.ShowAccessApplyResult(
+                status="no_change",
+                show_access=show_pages.ShowAccess(
+                    page_id=page_id,
+                    access_mode="private",
+                    share_id="stable-link",
+                    revision=0,
+                    normalized_emails=(),
+                ),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+    payload = {
+        "expected_revision": 0,
+        "target_access_mode": "private",
+        "target_share_id": "stable-link",
+        "target_emails": [],
+    }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = asyncio.create_task(
+                client.post(
+                    "/internal/show-access/apply",
+                    json={"page_id": "ses-first", **payload},
+                )
+            )
+            assert await asyncio.to_thread(first_entered.wait, 2)
+            second = asyncio.create_task(
+                client.post(
+                    "/internal/show-access/apply",
+                    json={"page_id": "ses-second", **payload},
+                )
+            )
+            await asyncio.sleep(0.05)
+            with calls_lock:
+                assert calls == ["ses-first"]
+            release_first.set()
+            return await asyncio.gather(first, second)
+
+    responses = asyncio.run(_exercise())
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert calls == ["ses-first", "ses-second"]

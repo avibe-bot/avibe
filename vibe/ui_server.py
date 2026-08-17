@@ -53,6 +53,7 @@ from core.show_pages import (
     SHOW_EVENT_WRITE_TOKEN_COOKIE,
     SHOW_EVENT_WRITE_TOKEN_HEADER,
     SHOW_PAGE_ICON_MAX_UPLOAD_BYTES,
+    VISIBILITY_LIMITED,
     VISIBILITY_OFFLINE,
     VISIBILITY_PRIVATE,
     VISIBILITY_PUBLIC,
@@ -3032,10 +3033,10 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         except ShowPageError:
             await websocket.close(code=1008)
             return
-        # Amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
-        # pages too, so a public page framed in the Dock app must also get live
-        # HMR. Mirror the serve route's private+public visibility gate here.
-        if page is None or page.visibility not in {"private", "public"}:
+        # The authenticated /show/ surface is the editor path for every online
+        # audience mode. Limited /p admission remains a separate shared-runtime
+        # boundary, but choosing Limited must not break the owner's live preview.
+        if page is None or page.visibility not in {"private", "limited", "public"}:
             await websocket.close(code=1008)
             return
     finally:
@@ -5348,10 +5349,8 @@ def _show_page_error_response(exc):
         status = 404
     # A conflict (not a malformed request) when the page is in the wrong state or
     # the chosen suffix is already claimed.
-    elif code in {"not_public", "share_id_taken"}:
+    elif code in {"not_public", "not_shared", "share_id_taken", "show_access_conflict"}:
         status = 409
-    elif code == "show_page_email_access_transient":
-        status = 503
     else:
         status = 400
     return _coded_error_response(code, str(exc), status)
@@ -5446,20 +5445,27 @@ def show_pages_list_get():
     return jsonify(payload)
 
 
-@app.route("/api/show-pages/<session_id>/visibility", methods=["POST"])
-def show_page_visibility_post(session_id):
+@app.route("/api/show-pages/<session_id>/availability", methods=["POST"])
+def show_page_availability_post(session_id):
     from core.show_pages import ShowPageError
     from vibe import api
 
-    payload = request.json or {}
+    payload = request.json if isinstance(request.json, dict) else {}
+    if set(payload) != {"offline"} or not isinstance(payload.get("offline"), bool):
+        return _show_page_error_response(
+            ShowPageError("Invalid Show Page availability.", code="invalid_availability")
+        )
     try:
         context = _request_authorization_context()
         return jsonify(
-            _show_page_response_for_request(api.set_show_page_visibility(
-                session_id,
-                str(payload.get("visibility") or ""),
-                user_context=context,
-            ), context)
+            _show_page_response_for_request(
+                api.set_show_page_availability(
+                    session_id,
+                    payload["offline"],
+                    user_context=context,
+                ),
+                context,
+            )
         )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
@@ -5504,87 +5510,128 @@ def show_page_access_get(session_id):
         return _show_page_error_response(exc)
 
 
-@app.route("/api/show-pages/<session_id>/authorized-emails", methods=["GET"])
-def show_page_authorized_emails_get(session_id):
-    from core.show_pages import ShowPageError
-    from vibe import api
+def _show_access_http_response(body: dict[str, Any], status: int = 200):
+    response = jsonify(body)
+    response.status_code = status
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Cookie"
+    return response
 
-    try:
-        response = jsonify(
-            api.get_show_page_authorized_emails(
-                session_id,
-                user_context=_request_authorization_context(),
-            )
+
+def _show_access_page_identity_matches(body: Any, page_id: str) -> bool:
+    return bool(
+        isinstance(body, dict)
+        and isinstance(body.get("show_access"), dict)
+        and body["show_access"].get("page_id") == page_id
+    )
+
+
+def _valid_show_access_apply_payload(payload: dict[str, Any]) -> bool:
+    return bool(
+        isinstance(payload.get("page_id"), str)
+        and not isinstance(payload.get("expected_revision"), bool)
+        and isinstance(payload.get("expected_revision"), int)
+        and payload["expected_revision"] >= 0
+        and isinstance(payload.get("target_access_mode"), str)
+        and (
+            payload.get("target_share_id") is None
+            or isinstance(payload.get("target_share_id"), str)
         )
-        response.headers["Cache-Control"] = "no-store, private"
-        response.headers["Vary"] = "Cookie"
-        return response
-    except ShowPageError as exc:
-        return _show_page_error_response(exc)
+        and isinstance(payload.get("target_emails"), list)
+        and all(isinstance(email, str) for email in payload["target_emails"])
+    )
 
 
-@app.route("/api/show-pages/<session_id>/authorized-emails", methods=["PUT"])
-def show_page_authorized_emails_put(session_id):
+@app.route("/api/show-pages/<session_id>/access-settings/read", methods=["POST"])
+async def show_page_access_settings_read(session_id):
     from core.show_pages import ShowPageError
-    from vibe import api
+    from vibe import api, internal_client
 
     payload = request.json if isinstance(request.json, dict) else {}
-    emails = payload.get("emails")
-    if (
-        not isinstance(emails, list)
-        or len(emails) > 64
-        or any(not isinstance(email, str) for email in emails)
-    ):
-        return _show_page_error_response(
-            ShowPageError("Invalid Show Page email audience.", code="invalid_email")
+    if set(payload) != {"page_id"} or payload.get("page_id") != session_id:
+        return _show_access_http_response(
+            {"ok": False, "error": "show_access_page_identity_mismatch"},
+            400,
         )
     try:
-        context = _request_authorization_context()
-        return jsonify(
-            _show_page_response_for_request(api.replace_show_page_authorized_emails(
-                session_id,
-                emails,
-                user_context=context,
-            ), context)
+        api.require_show_access_settings_control(
+            session_id,
+            user_context=_request_authorization_context(),
         )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
+    try:
+        result = await internal_client.show_access_settings_read(payload)
+    except internal_client.InternalServerUnavailable:
+        return _show_access_http_response(
+            {"ok": False, "error": "show_access_controller_unavailable"},
+            503,
+        )
+    except internal_client.InternalServerTimeout:
+        return _show_access_http_response(
+            {"ok": False, "error": "show_access_controller_timeout"},
+            504,
+        )
+    body = result.get("body") or {}
+    status = int(result.get("status_code") or 500)
+    if status == 200 and not _show_access_page_identity_matches(body, session_id):
+        return _show_access_http_response(
+            {"ok": False, "error": "show_access_internal_protocol_error"},
+            502,
+        )
+    return _show_access_http_response(body, status)
 
 
-@app.route("/api/show-pages/<session_id>/rotate-share", methods=["POST"])
-def show_page_rotate_share_post(session_id):
+@app.route("/api/show-pages/<session_id>/access-settings/apply", methods=["POST"])
+async def show_page_access_settings_apply(session_id):
     from core.show_pages import ShowPageError
-    from vibe import api
+    from vibe import api, internal_client
 
+    payload = request.json if isinstance(request.json, dict) else {}
+    required = {
+        "page_id",
+        "expected_revision",
+        "target_access_mode",
+        "target_share_id",
+        "target_emails",
+    }
+    if payload.get("page_id") != session_id:
+        return _show_access_http_response(
+            {"ok": False, "error": "show_access_page_identity_mismatch"},
+            400,
+        )
+    if set(payload) != required or not _valid_show_access_apply_payload(payload):
+        return _show_access_http_response(
+            {"ok": False, "error": "invalid_show_access_apply_request"},
+            400,
+        )
     try:
-        context = _request_authorization_context()
-        return jsonify(
-            _show_page_response_for_request(api.rotate_show_page_share(
-                session_id,
-                user_context=context,
-            ), context)
+        api.require_show_access_settings_control(
+            session_id,
+            user_context=_request_authorization_context(),
         )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
-
-
-@app.route("/api/show-pages/<session_id>/share-id", methods=["POST"])
-def show_page_set_share_id_post(session_id):
-    from core.show_pages import ShowPageError
-    from vibe import api
-
-    payload = request.json or {}
     try:
-        context = _request_authorization_context()
-        return jsonify(
-            _show_page_response_for_request(api.set_show_page_share_id(
-                session_id,
-                str(payload.get("share_id") or ""),
-                user_context=context,
-            ), context)
+        result = await internal_client.show_access_apply(payload)
+    except internal_client.InternalServerUnavailable:
+        return _show_access_http_response(
+            {"ok": False, "error": "show_access_controller_unavailable"},
+            503,
         )
-    except ShowPageError as exc:
-        return _show_page_error_response(exc)
+    except internal_client.InternalServerTimeout:
+        return _show_access_http_response(
+            {"ok": False, "error": "show_access_controller_timeout"},
+            504,
+        )
+    body = result.get("body") or {}
+    status = int(result.get("status_code") or 500)
+    if status == 200 and not _show_access_page_identity_matches(body, session_id):
+        return _show_access_http_response(
+            {"ok": False, "error": "show_access_internal_protocol_error"},
+            502,
+        )
+    return _show_access_http_response(body, status)
 
 
 def _show_page_icon_not_found():
@@ -13205,7 +13252,11 @@ def _show_annotation_capability(
         return False
     if public_share_id is not None:
         return page.visibility == VISIBILITY_PUBLIC and page.share_id == public_share_id
-    return page.visibility in {VISIBILITY_PRIVATE, VISIBILITY_PUBLIC}
+    return page.visibility in {
+        VISIBILITY_PRIVATE,
+        VISIBILITY_LIMITED,
+        VISIBILITY_PUBLIC,
+    }
 
 
 def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
@@ -14737,10 +14788,9 @@ def redirect_private_show_page_to_canonical_path(session_id):
             if exc.code == "resource_access_forbidden":
                 return _show_page_access_forbidden_response()
             return _show_page_not_found_response()
-        # Amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
-        # pages too, so the sibling no-trailing-slash canonical redirect must
-        # accept public as well (offline still redirects to its offline page).
-        if page.visibility not in {"private", "public", "offline"}:
+        # The authenticated editor surface accepts every configured audience;
+        # offline still redirects to the explanatory offline page.
+        if page.visibility not in {"private", "limited", "public", "offline"}:
             return _show_page_not_found_response()
         return redirect(f"/show/{quote(session_id, safe='')}/")
     finally:
@@ -14773,15 +14823,11 @@ async def serve_private_show_page(session_id, asset_path):
             return _show_page_not_found_response()
         if page.visibility == "offline":
             return _show_page_offline_response()
-        # Amendment (2026-07-13, docs/plans/dock-pinned-show-page-apps.md §2.3): the
-        # authed workbench `/show/<id>/` surface serves BOTH private and public
-        # pages, so a Show Page pinned to the Dock while public still opens (a
-        # pinned public page must not open a broken window). This is no new
-        # exposure — the route stays behind workbench auth, and a public page is
-        # already anonymously readable via `/p/<share_id>`, which remains the only
-        # anonymous surface. `offline` (handled above) and any unexpected
-        # visibility still fall through to not-found.
-        if page.visibility not in {"private", "public"}:
+        # The Workbench editor route serves every online audience mode. This is
+        # no new anonymous exposure: `/show` stays behind Workbench and resource
+        # authorization, while `/p` owns shared navigation admission. `offline`
+        # (handled above) and unexpected states still fail closed.
+        if page.visibility not in {"private", "limited", "public"}:
             return _show_page_not_found_response()
         # A remote viewer is an untrusted viewer even on the private surface: keep
         # its asset reads inside the page workspace so an authored symlink cannot

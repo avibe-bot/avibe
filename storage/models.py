@@ -389,14 +389,38 @@ show_pages = Table(
     "show_pages",
     metadata,
     Column("session_id", String, primary_key=True),
-    Column("visibility", String, nullable=False),
+    Column("access_mode", String, nullable=False, server_default="private"),
+    Column("access_revision", Integer, nullable=False, server_default="0"),
     Column("share_id", String, nullable=True),
     Column("offline_at", String, nullable=True),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
     UniqueConstraint("share_id", name="uq_show_pages_share_id"),
+    CheckConstraint(
+        "access_mode in ('private', 'limited', 'public')",
+        name="ck_show_pages_access_mode",
+    ),
+    CheckConstraint("access_revision >= 0", name="ck_show_pages_access_revision"),
     Index("ix_show_pages_share_id", "share_id"),
-    Index("ix_show_pages_visibility", "visibility"),
+    Index("ix_show_pages_access_mode", "access_mode"),
+)
+
+show_page_authorized_emails = Table(
+    "show_page_authorized_emails",
+    metadata,
+    Column(
+        "session_id",
+        String,
+        ForeignKey("show_pages.session_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("normalized_email", String, primary_key=True),
+    Column("created_at", String, nullable=False),
+    CheckConstraint(
+        "length(normalized_email) between 3 and 320",
+        name="ck_show_page_authorized_emails_length",
+    ),
+    Index("ix_show_page_authorized_emails_email", "normalized_email"),
 )
 
 show_session_events = Table(

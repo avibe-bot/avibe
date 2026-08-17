@@ -1,6 +1,4 @@
 import type { ResourceAccessLevel, SyncStatus } from '@/features/organization/api/types';
-import type { ShowPageLinkInfo } from './showPageLinks';
-
 export type ShowPageAccess = {
   ok: true;
   mode: 'personal' | 'organization';
@@ -13,7 +11,6 @@ export type ShowPageAccess = {
   can_use: boolean;
   can_manage: boolean;
   can_publish_public: boolean;
-  public_link_enabled: boolean;
 };
 
 export type ShowPageAccessProbe =
@@ -21,37 +18,68 @@ export type ShowPageAccessProbe =
   | { status: 'denied'; access: null }
   | { status: 'error'; access: null };
 
-export type ShowPageVisibilityMetadata = {
-  ok: true;
-  public_link_enabled: boolean;
+export type ShowAccessMode = 'private' | 'limited' | 'public';
+
+export type ShowAccess = {
+  page_id: string;
+  access_mode: ShowAccessMode;
+  share_id: string | null;
+  revision: number;
+  normalized_emails: string[];
 };
 
-export type ShowPageVisibilityPayload<Payload extends ShowPageLinkInfo = ShowPageLinkInfo> = {
-  ok: true;
-} & Payload;
-export type ShowPageVisibilityResult<Payload extends ShowPageLinkInfo = ShowPageLinkInfo> =
-  | ShowPageVisibilityPayload<Payload>
-  | ShowPageVisibilityMetadata;
-
-export type ShowPageAuthorizedEmails = {
-  ok: true;
-  emails: string[];
-  changed?: boolean;
+export type ShowAccessSettingsResult = {
+  show_access: ShowAccess;
 };
 
-const SHOW_PAGE_EMAIL_PATTERN = /^[a-z0-9._%+-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/;
+export type ShowAccessApplyRequest = {
+  expected_revision: number;
+  target_access_mode: ShowAccessMode;
+  target_share_id: string | null;
+  target_emails: string[];
+};
 
-export function normalizeShowPageAuthorizedEmail(raw: string): string | null {
-  const normalized = raw.trim().toLowerCase();
-  return SHOW_PAGE_EMAIL_PATTERN.test(normalized) ? normalized : null;
+export type ShowAccessApplyResult = {
+  status: 'applied' | 'no_change' | 'conflict' | 'share_id_taken' | 'invalid';
+  show_access: ShowAccess;
+};
+
+export const SHOW_ACCESS_EMAIL_MAX_COUNT = 64;
+const SHOW_ACCESS_EMAIL_PATTERN = /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+const ASCII_SURROUNDING_WHITESPACE = /^[\t\n\f\r\v ]+|[\t\n\f\r\v ]+$/g;
+
+export function normalizeShowAccessEmail(raw: string): string | null {
+  const normalized = raw
+    .replace(ASCII_SURROUNDING_WHITESPACE, '')
+    .replace(/[A-Z]/g, (value) => value.toLowerCase());
+  return normalized.length <= 320 && SHOW_ACCESS_EMAIL_PATTERN.test(normalized)
+    ? normalized
+    : null;
 }
 
-export function requiresShowPageEmailRevocationConfirmation(
-  savedEmails: string[],
-  nextEmails: string[],
+export function normalizeShowAccessEmails(emails: string[]): string[] | null {
+  if (emails.length > SHOW_ACCESS_EMAIL_MAX_COUNT) return null;
+  const normalized = emails.map(normalizeShowAccessEmail);
+  if (normalized.some((email) => email === null)) return null;
+  return [...new Set(normalized as string[])].sort();
+}
+
+export function showAccessTargetEmails(
+  mode: ShowAccessMode,
+  emails: string[],
+): string[] {
+  return mode === 'limited' ? [...new Set(emails)].sort() : [];
+}
+
+export function showAccessDraftChanged(
+  saved: ShowAccess,
+  mode: ShowAccessMode,
+  shareId: string | null,
+  emails: string[],
 ): boolean {
-  const next = new Set(nextEmails);
-  return savedEmails.some((email) => !next.has(email));
+  return saved.access_mode !== mode
+    || saved.share_id !== shareId
+    || saved.normalized_emails.join('\u0000') !== showAccessTargetEmails(mode, emails).join('\u0000');
 }
 
 function isShowPageAccess(value: unknown): value is ShowPageAccess {
@@ -61,8 +89,7 @@ function isShowPageAccess(value: unknown): value is ShowPageAccess {
     && (candidate.mode === 'personal' || candidate.mode === 'organization')
     && typeof candidate.can_use === 'boolean'
     && typeof candidate.can_manage === 'boolean'
-    && typeof candidate.can_publish_public === 'boolean'
-    && typeof candidate.public_link_enabled === 'boolean';
+    && typeof candidate.can_publish_public === 'boolean';
 }
 
 export function classifyShowPageAccessProbe(
@@ -86,12 +113,6 @@ export function showPageRestoreAccessDecision(
   if (!probe || probe.status === 'error') return 'wait';
   if (probe.status === 'denied') return 'deny';
   return probe.access.can_use ? 'allow' : 'deny';
-}
-
-export function isShowPageVisibilityPayload<Payload extends ShowPageLinkInfo>(
-  result: ShowPageVisibilityResult<Payload>,
-): result is ShowPageVisibilityPayload<Payload> {
-  return 'session_id' in result && typeof result.session_id === 'string';
 }
 
 export function showPageHeaderAccess(
@@ -133,42 +154,6 @@ export function buildShowPageAccessPatch(
     access_level: level,
     group_ids: normalizedGroupIds,
     if_match_revision: revision,
-  };
-}
-
-export function canChangeShowPagePublicLink(
-  access: ShowPageAccess | null,
-  nextEnabled: boolean,
-): boolean {
-  if (!access) return false;
-  return nextEnabled ? access.can_publish_public : access.can_manage;
-}
-
-export function showPageShareCapabilities(
-  access: ShowPageAccess | null,
-  options: {
-    accessInvalid?: boolean;
-    canManageInstance?: boolean;
-  } = {},
-): {
-  canReadPayload: boolean;
-  canRevokePublicLinkWithoutPayload: boolean;
-  canManageDock: boolean;
-} {
-  const accessValid = options.accessInvalid !== true;
-  const canManageInstance = options.canManageInstance === true;
-  return {
-    canReadPayload: accessValid && (canManageInstance || access?.can_use === true),
-    canRevokePublicLinkWithoutPayload: Boolean(
-      accessValid
-      && access
-      && !access.can_use
-      && access.can_manage
-      && access.public_link_enabled,
-    ),
-    // Dock writes remain Instance-owner operations. Page-level use/manage
-    // authority deliberately does not inherit this independent capability.
-    canManageDock: canManageInstance,
   };
 }
 

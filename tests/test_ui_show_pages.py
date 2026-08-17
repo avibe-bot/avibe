@@ -179,7 +179,20 @@ def _create_show_page(session_id: str, visibility: str) -> str | None:
     (page_dir / "app.js").write_text("window.showPage = true;", encoding="utf-8")
     store = ShowPageStore()
     try:
-        page = store.update_visibility(session_id, visibility)
+        if visibility == "limited":
+            page = store.ensure(session_id)
+            result = store.apply_access(
+                session_id,
+                expected_revision=page.access_revision,
+                target_access_mode="limited",
+                target_share_id=page.share_id,
+                target_emails=["viewer@example.com"],
+            )
+            assert result.status == "applied"
+            page = store.get(session_id)
+            assert page is not None
+        else:
+            page = store.update_visibility(session_id, visibility)
         # The factory represents a page that has been published to this test
         # Organization. Runtime access still requires the caller's Instance role;
         # this ACL only supplies the independent Show Page entitlement.
@@ -435,6 +448,30 @@ def test_public_show_page_serves_from_authed_route(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert b"Show Page" in response.content
+
+
+def test_limited_show_page_uses_authed_editor_route_but_not_anonymous_route(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "limited")
+
+    editor = app.test_client().get(
+        "/show/ses123/",
+        base_url="http://127.0.0.1:5123",
+    )
+    shared = app.test_client().get(
+        f"/p/{share_id}/",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert editor.status_code == 200
+    assert b"Show Page" in editor.content
+    # Limited guest admission belongs to the identity/shared-Runtime delivery
+    # lane. Until that lands, the anonymous route remains fail-closed.
+    assert shared.status_code == 404
 
 
 def test_public_show_page_still_requires_remote_login(monkeypatch, tmp_path):
@@ -6303,17 +6340,22 @@ def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypat
     ]
 
 
-def test_public_show_page_hmr_websocket_accepts_local_peer(monkeypatch, tmp_path):
-    # Amendment §2.3: the HMR socket serves public pages too, so a public page's
-    # /show/ HMR socket gets PAST the visibility gate (then fails at the fake
+@pytest.mark.parametrize("visibility", ["limited", "public"])
+def test_shared_mode_show_page_hmr_websocket_accepts_local_peer(
+    monkeypatch,
+    tmp_path,
+    visibility,
+):
+    # The HMR socket serves all authenticated editor modes, so a shared-mode
+    # /show/ HMR socket gets PAST the audience gate (then fails at the fake
     # runtime proxy with 1011 — not the 1008 visibility rejection an offline page
-    # would get), keeping live HMR for a page pinned while public.
+    # would get), keeping live HMR when the audience changes.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.ui.setup_host = "192.168.2.3"
     config.save()
     _mock_interface(monkeypatch, "192.168.2.3", 24)
-    _create_show_page("ses123", "public")
+    _create_show_page("ses123", visibility)
     manager = _FakeShowRuntimeManager()
     set_show_runtime_manager_for_tests(manager)
     try:

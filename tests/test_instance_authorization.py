@@ -159,6 +159,10 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/sessions/session-1/messages"),
         ("POST", "/api/sessions/session-1/attachments"),
         ("POST", "/api/sessions/session-1/cancel"),
+        ("POST", "/api/show-pages/session-1/ensure"),
+        ("POST", "/api/show-pages/session-1/availability"),
+        ("POST", "/api/show-pages/session-1/access-settings/read"),
+        ("POST", "/api/show-pages/session-1/access-settings/apply"),
     )
     for method, path in editor_examples:
         assert http_authorization_policy(method, path).minimum_role == "editor", path

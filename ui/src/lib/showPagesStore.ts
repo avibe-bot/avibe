@@ -1,10 +1,14 @@
 import type { ApiContextType } from '../context/ApiContext';
 
-export type Visibility = 'private' | 'public' | 'offline';
+export type Visibility = 'private' | 'limited' | 'public' | 'offline';
 
 export interface ShowPage {
   session_id: string;
   visibility: Visibility;
+  access_mode: 'private' | 'limited' | 'public';
+  access_revision: number;
+  can_manage: boolean;
+  can_publish_public: boolean;
   title: string | null;
   platform: string | null;
   agent: string | null;

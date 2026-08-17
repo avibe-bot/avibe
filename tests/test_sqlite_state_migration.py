@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260815_0054"
+HEAD_REVISION = "20260817_0055"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -48,6 +48,139 @@ MESSAGE_PARTIAL_INDEX_PREDICATES = {
         "or (author = 'harness' and type = 'annotation'))"
     ),
 }
+
+
+def test_local_show_access_migration_round_trip_preserves_pages_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260815_0054")
+    legacy_rows = [
+        ("private-null", "private", None, None),
+        ("private-stable", "private", "private-link", None),
+        ("public-null", "public", None, None),
+        ("public-stable", "public", "public-link", None),
+        ("offline-null", "offline", None, None),
+        ("offline-stable", "offline", "offline-link", "2026-08-16T00:00:00Z"),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            insert into show_pages (
+                session_id, visibility, share_id, offline_at, created_at, updated_at
+            ) values (?, ?, ?, ?, '2026-08-15T00:00:00Z', '2026-08-16T00:00:00Z')
+            """,
+            legacy_rows,
+        )
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma foreign_keys = on")
+        columns = {row[1] for row in conn.execute("pragma table_info(show_pages)")}
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "select session_id, access_mode, access_revision, share_id, offline_at "
+                "from show_pages order by session_id"
+            )
+        }
+        assert "visibility" not in columns
+        assert {"access_mode", "access_revision", "share_id", "offline_at"}.issubset(columns)
+        assert rows["private-null"][0:2] == ("private", 0)
+        assert rows["private-stable"] == ("private", 0, "private-link", None)
+        assert rows["public-null"][0:2] == ("public", 0)
+        assert rows["public-stable"] == ("public", 0, "public-link", None)
+        assert rows["offline-null"][0] == "private"
+        assert rows["offline-null"][3] == "2026-08-16T00:00:00Z"
+        assert rows["offline-stable"] == (
+            "private",
+            0,
+            "offline-link",
+            "2026-08-16T00:00:00Z",
+        )
+        assert all(row[2] for row in rows.values())
+
+        show_indexes = {row[1] for row in conn.execute("pragma index_list(show_pages)")}
+        email_indexes = {
+            row[1]
+            for row in conn.execute("pragma index_list(show_page_authorized_emails)")
+        }
+        assert {"ix_show_pages_share_id", "ix_show_pages_access_mode"}.issubset(show_indexes)
+        assert "ix_show_page_authorized_emails_email" in email_indexes
+        foreign_key = conn.execute(
+            "pragma foreign_key_list(show_page_authorized_emails)"
+        ).fetchone()
+        assert foreign_key is not None
+        assert foreign_key[2] == "show_pages"
+        assert foreign_key[6].upper() == "CASCADE"
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "update show_pages set access_mode = 'other' where session_id = 'private-null'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "update show_pages set access_revision = -1 where session_id = 'private-null'"
+            )
+
+        conn.execute(
+            "update show_pages set access_mode = 'limited', access_revision = 3 "
+            "where session_id = 'private-stable'"
+        )
+        conn.execute(
+            "insert into show_page_authorized_emails values (?, ?, ?)",
+            ("private-stable", "guest@example.com", "2026-08-17T00:00:00Z"),
+        )
+        conn.execute(
+            "insert into show_page_authorized_emails values (?, ?, ?)",
+            ("private-null", "cascade@example.com", "2026-08-17T00:00:00Z"),
+        )
+        conn.execute("delete from show_pages where session_id = 'private-null'")
+        assert conn.execute(
+            "select count(*) from show_page_authorized_emails "
+            "where session_id = 'private-null'"
+        ).fetchone() == (0,)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260815_0054")
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info(show_pages)")}
+        downgraded = dict(
+            conn.execute(
+                "select session_id, visibility from show_pages order by session_id"
+            )
+        )
+        retained_slugs = dict(
+            conn.execute("select session_id, share_id from show_pages order by session_id")
+        )
+        assert "visibility" in columns
+        assert "access_mode" not in columns
+        assert "access_revision" not in columns
+        assert "show_page_authorized_emails" not in {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'table'"
+            )
+        }
+        assert downgraded["private-stable"] == "private"
+        assert downgraded["public-null"] == "public"
+        assert downgraded["public-stable"] == "public"
+        assert downgraded["offline-null"] == "offline"
+        assert downgraded["offline-stable"] == "offline"
+        assert retained_slugs["private-stable"] == "private-link"
+        assert retained_slugs["public-stable"] == "public-link"
+        assert retained_slugs["offline-stable"] == "offline-link"
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        reupgraded = conn.execute(
+            "select access_mode, access_revision, share_id from show_pages "
+            "where session_id = 'private-stable'"
+        ).fetchone()
+        email_count = conn.execute(
+            "select count(*) from show_page_authorized_emails"
+        ).fetchone()
+    assert reupgraded == ("private", 0, "private-link")
+    assert email_count == (0,)
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -3991,6 +4124,12 @@ def test_run_migrations_backfills_existing_session_policy_only_for_targeted_defi
         engine.dispose()
 
     with sqlite3.connect(db_path) as conn:
+        # This fixture stamps the database at 0002 and then exercises every later
+        # migration. Current metadata has already replaced the 0004-era
+        # ``show_pages.visibility`` shape, so remove the future tables instead of
+        # presenting 0004 with an impossible hybrid schema.
+        conn.execute("drop table show_page_authorized_emails")
+        conn.execute("drop table show_pages")
         conn.execute("update run_definitions set session_policy = null")
         conn.execute(
             """

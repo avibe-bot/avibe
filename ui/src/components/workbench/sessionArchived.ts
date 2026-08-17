@@ -148,9 +148,9 @@ export const isShowPageActive = (
  *     to create a missing one (``409 session_archived``, ``core/show_pages.py``).
  *     So Visualize can only end in that 409, or frame a page that is offline —
  *     never a working view.
- *   - Share's mutations (``update_visibility``, ``set_share_id``, ``rotate_share``)
- *     are refused by the same guard, and its popover re-ensures the page on open,
- *     so it 409s before it can render anything.
+ *   - Share's availability and access-settings mutations are refused by the same
+ *     guard, and its popover re-ensures the page on open, so it 409s before it can
+ *     render anything.
  *   - Annotating enqueues an annotation *message* into the session, which the
  *     messages POST refuses.
  *

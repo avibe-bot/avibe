@@ -1,9 +1,7 @@
-"""Web UI admin Show Pages API: listing (with title join), visibility, rotate."""
+"""Web UI admin Show Pages API: listing and orthogonal availability."""
 
-import pytest
-
-from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
-from tests.ui_server_test_helpers import _save_config
+from core.show_pages import ShowPageStore, ensure_show_page_dir
+from tests.ui_server_test_helpers import _save_config, csrf_headers
 from vibe import api
 from vibe.ui_server import app
 
@@ -77,6 +75,8 @@ def test_list_show_pages_orders_newest_first_and_joins_title(monkeypatch, tmp_pa
     assert by_id["ses_titled"]["agent"] == "Claude"
     assert by_id["ses_titled"]["visibility"] == "public"
     assert by_id["ses_titled"]["share_id"]
+    assert by_id["ses_titled"]["can_manage"] is True
+    assert by_id["ses_titled"]["can_publish_public"] is True
     # IM-dispatch sessions persist title=None; the UI falls back to the id.
     assert by_id["ses_plain"]["title"] is None
     assert by_id["ses_plain"]["visibility"] == "private"
@@ -118,49 +118,37 @@ def test_list_show_pages_preserves_archived_agent_display_name(monkeypatch, tmp_
         store.close()
 
 
-def test_set_show_page_visibility_public_then_offline(monkeypatch, tmp_path):
+def test_set_show_page_availability_preserves_configured_access(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _seed_session("ses_x")
-    _set_visibility("ses_x", "private")
+    _set_visibility("ses_x", "public")
 
-    public = api.set_show_page_visibility("ses_x", "public")
-    assert public["ok"] is True
-    assert public["visibility"] == "public"
-    assert public["share_id"]
-
-    offline = api.set_show_page_visibility("ses_x", "offline")
+    offline = api.set_show_page_availability("ses_x", True)
     assert offline["visibility"] == "offline"
     assert offline["offline"] is True
     assert offline["offline_at"]
+    share_id = offline["share_id"]
+
+    online = api.set_show_page_availability("ses_x", False)
+    assert online["visibility"] == "public"
+    assert online["offline"] is False
+    assert online["share_id"] == share_id
 
 
-def test_set_show_page_visibility_rejects_invalid(monkeypatch, tmp_path):
+def test_show_page_availability_route_rejects_non_boolean_payload(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    _seed_session("ses_x")
 
-    with pytest.raises(ShowPageError) as excinfo:
-        api.set_show_page_visibility("ses_x", "bogus")
-    assert excinfo.value.code == "invalid_visibility"
+    client = app.test_client()
+    response = client.post(
+        "/api/show-pages/ses_x/availability",
+        json={"offline": "yes"},
+        headers=csrf_headers(client),
+    )
 
-
-def test_rotate_share_requires_public_and_revokes_previous(monkeypatch, tmp_path):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    _seed_session("ses_x")
-    _set_visibility("ses_x", "private")
-
-    with pytest.raises(ShowPageError) as excinfo:
-        api.rotate_show_page_share("ses_x")
-    assert excinfo.value.code == "not_public"
-
-    public = api.set_show_page_visibility("ses_x", "public")
-    rotated = api.rotate_show_page_share("ses_x")
-    assert rotated["ok"] is True
-    assert rotated["share_id"]
-    assert rotated["share_id"] != public["share_id"]
-    assert rotated["previous_share_id"] == public["share_id"]
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "invalid_availability"
 
 
 def test_show_pages_list_route_returns_payload(monkeypatch, tmp_path):

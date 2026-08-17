@@ -1567,66 +1567,6 @@ def _device_json_request(
     return parsed
 
 
-def _show_page_email_grant_suffix(show_page_id: str) -> str:
-    encoded = urllib.parse.quote(show_page_id, safe="")
-    return f"show-pages/{encoded}/authorized-emails"
-
-
-def get_show_page_authorized_emails(
-    show_page_id: str,
-    config: V2Config | None = None,
-) -> dict[str, Any]:
-    """Load one Show Page's exact email grants through paired-device auth."""
-
-    config = config or V2Config.load()
-    if not _resource_acl_sync_configured(config):
-        raise RuntimeError("show_page_email_access_not_configured")
-    result = _device_json_request(
-        config,
-        "GET",
-        _show_page_email_grant_suffix(show_page_id),
-    )
-    emails = result.get("emails")
-    if not isinstance(emails, list) or any(not isinstance(email, str) for email in emails):
-        raise RuntimeError("show_page_email_access_invalid_response")
-    return {"emails": emails}
-
-
-def replace_show_page_authorized_emails(
-    show_page_id: str,
-    emails: list[str],
-    config: V2Config | None = None,
-) -> dict[str, Any]:
-    """Replace one Show Page's email grants without exposing the device secret."""
-
-    config = config or V2Config.load()
-    if not _resource_acl_sync_configured(config):
-        raise RuntimeError("show_page_email_access_not_configured")
-    result = _device_json_request(
-        config,
-        "PUT",
-        _show_page_email_grant_suffix(show_page_id),
-        {"emails": emails},
-    )
-    returned_emails = result.get("emails")
-    if not isinstance(returned_emails, list) or any(
-        not isinstance(email, str) for email in returned_emails
-    ):
-        raise RuntimeError("show_page_email_access_invalid_response")
-    changed = bool(result.get("changed"))
-    if changed and "authorization_revision" not in result:
-        raise RuntimeError("show_page_email_access_invalid_response")
-    if result.get("authorization_revision") is not None:
-        try:
-            _replace_authorization_revision(config, result["authorization_revision"])
-        except ValueError as exc:
-            raise RuntimeError("show_page_email_access_invalid_response") from exc
-    return {
-        "emails": returned_emails,
-        "changed": changed,
-    }
-
-
 def sync_authorization_revision_once(
     config: V2Config | None = None,
 ) -> dict[str, Any]:

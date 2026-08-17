@@ -3,11 +3,9 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
-import { isShowPageVisibilityPayload, type ShowPageVisibilityResult } from '../lib/showPageAccess';
 import {
   getShowPagesInventoryStore,
   type ShowPage,
-  type Visibility,
 } from '../lib/showPagesStore';
 
 export { replaceShowPageTitleIfCurrent } from '../lib/showPagesStore';
@@ -44,69 +42,31 @@ export function useShowPageInventory(enabled = true) {
   };
 }
 
-// The Show Pages inventory: fetch + the visibility / share-id / rotate mutations,
-// with their toasts. Lifted out of the view so the App Library owns one copy of
+// The Show Pages inventory and availability mutations, with their toasts.
+// Lifted out of the view so the App Library owns one copy of
 // the pages state and projects it into both the Apps and Show Pages views (kept
 // in a hook module so the view file exports only components — fast-refresh safe).
 export function useShowPages() {
   const api = useApi();
   const { showToast } = useToast();
   const { t } = useTranslation();
-  const { pages, loading, loaded, mergePage, removePage, replaceTitleIfCurrent, reload } =
+  const { pages, loading, loaded, mergePage, replaceTitleIfCurrent, reload } =
     useShowPageInventory();
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const setVisibility = async (page: ShowPage, visibility: Visibility) => {
-    if (page.visibility === visibility || busyId) return;
+  const setOffline = async (page: ShowPage, offline: boolean) => {
+    if (page.offline === offline || busyId) return;
     setBusyId(page.session_id);
     try {
-      const res = await api.setShowPageVisibility<ShowPage>(page.session_id, visibility);
-      if (isShowPageVisibilityPayload(res)) {
-        mergePage(res);
-      } else {
-        // The caller lost page-use access between render and mutation. The
-        // metadata-only response deliberately contains no page identifiers or
-        // links, so withdraw the retained inventory row immediately.
-        removePage(page.session_id);
-        reload();
-      }
+      const res = await api.setShowPageAvailability(page.session_id, offline);
+      if (res?.session_id === page.session_id) mergePage(res as ShowPage);
+      else reload();
       showToast(t('showPages.toast.updated'));
     } catch {
       // ApiContext surfaces a toast on failure.
     } finally {
       setBusyId(null);
     }
-  };
-
-  const rotate = async (page: ShowPage) => {
-    if (busyId) return;
-    setBusyId(page.session_id);
-    try {
-      const res = await api.rotateShowPageShare(page.session_id);
-      if (isShowPageVisibilityPayload(res)) {
-        mergePage(res);
-      } else {
-        removePage(page.session_id);
-        reload();
-      }
-      showToast(t('showPages.toast.rotated'));
-    } catch {
-      // handled by ApiContext
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  // The custom-link field owns its own request/validation; we only merge the
-  // returned payload (new share_id, updated_at) and confirm.
-  const onShareIdSaved = (next: ShowPageVisibilityResult, sessionId: string) => {
-    if (isShowPageVisibilityPayload(next)) {
-      mergePage(next as unknown as ShowPage);
-    } else {
-      removePage(sessionId);
-      reload();
-    }
-    showToast(t('showPages.shareId.toast.saved'));
   };
 
   const rename = async (page: ShowPage, title: string | null) => {
@@ -140,7 +100,7 @@ export function useShowPages() {
     }
   };
 
-  return { pages, loading, loaded, busyId, setVisibility, rotate, rename, uploadIcon, onShareIdSaved, reload };
+  return { pages, loading, loaded, busyId, setOffline, rename, uploadIcon, reload };
 }
 
 export type ShowPagesController = ReturnType<typeof useShowPages>;

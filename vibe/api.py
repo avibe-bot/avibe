@@ -1538,12 +1538,32 @@ def list_show_pages(*, user_context: Any = None) -> dict:
     """
     from core.avibe_cloud import avibe_cloud_connect_guidance, avibe_cloud_url_available
     from core.show_pages import ShowPageStore, show_page_payload
+    from storage import resource_access_service
 
     config = V2Config.load()
+    context = resource_access_service.resolve_resource_access_context(user_context)
     store = ShowPageStore()
     try:
         result = store.list_page(page_request=None, user_context=user_context)
         pages = [show_page_payload(page, config=config) for page in result.items]
+        with store.engine.connect() as connection:
+            for payload in pages:
+                session_id = payload["session_id"]
+                payload["can_manage"] = (
+                    resource_access_service.can_manage_show_page_access(
+                        context,
+                        session_id,
+                        connection=connection,
+                    )
+                )
+                payload["can_publish_public"] = (
+                    resource_access_service.can_control_resource_sharing(
+                        context,
+                        "show_page",
+                        session_id,
+                        connection=connection,
+                    )
+                )
     finally:
         store.close()
     _apply_session_meta(pages)
@@ -1576,12 +1596,9 @@ def _show_page_mutation_response(
             connection=connection,
         )
     if not can_use:
-        # Audience managers may revoke an anonymous link without page-use
-        # access. Do not return page paths, URLs, share IDs, or session metadata.
-        return {
-            "ok": True,
-            "public_link_enabled": page.visibility == "public",
-        }
+        # Access managers may take a page offline without page-use access. Do
+        # not return page paths, URLs, share IDs, audience, or session metadata.
+        return {"ok": True}
     from core.show_pages import show_page_payload
 
     payload = show_page_payload(page, config=config)
@@ -1592,25 +1609,22 @@ def _show_page_mutation_response(
     }
 
 
-def set_show_page_visibility(
+def set_show_page_availability(
     session_id: str,
-    visibility: str,
+    offline: bool,
     *,
     user_context: Any = None,
 ) -> dict:
-    """Switch a Show Page between private / public / offline.
+    """Change Show Page availability without mutating its configured audience."""
 
-    Raises ``ShowPageError`` (a ``ValueError``) for invalid input, which the
-    route layer maps to a 4xx response.
-    """
     from core.show_pages import ShowPageStore
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated = store.update_visibility(
+        updated = store.set_offline(
             session_id,
-            visibility,
+            offline,
             user_context=user_context,
         )
         return _show_page_mutation_response(
@@ -1704,11 +1718,10 @@ def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
         "can_use": can_use,
         "can_manage": can_manage,
         "can_publish_public": can_publish_public,
-        "public_link_enabled": page.visibility == "public",
     }
 
 
-def _require_show_page_email_access_owner(
+def require_show_access_settings_control(
     session_id: str,
     *,
     user_context: Any = None,
@@ -1733,130 +1746,6 @@ def _require_show_page_email_access_owner(
                     "Show Page access is not permitted.",
                     code="resource_access_forbidden",
                 )
-    finally:
-        store.close()
-
-
-def _show_page_email_access_error(exc: Exception):
-    from core.show_pages import ShowPageError
-    from vibe import remote_access
-
-    known_codes = {
-        "invalid_email",
-        "too_many_entries",
-        "show_page_email_access_not_configured",
-        "show_page_email_access_invalid_response",
-    }
-    transient_code = "show_page_email_access_transient"
-    if isinstance(exc, ShowPageError):
-        return exc
-    if isinstance(exc, remote_access.BackendRequestError):
-        raw_code = str(exc.payload.get("error") or "")
-        code = raw_code if raw_code in known_codes else (
-            transient_code if exc.status >= 500 else "show_page_email_access_unavailable"
-        )
-    else:
-        raw_code = str(exc)
-        code = transient_code if raw_code in {
-            "resource_acl_device_unavailable",
-            "show_page_email_access_invalid_response",
-        } else raw_code or "show_page_email_access_unavailable"
-        if code not in known_codes and code != transient_code:
-            code = "show_page_email_access_unavailable"
-    return ShowPageError(code, code=code)
-
-
-def get_show_page_authorized_emails(
-    session_id: str,
-    *,
-    user_context: Any = None,
-) -> dict:
-    """Return exact email grants for one owner-managed Show Page."""
-
-    from vibe import remote_access
-
-    _require_show_page_email_access_owner(session_id, user_context=user_context)
-    try:
-        result = remote_access.get_show_page_authorized_emails(session_id)
-    except Exception as exc:
-        raise _show_page_email_access_error(exc) from exc
-    return {"ok": True, "emails": result["emails"]}
-
-
-def replace_show_page_authorized_emails(
-    session_id: str,
-    emails: list[str],
-    *,
-    user_context: Any = None,
-) -> dict:
-    """Replace one Show Page's exact email grants through paired-device auth."""
-
-    from vibe import remote_access
-
-    _require_show_page_email_access_owner(session_id, user_context=user_context)
-    normalized = sorted({str(email).strip().lower() for email in emails if str(email).strip()})
-    try:
-        result = remote_access.replace_show_page_authorized_emails(session_id, normalized)
-    except Exception as exc:
-        raise _show_page_email_access_error(exc) from exc
-    return {
-        "ok": True,
-        "emails": result["emails"],
-        "changed": result["changed"],
-    }
-
-
-def rotate_show_page_share(session_id: str, *, user_context: Any = None) -> dict:
-    """Revoke the current public link and issue a new one (public pages only)."""
-    from core.show_pages import ShowPageStore
-
-    config = V2Config.load()
-    store = ShowPageStore()
-    try:
-        updated, previous_share_id = store.rotate_share(
-            session_id,
-            user_context=user_context,
-        )
-        return _show_page_mutation_response(
-            store,
-            updated,
-            config=config,
-            additional_payload={"previous_share_id": previous_share_id},
-            user_context=user_context,
-        )
-    finally:
-        store.close()
-
-
-def set_show_page_share_id(
-    session_id: str,
-    share_id: str,
-    *,
-    user_context: Any = None,
-) -> dict:
-    """Set a custom public link suffix (public pages only).
-
-    Like ``rotate_show_page_share`` but with a caller-chosen value; setting it
-    revokes the previous public URL. Raises ``ShowPageError`` for an invalid /
-    taken suffix or a non-public page, which the route layer maps to a 4xx/409.
-    """
-    from core.show_pages import ShowPageStore
-
-    config = V2Config.load()
-    store = ShowPageStore()
-    try:
-        updated, previous_share_id = store.set_share_id(
-            session_id,
-            share_id,
-            user_context=user_context,
-        )
-        return _show_page_mutation_response(
-            store,
-            updated,
-            config=config,
-            additional_payload={"previous_share_id": previous_share_id},
-            user_context=user_context,
-        )
     finally:
         store.close()
 
@@ -8540,7 +8429,12 @@ def startup_show_page_prewarm_targets(limit: int | None = None) -> dict:
     if resolved_limit <= 0:
         return {"ok": True, "limit": resolved_limit, "pages": []}
 
-    from core.show_pages import ShowPageStore, VISIBILITY_PRIVATE, VISIBILITY_PUBLIC
+    from core.show_pages import (
+        ShowPageStore,
+        VISIBILITY_LIMITED,
+        VISIBILITY_PRIVATE,
+        VISIBILITY_PUBLIC,
+    )
     from core.show_runtime import ShowRuntimeContext
     from storage.pagination import PageRequest
 
@@ -8548,6 +8442,7 @@ def startup_show_page_prewarm_targets(limit: int | None = None) -> dict:
     try:
         candidates = [
             *store.list_page(visibility=VISIBILITY_PRIVATE, page_request=PageRequest(limit=resolved_limit)).items,
+            *store.list_page(visibility=VISIBILITY_LIMITED, page_request=PageRequest(limit=resolved_limit)).items,
             *store.list_page(visibility=VISIBILITY_PUBLIC, page_request=PageRequest(limit=resolved_limit)).items,
         ]
     finally:

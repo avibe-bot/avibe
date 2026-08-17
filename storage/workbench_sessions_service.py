@@ -1479,7 +1479,7 @@ def archive_session(
     conn.execute(
         update(show_pages)
         .where(show_pages.c.session_id == session_id)
-        .values(visibility="offline", offline_at=now, updated_at=now)
+        .values(offline_at=now, updated_at=now)
     )
 
     payload = get_session(conn, session_id, authorization_context=context)

@@ -222,7 +222,7 @@ the same objects. Decision: fold it into the App Library.
     (Not every Show Page is an app; every session has a page, so the full
     inventory must not masquerade as the app list.)
   - *Show Pages*: the full inventory (today's admin page content: status,
-    visibility private/public/offline, link + share-id, open) **plus a
+    access mode, availability, active link/custom suffix, open) **plus a
     per-row "Pin to Dock" toggle** — pinning is the "install" gesture.
   - Same data sources (`/api/show-pages` + `/api/dock`), two projections; no
     new backend.

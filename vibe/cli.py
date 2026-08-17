@@ -15219,7 +15219,7 @@ def build_parser():
     )
     show_list_parser.add_argument(
         "--visibility",
-        choices=("private", "public", "offline"),
+        choices=("private", "limited", "public", "offline"),
         help="Filter by Show Page visibility.",
     )
     show_list_parser.add_argument("--session-id", help="Filter by Agent Session ID prefix.")

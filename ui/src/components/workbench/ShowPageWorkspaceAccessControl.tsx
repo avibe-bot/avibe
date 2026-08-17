@@ -39,7 +39,6 @@ import {
   showPageSyncPresentation,
   type ShowPageAccess,
 } from '@/lib/showPageAccess';
-import { ShowPageEmailAccessEditor } from './ShowPageEmailAccessEditor';
 
 type ManagementGate =
   | 'idle'
@@ -435,15 +434,6 @@ export function ShowPageWorkspaceAccessControl({
         </div>
       ) : null}
 
-      {access ? (
-        <ShowPageEmailAccessEditor
-          active={active}
-          canManage={access.can_publish_public}
-          sessionId={sessionId}
-          onConfirmationOpenChange={onConfirmationOpenChange}
-          ownerWindowId={ownerWindowId}
-        />
-      ) : null}
       </section>
       <ConfirmDialog
         open={confirmNarrowing}

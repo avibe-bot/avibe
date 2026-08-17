@@ -7,6 +7,7 @@ import pytest
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from core.show_pages import (
+    SHOW_ACCESS_EMAIL_MAX_COUNT,
     ShowPage,
     ShowPageError,
     ShowPageStore,
@@ -389,7 +390,7 @@ def test_store_defaults_to_private_and_rotates_public_share(monkeypatch, tmp_pat
     try:
         page = store.ensure("ses123")
         assert page.visibility == "private"
-        assert page.share_id is None
+        assert page.share_id
 
         public_page = store.update_visibility("ses123", "public")
         assert public_page.visibility == "public"
@@ -422,7 +423,7 @@ def test_rotate_share_requires_public(monkeypatch, tmp_path):
         try:
             store.rotate_share("ses123")
         except ShowPageError as exc:
-            assert exc.code == "not_public"
+            assert exc.code == "not_shared"
         else:
             raise AssertionError("rotate_share should fail while private")
     finally:
@@ -475,7 +476,7 @@ def test_set_share_id_requires_public(monkeypatch, tmp_path):
     store = ShowPageStore()
     try:
         store.ensure("ses123")  # defaults to private
-        _expect_show_page_error(lambda: store.set_share_id("ses123", "my-demo"), "not_public")
+        _expect_show_page_error(lambda: store.set_share_id("ses123", "my-demo"), "not_shared")
     finally:
         store.close()
 
@@ -524,6 +525,271 @@ def test_set_share_id_is_idempotent(monkeypatch, tmp_path):
         assert previous == "stable-link"
         # Re-saving the same value is a no-op, not a self-collision rewrite.
         assert again.updated_at == first.updated_at
+    finally:
+        store.close()
+
+
+def test_show_access_apply_normalizes_and_no_op_does_not_advance_revision(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-access")
+        applied = store.apply_access(
+            "ses-access",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=[
+                " Bob@Example.COM ",
+                "alice@example.com",
+                "bob@example.com",
+            ],
+        )
+        assert applied.status == "applied"
+        assert applied.show_access.revision == 1
+        assert applied.show_access.normalized_emails == (
+            "alice@example.com",
+            "bob@example.com",
+        )
+
+        no_change = store.apply_access(
+            "ses-access",
+            expected_revision=1,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["bob@example.com", " Alice@Example.com "],
+        )
+        assert no_change.status == "no_change"
+        assert no_change.show_access.revision == 1
+        assert no_change.show_access == applied.show_access
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        ".guest@example.com",
+        "guest.@example.com",
+        "guest..name@example.com",
+        "guest@-example.com",
+        "guest@example-.com",
+        "guest@example..com",
+        "guest@example.com.",
+        "guest@@example.com",
+        "guest@exam_ple.com",
+    ],
+)
+def test_show_access_apply_rejects_email_outside_contract(monkeypatch, tmp_path, email) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-invalid-email")
+        result = store.apply_access(
+            "ses-invalid-email",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=[email],
+        )
+
+        assert result.status == "invalid"
+        assert result.show_access.revision == 0
+        assert result.show_access.access_mode == "private"
+        assert result.show_access.normalized_emails == ()
+    finally:
+        store.close()
+
+
+def test_show_access_apply_rejects_email_audience_over_limit_without_write(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-email-limit")
+        allowed_emails = [
+            f"guest-{index}@example.com"
+            for index in range(SHOW_ACCESS_EMAIL_MAX_COUNT)
+        ]
+        allowed = store.apply_access(
+            "ses-email-limit",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=allowed_emails,
+        )
+        result = store.apply_access(
+            "ses-email-limit",
+            expected_revision=allowed.show_access.revision,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=[*allowed_emails, "one-too-many@example.com"],
+        )
+
+        assert allowed.status == "applied"
+        assert len(allowed.show_access.normalized_emails) == SHOW_ACCESS_EMAIL_MAX_COUNT
+        assert result.status == "invalid"
+        assert result.show_access == allowed.show_access
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("mode", "share_id", "emails"),
+    [
+        ("limited", "stable-link", []),
+        ("limited", None, ["guest@example.com"]),
+        ("public", None, []),
+        ("public", "stable-link", ["guest@example.com"]),
+        ("private", "stable-link", ["guest@example.com"]),
+    ],
+)
+def test_show_access_apply_enforces_closed_mode_invariants(
+    monkeypatch, tmp_path, mode, share_id, emails
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-invalid-mode")
+        result = store.apply_access(
+            "ses-invalid-mode",
+            expected_revision=0,
+            target_access_mode=mode,
+            target_share_id=share_id,
+            target_emails=emails,
+        )
+
+        assert result.status == "invalid"
+        assert result.show_access.revision == 0
+        assert result.show_access.access_mode == "private"
+        assert result.show_access.normalized_emails == ()
+    finally:
+        store.close()
+
+
+def test_show_access_private_retains_binding_and_leaving_limited_clears_emails(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-stable-access")
+        limited = store.apply_access(
+            "ses-stable-access",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["guest@example.com"],
+        )
+        private = store.apply_access(
+            "ses-stable-access",
+            expected_revision=limited.show_access.revision,
+            target_access_mode="private",
+            target_share_id=None,
+            target_emails=[],
+        )
+
+        assert private.status == "applied"
+        assert private.show_access.access_mode == "private"
+        assert private.show_access.share_id == page.share_id
+        assert private.show_access.normalized_emails == ()
+        assert private.show_access.revision == 2
+    finally:
+        store.close()
+
+
+def test_show_access_stale_revision_has_no_write(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-conflict")
+        limited = store.apply_access(
+            "ses-conflict",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["guest@example.com"],
+        )
+        conflict = store.apply_access(
+            "ses-conflict",
+            expected_revision=0,
+            target_access_mode="public",
+            target_share_id="replacement-link",
+            target_emails=[],
+        )
+
+        assert conflict.status == "conflict"
+        assert conflict.show_access == limited.show_access
+        assert store.get_access("ses-conflict") == limited.show_access
+    finally:
+        store.close()
+
+
+def test_show_access_share_collision_rolls_back_whole_aggregate(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        first = store.ensure("ses-first")
+        second = store.ensure("ses-second")
+        first_limited = store.apply_access(
+            "ses-first",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id="taken-link",
+            target_emails=["first@example.com"],
+        )
+        second_limited = store.apply_access(
+            "ses-second",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=second.share_id,
+            target_emails=["second@example.com"],
+        )
+        assert first_limited.status == second_limited.status == "applied"
+
+        collision = store.apply_access(
+            "ses-second",
+            expected_revision=1,
+            target_access_mode="limited",
+            target_share_id="taken-link",
+            target_emails=["replacement@example.com"],
+        )
+
+        assert collision.status == "share_id_taken"
+        assert collision.show_access == second_limited.show_access
+        assert collision.show_access.share_id == second.share_id
+        assert collision.show_access.normalized_emails == ("second@example.com",)
+        assert store.get_by_share_id("taken-link").session_id == first.session_id
+    finally:
+        store.close()
+
+
+def test_show_access_and_availability_are_independent(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-offline-access")
+        limited = store.apply_access(
+            "ses-offline-access",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["guest@example.com"],
+        )
+        offline = store.set_offline("ses-offline-access", True)
+        assert offline.offline is True
+        assert store.get_access("ses-offline-access") == limited.show_access
+
+        public = store.apply_access(
+            "ses-offline-access",
+            expected_revision=1,
+            target_access_mode="public",
+            target_share_id=page.share_id,
+            target_emails=[],
+        )
+        assert public.status == "applied"
+        assert public.show_access.revision == 2
+        assert public.show_access.access_mode == "public"
+        assert store.get("ses-offline-access").offline is True
     finally:
         store.close()
 
@@ -981,7 +1247,8 @@ def test_extract_icon_path_accepts_whitelisted_image_extensions(tmp_path):
 def _icon_page(session_id: str) -> ShowPage:
     return ShowPage(
         session_id=session_id,
-        visibility="private",
+        access_mode="private",
+        access_revision=0,
         share_id=None,
         offline_at=None,
         created_at="2026-01-01T00:00:00Z",
@@ -1761,7 +2028,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     assert payload["visibility"] == "private"
     assert payload["active_url"] == "https://alex.avibe.bot/show/ses123/"
     assert payload["private_url"] == "https://alex.avibe.bot/show/ses123/"
-    assert payload["public_url"] is None
+    assert payload["public_url"].startswith("https://alex.avibe.bot/p/")
     assert payload["url_available"] is True
     assert payload["url_guidance"] is None
     assert "Do not send implementation details such as local paths to the user unless they ask for them." in payload["next_actions"]
@@ -2011,6 +2278,14 @@ def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
     store = ShowPageStore()
     try:
         store.ensure("ses-private")
+        limited = store.ensure("ses-limited")
+        store.apply_access(
+            "ses-limited",
+            expected_revision=limited.access_revision,
+            target_access_mode="limited",
+            target_share_id=limited.share_id,
+            target_emails=["guest@example.com"],
+        )
         store.update_visibility("ses-public", "public")
     finally:
         store.close()
@@ -2022,6 +2297,17 @@ def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
     assert "Count: 1" in output
     assert "Filter: visibility=private" in output
     assert "- ses-private" in output
+    assert "- ses-limited" not in output
+    assert "- ses-public" not in output
+
+    args = cli.build_parser().parse_args(["show", "list", "--visibility", "limited"])
+    assert cli.cmd_show_list(args) == 0
+
+    output = capsys.readouterr().out
+    assert "Count: 1" in output
+    assert "Filter: visibility=limited" in output
+    assert "- ses-private" not in output
+    assert "- ses-limited" in output
     assert "- ses-public" not in output
 
 
@@ -2043,6 +2329,31 @@ def test_show_page_payload_requires_enabled_avibe_cloud(monkeypatch, tmp_path):
         assert "Avibe Cloud is not connected" in payload["url_guidance"]
         assert "avibe.bot" in payload["url_guidance"]
         assert "`vibe remote pair`" in payload["url_guidance"]
+    finally:
+        store.close()
+
+
+def test_show_page_payload_does_not_advertise_limited_link_before_guest_admission(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-limited-link")
+        limited = store.apply_access(
+            page.session_id,
+            expected_revision=page.access_revision,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["guest@example.com"],
+        )
+        payload = show_page_payload(store.get(page.session_id))
+
+        assert limited.status == "applied"
+        assert payload["visibility"] == "limited"
+        assert payload["active_url"] is None
+        assert payload["public_url"].endswith(f"/p/{page.share_id}/")
     finally:
         store.close()
 
@@ -2130,7 +2441,7 @@ def test_show_update_rotate_share_fails_while_private(monkeypatch, tmp_path, cap
     args = parser.parse_args(["show", "update", "--session-id", "ses123", "--rotate-share", "--json"])
     assert cli.cmd_show_update(args) == 1
     payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "not_public"
+    assert payload["code"] == "not_shared"
 
 
 def _seed_show_cli_session(session_id: str = "ses123") -> None:

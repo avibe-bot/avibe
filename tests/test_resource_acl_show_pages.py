@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from config import paths
 from core.dock_store import BUILTIN_DOCK_IDS, DockError
-from core.show_pages import ShowPageError, ShowPageStore, public_url
+from core.show_pages import ShowPageError, ShowPageStore
 from storage import media_service, project_access_service, projects_service, resource_access_service
 from storage import workbench_sessions_service as sessions_service
 from storage.db import create_sqlite_engine
@@ -13,7 +13,7 @@ from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, show_pages
 from tests.ui_server_test_helpers import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import api, remote_access, ui_server
+from vibe import api, internal_client, remote_access, ui_server
 from vibe.ui_server import app
 
 
@@ -227,8 +227,8 @@ def test_remote_show_page_access_does_not_bypass_acl(
         environ_base=_remote_peer(),
     )
     mutation = client.post(
-        "/api/show-pages/ses-public/visibility",
-        json={"visibility": "offline"},
+        "/api/show-pages/ses-public/availability",
+        json={"offline": True},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
@@ -249,8 +249,12 @@ def test_remote_show_page_access_does_not_bypass_acl(
     assert {item["session_id"] for item in pages} == expected
     if instance_role == "owner":
         assert all(item.get("path") for item in pages)
+        assert all(item["can_manage"] for item in pages)
+        assert all(item["can_publish_public"] for item in pages)
     else:
         assert all("path" not in item for item in pages)
+        assert all(not item["can_manage"] for item in pages)
+        assert all(not item["can_publish_public"] for item in pages)
     assert mutation.status_code == (200 if instance_role == "owner" else 403)
     assert page.status_code == (200 if instance_role == "owner" else 302)
 
@@ -313,11 +317,10 @@ def test_remote_show_page_creation_persists_real_org_identity(monkeypatch, tmp_p
                 access_level="public",
                 group_ids=[],
             )
-        updated = store.get(page.session_id)
-        assert updated is not None
-        assert updated.visibility == "private"
-        assert updated.share_id is None
-        assert public_url(updated.share_id) is None
+            updated = store.get(page.session_id)
+            assert updated is not None
+            assert updated.visibility == "private"
+            assert updated.share_id
     finally:
         store.close()
 
@@ -367,7 +370,7 @@ def test_organization_admin_without_instance_owner_role_cannot_manage_pages(monk
         store.close()
 
 
-def test_access_only_manager_visibility_response_does_not_expose_page_payload(monkeypatch, tmp_path) -> None:
+def test_access_only_manager_availability_response_does_not_expose_page_payload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
@@ -392,10 +395,10 @@ def test_access_only_manager_visibility_response_does_not_expose_page_payload(mo
     )
 
     with pytest.raises(ShowPageError):
-        api.set_show_page_visibility("ses-private", "private")
+        api.set_show_page_availability("ses-private", True)
 
 
-def test_excluded_scoped_owner_share_mutations_do_not_expose_page_payload(monkeypatch, tmp_path) -> None:
+def test_excluded_scoped_owner_availability_mutations_do_not_expose_page_payload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
@@ -414,11 +417,11 @@ def test_excluded_scoped_owner_share_mutations_do_not_expose_page_payload(monkey
         lambda _value=None: excluded_owner,
     )
 
-    rotated = api.rotate_show_page_share("ses-scope")
-    customized = api.set_show_page_share_id("ses-scope", "excluded-owner-link")
+    offline = api.set_show_page_availability("ses-scope", True)
+    online = api.set_show_page_availability("ses-scope", False)
 
-    assert rotated["ok"] is True
-    assert customized["ok"] is True
+    assert offline["ok"] is True
+    assert online["ok"] is True
 
 
 def test_remote_show_page_editor_can_control_sharing_without_instance_owner_role(monkeypatch, tmp_path) -> None:
@@ -487,26 +490,32 @@ def test_remote_show_page_viewer_mutations_are_instance_role_denied(monkeypatch,
         json={},
         **request_options,
     )
-    published = client.post(
-        f"/api/show-pages/{session_id}/visibility",
-        json={"visibility": "public"},
+    availability = client.post(
+        f"/api/show-pages/{session_id}/availability",
+        json={"offline": True},
         **request_options,
     )
-    rotated = client.post(
-        f"/api/show-pages/{session_id}/rotate-share",
-        json={},
+    settings = client.post(
+        f"/api/show-pages/{session_id}/access-settings/read",
+        json={"page_id": session_id},
         **request_options,
     )
-    customized = client.post(
-        f"/api/show-pages/{session_id}/share-id",
-        json={"share_id": "viewer-owner-link"},
+    applied = client.post(
+        f"/api/show-pages/{session_id}/access-settings/apply",
+        json={
+            "page_id": session_id,
+            "expected_revision": 0,
+            "target_access_mode": "public",
+            "target_share_id": "viewer-owner-link",
+            "target_emails": [],
+        },
         **request_options,
     )
 
     assert ensured.status_code == 403
-    assert published.status_code == 403
-    assert rotated.status_code == 403
-    assert customized.status_code == 403
+    assert availability.status_code == 403
+    assert settings.status_code == 403
+    assert applied.status_code == 403
 
 
 def test_organization_admin_can_read_show_page_access_metadata_without_use_access(monkeypatch, tmp_path) -> None:
@@ -568,7 +577,6 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "can_use": True,
         "can_manage": True,
         "can_publish_public": True,
-        "public_link_enabled": False,
     }
 
     config = _save_config(tmp_path)
@@ -620,7 +628,6 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "can_use": True,
         "can_manage": True,
         "can_publish_public": True,
-        "public_link_enabled": False,
     }
 
 
@@ -633,206 +640,244 @@ def test_show_page_access_api_reports_missing_page_as_definitive_denial(monkeypa
     assert response.get_json()["code"] == "show_page_not_found"
 
 
-def test_show_page_owner_can_read_and_replace_exact_email_grants(monkeypatch, tmp_path) -> None:
+def _show_access_payload(page_id: str, *, revision: int = 0) -> dict:
+    return {
+        "page_id": page_id,
+        "access_mode": "private",
+        "share_id": "stable-link",
+        "revision": revision,
+        "normalized_emails": [],
+    }
+
+
+def test_show_access_owner_read_and_apply_use_controller_ipc(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ShowPageStore()
     try:
-        store.ensure("ses-email-access")
+        store.ensure("ses-access-settings")
     finally:
         store.close()
+    calls: list[tuple[str, dict]] = []
 
-    calls: list[tuple] = []
-    monkeypatch.setattr(
-        remote_access,
-        "get_show_page_authorized_emails",
-        lambda show_page_id: calls.append(("GET", show_page_id))
-        or {"emails": ["guest@example.com"]},
-    )
-    monkeypatch.setattr(
-        remote_access,
-        "replace_show_page_authorized_emails",
-        lambda show_page_id, emails: calls.append(("PUT", show_page_id, emails))
-        or {"emails": emails, "changed": True},
-    )
+    async def _read(payload):
+        calls.append(("read", payload))
+        return {
+            "status_code": 200,
+            "body": {"show_access": _show_access_payload("ses-access-settings")},
+        }
+
+    async def _apply(payload):
+        calls.append(("apply", payload))
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "applied",
+                "show_access": {
+                    **_show_access_payload("ses-access-settings", revision=1),
+                    "access_mode": "limited",
+                    "normalized_emails": ["guest@example.com"],
+                },
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "show_access_settings_read", _read)
+    monkeypatch.setattr(internal_client, "show_access_apply", _apply)
     client = app.test_client()
-
-    loaded = client.get("/api/show-pages/ses-email-access/authorized-emails")
-    replaced = client.put(
-        "/api/show-pages/ses-email-access/authorized-emails",
-        json={"emails": [" Guest@Example.com ", "guest@example.com"]},
-        headers=csrf_headers(client),
+    headers = csrf_headers(client)
+    loaded = client.post(
+        "/api/show-pages/ses-access-settings/access-settings/read",
+        json={"page_id": "ses-access-settings"},
+        headers=headers,
+    )
+    request_payload = {
+        "page_id": "ses-access-settings",
+        "expected_revision": 0,
+        "target_access_mode": "limited",
+        "target_share_id": "stable-link",
+        "target_emails": ["guest@example.com"],
+    }
+    applied = client.post(
+        "/api/show-pages/ses-access-settings/access-settings/apply",
+        json=request_payload,
+        headers=headers,
     )
 
     assert loaded.status_code == 200
-    assert loaded.get_json() == {"ok": True, "emails": ["guest@example.com"]}
-    assert loaded.headers["Cache-Control"] == "no-store, private"
-    assert replaced.status_code == 200
-    assert replaced.get_json() == {
-        "ok": True,
-        "emails": ["guest@example.com"],
-        "changed": True,
-    }
+    assert loaded.headers["Cache-Control"] == "private, no-store"
+    assert loaded.headers["Vary"] == "Cookie"
+    assert loaded.get_json()["show_access"]["page_id"] == "ses-access-settings"
+    assert applied.status_code == 200
+    assert applied.get_json()["status"] == "applied"
     assert calls == [
-        ("GET", "ses-email-access"),
-        ("PUT", "ses-email-access", ["guest@example.com"]),
+        ("read", {"page_id": "ses-access-settings"}),
+        ("apply", request_payload),
     ]
 
 
-@pytest.mark.parametrize(
-    ("subject", "organization_role", "instance_role"),
-    [
-        ("member-1", "member", "viewer"),
-    ],
-)
-def test_show_page_email_grants_reject_non_owner_without_contacting_backend(
-    monkeypatch,
-    tmp_path,
-    subject: str,
-    organization_role: str,
-    instance_role: str,
-) -> None:
+def test_show_access_route_identity_mismatch_is_rejected_before_ipc(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+
+    async def _unexpected(_payload):
+        pytest.fail("identity mismatch must not reach controller IPC")
+
+    monkeypatch.setattr(internal_client, "show_access_settings_read", _unexpected)
+    client = app.test_client()
+    response = client.post(
+        "/api/show-pages/ses-route/access-settings/read",
+        json={"page_id": "ses-other"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "ok": False,
+        "error": "show_access_page_identity_mismatch",
+    }
+
+
+def test_show_access_malformed_apply_is_rejected_before_ipc(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    async def _unexpected(_payload):
+        pytest.fail("malformed request must not reach controller IPC")
+
+    monkeypatch.setattr(internal_client, "show_access_apply", _unexpected)
+    client = app.test_client()
+    response = client.post(
+        "/api/show-pages/ses-route/access-settings/apply",
+        json={
+            "page_id": "ses-route",
+            "expected_revision": True,
+            "target_access_mode": "limited",
+            "target_share_id": ["not-a-string"],
+            "target_emails": ["guest@example.com"],
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "invalid_show_access_apply_request"
+
+
+def test_show_access_non_owner_is_rejected_before_ipc(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = _seed_show_pages_with_policies()
     store.close()
+    viewer = _organization_context("member-1", instance_role="viewer")
     monkeypatch.setattr(
         resource_access_service,
         "resolve_resource_access_context",
-        lambda _value=None: resource_access_service.ResourceUserContext(
-            subject=subject,
-            email=f"{subject}@example.com",
-            instance_role=instance_role,
-            instance_access_source="email",
-            is_remote=True,
-        ),
-    )
-    monkeypatch.setattr(
-        remote_access,
-        "get_show_page_authorized_emails",
-        lambda _show_page_id: pytest.fail("backend must not be contacted"),
+        lambda _value=None: viewer,
     )
 
-    response = app.test_client().get(
-        "/api/show-pages/ses-public/authorized-emails"
+    async def _unexpected(_payload):
+        pytest.fail("unauthorized request must not reach controller IPC")
+
+    monkeypatch.setattr(internal_client, "show_access_settings_read", _unexpected)
+    client = app.test_client()
+    response = client.post(
+        "/api/show-pages/ses-public/access-settings/read",
+        json={"page_id": "ses-public"},
+        headers=csrf_headers(client),
     )
 
     assert response.status_code == 403
     assert response.get_json()["code"] == "resource_access_forbidden"
 
 
-def test_show_page_email_grants_report_unavailable_without_cloud_pairing(
-    monkeypatch, tmp_path
-) -> None:
+def test_show_access_internal_identity_mismatch_hides_email_data(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
     store = ShowPageStore()
     try:
-        store.ensure("ses-email-access")
+        store.ensure("ses-access-settings")
     finally:
         store.close()
 
-    response = app.test_client().get(
-        "/api/show-pages/ses-email-access/authorized-emails"
+    async def _mismatched(_payload):
+        return {
+            "status_code": 200,
+            "body": {
+                "show_access": {
+                    **_show_access_payload("ses-other"),
+                    "access_mode": "limited",
+                    "normalized_emails": ["secret@example.com"],
+                }
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "show_access_settings_read", _mismatched)
+    client = app.test_client()
+    response = client.post(
+        "/api/show-pages/ses-access-settings/access-settings/read",
+        json={"page_id": "ses-access-settings"},
+        headers=csrf_headers(client),
     )
 
-    assert response.status_code == 400
-    assert response.get_json()["code"] == "show_page_email_access_not_configured"
+    assert response.status_code == 502
+    assert response.get_json() == {
+        "ok": False,
+        "error": "show_access_internal_protocol_error",
+    }
+    assert "secret@example.com" not in response.text
 
 
-def test_show_page_email_grants_report_transient_device_failures_as_retryable(
-    monkeypatch, tmp_path
-) -> None:
+def test_show_access_controller_unavailable_is_retryable(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
     store = ShowPageStore()
     try:
-        store.ensure("ses-email-access-transient")
+        store.ensure("ses-access-settings")
     finally:
         store.close()
-    monkeypatch.setattr(
-        remote_access,
-        "get_show_page_authorized_emails",
-        lambda _show_page_id: (_ for _ in ()).throw(
-            RuntimeError("resource_acl_device_unavailable")
-        ),
-    )
 
-    response = app.test_client().get(
-        "/api/show-pages/ses-email-access-transient/authorized-emails"
+    async def _unavailable(_payload):
+        raise internal_client.InternalServerUnavailable("missing controller socket")
+
+    monkeypatch.setattr(internal_client, "show_access_settings_read", _unavailable)
+    client = app.test_client()
+    response = client.post(
+        "/api/show-pages/ses-access-settings/access-settings/read",
+        json={"page_id": "ses-access-settings"},
+        headers=csrf_headers(client),
     )
 
     assert response.status_code == 503
-    assert response.get_json()["code"] == "show_page_email_access_transient"
+    assert response.get_json()["error"] == "show_access_controller_unavailable"
 
 
-def test_show_page_email_grant_device_requests_freeze_the_target(monkeypatch, tmp_path) -> None:
+def test_show_access_conflict_returns_current_snapshot(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
-    calls: list[tuple] = []
-    monkeypatch.setattr(remote_access, "_resource_acl_sync_configured", lambda _config: True)
-    monkeypatch.setattr(
-        remote_access,
-        "_device_json_request",
-        lambda cfg, method, suffix, payload=None: calls.append(
-            (cfg, method, suffix, payload)
-        )
-        or (
-            {"emails": ["guest@example.com"]}
-            if method == "GET"
-            else {
-                "emails": ["guest@example.com"],
-                "changed": True,
-                "authorization_revision": 9,
-            }
-        ),
-    )
-    revisions: list[int] = []
-    monkeypatch.setattr(
-        remote_access,
-        "_replace_authorization_revision",
-        lambda _config, revision: revisions.append(revision) or revision,
-    )
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-access-settings")
+    finally:
+        store.close()
 
-    loaded = remote_access.get_show_page_authorized_emails("session/one", config)
-    replaced = remote_access.replace_show_page_authorized_emails(
-        "session/one",
-        ["guest@example.com"],
-        config,
-    )
+    async def _conflict(_payload):
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "conflict",
+                "show_access": _show_access_payload("ses-access-settings", revision=3),
+            },
+        }
 
-    assert loaded == {"emails": ["guest@example.com"]}
-    assert replaced == {"emails": ["guest@example.com"], "changed": True}
-    assert calls == [
-        (config, "GET", "show-pages/session%2Fone/authorized-emails", None),
-        (
-            config,
-            "PUT",
-            "show-pages/session%2Fone/authorized-emails",
-            {"emails": ["guest@example.com"]},
-        ),
-    ]
-    assert revisions == [9]
-
-
-def test_show_page_email_grant_change_requires_authorization_revision(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
-    monkeypatch.setattr(remote_access, "_resource_acl_sync_configured", lambda _config: True)
-    monkeypatch.setattr(
-        remote_access,
-        "_device_json_request",
-        lambda *_args, **_kwargs: {
-            "emails": ["guest@example.com"],
-            "changed": True,
+    monkeypatch.setattr(internal_client, "show_access_apply", _conflict)
+    client = app.test_client()
+    response = client.post(
+        "/api/show-pages/ses-access-settings/access-settings/apply",
+        json={
+            "page_id": "ses-access-settings",
+            "expected_revision": 2,
+            "target_access_mode": "public",
+            "target_share_id": "stable-link",
+            "target_emails": [],
         },
+        headers=csrf_headers(client),
     )
 
-    with pytest.raises(RuntimeError, match="show_page_email_access_invalid_response"):
-        remote_access.replace_show_page_authorized_emails(
-            "session-one",
-            ["guest@example.com"],
-            config,
-        )
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "conflict"
+    assert response.get_json()["show_access"]["revision"] == 3
 
 
 def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> None:

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
-from sqlalchemy import insert, or_, select, update
+from sqlalchemy import delete, insert, or_, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
@@ -23,13 +23,24 @@ from core.avibe_cloud import avibe_cloud_connect_guidance, base_public_url
 from core.show_git import format_agent_contract
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-from storage.models import agent_sessions, show_pages
+from storage.models import agent_sessions, show_page_authorized_emails, show_pages
 from storage.pagination import PageRequest, PageResult, page_sequence
 
 VISIBILITY_PRIVATE = "private"
+VISIBILITY_LIMITED = "limited"
 VISIBILITY_PUBLIC = "public"
 VISIBILITY_OFFLINE = "offline"
-VISIBILITIES = {VISIBILITY_PRIVATE, VISIBILITY_PUBLIC, VISIBILITY_OFFLINE}
+VISIBILITIES = {
+    VISIBILITY_PRIVATE,
+    VISIBILITY_LIMITED,
+    VISIBILITY_PUBLIC,
+    VISIBILITY_OFFLINE,
+}
+ACCESS_MODE_PRIVATE = "private"
+ACCESS_MODE_LIMITED = "limited"
+ACCESS_MODE_PUBLIC = "public"
+ACCESS_MODES = {ACCESS_MODE_PRIVATE, ACCESS_MODE_LIMITED, ACCESS_MODE_PUBLIC}
+SHOW_ACCESS_EMAIL_MAX_COUNT = 64
 SHARE_ID_BYTES = 8
 SHOW_EVENT_WRITE_TOKEN_COOKIE = "vibe_show_event_token"
 SHOW_EVENT_WRITE_TOKEN_HEADER = "X-Vibe-Show-Token"
@@ -60,6 +71,16 @@ SHOW_PAGE_ICON_CONTENT_TYPES: dict[str, str] = {
     "gif": "image/gif",
 }
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_EMAIL_ATOM = r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+"
+_DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_NORMALIZED_EMAIL_PATTERN = re.compile(
+    rf"^{_EMAIL_ATOM}(?:\.{_EMAIL_ATOM})*@{_DNS_LABEL}(?:\.{_DNS_LABEL})*$"
+)
+_ASCII_SURROUNDING_WHITESPACE = " \t\r\n\f\v"
+_ASCII_LOWER_TRANSLATION = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "abcdefghijklmnopqrstuvwxyz",
+)
 # A custom public share suffix lands directly in the ``/p/<share_id>/`` URL, so
 # keep it to URL-safe slug characters: start and end alphanumeric, with dash and
 # underscore allowed in between. 3–64 chars balances "memorable" against trivial
@@ -79,7 +100,8 @@ class ShowPageError(ValueError):
 @dataclass(frozen=True)
 class ShowPage:
     session_id: str
-    visibility: str
+    access_mode: str
+    access_revision: int
     share_id: str | None
     offline_at: str | None
     created_at: str
@@ -87,7 +109,28 @@ class ShowPage:
 
     @property
     def offline(self) -> bool:
-        return self.visibility == VISIBILITY_OFFLINE
+        return self.offline_at is not None
+
+    @property
+    def visibility(self) -> str:
+        """Compatibility projection for callers not yet migrated to ShowAccess."""
+
+        return VISIBILITY_OFFLINE if self.offline else self.access_mode
+
+
+@dataclass(frozen=True)
+class ShowAccess:
+    page_id: str
+    access_mode: str
+    share_id: str | None
+    revision: int
+    normalized_emails: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ShowAccessApplyResult:
+    status: str
+    show_access: ShowAccess
 
 
 def get_show_page_resource_metadata(connection: Connection, session_id: str) -> dict[str, str] | None:
@@ -142,6 +185,42 @@ def validate_share_id(share_id: str) -> str:
             code="invalid_share_id",
         )
     return value
+
+
+def normalize_show_access_email(raw: str) -> str:
+    if not isinstance(raw, str):
+        raise ShowPageError("Invalid Show Page email.", code="invalid_email")
+    value = raw.strip(_ASCII_SURROUNDING_WHITESPACE).translate(
+        _ASCII_LOWER_TRANSLATION
+    )
+    if (
+        len(value) > 320
+        or not value
+        or _NORMALIZED_EMAIL_PATTERN.fullmatch(value) is None
+    ):
+        raise ShowPageError("Invalid Show Page email.", code="invalid_email")
+    return value
+
+
+def normalize_show_access_emails(emails: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(emails, (list, tuple)):
+        raise ShowPageError("Invalid Show Page email list.", code="invalid_email")
+    if len(emails) > SHOW_ACCESS_EMAIL_MAX_COUNT:
+        raise ShowPageError(
+            f"A Show Page may grant access to at most {SHOW_ACCESS_EMAIL_MAX_COUNT} emails.",
+            code="invalid_email",
+        )
+    return tuple(sorted({normalize_show_access_email(email) for email in emails}))
+
+
+def show_access_payload(show_access: ShowAccess) -> dict[str, Any]:
+    return {
+        "page_id": show_access.page_id,
+        "access_mode": show_access.access_mode,
+        "share_id": show_access.share_id,
+        "revision": show_access.revision,
+        "normalized_emails": list(show_access.normalized_emails),
+    }
 
 
 def show_page_dir(session_id: str) -> Path:
@@ -206,7 +285,10 @@ def _utc_now_iso() -> str:
 
 
 def _new_share_id() -> str:
-    return secrets.token_urlsafe(SHARE_ID_BYTES).rstrip("_-")
+    while True:
+        candidate = secrets.token_urlsafe(SHARE_ID_BYTES).strip("_-")
+        if _SHARE_ID_PATTERN.fullmatch(candidate):
+            return candidate
 
 
 def _like_pattern(value: str, *, prefix: bool = False, contains: bool = False) -> str:
@@ -257,7 +339,7 @@ def require_show_page_sharing_control(
     *,
     user_context: Any = None,
 ) -> None:
-    """Require resource-owner authority for anonymous publication changes."""
+    """Require resource-owner authority for shared-audience changes."""
 
     from storage import resource_access_service
 
@@ -328,6 +410,190 @@ class ShowPageStore:
             row = conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1)).mappings().first()
             return _page_from_row(row) if row else None
 
+    def get_access(self, page_id: str) -> ShowAccess | None:
+        page_id = validate_session_id(page_id)
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(show_pages)
+                    .where(show_pages.c.session_id == page_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            return _show_access_from_row(conn, row) if row else None
+
+    def require_access_settings(
+        self,
+        page_id: str,
+        *,
+        user_context: Any = None,
+    ) -> ShowAccess:
+        page_id = validate_session_id(page_id)
+        context = _resolve_resource_access_context(user_context)
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(show_pages)
+                    .where(show_pages.c.session_id == page_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError(
+                    "This session has no Show Page.",
+                    code="show_page_not_found",
+                )
+            self._require_sharing_control(conn, page_id, context)
+            return _show_access_from_row(conn, row)
+
+    def apply_access(
+        self,
+        page_id: str,
+        *,
+        expected_revision: int,
+        target_access_mode: str,
+        target_share_id: str | None,
+        target_emails: list[str] | tuple[str, ...],
+        user_context: Any = None,
+    ) -> ShowAccessApplyResult:
+        page_id = validate_session_id(page_id)
+        context = _resolve_resource_access_context(user_context)
+        current = self.require_access_settings(page_id, user_context=context)
+
+        try:
+            if (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+                or expected_revision < 0
+            ):
+                raise ShowPageError("Invalid ShowAccess revision.", code="invalid_revision")
+            if target_access_mode not in ACCESS_MODES:
+                raise ShowPageError("Invalid ShowAccess mode.", code="invalid_access_mode")
+            normalized_share_id = (
+                validate_share_id(target_share_id)
+                if target_share_id is not None
+                else None
+            )
+            if target_access_mode == ACCESS_MODE_PRIVATE and normalized_share_id is None:
+                normalized_share_id = current.share_id
+            normalized_emails = normalize_show_access_emails(target_emails)
+            if target_access_mode == ACCESS_MODE_LIMITED:
+                if normalized_share_id is None or not normalized_emails:
+                    raise ShowPageError(
+                        "Limited ShowAccess requires a share ID and at least one email.",
+                        code="invalid_show_access",
+                    )
+            elif normalized_emails:
+                raise ShowPageError(
+                    "Only Limited ShowAccess may contain emails.",
+                    code="invalid_show_access",
+                )
+            if target_access_mode == ACCESS_MODE_PUBLIC and normalized_share_id is None:
+                raise ShowPageError(
+                    "Public ShowAccess requires a share ID.",
+                    code="invalid_show_access",
+                )
+        except (ShowPageError, TypeError):
+            return ShowAccessApplyResult(status="invalid", show_access=current)
+
+        status = "applied"
+        now = _utc_now_iso()
+        try:
+            with self.engine.begin() as conn:
+                row = (
+                    conn.execute(
+                        select(show_pages)
+                        .where(show_pages.c.session_id == page_id)
+                        .limit(1)
+                    )
+                    .mappings()
+                    .first()
+                )
+                if row is None:
+                    raise ShowPageError(
+                        "This session has no Show Page.",
+                        code="show_page_not_found",
+                    )
+                self._require_sharing_control(conn, page_id, context)
+                current = _show_access_from_row(conn, row)
+                if current.revision != expected_revision:
+                    return ShowAccessApplyResult(
+                        status="conflict",
+                        show_access=current,
+                    )
+                canonical_target = (
+                    target_access_mode,
+                    normalized_share_id,
+                    normalized_emails,
+                )
+                canonical_current = (
+                    current.access_mode,
+                    current.share_id,
+                    current.normalized_emails,
+                )
+                if canonical_target == canonical_current:
+                    return ShowAccessApplyResult(
+                        status="no_change",
+                        show_access=current,
+                    )
+                archived = conn.execute(
+                    select(agent_sessions.c.status)
+                    .where(agent_sessions.c.id == page_id)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if archived == "archived":
+                    return ShowAccessApplyResult(
+                        status="invalid",
+                        show_access=current,
+                    )
+                result = conn.execute(
+                    update(show_pages)
+                    .where(
+                        show_pages.c.session_id == page_id,
+                        show_pages.c.access_revision == expected_revision,
+                    )
+                    .values(
+                        access_mode=target_access_mode,
+                        share_id=normalized_share_id,
+                        access_revision=expected_revision + 1,
+                        updated_at=now,
+                    )
+                )
+                if not result.rowcount:
+                    status = "conflict"
+                else:
+                    conn.execute(
+                        delete(show_page_authorized_emails).where(
+                            show_page_authorized_emails.c.session_id == page_id
+                        )
+                    )
+                    if normalized_emails:
+                        conn.execute(
+                            insert(show_page_authorized_emails),
+                            [
+                                {
+                                    "session_id": page_id,
+                                    "normalized_email": email,
+                                    "created_at": now,
+                                }
+                                for email in normalized_emails
+                            ],
+                        )
+        except IntegrityError:
+            status = "share_id_taken"
+
+        latest = self.get_access(page_id)
+        if latest is None:
+            raise ShowPageError(
+                "This session has no Show Page.",
+                code="show_page_not_found",
+            )
+        return ShowAccessApplyResult(status=status, show_access=latest)
+
     def get_by_share_id(self, share_id: str) -> ShowPage | None:
         share_id = (share_id or "").strip()
         if not share_id:
@@ -392,7 +658,13 @@ class ShowPageStore:
             raise ShowPageError(f"Unsupported visibility: {visibility}", code="invalid_visibility")
         statement = select(show_pages)
         if visibility is not None:
-            statement = statement.where(show_pages.c.visibility == visibility)
+            if visibility == VISIBILITY_OFFLINE:
+                statement = statement.where(show_pages.c.offline_at.is_not(None))
+            else:
+                statement = statement.where(
+                    show_pages.c.offline_at.is_(None),
+                    show_pages.c.access_mode == visibility,
+                )
         if session_id:
             statement = statement.where(show_pages.c.session_id.like(_like_pattern(session_id, prefix=True), escape=_LIKE_ESCAPE))
         if updated_after:
@@ -401,13 +673,14 @@ class ShowPageStore:
             statement = statement.where(show_pages.c.updated_at <= updated_before)
         if query:
             pattern = _like_pattern(query, contains=True)
-            statement = statement.where(
-                or_(
-                    show_pages.c.session_id.like(pattern, escape=_LIKE_ESCAPE),
-                    show_pages.c.share_id.like(pattern, escape=_LIKE_ESCAPE),
-                    show_pages.c.visibility.like(pattern, escape=_LIKE_ESCAPE),
-                )
-            )
+            clauses = [
+                show_pages.c.session_id.like(pattern, escape=_LIKE_ESCAPE),
+                show_pages.c.share_id.like(pattern, escape=_LIKE_ESCAPE),
+                show_pages.c.access_mode.like(pattern, escape=_LIKE_ESCAPE),
+            ]
+            if query.lower() in VISIBILITY_OFFLINE:
+                clauses.append(show_pages.c.offline_at.is_not(None))
+            statement = statement.where(or_(*clauses))
         statement = statement.order_by(show_pages.c.updated_at.desc(), show_pages.c.session_id.asc())
         with self.engine.connect() as conn:
             rows = conn.execute(statement).mappings().all()
@@ -509,8 +782,9 @@ class ShowPageStore:
         now = _utc_now_iso()
         page = ShowPage(
             session_id=session_id,
-            visibility=VISIBILITY_PRIVATE,
-            share_id=None,
+            access_mode=ACCESS_MODE_PRIVATE,
+            access_revision=0,
+            share_id=self._unique_share_id(),
             offline_at=None,
             created_at=now,
             updated_at=now,
@@ -530,7 +804,8 @@ class ShowPageStore:
             conn.execute(
                 insert(show_pages).values(
                     session_id=page.session_id,
-                    visibility=page.visibility,
+                    access_mode=page.access_mode,
+                    access_revision=page.access_revision,
                     share_id=page.share_id,
                     offline_at=page.offline_at,
                     created_at=page.created_at,
@@ -581,27 +856,41 @@ class ShowPageStore:
                     "Cannot create a Show Page for an archived session.",
                     code="session_archived",
                 )
-            result = conn.execute(
-                insert(show_pages)
-                .prefix_with("OR IGNORE")
-                .values(
-                    session_id=session_id,
-                    visibility=VISIBILITY_PRIVATE,
-                    share_id=None,
-                    offline_at=None,
-                    created_at=now,
-                    updated_at=now,
+            created = False
+            row = None
+            for _ in range(20):
+                result = conn.execute(
+                    insert(show_pages)
+                    .prefix_with("OR IGNORE")
+                    .values(
+                        session_id=session_id,
+                        access_mode=ACCESS_MODE_PRIVATE,
+                        access_revision=0,
+                        share_id=_new_share_id(),
+                        offline_at=None,
+                        created_at=now,
+                        updated_at=now,
+                    )
                 )
-            )
-            created = bool(result.rowcount and result.rowcount > 0)
+                created = bool(result.rowcount and result.rowcount > 0)
+                row = (
+                    conn.execute(
+                        select(show_pages)
+                        .where(show_pages.c.session_id == session_id)
+                        .limit(1)
+                    )
+                    .mappings()
+                    .first()
+                )
+                if row is not None:
+                    break
+            if row is None:
+                raise ShowPageError(
+                    "Could not allocate a unique share ID.",
+                    code="share_id_allocation_failed",
+                )
             if created:
                 self._register_created_resource_policy(conn, session_id, context)
-            row = (
-                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                .mappings()
-                .first()
-            )
-            assert row is not None
             self._require_resource_access(conn, session_id, context)
         return _page_from_row(row), created
 
@@ -615,15 +904,87 @@ class ShowPageStore:
             ).scalar_one_or_none()
         return status == "archived"
 
-    def update_visibility(self, session_id: str, visibility: str, *, user_context: Any = None) -> ShowPage:
+    def set_offline(
+        self,
+        session_id: str,
+        offline: bool,
+        *,
+        user_context: Any = None,
+    ) -> ShowPage:
+        """Change operational availability without changing ShowAccess."""
+
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
-        if visibility not in VISIBILITIES:
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            row = (
+                conn.execute(
+                    select(show_pages)
+                    .where(show_pages.c.session_id == session_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError(
+                    "This session has no Show Page.",
+                    code="show_page_not_found",
+                )
+            current_visibility = (
+                VISIBILITY_OFFLINE
+                if row["offline_at"] is not None
+                else str(row["access_mode"])
+            )
+            target_visibility = (
+                VISIBILITY_OFFLINE if offline else str(row["access_mode"])
+            )
+            self._require_visibility_transition_control(
+                conn,
+                session_id,
+                context,
+                current_visibility=current_visibility,
+                target_visibility=target_visibility,
+            )
+            if not offline:
+                status = conn.execute(
+                    select(agent_sessions.c.status)
+                    .where(agent_sessions.c.id == session_id)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if status == "archived":
+                    raise ShowPageError(
+                        "Cannot bring back the Show Page of an archived session.",
+                        code="session_archived",
+                    )
+            target_offline_at = (row["offline_at"] or now) if offline else None
+            if target_offline_at != row["offline_at"]:
+                conn.execute(
+                    update(show_pages)
+                    .where(show_pages.c.session_id == session_id)
+                    .values(offline_at=target_offline_at, updated_at=now)
+                )
+        updated = self.get(session_id)
+        assert updated is not None
+        return updated
+
+    def update_visibility(self, session_id: str, visibility: str, *, user_context: Any = None) -> ShowPage:
+        """Compatibility adapter over orthogonal availability and ShowAccess.
+
+        New audience callers use :meth:`apply_access`. The legacy CLI still uses
+        this adapter, but Web callers have no second audience write path.
+        """
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        if visibility not in {
+            VISIBILITY_PRIVATE,
+            VISIBILITY_PUBLIC,
+            VISIBILITY_OFFLINE,
+        }:
             raise ShowPageError(f"Unsupported visibility: {visibility}", code="invalid_visibility")
         existing = self.get(session_id)
         if existing is not None:
-            # Check management before reporting a terminal lifecycle state so an
-            # unauthorized remote user cannot probe page/session details.
             with self.engine.connect() as conn:
                 self._require_visibility_transition_control(
                     conn,
@@ -635,10 +996,6 @@ class ShowPageStore:
             page = existing
         else:
             page = None
-        # Reject republish BEFORE ``ensure`` so it doesn't first materialize a
-        # default (private) page row for an archived session — that would leave
-        # ``/show/<id>/`` enabled for a terminal session. The in-txn check below
-        # is the atomic authority for the concurrent-archive race.
         if visibility != VISIBILITY_OFFLINE and self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot republish the Show Page of an archived session.",
@@ -646,83 +1003,81 @@ class ShowPageStore:
             )
         if page is None:
             page = self.ensure(session_id, user_context=context)
-        now = _utc_now_iso()
-        values: dict[str, Any] = {
-            "visibility": visibility,
-            "updated_at": now,
-            "offline_at": now if visibility == VISIBILITY_OFFLINE else None,
-        }
-        if visibility == VISIBILITY_PUBLIC and not page.share_id:
-            values["share_id"] = self._unique_share_id()
-        with self.engine.begin() as conn:
-            current_visibility = conn.execute(
-                select(show_pages.c.visibility).where(show_pages.c.session_id == session_id)
-            ).scalar_one()
-            # Re-evaluate against the in-transaction row so a concurrent transition
-            # to offline cannot turn an access-manager operation into a republish.
-            self._require_visibility_transition_control(
-                conn,
-                session_id,
-                context,
-                current_visibility=current_visibility,
-                target_visibility=visibility,
-            )
-            # Archive is terminal and takes the page offline on purpose — never let
-            # an archived session's page be brought back online / re-shared. Checked
-            # in the SAME txn as the write so a concurrent archive can't slip in
-            # between the check and the update (TOCTOU); raising here rolls back.
-            if visibility != VISIBILITY_OFFLINE:
-                status = conn.execute(
-                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-                ).scalar_one_or_none()
-                if status == "archived":
-                    raise ShowPageError(
-                        "Cannot republish the Show Page of an archived session.",
-                        code="session_archived",
-                    )
-            conn.execute(update(show_pages).where(show_pages.c.session_id == session_id).values(**values))
-        updated = self.get(session_id)
-        assert updated is not None
-        return updated
 
-    def rotate_share(self, session_id: str, *, user_context: Any = None) -> tuple[ShowPage, str | None]:
+        if visibility != VISIBILITY_OFFLINE:
+            access = self.require_access_settings(session_id, user_context=context)
+            result = self.apply_access(
+                session_id,
+                expected_revision=access.revision,
+                target_access_mode=visibility,
+                target_share_id=access.share_id,
+                target_emails=[],
+                user_context=context,
+            )
+            if result.status == "conflict":
+                raise ShowPageError(
+                    "ShowAccess changed concurrently.",
+                    code="show_access_conflict",
+                )
+            if result.status not in {"applied", "no_change"}:
+                raise ShowPageError(
+                    "ShowAccess could not be updated.",
+                    code=result.status,
+                )
+            return self.set_offline(session_id, False, user_context=context)
+
+        return self.set_offline(session_id, True, user_context=context)
+
+    def rotate_share(
+        self,
+        session_id: str,
+        *,
+        user_context: Any = None,
+    ) -> tuple[ShowPage, str | None]:
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
-        existing = self.get(session_id)
-        if existing is not None:
-            with self.engine.connect() as conn:
-                self._require_sharing_control(conn, session_id, context)
-            page = existing
-        else:
-            page = None
-        # Same guard as update_visibility, before ``ensure`` materializes a page:
-        # an archived session is terminal, so its share link can't be rotated /
-        # re-enabled (and a stale/direct call must not create a default page).
         if self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot rotate the share link of an archived session.",
                 code="session_archived",
             )
-        if page is None:
-            page = self.ensure(session_id, user_context=context)
-        if page.visibility != VISIBILITY_PUBLIC:
+        if self.get(session_id) is None:
+            self.ensure(session_id, user_context=context)
+        access = self.require_access_settings(session_id, user_context=context)
+        if access.access_mode not in {ACCESS_MODE_LIMITED, ACCESS_MODE_PUBLIC}:
             raise ShowPageError(
-                "Share links can only be rotated while the Show Page is public.",
-                code="not_public",
+                "Share links can only be rotated while the Show Page is shared.",
+                code="not_shared",
             )
-        previous_share_id = page.share_id
-        new_share_id = self._unique_share_id()
-        now = _utc_now_iso()
-        with self.engine.begin() as conn:
-            self._require_sharing_control(conn, session_id, context)
-            conn.execute(
-                update(show_pages)
-                .where(show_pages.c.session_id == session_id)
-                .values(share_id=new_share_id, updated_at=now)
+        previous_share_id = access.share_id
+        for _ in range(20):
+            result = self.apply_access(
+                session_id,
+                expected_revision=access.revision,
+                target_access_mode=access.access_mode,
+                target_share_id=_new_share_id(),
+                target_emails=access.normalized_emails,
+                user_context=context,
             )
-        updated = self.get(session_id)
-        assert updated is not None
-        return updated, previous_share_id
+            if result.status == "share_id_taken":
+                continue
+            if result.status == "conflict":
+                raise ShowPageError(
+                    "ShowAccess changed concurrently.",
+                    code="show_access_conflict",
+                )
+            if result.status not in {"applied", "no_change"}:
+                raise ShowPageError(
+                    "The share link could not be rotated.",
+                    code=result.status,
+                )
+            updated = self.get(session_id)
+            assert updated is not None
+            return updated, previous_share_id
+        raise ShowPageError(
+            "Could not allocate a unique share ID.",
+            code="share_id_allocation_failed",
+        )
 
     def set_share_id(
         self,
@@ -731,82 +1086,46 @@ class ShowPageStore:
         *,
         user_context: Any = None,
     ) -> tuple[ShowPage, str | None]:
-        """Set a custom public share suffix; return (page, previous_share_id).
-
-        A custom suffix is just a chosen value for the same ``share_id`` that
-        ``rotate_share`` would otherwise randomize, so this mirrors that method:
-        archived sessions are terminal (guarded before ``ensure`` materializes a
-        page), and the suffix can only be set while the page is public. Setting a
-        new value revokes the previous public URL, exactly like a rotate.
-        """
+        """Replace a shared page's stable suffix through the ShowAccess writer."""
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
         new_share_id = validate_share_id(share_id)
-        existing = self.get(session_id)
-        if existing is not None:
-            with self.engine.connect() as conn:
-                self._require_sharing_control(conn, session_id, context)
-        # Pre-guard before ``ensure`` so a stale/direct call never materializes a
-        # default page for an archived (terminal) session. The in-txn re-reads
-        # below are the atomic authority for the concurrent-archive / concurrent
-        # visibility-flip race.
         if self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot change the share link of an archived session.",
                 code="session_archived",
             )
-        if existing is None:
+        if self.get(session_id) is None:
             self.ensure(session_id, user_context=context)
-        now = _utc_now_iso()
-        previous_share_id: str | None = None
-        try:
-            with self.engine.begin() as conn:
-                self._require_sharing_control(conn, session_id, context)
-                # Read visibility, archive status, and the current suffix in the
-                # SAME transaction as the write so a concurrent flip to private/
-                # offline, an archive, or another session claiming the suffix
-                # can't slip between the check and the update; raising rolls back.
-                row = (
-                    conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                    .mappings()
-                    .first()
-                )
-                if row is None or row["visibility"] != VISIBILITY_PUBLIC:
-                    raise ShowPageError(
-                        "A custom link can only be set while the Show Page is public.",
-                        code="not_public",
-                    )
-                status = conn.execute(
-                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-                ).scalar_one_or_none()
-                if status == "archived":
-                    raise ShowPageError(
-                        "Cannot change the share link of an archived session.",
-                        code="session_archived",
-                    )
-                previous_share_id = row["share_id"]
-                if new_share_id != previous_share_id:
-                    # Idempotent when unchanged (skips the write, so no self-
-                    # collision and no updated_at churn). Otherwise reject a
-                    # suffix held by another session; the unique constraint is
-                    # the final authority (IntegrityError below).
-                    taken_by = conn.execute(
-                        select(show_pages.c.session_id).where(show_pages.c.share_id == new_share_id).limit(1)
-                    ).scalar_one_or_none()
-                    if taken_by is not None and taken_by != session_id:
-                        raise ShowPageError(
-                            "That custom link is already taken. Pick another.",
-                            code="share_id_taken",
-                        )
-                    conn.execute(
-                        update(show_pages)
-                        .where(show_pages.c.session_id == session_id)
-                        .values(share_id=new_share_id, updated_at=now)
-                    )
-        except IntegrityError:
+        access = self.require_access_settings(session_id, user_context=context)
+        if access.access_mode not in {ACCESS_MODE_LIMITED, ACCESS_MODE_PUBLIC}:
+            raise ShowPageError(
+                "A custom link can only be set while the Show Page is shared.",
+                code="not_shared",
+            )
+        previous_share_id = access.share_id
+        result = self.apply_access(
+            session_id,
+            expected_revision=access.revision,
+            target_access_mode=access.access_mode,
+            target_share_id=new_share_id,
+            target_emails=access.normalized_emails,
+            user_context=context,
+        )
+        if result.status == "share_id_taken":
             raise ShowPageError(
                 "That custom link is already taken. Pick another.",
                 code="share_id_taken",
+            )
+        if result.status == "conflict":
+            raise ShowPageError(
+                "ShowAccess changed concurrently.",
+                code="show_access_conflict",
+            )
+        if result.status not in {"applied", "no_change"}:
+            raise ShowPageError(
+                "The custom link could not be applied.",
+                code=result.status,
             )
         updated = self.get(session_id)
         assert updated is not None
@@ -823,11 +1142,31 @@ class ShowPageStore:
 def _page_from_row(row: Any) -> ShowPage:
     return ShowPage(
         session_id=str(row["session_id"]),
-        visibility=str(row["visibility"]),
+        access_mode=str(row["access_mode"]),
+        access_revision=int(row["access_revision"]),
         share_id=str(row["share_id"]) if row["share_id"] else None,
         offline_at=str(row["offline_at"]) if row["offline_at"] else None,
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
+    )
+
+
+def _show_access_from_row(connection: Connection, row: Any) -> ShowAccess:
+    page_id = str(row["session_id"])
+    emails = tuple(
+        str(value)
+        for value in connection.execute(
+            select(show_page_authorized_emails.c.normalized_email)
+            .where(show_page_authorized_emails.c.session_id == page_id)
+            .order_by(show_page_authorized_emails.c.normalized_email.asc())
+        ).scalars()
+    )
+    return ShowAccess(
+        page_id=page_id,
+        access_mode=str(row["access_mode"]),
+        share_id=str(row["share_id"]) if row["share_id"] else None,
+        revision=int(row["access_revision"]),
+        normalized_emails=emails,
     )
 
 
@@ -1330,6 +1669,8 @@ def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict
     return {
         "session_id": page.session_id,
         "visibility": page.visibility,
+        "access_mode": page.access_mode,
+        "access_revision": page.access_revision,
         "path": str(path),
         # Opaque cache token (not a path): non-null iff a servable icon exists, and
         # it changes when the icon file changes so the frontend's ?v=<token> busts

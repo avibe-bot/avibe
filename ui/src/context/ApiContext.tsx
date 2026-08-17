@@ -8,14 +8,14 @@ import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
-import type { ShowPageLinkInfo } from '../lib/showPageLinks';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import {
   classifyShowPageAccessProbe,
   type ShowPageAccess,
   type ShowPageAccessProbe,
-  type ShowPageAuthorizedEmails,
-  type ShowPageVisibilityResult,
+  type ShowAccessApplyRequest,
+  type ShowAccessApplyResult,
+  type ShowAccessSettingsResult,
 } from '../lib/showPageAccess';
 import {
   WorkbenchEventReconnectLoop,
@@ -510,11 +510,11 @@ export type ApiContextType = {
   getShowPages: () => Promise<any>;
   getShowPageAccess: (sessionId: string) => Promise<ShowPageAccess>;
   probeShowPageAccess: (sessionId: string) => Promise<ShowPageAccessProbe>;
-  getShowPageAuthorizedEmails: (sessionId: string) => Promise<ShowPageAuthorizedEmails>;
-  replaceShowPageAuthorizedEmails: (
+  getShowAccessSettings: (sessionId: string) => Promise<ShowAccessSettingsResult>;
+  applyShowAccess: (
     sessionId: string,
-    emails: string[],
-  ) => Promise<ShowPageAuthorizedEmails>;
+    payload: ShowAccessApplyRequest,
+  ) => Promise<ShowAccessApplyResult>;
   getWebPushStatus: (payload?: WebPushStatusPayload) => Promise<WebPushStatus>;
   getWebPushVapidPublicKey: () => Promise<{ ok: boolean; public_key: string }>;
   subscribeWebPush: (
@@ -525,15 +525,9 @@ export type ApiContextType = {
   ) => Promise<WebPushSubscriptionResult>;
   unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
-  setShowPageVisibility: <Payload extends ShowPageLinkInfo = ShowPageLinkInfo>(
-    sessionId: string,
-    visibility: string,
-  ) => Promise<ShowPageVisibilityResult<Payload>>;
+  setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
   /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. */
   ensureShowPage: (sessionId: string) => Promise<any>;
-  rotateShowPageShare: (sessionId: string) => Promise<any>;
-  /** Set a custom public link suffix (public pages only); rejects on a taken/invalid id. */
-  setShowPageShareId: (sessionId: string, shareId: string) => Promise<any>;
   /** Upload an image as the page's workspace-root favicon (multipart); resolves to the
    *  refreshed page payload carrying the fresh `icon_version` (§7.1j). */
   uploadShowPageIcon: (sessionId: string, file: File) => Promise<any>;
@@ -2577,36 +2571,6 @@ export class ApiError extends Error {
   }
 }
 
-async function requestShowPageAuthorizedEmails(
-  sessionId: string,
-  init?: RequestInit,
-): Promise<ShowPageAuthorizedEmails> {
-  const path = `/api/show-pages/${encodeURIComponent(sessionId)}/authorized-emails`;
-  const response = await apiFetch(path, init);
-  const payload: unknown = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const fallback = `Request failed: ${path} (${response.status})`;
-    const parsed = selectApiErrorFields(payload, fallback);
-    throw new ApiError(
-      parsed?.fallback ?? fallback,
-      response.status,
-      parsed?.code ?? null,
-    );
-  }
-  if (
-    !payload
-    || typeof payload !== 'object'
-    || (payload as Partial<ShowPageAuthorizedEmails>).ok !== true
-    || !Array.isArray((payload as Partial<ShowPageAuthorizedEmails>).emails)
-    || (payload as Partial<ShowPageAuthorizedEmails>).emails?.some(
-      (email) => typeof email !== 'string',
-    )
-  ) {
-    throw new ApiError('Invalid Show Page email access response.', 502, null);
-  }
-  return payload as ShowPageAuthorizedEmails;
-}
-
 const ApiContext = createContext<ApiContextType | undefined>(undefined);
 const CONFIG_CACHE_TTL_MS = 30_000;
 
@@ -3320,14 +3284,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { status: 'error', access: null };
       }
     },
-    getShowPageAuthorizedEmails: (sessionId) => requestShowPageAuthorizedEmails(sessionId),
-    replaceShowPageAuthorizedEmails: (sessionId, emails) => requestShowPageAuthorizedEmails(
-      sessionId,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ emails }),
-      },
+    getShowAccessSettings: (sessionId) => postJson(
+      `/api/show-pages/${encodeURIComponent(sessionId)}/access-settings/read`,
+      { page_id: sessionId },
+    ),
+    applyShowAccess: (sessionId, payload) => postJson(
+      `/api/show-pages/${encodeURIComponent(sessionId)}/access-settings/apply`,
+      { page_id: sessionId, ...payload },
     ),
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
@@ -3341,10 +3304,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }),
     unsubscribeWebPush: (endpoint) => deleteJson('/api/web-push/subscriptions', { endpoint }),
     sendWebPushTest: (payload) => postJson('/api/web-push/test', payload ?? {}),
-    setShowPageVisibility: (sessionId, visibility) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/visibility`, { visibility }),
+    setShowPageAvailability: (sessionId, offline) => postJson(
+      `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
+      { offline },
+    ),
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
-    rotateShowPageShare: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/rotate-share`, {}),
-    setShowPageShareId: (sessionId, shareId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/share-id`, { share_id: shareId }),
     uploadShowPageIcon: async (sessionId, file) => {
       // Multipart POST: the server names the on-disk file, so we send only the bytes
       // and a filename hint. `requestJson` adds CSRF + surfaces errors like everything

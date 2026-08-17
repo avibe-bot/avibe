@@ -52,6 +52,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "run_definitions",
     "agent_runs",
     "show_pages",
+    "show_page_authorized_emails",
     "messages",
     "message_deliveries",
     "session_turns",
@@ -146,6 +147,8 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
+    "show_page_authorized_emails": {"session_id", "normalized_email", "created_at"},
     "web_push_subscriptions": {"device_id"},
     "remote_access_authorizations": {
         "instance_id",

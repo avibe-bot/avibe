@@ -347,7 +347,6 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/resource-policies$",
         r"^/api/show-pages$",
         r"^/api/show-pages/[^/]+/access$",
-        r"^/api/show-pages/[^/]+/authorized-emails$",
         r"^/api/show-pages/[^/]+/icon$",
     )
 )
@@ -405,8 +404,8 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/show/sessions/[^/]+/events$"),
         ("POST", r"^/api/show/sessions/[^/]+/prewarm$"),
         ("POST", r"^/api/show-pages/[^/]+/icon$"),
-        ("POST", r"^/api/show-pages/[^/]+/(?:ensure|visibility|rotate-share|share-id)$"),
-        ("PUT", r"^/api/show-pages/[^/]+/authorized-emails$"),
+        ("POST", r"^/api/show-pages/[^/]+/(?:ensure|availability)$"),
+        ("POST", r"^/api/show-pages/[^/]+/access-settings/(?:read|apply)$"),
     )
 )
 

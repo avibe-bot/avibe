@@ -177,7 +177,7 @@
   },
   "showPages": {
     "title": "展示页面",
-    "subtitle": "每个 Agent 会话都有一个展示页面。可以将其公开、保持私有，或下线。",
+    "subtitle": "管理 Show Page 的访问范围与在线状态。",
     "searchPlaceholder": "按标题或会话搜索…",
     "allPages": "全部页面",
     "sortedRecent": "按最近活动排序",
@@ -186,11 +186,13 @@
       "all": "全部",
       "online": "在线",
       "private": "私有",
+      "limited": "指定用户",
       "public": "公开",
       "offline": "已下线"
     },
     "status": {
       "private": "私有",
+      "limited": "指定用户",
       "public": "公开",
       "offline": "已下线"
     },
@@ -213,28 +215,17 @@
         "updated": "应用图标已更新"
       }
     },
-    "visibilityLabel": "可见性",
-    "visibilityOffline": "下线",
     "liveLink": "访问链接",
     "offlineNoLink": "该页面已下线——用上方的开关重新上线即可获得访问链接。",
     "copy": "复制",
     "copied": "已复制",
     "open": "打开",
     "openApp": "打开应用",
-    "shareLink": "分享链接",
-    "rotate": "更换链接",
-    "rotateHint": "生成新链接并使当前链接立即失效。",
     "shareId": {
       "label": "自定义链接",
-      "hint": "3–64 位，可用字母、数字、短横线或下划线，需唯一。",
-      "placeholder": "my-page",
-      "toast": {
-        "saved": "自定义链接已更新"
-      },
       "errors": {
         "taken": "这个自定义链接已被占用，换一个。",
-        "invalid": "请使用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
-        "generic": "更新自定义链接失败。"
+        "invalid": "请使用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。"
       }
     },
     "cloudOff": "Avibe Cloud 未开启——此链接仅能在本机打开。",
@@ -1636,7 +1627,6 @@
     "remote_access_unknown": "操作没有完成。请刷新状态后再试一次；如果仍然失败，请查看远程访问运行日志。",
     "editor_config_write_forbidden": "当前角色只能保存消息偏好。",
     "editor_config_write_invalid": "这条消息设置无法保存。",
-    "show_page_email_access_transient": "邮箱权限暂时不可用，请重试。",
     "invalid_pairing_key": "这个 pairing key 无效或已过期。请回到 avibe.bot 重新生成一个 key，然后粘贴到这里。",
     "missing_pairing_key": "请先粘贴 pairing key。",
     "invalid_pairing_backend_url": "Avibe Cloud 地址必须是有效的 HTTPS 地址。",
@@ -3553,12 +3543,31 @@
       "shareTitle": "分享这个 Show Page",
       "copyLink": "复制链接",
       "nativeShare": "系统分享",
-      "rotateLink": "更换公开链接",
       "access": "权限",
-      "visibilityPublic": "公开",
-      "visibilityPrivate": "私有",
-      "publicDesc": "任何人都可以通过链接查看",
-      "privateDesc": "只有你能查看",
+      "sharingAccess": "链接访问",
+      "sharingAccessDesc": "独立控制分享链接 /p，不改变 Workspace 权限。",
+      "loadingSharingAccess": "正在加载链接访问设置…",
+      "sharingModes": {
+        "private": "私有",
+        "limited": "指定用户",
+        "public": "完全公开"
+      },
+      "sharingHelp": {
+        "private": "分享链接已停用。",
+        "limited": "可先配置邮箱名单；分享链接暂未启用。",
+        "public": "任何拿到链接的人都可以打开分享页面。"
+      },
+      "limitedEmails": "指定用户邮箱",
+      "limitedEmailRequired": "请至少添加一个邮箱。",
+      "limitedEmailLimit": "最多添加 {{count}} 个邮箱。",
+      "sharingErrors": {
+        "conflict": "链接访问设置已在其他位置更新，已载入最新版本。",
+        "invalid": "请检查访问模式、链接和邮箱列表。",
+        "error": "无法加载链接访问设置。"
+      },
+      "applySharingAccess": "应用",
+      "narrowSharingTitle": "收紧链接访问范围？",
+      "narrowSharingBody": "失去权限的用户在下一次请求页面时将被拒绝。",
       "workspaceAccess": "登录访问范围",
       "workspaceAccessDesc": "控制登录后哪些人可以打开此页面。",
       "workspaceLevels": {
@@ -3592,27 +3601,15 @@
         "offline": "当前 Avibe 已离线，重新连接后会应用访问范围变更。",
         "error": "当前 Avibe 无法应用访问范围变更。"
       },
-      "emailAccess": "指定邮箱",
-      "emailAccessDesc": "这些邮箱登录后只能打开当前 Show Page。",
       "emailPlaceholder": "name@example.com",
       "addEmail": "添加邮箱",
       "removeEmail": "移除 {{email}}",
       "emailInvalid": "请输入有效的邮箱地址。",
-      "emailAccessEmpty": "尚未授权额外邮箱。",
-      "emailAccessLimit": "最多 64 个邮箱",
-      "applyEmailAccess": "应用",
-      "loadingEmailAccess": "正在加载邮箱权限…",
-      "emailAccessUnavailable": "连接 Avibe Cloud 后才能设置邮箱权限。",
-      "emailAccessError": "无法加载邮箱权限。",
       "accessLoadError": "无法加载权限详情，分享设置已停用。",
-      "publicLink": "公开链接",
-      "publicLinkOnDesc": "任何人都可以通过链接直接打开，无需登录。",
-      "publicLinkOffDesc": "匿名访问已关闭；登录后的访问范围由上方设置控制。",
-      "publicLinkOwnerOnly": "只有页面所有者可以更换、自定义或重新开启此链接。",
-      "publicLinkOffline": "此页面离线期间无法修改公开链接。",
-      "customLink": "自定义链接",
-      "offlineNote": "这个 Show Page 已离线，暂时无法分享。",
-      "publicUnavailable": "连接 Avibe Cloud 后才能获得别人可打开的公开链接。",
+      "availability": "在线状态",
+      "offline": "下线",
+      "availabilityOnline": "页面在线，并按当前链接访问模式提供服务。",
+      "availabilityOffline": "所有人暂时无法访问；链接访问设置会保留。",
       "loadError": "无法加载这个 Show Page。",
       "pinToDock": "固定到 Dock",
       "pinToDockCaption": "作为应用从 Dock 打开",

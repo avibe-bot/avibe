@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Copy, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Check, Copy, LayoutGrid, Loader2, Plus, RotateCw, Share2 } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -9,49 +9,28 @@ import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { showDockId } from '../../context/dockDoc';
-import { copyTextToClipboard } from '../../lib/utils';
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
+import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
-import {
-  canChangeShowPagePublicLink,
-  isShowPageVisibilityPayload,
-  showPageShareCapabilities,
-  type ShowPageAccess,
-  type ShowPageVisibilityResult,
-} from '../../lib/showPageAccess';
-import { ShowPageShareIdField } from './ShowPageShareIdField';
-import { ShowPageWorkspaceAccessControl } from './ShowPageWorkspaceAccessControl';
+import { copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
+import { ShowPageSharingSettings } from './ShowPageSharingSettings';
+import { ShowPageWorkspaceAccessControl } from './ShowPageWorkspaceAccessControl';
 
 type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
   url_guidance?: string | null;
   offline: boolean;
-  // The live session title (joined server-side by ensureShowPage); labels the
-  // pinned-app confirmation. Null for untitled IM-dispatch sessions.
   title?: string | null;
 };
 
-// Share affordance for the current session's Show Page. Resource managers may
-// open the audience controls without receiving access to the page content;
-// page links render only when the caller can use the page; an access-only
-// manager receives a metadata-only control for revoking an existing public link.
 export const ShowPageShareControl: React.FC<{
   sessionId: string;
   initialAccess?: ShowPageAccess | null;
-  // Dock mutations use Instance authority, not Show Page resource authority.
   canManageInstance?: boolean;
-  // Lets the chat view re-point the iframe at the route that now serves the
-  // page when visibility flips (private↔public swap the serving route).
   onPayloadChange?: (payload: ShowPageLinkInfo) => void;
-  // The popover floats over the Show Page iframe; the chat view makes the iframe
-  // inert while it is open so an outside tap there falls through to the parent
-  // document and Radix can dismiss (a tap inside an iframe never reaches us).
   onOpenChange?: (open: boolean) => void;
-  // Keep a single icon trigger at every viewport size (window title bars),
-  // matching the compact annotate control's chrome styling.
   compact?: boolean;
-  // Associate portalled popover focus with its owning app window.
   ownerWindowId?: string;
 }> = ({
   sessionId,
@@ -65,76 +44,59 @@ export const ShowPageShareControl: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const dock = useDock();
-  const { pages, mergePage, removePage, reload } = useShowPageInventory();
+  const { pages, mergePage, reload } = useShowPageInventory();
   const inventoryPage = pages.find((page) => page.session_id === sessionId);
   const [open, setOpen] = useState(false);
-  const [workspaceConfirmationOpen, setWorkspaceConfirmationOpen] = useState(false);
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [localPayload, setLocalPayload] = useState<ShowPagePayload | null>(null);
-  const candidatePayload = useMemo<ShowPagePayload | null>(() => {
-    const local = localPayload?.session_id === sessionId ? localPayload : null;
-    if (!inventoryPage) return local;
-    if (!local) return inventoryPage as ShowPagePayload;
-
-    // A mutation/ensure response is newer than the retained inventory until its
-    // merge reaches this render. Prefer it while the share identity differs so
-    // onPayloadChange never re-points ChatPage at a revoked cached URL. Once the
-    // shared store catches up, inventory resumes as the live source of truth.
-    const inventoryCaughtUp =
-      inventoryPage.visibility === local.visibility &&
-      inventoryPage.active_url === local.active_url &&
-      inventoryPage.share_id === local.share_id &&
-      inventoryPage.offline === local.offline &&
-      inventoryPage.url_available === local.url_available;
-    return (inventoryCaughtUp
-      ? { ...local, ...inventoryPage }
-      : { ...inventoryPage, ...local }) as ShowPagePayload;
-  }, [inventoryPage, localPayload, sessionId]);
   const [loading, setLoading] = useState(false);
   const [accessLoading, setAccessLoading] = useState(false);
   const [access, setAccess] = useState<ShowPageAccess | null>(initialAccess);
   const [accessError, setAccessError] = useState(false);
-  const shareCapabilities = showPageShareCapabilities(access, {
-    accessInvalid: accessError,
-    canManageInstance,
-  });
-  const payload = shareCapabilities.canReadPayload ? candidatePayload : null;
-  const [busy, setBusy] = useState(false);
+  const [availabilityBusy, setAvailabilityBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  // A visibility mutation is authoritative: it always applies its result and
-  // clears its own busy state, and it invalidates any refresh read issued
-  // before it resolved. A refresh (read) only applies if no newer request has
-  // superseded it. reqSeq orders the reads; a mutation bumps it on resolve.
   const reqSeq = useRef(0);
   const hasObservedPayloadRef = useRef(false);
+
+  const candidatePayload = useMemo<ShowPagePayload | null>(() => {
+    const local = localPayload?.session_id === sessionId ? localPayload : null;
+    if (!inventoryPage) return local;
+    if (!local) return inventoryPage as ShowPagePayload;
+    const inventoryCaughtUp = inventoryPage.visibility === local.visibility
+      && inventoryPage.active_url === local.active_url
+      && inventoryPage.share_id === local.share_id
+      && inventoryPage.offline === local.offline
+      && inventoryPage.url_available === local.url_available;
+    return (inventoryCaughtUp
+      ? { ...local, ...inventoryPage }
+      : { ...inventoryPage, ...local }) as ShowPagePayload;
+  }, [inventoryPage, localPayload, sessionId]);
+
+  const canReadPayload = !accessError && (canManageInstance || access?.can_use === true);
+  const payload = canReadPayload ? candidatePayload : null;
+  const offline = payload?.visibility === 'offline' || payload?.offline === true;
+  const link = payload && !offline ? copyHref(payload) ?? '' : '';
+  const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  const iosStandalone = isIosDevice() && isStandalonePwa();
+  const showAddToHome = !!link && (iosStandalone || isRealMobileSafari());
 
   const applyPayload = (next: ShowPagePayload) => {
     setLocalPayload(next);
     mergePage(next as ShowPage);
   };
 
-  const applyMutationResult = (
-    result: ShowPageVisibilityResult<ShowPagePayload>,
-    options: { publicLinkEnabled?: boolean } = {},
-  ) => {
-    const canReadResult = isShowPageVisibilityPayload(result);
-    if (canReadResult) {
-      applyPayload(result as ShowPagePayload);
-    } else {
-      // Access can change after this control renders. A metadata-only response
-      // deliberately has no page identity or link, so withdraw every retained
-      // copy before revalidating the inventory instead of merging malformed data.
-      setLocalPayload(null);
-      removePage(sessionId);
+  const reloadPayload = async () => {
+    const seq = ++reqSeq.current;
+    if (!canReadPayload) {
+      reload();
+      return;
+    }
+    try {
+      const next: ShowPagePayload = await api.ensureShowPage(sessionId);
+      if (seq === reqSeq.current) applyPayload(next);
+    } catch {
       reload();
     }
-    setAccess((current) => current ? {
-      ...current,
-      can_use: canReadResult ? current.can_use : false,
-      public_link_enabled: canReadResult
-        ? options.publicLinkEnabled ?? current.public_link_enabled
-        : result.public_link_enabled,
-    } : current);
-    reqSeq.current += 1;
   };
 
   useEffect(() => {
@@ -142,17 +104,11 @@ export const ShowPageShareControl: React.FC<{
     const hasFreshLocalPayload = localPayload?.session_id === sessionId;
     if (!hasObservedPayloadRef.current) {
       hasObservedPayloadRef.current = true;
-      // ChatPage just resolved ensureShowPage before mounting this control. Do
-      // not overwrite that fresh route with the retained inventory's first
-      // snapshot; a revalidated store update or local response may notify it.
       if (!hasFreshLocalPayload) return;
     }
     onPayloadChange?.(payload);
   }, [localPayload, onPayloadChange, payload, sessionId]);
 
-  // If we unmount while open (a route/session change tears down Show Page mode),
-  // Radix won't fire onOpenChange, so report closed here — otherwise the chat
-  // view would keep the iframe inert (pointer-events:none) on the next Show Page.
   useEffect(() => () => onOpenChange?.(false), [onOpenChange]);
 
   useEffect(() => {
@@ -160,33 +116,8 @@ export const ShowPageShareControl: React.FC<{
     setAccessError(false);
   }, [initialAccess, sessionId]);
 
-  const offline = payload?.visibility === 'offline' || payload?.offline === true;
-  const isPublic = payload?.visibility === 'public';
-  // Absolute, copyable href; falls back to the same-origin route when Avibe
-  // Cloud is off (payload urls null). The field shows this full url so a manual
-  // select/copy yields the same link as the Copy button.
-  const link = payload ? copyHref(payload) ?? '' : '';
-  const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
-  // "Add to Home Screen" only works where Safari's page-share flow is reachable:
-  // real iOS Safari (tapping opens the Show Page top-level, then the user shares
-  // that), or an installed iOS standalone PWA (a same-origin link stays trapped in
-  // scope, so the user copies the link and opens it in Safari). iOS Chrome/Firefox
-  // and IM in-app browsers report iOS too but can't reach that flow, so we don't
-  // show steps they can't complete — matching the InstallHint nudge's gating.
-  const iosStandalone = isIosDevice() && isStandalonePwa();
-  const showAddToHome = !!link && (iosStandalone || isRealMobileSafari());
-
-  // Re-fetch on every open so a visibility/share change made elsewhere (e.g. the
-  // admin Show Pages page) is reflected; keep the last payload visible while
-  // refreshing so reopening doesn't flash a spinner.
   const refresh = () => {
     const seq = ++reqSeq.current;
-    // Callers that already hold authority (instance managers, or a caller that
-    // passed initialAccess) read the payload and the access in parallel like
-    // before. A caller with NEITHER (the app window title bar) must sequence:
-    // the payload read is gated on access, so it starts only after access
-    // resolves — otherwise a granted can_use arrives with no payload behind it
-    // until the popover is reopened.
     const loadPayload = async (granted: boolean) => {
       if (!granted) {
         setLoading(false);
@@ -194,13 +125,12 @@ export const ShowPageShareControl: React.FC<{
       }
       setLoading(!payload);
       try {
-        const res: ShowPagePayload = await api.ensureShowPage(sessionId);
+        const result: ShowPagePayload = await api.ensureShowPage(sessionId);
         if (seq !== reqSeq.current) return;
-        applyPayload(res);
+        applyPayload(result);
         if (!inventoryPage) reload();
       } catch {
-        // An archived Show Page cannot be ensured, but its applied access
-        // metadata is still useful and is loaded below.
+        // Archived pages can still expose access metadata, but cannot be ensured.
       } finally {
         setLoading(false);
       }
@@ -216,18 +146,12 @@ export const ShowPageShareControl: React.FC<{
           setAccess(nextAccess);
         } catch {
           if (seq !== reqSeq.current) return;
-          // A failed refresh cannot leave the previous authority actionable. The
-          // payload stays cached for a later successful refresh, but is withdrawn
-          // while accessError invalidates this control's authorization state.
           setAccess(null);
           setAccessError(true);
           return;
         } finally {
           setAccessLoading(false);
         }
-        // Only the sequenced caller loads here: the parallel branch already
-        // started its payload read alongside this one — loading twice would
-        // duplicate the ensure request and the inventory merge.
         if (thenLoadPayload) {
           await loadPayload(canManageInstance || nextAccess?.can_use === true);
         }
@@ -243,49 +167,26 @@ export const ShowPageShareControl: React.FC<{
 
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
-    if (!next) setWorkspaceConfirmationOpen(false);
+    if (!next) setConfirmationOpen(false);
     onOpenChange?.(next);
     if (next) refresh();
   };
 
-  const setVisibilityTo = (next: string) => {
-    setBusy(true);
-    api
-      .setShowPageVisibility<ShowPagePayload>(sessionId, next)
-      .then((res) => {
-        // Authoritative server state: apply it and invalidate any in-flight
-        // refresh read so a stale read cannot revert us afterwards.
-        applyMutationResult(res, { publicLinkEnabled: next === 'public' });
-      })
-      .catch(() => undefined)
-      .finally(() => setBusy(false));
+  const handleShowAccessApplied = () => {
+    void reloadPayload();
   };
 
-  const revokePublicLinkWithoutPayload = () => {
-    if (!shareCapabilities.canRevokePublicLinkWithoutPayload) return;
-    setBusy(true);
-    api
-      .setShowPageVisibility(sessionId, 'private')
-      .then(() => {
-        // Do not retain the mutation payload: this manager can revoke anonymous
-        // access but cannot read the page, its link, or its share identifier.
-        setAccess((current) => current ? {
-          ...current,
-          public_link_enabled: false,
-        } : current);
+  const setOffline = (next: boolean) => {
+    if (!payload || availabilityBusy) return;
+    setAvailabilityBusy(true);
+    void api.setShowPageAvailability(sessionId, next)
+      .then((result) => {
+        if (result && result.session_id === sessionId) applyPayload(result as ShowPagePayload);
+        else reload();
         reqSeq.current += 1;
       })
       .catch(() => undefined)
-      .finally(() => setBusy(false));
-  };
-
-  const rotatePublicLink = () => {
-    setBusy(true);
-    api
-      .rotateShowPageShare(sessionId)
-      .then((res: ShowPageVisibilityResult<ShowPagePayload>) => applyMutationResult(res))
-      .catch(() => undefined)
-      .finally(() => setBusy(false));
+      .finally(() => setAvailabilityBusy(false));
   };
 
   const copyLink = async () => {
@@ -301,7 +202,7 @@ export const ShowPageShareControl: React.FC<{
     try {
       await navigator.share({ title: t('chat.showPage.title'), url: link });
     } catch {
-      // user dismissed the share sheet, or it is unavailable — no-op
+      // The native sheet may be dismissed without changing state.
     }
   };
 
@@ -316,88 +217,82 @@ export const ShowPageShareControl: React.FC<{
             ? 'size-6 shrink-0 rounded-md text-muted hover:bg-foreground/[0.06] hover:text-foreground'
             : 'size-7 shrink-0'}
           aria-label={t('chat.showPage.share')}
-          title={t('chat.showPage.share')}
         >
           <Share2 className="size-3.5" />
         </Button>
       </PopoverTrigger>
       <PopoverContent
         align="end"
-        className="w-80 space-y-3"
+        className="w-[min(22rem,calc(100vw-1rem))] space-y-3"
         data-window-owner-id={ownerWindowId}
         onInteractOutside={(event) => {
-          if (workspaceConfirmationOpen) event.preventDefault();
+          if (confirmationOpen) event.preventDefault();
         }}
       >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
 
-        {/* Access-less callers (the app-window title bar) resolve access first, so
-            the access read itself is part of the loading presentation — without
-            it the popover would flash the load-error text for the whole request. */}
         {(loading || accessLoading) && !access ? (
-          <div className="flex items-center gap-2 py-2 text-sm text-muted">
+          <div className="flex h-9 items-center gap-2 text-sm text-muted">
             <Loader2 className="size-4 animate-spin" />
             {t('common.loading')}
           </div>
         ) : !payload && !access ? (
           <p className="py-1 text-sm text-muted">{t('chat.showPage.loadError')}</p>
-        ) : payload ? (
-          <>
-            {offline ? (
-              <p className="py-1 text-sm text-muted">{t('chat.showPage.offlineNote')}</p>
-            ) : (
-              <div className="flex items-center gap-1.5">
-                <Input
-                  id="show-share-link"
-                  readOnly
-                  value={link}
-                  onFocus={(e) => e.currentTarget.select()}
-                  className="h-8 min-w-0 flex-1 text-xs"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  className="size-8 shrink-0"
-                  disabled={!link}
-                  onClick={copyLink}
-                  aria-label={t('chat.showPage.copyLink')}
-                  title={t('chat.showPage.copyLink')}
-                >
-                  {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                </Button>
-                {isPublic ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    className="size-8 shrink-0"
-                    disabled={busy || !access?.can_publish_public}
-                    onClick={rotatePublicLink}
-                    aria-label={t('chat.showPage.rotateLink')}
-                    title={t('chat.showPage.rotateLink')}
-                  >
-                    <RotateCw className="size-3.5" />
-                  </Button>
-                ) : null}
-                {canNativeShare && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    className="size-8 shrink-0"
-                    disabled={!link}
-                    onClick={nativeShare}
-                    aria-label={t('chat.showPage.nativeShare')}
-                    title={t('chat.showPage.nativeShare')}
-                  >
-                    <Share2 className="size-3.5" />
-                  </Button>
-                )}
-              </div>
-            )}
+        ) : null}
 
-          </>
+        {payload && !offline && payload.visibility !== 'limited' ? (
+          <div className="flex items-center gap-1.5">
+            <Input
+              id="show-share-link"
+              readOnly
+              value={link}
+              onFocus={(event) => event.currentTarget.select()}
+              className="h-8 min-w-0 flex-1 text-xs"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="size-8 shrink-0"
+              disabled={!link}
+              onClick={copyLink}
+              aria-label={t('chat.showPage.copyLink')}
+            >
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            </Button>
+            {canNativeShare ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="size-8 shrink-0"
+                disabled={!link}
+                onClick={nativeShare}
+                aria-label={t('chat.showPage.nativeShare')}
+              >
+                <Share2 className="size-3.5" />
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {payload && !offline && payload.visibility === 'limited' ? (
+          <p className="text-[11px] leading-snug text-muted">
+            {t('chat.showPage.sharingHelp.limited')}
+          </p>
+        ) : null}
+
+        {access?.can_publish_public ? (
+          <div className="border-t border-border pt-3">
+            <ShowPageSharingSettings
+              active={open}
+              canManage
+              sessionId={sessionId}
+              onApplied={handleShowAccessApplied}
+              onConfirmationOpenChange={setConfirmationOpen}
+              ownerWindowId={ownerWindowId}
+            />
+          </div>
         ) : null}
 
         <div className="border-t border-border pt-3">
@@ -405,7 +300,7 @@ export const ShowPageShareControl: React.FC<{
             access={access}
             active={open}
             sessionId={sessionId}
-            onConfirmationOpenChange={setWorkspaceConfirmationOpen}
+            onConfirmationOpenChange={setConfirmationOpen}
             ownerWindowId={ownerWindowId}
           />
           {accessError ? (
@@ -415,130 +310,52 @@ export const ShowPageShareControl: React.FC<{
           ) : null}
         </div>
 
-        {shareCapabilities.canRevokePublicLinkWithoutPayload ? (
+        {payload ? (
           <div className="border-t border-border pt-3">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-sm font-medium">{t('chat.showPage.publicLink')}</div>
+                <div className="text-sm font-medium">{t('chat.showPage.availability')}</div>
                 <p className="mt-0.5 text-[11px] leading-snug text-muted">
-                  {t('chat.showPage.publicLinkOnDesc')}
+                  {t(offline ? 'chat.showPage.availabilityOffline' : 'chat.showPage.availabilityOnline')}
                 </p>
               </div>
               <Switch
-                checked
-                disabled={
-                  busy
-                  || accessLoading
-                  || !canChangeShowPagePublicLink(access, false)
-                }
-                onCheckedChange={(next) => {
-                  if (!next) revokePublicLinkWithoutPayload();
-                }}
-                label={t('chat.showPage.publicLink')}
+                checked={Boolean(offline)}
+                disabled={availabilityBusy || (offline ? !access?.can_publish_public : !access?.can_manage)}
+                onCheckedChange={setOffline}
+                label={t('chat.showPage.offline')}
               />
             </div>
-            <p className="mt-1.5 text-[11px] leading-snug text-muted">
-              {t('chat.showPage.publicLinkOwnerOnly')}
-            </p>
           </div>
         ) : null}
 
-        {payload ? (
-          <>
-            <div className="border-t border-border pt-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium">{t('chat.showPage.publicLink')}</div>
-                  <p className="mt-0.5 text-[11px] leading-snug text-muted">
-                    {isPublic ? t('chat.showPage.publicLinkOnDesc') : t('chat.showPage.publicLinkOffDesc')}
-                  </p>
-                </div>
-                <Switch
-                  checked={isPublic}
-                  disabled={
-                    offline
-                    || busy
-                    || accessLoading
-                    || !canChangeShowPagePublicLink(access, !isPublic)
-                  }
-                  onCheckedChange={(next) => setVisibilityTo(next ? 'public' : 'private')}
-                  label={t('chat.showPage.publicLink')}
-                />
-              </div>
-              {isPublic && access && !access.can_publish_public ? (
-                <p className="mt-1.5 text-[11px] leading-snug text-muted">
-                  {t('chat.showPage.publicLinkOwnerOnly')}
-                </p>
-              ) : null}
-              {offline ? (
-                <p className="mt-1.5 text-[11px] leading-snug text-muted">
-                  {t('chat.showPage.publicLinkOffline')}
-                </p>
-              ) : null}
+        {showAddToHome ? (
+          <div className="border-t border-border pt-3">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+              <Plus className="size-3.5 shrink-0 text-cyan-ink" />
+              {t('chat.showPage.addToHomeTitle')}
             </div>
-
-            {isPublic && !offline ? (
-              <div>
-                <div className="mb-1.5 text-sm">{t('chat.showPage.customLink')}</div>
-                <ShowPageShareIdField
-                  sessionId={sessionId}
-                  shareId={payload.share_id}
-                  disabled={busy || !access?.can_publish_public}
-                  onSaved={(res) => {
-                    // Custom-link updates can also return metadata only when
-                    // page-use access changed while the editor was open.
-                    applyMutationResult(res as ShowPageVisibilityResult<ShowPagePayload>);
-                  }}
-                />
-              </div>
-            ) : null}
-
-            {isPublic && !payload.url_available ? (
-              <div className="rounded-md border border-border px-2.5 py-2 text-xs text-muted">
-                {t('chat.showPage.publicUnavailable')}
-              </div>
-            ) : null}
-
-            {showAddToHome && !offline ? (
-              <div className="rounded-md border border-border bg-foreground/[0.02] px-2.5 py-2">
-                <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-                  <Plus className="size-3.5 shrink-0 text-cyan-ink" />
-                  {t('chat.showPage.addToHomeTitle')}
-                </div>
-                {iosStandalone ? (
-                  // Installed PWA: a same-origin link can't hand off to Safari
-                  // (it stays trapped in scope), so the user must copy the link
-                  // and open it in Safari — the Copy button above does that.
-                  <p className="mt-1 text-xs leading-relaxed text-muted">
-                    {t('chat.showPage.addToHomeBodyPwa')}
-                  </p>
-                ) : (
-                  // Safari: the popover sits in the workbench while the Show Page
-                  // is framed, so Safari's own Share targets the workbench URL.
-                  // Open the Show Page top-level first (new tab) — then the user's
-                  // Share → Add to Home Screen captures the Show Page, not us.
-                  <a
-                    href={link}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="mt-1 block text-xs leading-relaxed text-foreground underline underline-offset-2"
-                  >
-                    {t('chat.showPage.addToHomeBodySafari')}
-                  </a>
-                )}
-              </div>
-            ) : null}
-          </>
+            {iosStandalone ? (
+              <p className="mt-1 text-xs leading-relaxed text-muted">
+                {t('chat.showPage.addToHomeBodyPwa')}
+              </p>
+            ) : (
+              <a
+                href={link}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-1 block text-xs leading-relaxed text-foreground underline underline-offset-2"
+              >
+                {t('chat.showPage.addToHomeBodySafari')}
+              </a>
+            )}
+          </div>
         ) : null}
 
-        {/* Pin to Dock — records the session's Show Page as a Dock app. Deliberately
-            OUTSIDE the visibility branches: pinning is independent of public/private
-            (a private page can be pinned) and never changes visibility or deletes the
-            page. Shown only when the page exists and the caller can manage the Instance. */}
-        {payload && shareCapabilities.canManageDock && (
+        {payload && canManageInstance ? (
           <div className="border-t border-border pt-3">
             <div className="flex items-center gap-3">
-              <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-foreground/[0.03] text-cyan-ink">
+              <span className="grid size-9 shrink-0 place-items-center rounded-md border border-border bg-foreground/[0.03] text-cyan-ink">
                 <LayoutGrid className="size-4" />
               </span>
               <div className="min-w-0 flex-1">
@@ -548,11 +365,6 @@ export const ShowPageShareControl: React.FC<{
               <Switch
                 checked={dock.isDocked(showDockId(sessionId))}
                 onCheckedChange={(next) => {
-                  // "Pin to Dock" controls DOCK membership (§7.1c two-layer model):
-                  // ON docks (installing first if this page isn't installed yet —
-                  // pinning IS installing, §7.2); OFF undocks but keeps it installed
-                  // (uninstalling is the Library's 移出). Toggling off no longer
-                  // uninstalls, and undocking elsewhere now unchecks this switch.
                   if (next) {
                     void (dock.isPinned(sessionId) ? dock.dock(showDockId(sessionId)) : dock.pin(sessionId));
                   } else {
@@ -562,7 +374,7 @@ export const ShowPageShareControl: React.FC<{
                 label={t('chat.showPage.pinToDock')}
               />
             </div>
-            {dock.isDocked(showDockId(sessionId)) && (
+            {dock.isDocked(showDockId(sessionId)) ? (
               <div className="mt-2 flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.08] px-2.5 py-1.5 text-xs text-foreground">
                 <Check className="size-3.5 shrink-0 text-mint-ink" />
                 <span className="truncate">
@@ -571,9 +383,9 @@ export const ShowPageShareControl: React.FC<{
                   })}
                 </span>
               </div>
-            )}
+            ) : null}
           </div>
-        )}
+        ) : null}
       </PopoverContent>
     </Popover>
   );

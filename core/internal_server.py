@@ -202,6 +202,8 @@ def create_app(
     # ``manager.cancel`` / ``manager.send_now``), not in side sets here.
     in_flight = manager.in_flight
     app.state.in_flight_dispatches = in_flight
+    show_access_write_lock = asyncio.Lock()
+    app.state.show_access_write_lock = show_access_write_lock
 
     def _publish_scheduled_queue_growth(session_id: str, state: str) -> None:
         if state != "queued":
@@ -611,6 +613,115 @@ def create_app(
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
         return {"ok": True, "service": "vibe-remote-internal", "version": 1}
+
+    @app.post("/internal/show-access/settings-read")
+    async def _show_access_settings_read(request: Request) -> Any:
+        from core.show_pages import ShowPageError, ShowPageStore, show_access_payload
+
+        payload = await _safe_json(request)
+        if set(payload) != {"page_id"} or not isinstance(payload.get("page_id"), str):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid_show_access_settings_request"},
+            )
+        page_id = payload["page_id"]
+
+        def _read() -> dict[str, Any]:
+            store = ShowPageStore()
+            try:
+                show_access = store.get_access(page_id)
+            finally:
+                store.close()
+            if show_access is None:
+                raise ShowPageError(
+                    "This session has no Show Page.",
+                    code="show_page_not_found",
+                )
+            if show_access.page_id != page_id:
+                raise RuntimeError("show_access_page_identity_mismatch")
+            return {"show_access": show_access_payload(show_access)}
+
+        try:
+            return await asyncio.to_thread(_read)
+        except ShowPageError as exc:
+            status = 404 if exc.code == "show_page_not_found" else 400
+            return JSONResponse(
+                status_code=status,
+                content={"ok": False, "error": exc.code},
+            )
+        except Exception:
+            logger.exception("internal ShowAccess settings read failed")
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "show_access_internal_failure"},
+            )
+
+    @app.post("/internal/show-access/apply")
+    async def _show_access_apply(request: Request) -> Any:
+        from core.show_pages import ShowPageError, ShowPageStore, show_access_payload
+
+        payload = await _safe_json(request)
+        required = {
+            "page_id",
+            "expected_revision",
+            "target_access_mode",
+            "target_share_id",
+            "target_emails",
+        }
+        if (
+            set(payload) != required
+            or not isinstance(payload.get("page_id"), str)
+            or isinstance(payload.get("expected_revision"), bool)
+            or not isinstance(payload.get("expected_revision"), int)
+            or payload["expected_revision"] < 0
+            or not isinstance(payload.get("target_access_mode"), str)
+            or not (
+                payload.get("target_share_id") is None
+                or isinstance(payload.get("target_share_id"), str)
+            )
+            or not isinstance(payload.get("target_emails"), list)
+            or any(not isinstance(email, str) for email in payload["target_emails"])
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid_show_access_apply_request"},
+            )
+        page_id = payload["page_id"]
+
+        def _apply() -> dict[str, Any]:
+            store = ShowPageStore()
+            try:
+                result = store.apply_access(
+                    page_id,
+                    expected_revision=payload["expected_revision"],
+                    target_access_mode=payload["target_access_mode"],
+                    target_share_id=payload["target_share_id"],
+                    target_emails=payload["target_emails"],
+                )
+            finally:
+                store.close()
+            if result.show_access.page_id != page_id:
+                raise RuntimeError("show_access_page_identity_mismatch")
+            return {
+                "status": result.status,
+                "show_access": show_access_payload(result.show_access),
+            }
+
+        try:
+            async with show_access_write_lock:
+                return await asyncio.to_thread(_apply)
+        except ShowPageError as exc:
+            status = 404 if exc.code == "show_page_not_found" else 400
+            return JSONResponse(
+                status_code=status,
+                content={"ok": False, "error": exc.code},
+            )
+        except Exception:
+            logger.exception("internal ShowAccess apply failed")
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "show_access_internal_failure"},
+            )
 
     @app.get("/internal/turn-state/{session_id}")
     async def _turn_state(session_id: str) -> Any:
