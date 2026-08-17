@@ -33,9 +33,11 @@ local identity session proves identity only. Page admission remains a fresh loca
 decision at each new top-level navigation or manual refresh.
 
 After admission, the opaque document capability remains valid for that loaded
-document and its subresources until the tab, document, or Runtime namespace ends.
-Audience changes affect the next navigation or refresh. They do not poll, push a
-refresh, revoke loaded subresources, or close the loaded guest page.
+document and its subresources while its Runtime namespace and document handle
+exist. Audience changes and elapsed time do not expire it. They do not poll, push
+a refresh, revoke loaded subresources, or close the loaded guest page. Namespace
+loss is limited to Runtime restart, explicit operational shutdown, or genuine
+pressure under the fixed process-wide resource budget.
 
 `/p` always uses shared Runtime context and never exposes HMR, annotations,
 Avibe cookies or storage, local APIs, session IDs, or source paths. Shared code

@@ -62,17 +62,19 @@
     },
     "admitted_document_lifetime": {
       "capability_scope": ["instance_id", "page_id", "share_id", "admitted_revision", "namespace_id", "document_id"],
-      "valid_until": "tab_document_or_namespace_naturally_ends",
+      "valid_while": "runtime_namespace_and_document_handle_exist",
       "subresource_authority": "document_scoped_capability_only",
       "capability_entropy_bits": 256,
       "capability_derivation": "csprng_non_derived",
-      "subresource_validation": "opaque_capability_namespace_document_and_expiry_only_without_show_access_lookup",
+      "subresource_validation": "opaque_capability_namespace_and_document_binding_only_without_show_access_lookup",
       "permission_recheck_per_subresource": false,
       "permission_polling": false,
       "permission_change_push_refresh": false,
       "permission_change_revokes_loaded_document": false,
       "membership_mode_binding_or_revision_change": "affects_next_navigation_or_manual_refresh_only",
-      "runtime_restart_or_resource_pressure": "fixed_reload_required"
+      "time_based_capability_or_namespace_expiry": false,
+      "namespace_loss_causes": ["runtime_restart", "explicit_operational_shutdown", "global_resource_budget_pressure"],
+      "namespace_loss_outcome": "fixed_reload_required"
     },
     "browser_boundary": {
       "trusted_shell_url": "/p/<share_id>/",
@@ -110,11 +112,15 @@
       "public_versioned_asset_constraint": "contains_only_public_bytes_and_no_identity_or_page_private_data"
     },
     "fixed_limits": {
-      "shared_request_seconds": 60,
-      "shared_namespace_idle_seconds": 1800,
-      "shared_namespace_absolute_seconds": 7200,
+      "shared_request_execution_seconds": 60,
+      "request_timeout_outcome": "sanitized_request_timeout",
       "maximum_shared_snapshot_bytes": 67108864,
-      "limit_outcome": "reload_required_without_paths_or_diagnostics"
+      "maximum_shared_namespaces_per_process": 64,
+      "maximum_shared_process_bytes": 536870912,
+      "global_budget_scope": "one_per_runtime_process",
+      "resource_pressure_eviction_unit": "whole_shared_namespace",
+      "resource_pressure_outcome": "reload_required_without_paths_or_diagnostics",
+      "timer_or_permission_driven_eviction": false
     },
     "release_gate": {
       "reviewed_runtime_sha": "ee3b0b490ad8b4afafb59cf37e2d57a20325208a",
@@ -128,7 +134,7 @@
     {"name": "shared_envelope", "schema_ref": "#/$defs/RuntimeEnvelope", "value": {"protocol": 1, "context": "shared"}},
     {"name": "shared_admission", "schema_ref": "#/$defs/SharedAdmission", "value": {"instance_id": "instance-1", "page_id": "page:alpha", "share_id": "stable_alpha", "admitted_revision": 5, "audience": "limited", "identity_subject": "user-1"}},
     {"name": "public_anonymous_admission", "schema_ref": "#/$defs/SharedAdmission", "value": {"instance_id": "instance-1", "page_id": "page:alpha", "share_id": "stable_alpha", "admitted_revision": 6, "audience": "public", "identity_subject": null}},
-    {"name": "document_capability", "schema_ref": "#/$defs/SharedDocumentCapability", "value": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-", "expires_at": 1786942800}}
+    {"name": "document_capability", "schema_ref": "#/$defs/SharedDocumentCapability", "value": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"}}
   ],
   "$defs": {
     "RuntimeEnvelope": {
@@ -153,12 +159,11 @@
     "SharedDocumentCapability": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["namespace_id", "document_id", "capability", "expires_at"],
+      "required": ["namespace_id", "document_id", "capability"],
       "properties": {
         "namespace_id": {"type": "string", "minLength": 16, "maxLength": 256},
         "document_id": {"type": "string", "minLength": 16, "maxLength": 256},
-        "capability": {"type": "string", "minLength": 43, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$"},
-        "expires_at": {"type": "integer", "minimum": 0}
+        "capability": {"type": "string", "minLength": 43, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$"}
       }
     }
   }

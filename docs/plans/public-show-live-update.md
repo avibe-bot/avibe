@@ -134,10 +134,11 @@ identity, allow credentials, or set cookies, and they use `Referrer-Policy:
 no-referrer` so the capability is not propagated to unrelated requests.
 
 Admission is intentionally not continuous authorization. The document capability
-continues for that loaded document and its subresources until the tab, document,
-or namespace naturally ends. Membership, mode, binding, and revision changes do
-not revoke it, trigger refresh, poll authority, or close the loaded page. Runtime
-restart or genuine resource pressure may return a fixed reload-required result.
+continues while its Runtime namespace and document handle exist. Membership, mode,
+binding, revision, and elapsed time do not expire it, trigger refresh, poll
+authority, or close the loaded page. A namespace may be lost only on Runtime
+restart, explicit operational shutdown, or genuine process resource pressure under
+the fixed global budget; that returns a fixed reload-required result.
 
 `/show` always uses private context. A resource editor receives HMR and annotations
 only after connection-admission authorization. A resource viewer may use canonical
@@ -146,7 +147,9 @@ admitted editor connections may live until natural disconnect; later connections
 authorize again. Operational shutdown and Runtime restart are separate lifecycle
 events, not permission-revocation protocols.
 
-Shared Runtime version 1 uses simple fixed request, namespace, and snapshot limits.
+Shared Runtime version 1 uses a 60-second per-request execution timeout, a 64 MiB
+per-snapshot limit, and one process-wide shared budget of 64 namespaces and 512
+MiB. The request timeout bounds one handler; it does not expire the document.
 It defines no worker broker, background shared rebuild from private edits,
 permission monitor, or formal pin/reclaim race protocol.
 
@@ -188,6 +191,7 @@ This PR proves only contract conformance:
 - existing Avibe Runtime protocol constants equal the frozen values;
 - local membership never becomes Backend or Instance authorization;
 - admitted shared documents use admission-time, not continuous, authorization;
+- admitted capabilities and namespaces never expire because of time or permission changes;
 - shared code has no privileged surface and all worker kinds are unsupported;
 - `/p` is shared/no-HMR and `/show` editor capability is independently admitted.
 

@@ -319,7 +319,7 @@ def test_shared_authorization_is_once_per_document_not_per_request() -> None:
     lifetime = runtime["admitted_document_lifetime"]
 
     assert admission["entry_events"] == ["new_top_level_navigation", "manual_refresh"]
-    assert lifetime["valid_until"] == "tab_document_or_namespace_naturally_ends"
+    assert lifetime["valid_while"] == "runtime_namespace_and_document_handle_exist"
     assert lifetime["capability_entropy_bits"] == 256
     assert lifetime["capability_derivation"] == "csprng_non_derived"
     assert lifetime["subresource_validation"].endswith("without_show_access_lookup")
@@ -328,6 +328,12 @@ def test_shared_authorization_is_once_per_document_not_per_request() -> None:
     assert lifetime["permission_change_push_refresh"] is False
     assert lifetime["permission_change_revokes_loaded_document"] is False
     assert lifetime["membership_mode_binding_or_revision_change"] == ("affects_next_navigation_or_manual_refresh_only")
+    assert lifetime["time_based_capability_or_namespace_expiry"] is False
+    assert lifetime["namespace_loss_causes"] == [
+        "runtime_restart",
+        "explicit_operational_shutdown",
+        "global_resource_budget_pressure",
+    ]
 
 
 def test_shared_browser_boundary_denies_privileged_surfaces_and_all_workers() -> None:
@@ -365,16 +371,25 @@ def test_private_editor_authority_is_connection_admission_only() -> None:
     assert editor["new_connections_reauthorize"] is True
 
 
-def test_runtime_limits_are_fixed_without_pin_or_reclaim_protocol() -> None:
+def test_runtime_limits_keep_request_timeout_separate_from_document_lifetime() -> None:
     runtime = _load(ARTIFACTS["runtime"])["x-contract"]
     assert runtime["fixed_limits"] == {
-        "shared_request_seconds": 60,
-        "shared_namespace_idle_seconds": 1800,
-        "shared_namespace_absolute_seconds": 7200,
+        "shared_request_execution_seconds": 60,
+        "request_timeout_outcome": "sanitized_request_timeout",
         "maximum_shared_snapshot_bytes": 67108864,
-        "limit_outcome": "reload_required_without_paths_or_diagnostics",
+        "maximum_shared_namespaces_per_process": 64,
+        "maximum_shared_process_bytes": 536870912,
+        "global_budget_scope": "one_per_runtime_process",
+        "resource_pressure_eviction_unit": "whole_shared_namespace",
+        "resource_pressure_outcome": "reload_required_without_paths_or_diagnostics",
+        "timer_or_permission_driven_eviction": False,
     }
+    capability = _load(ARTIFACTS["runtime"])["$defs"]["SharedDocumentCapability"]
+    assert "expires_at" not in capability["properties"]
+    assert "expires_at" not in capability["required"]
     flattened = json.dumps(runtime, sort_keys=True).lower()
+    assert "idle_seconds" not in flattened
+    assert "absolute_seconds" not in flattened
     assert "pinning" not in flattened
     assert "reclaim_order" not in flattened
     assert "weighted_budget" not in flattened
