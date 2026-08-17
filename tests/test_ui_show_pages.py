@@ -534,6 +534,28 @@ def test_limited_show_page_uses_editor_route_and_redirects_guest_to_identity(
     assert editor_resolution_was_offloaded
     assert all(editor_resolution_was_offloaded)
 
+    editor_client.set_cookie(
+        show_identity.show_guest_cookie_name(share_id),
+        show_identity.make_show_guest_lease(
+            config,
+            page_id="ses123",
+            share_id=share_id,
+            normalized_email="owner@example.com",
+        ),
+        domain="alex.avibe.bot",
+        path=show_identity.show_guest_cookie_path(share_id),
+    )
+    upgraded_editor = editor_client.get(
+        f"/p/{share_id}/reports/daily?tab=1",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert upgraded_editor.status_code == 302
+    assert upgraded_editor.headers["Location"] == "/show/ses123/reports/daily?tab=1"
+    assert all(editor_resolution_was_offloaded)
+
     asset = app.test_client().get(
         f"/p/{share_id}/app.js",
         base_url="https://alex.avibe.bot",
@@ -765,6 +787,53 @@ def test_show_identity_callback_consumes_assertion_when_page_became_public(
     )
     assert replay.status_code == 400
     assert replay.get_json()["error"] == "replayed_assertion"
+
+
+def test_show_identity_callback_does_not_charge_denied_identity_to_replay_ledger(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    client = app.test_client()
+    login = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    state = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(login.headers["Location"]).query
+    )["state"][0]
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        lambda *_args, **_kwargs: show_identity.VerifiedShowIdentity(
+            subject="unlisted-user",
+            normalized_email="unlisted@example.com",
+            assertion_id="denied-assertion",
+            expires_at=int(ui_server.time.time()) + 300,
+        ),
+    )
+    monkeypatch.setattr(
+        show_identity,
+        "consume_verified_show_identity",
+        lambda _identity: pytest.fail("denied identity consumed replay capacity"),
+    )
+
+    denied = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": state, "assertion": "signed-assertion"},
+    )
+
+    assert denied.status_code == 403
+    assert denied.get_json()["error"] == "show_access_forbidden"
+    assert "Set-Cookie" not in denied.headers
 
 
 def test_show_identity_callback_body_stops_at_the_streaming_limit():

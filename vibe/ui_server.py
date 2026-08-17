@@ -15061,14 +15061,14 @@ async def complete_show_identity_login():
         access = store.get_access(page.session_id)
         if access is None:
             return _show_identity_error_response("not_found", 404)
-        try:
-            show_identity.consume_verified_show_identity(identity)
-        except show_identity.ShowIdentityError as exc:
-            return _show_identity_error_response(
-                exc.reason,
-                _show_identity_error_status(exc.reason),
-            )
         if access.access_mode == "public":
+            try:
+                show_identity.consume_verified_show_identity(identity)
+            except show_identity.ShowIdentityError as exc:
+                return _show_identity_error_response(
+                    exc.reason,
+                    _show_identity_error_status(exc.reason),
+                )
             return redirect(state.return_target, code=303)
         if (
             access.access_mode != "limited"
@@ -15076,6 +15076,14 @@ async def complete_show_identity_login():
             or identity.normalized_email not in access.normalized_emails
         ):
             return _show_identity_error_response("show_access_forbidden", 403)
+
+        try:
+            show_identity.consume_verified_show_identity(identity)
+        except show_identity.ShowIdentityError as exc:
+            return _show_identity_error_response(
+                exc.reason,
+                _show_identity_error_status(exc.reason),
+            )
 
         # This browser-session lease intentionally has no live revision check:
         # membership changes affect new admissions, not a page already opened.
@@ -15153,8 +15161,12 @@ async def serve_public_show_page(share_id, asset_path):
         )
         if page.visibility == "offline":
             return _show_page_offline_response()
-        if not limited_guest and page.visibility == "limited":
-            if _is_show_page_spa_route_request(asset_path, request._request):
+        if page.visibility == "limited":
+            is_spa_navigation = _is_show_page_spa_route_request(
+                asset_path,
+                request._request,
+            )
+            if is_spa_navigation:
                 editor_context = await asyncio.to_thread(_show_public_editor_context)
                 if editor_context is not None:
                     try:
@@ -15172,27 +15184,25 @@ async def serve_public_show_page(share_id, asset_path):
                         if query:
                             private_target = f"{private_target}?{query}"
                         return redirect(private_target)
-            if request.method != "GET" or not _is_show_page_spa_route_request(
-                asset_path,
-                request._request,
-            ):
-                return _show_page_not_found_response()
-            if config is None:
-                return _show_identity_error_response("identity_unavailable", 503)
-            return_target = request.full_path if request.query_string else request.path
-            try:
-                authorization_url = show_identity.begin_show_identity_authorization(
-                    config,
-                    callback_origin=_current_origin(),
-                    share_id=share_id,
-                    return_target=return_target,
-                )
-            except show_identity.ShowIdentityError:
-                return _show_identity_error_response("identity_unavailable", 503)
-            response = redirect(authorization_url)
-            response.headers["Cache-Control"] = "private, no-store"
-            response.headers["Referrer-Policy"] = "no-referrer"
-            return response
+            if not limited_guest:
+                if request.method != "GET" or not is_spa_navigation:
+                    return _show_page_not_found_response()
+                if config is None:
+                    return _show_identity_error_response("identity_unavailable", 503)
+                return_target = request.full_path if request.query_string else request.path
+                try:
+                    authorization_url = show_identity.begin_show_identity_authorization(
+                        config,
+                        callback_origin=_current_origin(),
+                        share_id=share_id,
+                        return_target=return_target,
+                    )
+                except show_identity.ShowIdentityError:
+                    return _show_identity_error_response("identity_unavailable", 503)
+                response = redirect(authorization_url)
+                response.headers["Cache-Control"] = "private, no-store"
+                response.headers["Referrer-Policy"] = "no-referrer"
+                return response
         if not limited_guest and page.visibility != "public":
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(
