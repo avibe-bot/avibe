@@ -576,7 +576,12 @@ def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
 
 
 def _is_mutation_guard_exempt() -> bool:
-    if request.path in {"/auth/callback", "/auth/organization/callback", "/auth/organization/start"}:
+    if request.path in {
+        "/auth/callback",
+        "/auth/organization/callback",
+        "/auth/organization/start",
+        "/auth/show-identity/callback",
+    }:
         return True
     if _is_cli_show_event_request() or _is_cli_session_activity_request():
         return True
@@ -1565,6 +1570,7 @@ def _remote_auth_exempt_path() -> bool:
         or path == "/auth/callback"
         or path == "/auth/organization/callback"
         or path == "/auth/organization/start"
+        or path == "/auth/show-identity/callback"
         or path == "/auth/logout"
         or path == "/api/session"
         or path == "/api/cloud/token"
@@ -14232,6 +14238,7 @@ async def _show_page_runtime_response(
     inject_show_config: bool = False,
     show_authenticated: bool = False,
     show_config_session_id: str | None = None,
+    include_annotation_bootstrap: bool = True,
 ):
     from core.show_runtime import (
         ShowRuntimeContext,
@@ -14334,6 +14341,7 @@ async def _show_page_runtime_response(
             base_path=base_path,
             authenticated=show_authenticated,
             include_write_token=external_prefix is None and show_authenticated,
+            include_annotation_bootstrap=include_annotation_bootstrap,
         )
         if external_prefix:
             response_headers["Referrer-Policy"] = "same-origin"
@@ -14678,6 +14686,7 @@ def _inject_show_runtime_config(
     base_path: str,
     authenticated: bool,
     include_write_token: bool,
+    include_annotation_bootstrap: bool = True,
 ) -> bytes:
     try:
         html = content.decode("utf-8")
@@ -14689,7 +14698,11 @@ def _inject_show_runtime_config(
         authenticated=authenticated,
         include_write_token=include_write_token,
     )
-    bootstrap = f'<script type="module" src="{base_path}__show/annotation.js"></script>'
+    bootstrap = (
+        f'<script type="module" src="{base_path}__show/annotation.js"></script>'
+        if include_annotation_bootstrap
+        else ""
+    )
     module_match = _SHOW_RUNTIME_MODULE_SCRIPT_RE.search(html)
     if module_match:
         html = f"{html[: module_match.start()]}{script}\n    {html[module_match.start() :]}"
@@ -14699,12 +14712,13 @@ def _inject_show_runtime_config(
         html = html.replace("</body>", f"{script}\n  </body>", 1)
     else:
         html = f"{script}\n{html}"
-    if "</body>" in html:
-        html = html.replace("</body>", f"{bootstrap}\n  </body>", 1)
-    elif "</html>" in html:
-        html = html.replace("</html>", f"{bootstrap}\n</html>", 1)
-    else:
-        html = f"{html}\n{bootstrap}"
+    if bootstrap:
+        if "</body>" in html:
+            html = html.replace("</body>", f"{bootstrap}\n  </body>", 1)
+        elif "</html>" in html:
+            html = html.replace("</html>", f"{bootstrap}\n</html>", 1)
+        else:
+            html = f"{html}\n{bootstrap}"
     return html.encode("utf-8")
 
 
@@ -14889,16 +14903,162 @@ async def serve_private_show_page(session_id, asset_path):
         store.close()
 
 
+def _show_identity_error_response(error: str, status: int):
+    response = jsonify({"ok": False, "error": error})
+    response.status_code = status
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+async def _show_identity_callback_fields() -> dict[str, str]:
+    from vibe.show_identity import MAX_CALLBACK_BODY_BYTES, ShowIdentityError
+
+    content_type = request.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+        raise ShowIdentityError("invalid_callback")
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_CALLBACK_BODY_BYTES:
+                raise ShowIdentityError("invalid_callback")
+        except ValueError as exc:
+            raise ShowIdentityError("invalid_callback") from exc
+    body = await request._request.body()
+    if len(body) > MAX_CALLBACK_BODY_BYTES:
+        raise ShowIdentityError("invalid_callback")
+    try:
+        pairs = parse_qsl(
+            body.decode("utf-8"),
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ShowIdentityError("invalid_callback") from exc
+    fields: dict[str, str] = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ShowIdentityError("invalid_callback")
+        fields[key] = value
+    if set(fields) not in ({"state", "assertion"}, {"state", "error"}):
+        raise ShowIdentityError("invalid_callback")
+    if any(not value for value in fields.values()):
+        raise ShowIdentityError("invalid_callback")
+    return fields
+
+
+def _show_guest_lease(config: V2Config | None, share_id: str):
+    from core.show_pages import ShowPageError
+    from vibe import show_identity
+
+    if config is None:
+        return None
+    try:
+        return show_identity.read_show_guest_lease(
+            config,
+            request.cookies.get(show_identity.show_guest_cookie_name(share_id)),
+            expected_share_id=share_id,
+        )
+    except (ShowPageError, show_identity.ShowIdentityError):
+        return None
+
+
+def _with_limited_show_policy(response: Response) -> Response:
+    response.headers["Cache-Control"] = "private, no-store"
+    vary = response.headers.get("Vary", "")
+    vary_values = {value.strip() for value in vary.split(",") if value.strip()}
+    vary_values.add("Cookie")
+    response.headers["Vary"] = ", ".join(sorted(vary_values))
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    return response
+
+
+@app.route("/auth/show-identity/callback", methods=["POST"])
+async def complete_show_identity_login():
+    from core.show_pages import ShowPageStore
+    from vibe import show_identity
+
+    config = _load_remote_access_config()
+    if config is None:
+        return _show_identity_error_response("identity_unavailable", 503)
+    try:
+        fields = await _show_identity_callback_fields()
+        state = show_identity.read_show_identity_state(
+            config,
+            fields.get("state"),
+            callback_origin=_current_origin(),
+        )
+        if "error" in fields:
+            if fields["error"] not in {"identity_not_verified", "identity_unavailable"}:
+                raise show_identity.ShowIdentityError("invalid_callback")
+            return _show_identity_error_response(fields["error"], 403)
+        identity = show_identity.verify_show_identity_assertion(
+            config,
+            fields.get("assertion"),
+            expected_nonce=state.nonce,
+        )
+    except show_identity.ShowIdentityError as exc:
+        return _show_identity_error_response(exc.reason, 400)
+    except Exception:
+        logger.warning("Show identity callback failed", exc_info=True)
+        return _show_identity_error_response("identity_unavailable", 503)
+
+    store = ShowPageStore()
+    try:
+        page = store.get_by_share_id(state.share_id)
+        if page is None:
+            return _show_identity_error_response("not_found", 404)
+        access = store.get_access(page.session_id)
+        if access is None:
+            return _show_identity_error_response("not_found", 404)
+        if access.access_mode == "public":
+            return redirect(state.return_target, code=303)
+        if (
+            access.access_mode != "limited"
+            or identity.normalized_email not in access.normalized_emails
+        ):
+            return _show_identity_error_response("show_access_forbidden", 403)
+
+        # This browser-session lease intentionally has no live revision check:
+        # membership changes affect new admissions, not a page already opened.
+        lease = show_identity.make_show_guest_lease(
+            config,
+            page_id=page.session_id,
+            share_id=state.share_id,
+            normalized_email=identity.normalized_email,
+        )
+        response = redirect(state.return_target, code=303)
+        response.set_cookie(
+            show_identity.show_guest_cookie_name(state.share_id),
+            lease,
+            httponly=True,
+            secure=True,
+            samesite="Lax",
+            path=show_identity.show_guest_cookie_path(state.share_id),
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+    finally:
+        store.close()
+
+
 @app.route("/p/<share_id>")
 def redirect_public_show_page_to_canonical_path(share_id):
     from core.show_pages import ShowPageStore
 
+    config = _load_remote_access_config()
+    lease = _show_guest_lease(config, share_id)
     store = ShowPageStore()
     try:
         page = store.get_by_share_id(share_id)
+        if page is None and lease is not None:
+            page = store.get(lease.page_id)
         if page is None:
             return _show_page_not_found_response()
-        if page.visibility not in {"public", "offline"}:
+        if lease is None and page.visibility not in {"public", "limited", "offline"}:
             return _show_page_not_found_response()
         return redirect(f"/p/{quote(share_id, safe='')}/")
     finally:
@@ -14916,15 +15076,43 @@ def redirect_public_show_page_to_canonical_path(share_id):
 )
 async def serve_public_show_page(share_id, asset_path):
     from core.show_pages import ShowPageStore, ensure_show_page_dir
+    from vibe import show_identity
 
+    config = _load_remote_access_config()
+    lease = _show_guest_lease(config, share_id)
     store = ShowPageStore()
     try:
         page = store.get_by_share_id(share_id)
+        if page is None and lease is not None:
+            page = store.get(lease.page_id)
         if page is None:
             return _show_page_not_found_response()
-        if page.visibility == "offline":
+        limited_guest = lease is not None and lease.page_id == page.session_id
+        if not limited_guest and page.visibility == "offline":
             return _show_page_offline_response()
-        if page.visibility != "public":
+        if not limited_guest and page.visibility == "limited":
+            if request.method != "GET" or not _is_show_page_spa_route_request(
+                asset_path,
+                request._request,
+            ):
+                return _show_page_not_found_response()
+            if config is None:
+                return _show_identity_error_response("identity_unavailable", 503)
+            return_target = request.full_path if request.query_string else request.path
+            try:
+                authorization_url = show_identity.begin_show_identity_authorization(
+                    config,
+                    callback_origin=_current_origin(),
+                    share_id=share_id,
+                    return_target=return_target,
+                )
+            except show_identity.ShowIdentityError:
+                return _show_identity_error_response("identity_unavailable", 503)
+            response = redirect(authorization_url)
+            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            return response
+        if not limited_guest and page.visibility != "public":
             return _show_page_not_found_response()
         if _is_show_page_runtime_denied_path(
             asset_path,
@@ -14935,20 +15123,23 @@ async def serve_public_show_page(share_id, asset_path):
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
-            author = _show_request_author(public=True)
+            author = None if limited_guest else _show_request_author(public=True)
             can_annotate = _show_annotation_capability(
                 author=author,
                 page=page,
                 public_share_id=share_id,
-            )
-            return _show_me_response(
+            ) if not limited_guest else False
+            response = _show_me_response(
                 author,
                 can_annotate=can_annotate,
                 write_token=(
                     show_public_event_write_token(share_id, page.session_id) if can_annotate else None
                 ),
             )
+            return _with_limited_show_policy(response) if limited_guest else response
         if asset_path.strip("/").startswith("__show/media/"):
+            if limited_guest:
+                return _show_page_file_not_found_response()
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
             token = asset_path.strip("/").removeprefix("__show/media/")
@@ -14961,6 +15152,8 @@ async def serve_public_show_page(share_id, asset_path):
                 public_show_page=True,
             )
         if asset_path.strip("/") in {"__show/events", "__events"}:
+            if limited_guest:
+                return _show_page_file_not_found_response()
             if request.method == "GET":
                 return await _show_events_response(
                     page.session_id,
@@ -14998,6 +15191,8 @@ async def serve_public_show_page(share_id, asset_path):
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):
                 return shim_response
+            if limited_guest and _is_show_annotation_asset(asset_path):
+                return _show_page_file_not_found_response()
         page_dir = ensure_show_page_dir(page.session_id)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
@@ -15009,8 +15204,11 @@ async def serve_public_show_page(share_id, asset_path):
                     starlette_request,
                     external_prefix=f"/p/{quote(share_id, safe='')}",
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
-                    show_authenticated=_show_request_author(public=True) is not None,
+                    show_authenticated=(
+                        False if limited_guest else _show_request_author(public=True) is not None
+                    ),
                     show_config_session_id=share_id,
+                    include_annotation_bootstrap=not limited_guest,
                 )
             except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
@@ -15028,6 +15226,8 @@ async def serve_public_show_page(share_id, asset_path):
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if request.method in {"GET", "HEAD"}:
+            if limited_guest:
+                return _with_limited_show_policy(response)
             if _is_show_runtime_immutable_asset_path(asset_path):
                 return response
             return _with_show_event_write_cookie(response, page.session_id, enabled=False)

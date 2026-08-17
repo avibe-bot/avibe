@@ -40,7 +40,7 @@ from core.show_runtime import (
 from storage import resource_access_service
 from tests.ui_server_test_helpers import _mock_interface, _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
-from vibe import remote_access, ui_server
+from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
 from storage import message_deliveries
 
@@ -450,12 +450,21 @@ def test_public_show_page_serves_from_authed_route(monkeypatch, tmp_path):
     assert b"Show Page" in response.content
 
 
-def test_limited_show_page_uses_authed_editor_route_but_not_anonymous_route(
+def _configure_show_identity(config):
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.issuer = "https://backend.test"
+    cloud.jwks_uri = "https://backend.test/oauth/jwks.json"
+    config.save()
+
+
+def test_limited_show_page_uses_editor_route_and_redirects_guest_to_identity(
     monkeypatch,
     tmp_path,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
     share_id = _create_show_page("ses123", "limited")
 
     editor = app.test_client().get(
@@ -464,14 +473,192 @@ def test_limited_show_page_uses_authed_editor_route_but_not_anonymous_route(
     )
     shared = app.test_client().get(
         f"/p/{share_id}/",
-        base_url="http://127.0.0.1:5123",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
     )
 
     assert editor.status_code == 200
     assert b"Show Page" in editor.content
-    # Limited guest admission belongs to the identity/shared-Runtime delivery
-    # lane. Until that lands, the anonymous route remains fail-closed.
-    assert shared.status_code == 404
+    assert shared.status_code == 302
+    authorization_url = urllib.parse.urlsplit(shared.headers["Location"])
+    assert authorization_url.path == (
+        "/api/v1/instances/inst_123/show-identity/authorize"
+    )
+    query = urllib.parse.parse_qs(authorization_url.query)
+    assert query["redirect_uri"] == [
+        "https://alex.avibe.bot/auth/show-identity/callback"
+    ]
+    state = show_identity.read_show_identity_state(
+        config,
+        query["state"][0],
+        callback_origin="https://alex.avibe.bot",
+    )
+    assert state.share_id == share_id
+    assert state.return_target == f"/p/{share_id}/"
+    assert query["nonce"] == [state.nonce]
+
+    asset = app.test_client().get(
+        f"/p/{share_id}/app.js",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert asset.status_code == 404
+
+
+def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    manager = _FakeShowRuntimeManager(
+        body=(
+            b'<!doctype html><html><body><script type="module" '
+            b'src="/src/main.tsx"></script></body></html>'
+        ),
+        bodies_by_path={
+            "/sessions/ses123/app/app.js": b"window.guestPage = true;",
+        },
+        headers_by_path={
+            "/sessions/ses123/app/app.js": {
+                "content-type": "text/javascript; charset=utf-8"
+            },
+        },
+    )
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        lambda *_args, **_kwargs: show_identity.VerifiedShowIdentity(
+            subject="viewer-1",
+            normalized_email="viewer@example.com",
+        ),
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        client = app.test_client()
+        login = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(login.headers["Location"]).query
+        )
+        callback = client.post(
+            show_identity.CALLBACK_PATH,
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            data={"state": query["state"][0], "assertion": "signed-assertion"},
+            follow_redirects=False,
+        )
+        assert callback.status_code == 303
+        assert callback.headers["Location"] == f"/p/{share_id}/"
+        set_cookie = callback.headers["Set-Cookie"]
+        assert "HttpOnly" in set_cookie
+        assert "Secure" in set_cookie
+        assert "SameSite=Lax" in set_cookie
+        assert "Expires=" not in set_cookie
+        assert "Max-Age=" not in set_cookie
+
+        page = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+        )
+        assert page.status_code == 200
+        assert page.headers["Cache-Control"] == "private, no-store"
+        assert page.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+        assert b'"authenticated":false' in page.content
+        assert b"__show/annotation.js" not in page.content
+
+        events = client.get(
+            f"/p/{share_id}/__show/events",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert events.status_code == 404
+
+        store = ShowPageStore()
+        try:
+            access = store.get_access("ses123")
+            assert access is not None
+            removed = store.apply_access(
+                "ses123",
+                expected_revision=access.revision,
+                target_access_mode="limited",
+                target_share_id=share_id,
+                target_emails=["someone-else@example.com"],
+            )
+            assert removed.status == "applied"
+        finally:
+            store.close()
+
+        existing_asset = client.get(
+            f"/p/{share_id}/app.js",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert existing_asset.status_code == 200
+
+        fresh_client = app.test_client()
+        fresh_login = fresh_client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        fresh_query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(fresh_login.headers["Location"]).query
+        )
+        denied = fresh_client.post(
+            show_identity.CALLBACK_PATH,
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            data={
+                "state": fresh_query["state"][0],
+                "assertion": "signed-assertion",
+            },
+        )
+        assert denied.status_code == 403
+
+        store = ShowPageStore()
+        try:
+            access = store.get_access("ses123")
+            assert access is not None
+            made_private = store.apply_access(
+                "ses123",
+                expected_revision=access.revision,
+                target_access_mode="private",
+                target_share_id=share_id,
+                target_emails=[],
+            )
+            assert made_private.status == "applied"
+        finally:
+            store.close()
+
+        still_open = client.get(
+            f"/p/{share_id}/app.js",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert still_open.status_code == 200
+        new_visit = app.test_client().get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+        )
+        assert new_visit.status_code == 404
+    finally:
+        set_show_runtime_manager_for_tests(None)
 
 
 def test_public_show_page_still_requires_remote_login(monkeypatch, tmp_path):
