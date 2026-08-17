@@ -275,6 +275,9 @@ function AccessEntryDialog({
   }, [editing, open, response]);
 
   const activeGroups = groups.filter((group) => !group.archived_at);
+  const archivedGroup = kind === 'organization_group'
+    ? groups.find((group) => group.id === value && group.archived_at)
+    : undefined;
   const resolvedValue = kind === 'organization_group'
     ? (value || activeGroups[0]?.id || '')
     : normalizePrincipal(kind, value);
@@ -393,7 +396,7 @@ function AccessEntryDialog({
               value={kind}
               onChange={(event) => { setKind(event.target.value as PrincipalKind); setValue(''); }}
             >
-              {activeGroups.length > 0 ? <option value="organization_group">{t('permissions.principals.organization_group')}</option> : null}
+              {activeGroups.length > 0 || archivedGroup ? <option value="organization_group">{t('permissions.principals.organization_group')}</option> : null}
               <option value="email">{t('permissions.principals.email')}</option>
               <option value="email_domain">{t('permissions.principals.email_domain')}</option>
             </Select>
@@ -402,6 +405,7 @@ function AccessEntryDialog({
             <Label htmlFor="permissions-access-value">{t('permissions.fields.principal')}</Label>
             {kind === 'organization_group' ? (
               <Select id="permissions-access-value" value={resolvedValue} onChange={(event) => setValue(event.target.value)}>
+                {archivedGroup ? <option value={archivedGroup.id}>{archivedGroup.name} ({t('common.archived')})</option> : null}
                 {activeGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
               </Select>
             ) : (
@@ -518,7 +522,7 @@ function ProjectAccessDialog({
       return false;
     }
     const authoritative = latest.response.projection.projects.find(
-      (item) => item.project_id === project.project_id,
+      (item) => item.project_id === project.project_id && item.sync.status !== 'deleted',
     );
     if (!authoritative) {
       onOpenChange(false);
@@ -624,47 +628,55 @@ function ProjectAccessDialog({
                   <Label>{t('permissions.projects.bindings')}</Label>
                   <Button size="sm" variant="outline" onClick={addBinding}><Plus className="size-4" />{t('permissions.actions.addBinding')}</Button>
                 </div>
-                {bindings.map((binding, index) => (
-                  <div key={`${index}:${binding.principal_kind}`} className="grid gap-2 rounded-lg border border-border p-3 sm:grid-cols-[150px_minmax(0,1fr)_110px_36px]">
-                    <Select
-                      aria-label={t('permissions.fields.principalType')}
-                      value={binding.principal_kind}
-                      onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? {
-                        ...item,
-                        principal_kind: event.target.value as PrincipalKind,
-                        principal_value: event.target.value === 'organization_group' ? (activeGroups[0]?.id ?? '') : '',
-                      } : item))}
-                    >
-                      {activeGroups.length > 0 ? <option value="organization_group">{t('permissions.principals.organization_group')}</option> : null}
-                      <option value="email">{t('permissions.principals.email')}</option>
-                      <option value="email_domain">{t('permissions.principals.email_domain')}</option>
-                    </Select>
-                    {binding.principal_kind === 'organization_group' ? (
+                {bindings.map((binding, index) => {
+                  const archivedGroup = binding.principal_kind === 'organization_group'
+                    ? groups.find((group) => (
+                        group.id === binding.principal_value && group.archived_at
+                      ))
+                    : undefined;
+                  return (
+                    <div key={`${index}:${binding.principal_kind}`} className="grid gap-2 rounded-lg border border-border p-3 sm:grid-cols-[150px_minmax(0,1fr)_110px_36px]">
                       <Select
-                        aria-label={t('permissions.fields.principal')}
-                        value={binding.principal_value}
-                        onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, principal_value: event.target.value } : item))}
+                        aria-label={t('permissions.fields.principalType')}
+                        value={binding.principal_kind}
+                        onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? {
+                          ...item,
+                          principal_kind: event.target.value as PrincipalKind,
+                          principal_value: event.target.value === 'organization_group' ? (activeGroups[0]?.id ?? '') : '',
+                        } : item))}
                       >
-                        {activeGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                        {activeGroups.length > 0 || archivedGroup ? <option value="organization_group">{t('permissions.principals.organization_group')}</option> : null}
+                        <option value="email">{t('permissions.principals.email')}</option>
+                        <option value="email_domain">{t('permissions.principals.email_domain')}</option>
                       </Select>
-                    ) : (
-                      <Input
-                        aria-label={t('permissions.fields.principal')}
-                        value={binding.principal_value}
-                        onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, principal_value: event.target.value } : item))}
-                      />
-                    )}
-                    <Select
-                      aria-label={t('permissions.fields.role')}
-                      value={binding.access_role}
-                      onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, access_role: event.target.value as AccessRole } : item))}
-                    >
-                      <option value="viewer">{t('permissions.roles.viewer')}</option>
-                      <option value="editor">{t('permissions.roles.editor')}</option>
-                    </Select>
-                    <Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeBinding')} onClick={() => setBindings((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 className="size-4" /></Button>
-                  </div>
-                ))}
+                      {binding.principal_kind === 'organization_group' ? (
+                        <Select
+                          aria-label={t('permissions.fields.principal')}
+                          value={binding.principal_value}
+                          onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, principal_value: event.target.value } : item))}
+                        >
+                          {archivedGroup ? <option value={archivedGroup.id}>{archivedGroup.name} ({t('common.archived')})</option> : null}
+                          {activeGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                        </Select>
+                      ) : (
+                        <Input
+                          aria-label={t('permissions.fields.principal')}
+                          value={binding.principal_value}
+                          onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, principal_value: event.target.value } : item))}
+                        />
+                      )}
+                      <Select
+                        aria-label={t('permissions.fields.role')}
+                        value={binding.access_role}
+                        onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, access_role: event.target.value as AccessRole } : item))}
+                      >
+                        <option value="viewer">{t('permissions.roles.viewer')}</option>
+                        <option value="editor">{t('permissions.roles.editor')}</option>
+                      </Select>
+                      <Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeBinding')} onClick={() => setBindings((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 className="size-4" /></Button>
+                    </div>
+                  );
+                })}
                 {bindings.length === 0 ? <p className="text-[12px] text-gold-ink">{t('permissions.projects.bindingRequired')}</p> : null}
               </div>
             ) : null}
@@ -714,6 +726,7 @@ export function PermissionsPage() {
     const result = await fetchPermissionsPage();
     if (!result.response) return { kind: 'failed' };
     if (result.response.source !== 'live' || result.response.offline) {
+      if (mounted.current) setState({ kind: 'ready', response: result.response });
       return { kind: 'offline' };
     }
     if (mounted.current) setState({ kind: 'ready', response: result.response });
@@ -783,10 +796,12 @@ export function PermissionsPage() {
   const groups = projection.directory.groups;
   const editable = capabilities.can_manage_instance
     && projection.instance.local_mutation_allowed
+    && projection.capabilities.includes('instance.permissions.mutate')
     && !response.offline;
   const applying = projectionIsApplying(response);
   const filteredProjects = projection.projects.filter((project) => (
-    `${project.display_name} ${project.project_id}`.toLowerCase().includes(search.trim().toLowerCase())
+    project.sync.status !== 'deleted'
+    && `${project.display_name} ${project.project_id}`.toLowerCase().includes(search.trim().toLowerCase())
   ));
 
   const updateResponse = (updater: (current: PermissionsResponse) => PermissionsResponse) => {
@@ -905,7 +920,7 @@ export function PermissionsPage() {
           body={t('permissions.states.cloudBody')}
           action={<Button asChild size="sm" variant="outline"><a href="https://avibe.bot" target="_blank" rel="noreferrer">{t('permissions.actions.openCloud')}<ExternalLink className="size-3.5" /></a></Button>}
         />
-      ) : !capabilities.can_manage_instance ? (
+      ) : !editable ? (
         <Notice tone="neutral" icon={Eye} title={t('permissions.states.readOnlyTitle')} body={t('permissions.states.readOnlyBody')} />
       ) : applying ? (
         <Notice tone="warning" icon={Loader2} title={t('permissions.states.applyingTitle')} body={t('permissions.states.applyingBody')} />

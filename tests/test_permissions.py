@@ -14,8 +14,9 @@ from config.v2_config import (
     V2Config,
 )
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import permissions
+from vibe import permissions, remote_access
 from vibe.authorization import http_authorization_policy
+from vibe.sse_broker import broker
 from vibe.ui_server import app
 
 
@@ -654,6 +655,83 @@ def test_project_access_mutation_refreshes_offline_cache(monkeypatch) -> None:
     assert cached.source == "cache"
     assert cached.projection["instance"]["authorization_revision"] == 4
     assert cached.projection["projects"] == [updated_project]
+
+
+def test_permissions_mutations_advance_and_publish_the_authorization_watermark(
+    monkeypatch,
+) -> None:
+    project = _complete_projection()["projects"][0]
+    published = []
+
+    def request(_method, url, **_kwargs):
+        if url.endswith("/authorized-users"):
+            return _Response(
+                200,
+                {
+                    "ok": True,
+                    "entries": [],
+                    "authorization_revision": 4,
+                },
+            )
+        return _Response(
+            200,
+            {
+                "ok": True,
+                "project": project,
+                "authorization_revision": 5,
+            },
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+    monkeypatch.setattr(
+        broker,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+    config = _config()
+
+    permissions.replace_authorized_users(
+        {
+            "entries": [],
+            "if_match_revision": 3,
+            "if_match_instance_id": "inst-123",
+        },
+        config,
+    )
+    permissions.update_project_access(
+        "project-1",
+        {
+            "mode": "restricted",
+            "bindings": project["access"]["bindings"],
+            "if_match_revision": 2,
+            "if_match_instance_id": "inst-123",
+        },
+        config,
+    )
+
+    assert remote_access.current_authorization_revision(config) == 5
+    assert published == [
+        ("authorization.changed", {"instance_authorization_revision": 4}),
+        ("authorization.changed", {"instance_authorization_revision": 5}),
+    ]
+
+
+def test_out_of_order_mutation_acknowledgement_keeps_the_newer_watermark_epoch(
+    monkeypatch,
+) -> None:
+    source_times = iter((100.0, 200.0))
+    monkeypatch.setattr(remote_access.time, "time", lambda: next(source_times))
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+    config = _config()
+
+    remote_access._replace_authorization_revision(config, 5)  # noqa: SLF001
+    assert remote_access.acknowledge_authorization_revision(config, 4) == 5
+
+    assert remote_access._load_authorization_revision_snapshot(config) == (  # noqa: SLF001
+        5,
+        100.0,
+    )
 
 
 def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() -> None:

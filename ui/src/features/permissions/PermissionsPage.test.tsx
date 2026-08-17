@@ -152,6 +152,21 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
   });
 
+  it('gates every edit surface on the Backend mutation capability', async () => {
+    const readOnly = response();
+    readOnly.projection.capabilities = ['instance.permissions.read'];
+    api.getPermissions.mockResolvedValue(readOnly);
+    const user = userEvent.setup();
+
+    renderPage();
+
+    expect(await screen.findByText('permissions.states.readOnlyTitle')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /permissions.actions.editAccess/ })).toBeNull();
+    await user.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+    expect(screen.queryByRole('button', { name: 'permissions.actions.manage' })).toBeNull();
+  });
+
   it('renders an API denial instead of an empty policy', async () => {
     api.getPermissions.mockRejectedValue(new PermissionsApiError(403, { error: 'instance_access_forbidden' }));
 
@@ -194,6 +209,31 @@ describe('PermissionsPage state model', () => {
     expect(api.getPermissions).toHaveBeenCalledTimes(2);
   });
 
+  it('installs an offline fallback before stopping an applying-policy refresh', async () => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    const cached = response({ source: 'cache', offline: true, cached_at: 123 });
+    cached.projection.policy_sync.status = 'applying';
+    cached.projection.projects[0]!.sync.status = 'pending';
+    api.getPermissions
+      .mockResolvedValueOnce(applying)
+      .mockResolvedValueOnce(cached);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText('permissions.states.applyingTitle')).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('permissions.states.offlineTitle')).toBeTruthy();
+    expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+  });
+
   it('does not poll cached offline policy and cleans up a live refresh timer', async () => {
     vi.useFakeTimers();
     const cached = response({ source: 'cache', offline: true, cached_at: 123 });
@@ -219,6 +259,58 @@ describe('PermissionsPage state model', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     expect(api.getPermissions).toHaveBeenCalledOnce();
+  });
+
+  it('hides deleted Project tombstones from the management surface', async () => {
+    const policy = response();
+    policy.projection.projects[0]!.sync.status = 'deleted';
+    api.getPermissions.mockResolvedValue(policy);
+    const user = userEvent.setup();
+
+    renderPage();
+    await user.click(await screen.findByRole('tab', { name: 'permissions.tabs.projects' }));
+
+    expect(screen.getByText('permissions.projects.emptyTitle')).toBeTruthy();
+    expect(screen.queryByText('Launch Plan')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'permissions.actions.manage' })).toBeNull();
+  });
+
+  it('keeps referenced archived groups selectable in both policy editors', async () => {
+    const policy = response();
+    policy.projection.directory.groups = [{
+      id: 'group-archived',
+      name: 'Retired Team',
+      archived_at: '2026-08-17T12:00:00Z',
+    }];
+    policy.projection.access.entries = [{
+      kind: 'organization_group',
+      value: 'group-archived',
+      role: 'viewer',
+    }];
+    policy.projection.projects[0]!.access.bindings = [{
+      principal_kind: 'organization_group',
+      principal_value: 'group-archived',
+      access_role: 'viewer',
+    }];
+    api.getPermissions.mockResolvedValue(policy);
+    const user = userEvent.setup();
+
+    renderPage();
+    await user.click(await screen.findByRole('button', {
+      name: 'permissions.actions.editAccess',
+    }));
+    const accessPrincipal = screen.getByLabelText('permissions.fields.principal');
+    expect((within(accessPrincipal).getByRole('option', {
+      name: 'Retired Team (common.archived)',
+    }) as HTMLOptionElement).selected).toBe(true);
+    await user.click(screen.getByRole('button', { name: 'common.cancel' }));
+
+    await user.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+    const projectPrincipal = screen.getByLabelText('permissions.fields.principal');
+    expect((within(projectPrincipal).getByRole('option', {
+      name: 'Retired Team (common.archived)',
+    }) as HTMLOptionElement).selected).toBe(true);
   });
 });
 

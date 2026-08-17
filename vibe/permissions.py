@@ -434,6 +434,12 @@ def _cache_mutation_result(
         _cache_projection(instance_id, _validated_projection(projection, instance_id))
 
 
+def _acknowledge_authorization_revision(config: V2Config, revision: int) -> None:
+    from vibe import remote_access
+
+    remote_access.acknowledge_authorization_revision(config, revision)
+
+
 def _backend_request(
     config: V2Config,
     method: str,
@@ -518,6 +524,7 @@ def replace_authorized_users(
         expected_instance_id=expected_instance_id,
     )
     result = _validated_authorized_users_result(payload_result)
+    _acknowledge_authorization_revision(config, result["authorization_revision"])
     _cache_mutation_result(
         instance_id,
         result["authorization_revision"],
@@ -543,6 +550,7 @@ def update_project_access(
         expected_instance_id=expected_instance_id,
     )
     result = _validated_project_result(payload_result, project_id)
+    _acknowledge_authorization_revision(config, result["authorization_revision"])
     _cache_mutation_result(
         instance_id,
         result["authorization_revision"],

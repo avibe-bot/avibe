@@ -768,6 +768,22 @@ def _replace_authorization_revision(config: V2Config, value: Any) -> int:
     return revision
 
 
+def acknowledge_authorization_revision(config: V2Config, value: Any) -> int:
+    """Record a mutation acknowledgement without regressing a newer watermark."""
+
+    try:
+        return _replace_authorization_revision(config, value)
+    except ValueError as exc:
+        if str(exc) != "authorization_revision_regressed":
+            raise
+        snapshot = _load_authorization_revision_snapshot(config)
+        if snapshot is None:
+            raise
+        # An out-of-order acknowledgement must not refresh the timestamp for the
+        # newer revision; it confirms only the older epoch carried in its result.
+        return snapshot[0]
+
+
 def _clear_authorization_revision_cache() -> None:
     global _AUTHORIZATION_REVISION_CACHE
 
