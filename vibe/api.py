@@ -703,13 +703,67 @@ def _config_recovery_message() -> Optional[str]:
     return config_recovery_notice(config)
 
 
+_LIST_OPS_PAYLOAD_KEY = "__avibe_list_ops"
+
+
+def _apply_list_ops(base: dict, list_ops: dict) -> dict:
+    """Apply add/remove operations to list-valued config paths.
+
+    ``{"platforms.enabled": {"add": ["wechat"], "remove": ["discord"]}}``
+    mutates the lock-fresh base's list instead of replacing it wholesale,
+    so a stale browser snapshot of the list cannot drop entries another
+    process added (#1458 stage ③: lists are replace-on-merge otherwise).
+    Unknown or non-list paths are ignored (no error surface yet — the
+    only producer is first-party UI code).
+    """
+    import copy as _copy
+
+    merged = _copy.deepcopy(base)
+
+    def _resolve(container: dict, dotted: str):
+        current = container
+        for part in dotted.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
+
+    for dotted, ops in list_ops.items():
+        if not isinstance(ops, dict):
+            continue
+        target = _resolve(merged, dotted)
+        if not isinstance(target, list):
+            continue
+        additions = ops.get("add")
+        removals = ops.get("remove")
+        next_list = [item for item in target if item not in (removals or [])]
+        for item in additions or []:
+            if item not in next_list:
+                next_list.append(item)
+        # Write back through the dotted path.
+        parts = dotted.split(".")
+        node = merged
+        for part in parts[:-1]:
+            node = node[part]
+        node[parts[-1]] = next_list
+    return merged
+
+
 def _deep_merge_dicts(base: dict, patch: dict) -> dict:
+    list_ops = None
+    if isinstance(patch, dict):
+        raw_ops = patch.get(_LIST_OPS_PAYLOAD_KEY)
+        if isinstance(raw_ops, dict):
+            list_ops = raw_ops
+            patch = {k: v for k, v in patch.items() if k != _LIST_OPS_PAYLOAD_KEY}
     merged = dict(base)
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge_dicts(merged[key], value)
         else:
             merged[key] = value
+    if list_ops is not None:
+        merged = _apply_list_ops(merged, list_ops)
     return merged
 
 
@@ -961,6 +1015,9 @@ def save_config(
     payload = _strip_agent_auth_fields(payload)
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
+    # The list-operations verb is a merge instruction, never config
+    # state: pull it out before anything treats the payload as data.
+    raw_list_ops = payload.pop(_LIST_OPS_PAYLOAD_KEY, None)
 
     # Serialize the WHOLE read-merge-write cycle across processes
     # (#1458 stage ③): the base load, merge, validation, and write all
@@ -1000,7 +1057,12 @@ def save_config(
                 base_payload.pop("platforms", None)
                 base_payload.pop("platform", None)
 
-        merged_payload = _deep_merge_dicts(base_payload, payload) if base_payload else payload
+        if base_payload:
+            merged_payload = _deep_merge_dicts(base_payload, payload)
+            if isinstance(raw_list_ops, dict) and raw_list_ops:
+                merged_payload = _apply_list_ops(merged_payload, raw_list_ops)
+        else:
+            merged_payload = payload
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)

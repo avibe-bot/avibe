@@ -123,14 +123,21 @@ export const SettingsPlatformsPage: React.FC = () => {
     return true;
   };
 
-  const persistEnabled = async (nextEnabled: string[]) => {
+  // Patch-write shape with list OPERATIONS: sending the whole enabled
+  // list (even as a section patch) replaces it wholesale in the merge —
+  // a stale browser snapshot would drop platforms another process
+  // enabled (e.g. WeChat QR confirmation). The backend verb applies
+  // add/remove against the lock-fresh persisted list instead.
+  const persistEnabledChange = async (
+    op: 'add' | 'remove',
+    platform: string
+  ): Promise<boolean> => {
     setRestartPhase('saving');
     try {
       try {
-        // Patch-write shape: only the section this page owns — a
-        // full-snapshot round-trip would overwrite concurrent changes
-        // from other processes (installer cli_path updates, auth saves).
-        const savedConfig = await saveConfig({ platforms: { enabled: nextEnabled } });
+        const savedConfig = await saveConfig({
+          __avibe_list_ops: { 'platforms.enabled': { [op]: [platform] } },
+        });
         showApplyResult(savedConfig);
       } catch {
         showToast(t('common.saveFailed'), 'error');
@@ -147,7 +154,7 @@ export const SettingsPlatformsPage: React.FC = () => {
   const doDisable = async (id: string) => {
     setBusyPlatform(id);
     try {
-      await persistEnabled(enabledPlatforms.filter((p) => p !== id));
+      await persistEnabledChange('remove', id);
       setRevealed((prev) => prev.filter((p) => p !== id));
       setOpenConfig((prev) => (prev === id ? null : prev));
     } finally {
@@ -173,7 +180,7 @@ export const SettingsPlatformsPage: React.FC = () => {
       // Already configured → checking enables it immediately.
       setBusyPlatform(id);
       try {
-        await persistEnabled([...enabledPlatforms, id]);
+        await persistEnabledChange('add', id);
       } finally {
         setBusyPlatform(null);
       }
@@ -216,9 +223,10 @@ export const SettingsPlatformsPage: React.FC = () => {
         }
         return;
       }
-      const nextEnabled = [...enabledPlatforms, platform];
       try {
-        savedConfig = await saveConfig({ platforms: { enabled: nextEnabled } });
+        savedConfig = await saveConfig({
+          __avibe_list_ops: { 'platforms.enabled': { add: [platform] } },
+        });
       } catch {
         showToast(t('platform.restartFailed'), 'error');
         return;

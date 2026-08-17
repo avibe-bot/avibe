@@ -1674,3 +1674,32 @@ def test_editor_config_write_error_code_keeps_every_failure_localizable():
         ValueError(""),
     ):
         assert api.editor_config_write_error_code(exc) == "editor_config_write_invalid"
+
+
+def test_save_config_list_ops_merge_against_lock_fresh_base(monkeypatch, tmp_path):
+    """The ``__avibe_list_ops`` verb mutates the CURRENT persisted list
+    instead of replacing it with a stale browser snapshot: a toggle that
+    was computed before another process added a platform must not drop
+    that platform (#1458 stage ③ list semantics)."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    original = api.save_config(_full_config_payload())
+    # Another process seeds lark credentials and enables lark AFTER the
+    # browser rendered its snapshot.
+    api.save_config(
+        {
+            "lark": {"app_id": "cli_lark_id", "app_secret": "lark-secret"},
+            "platforms": {"enabled": ["discord", "lark"]},
+        }
+    )
+
+    # The browser's stale snapshot only knows slack; the toggle wants to
+    # remove slack — expressed as an operation, not a list replacement.
+    updated = api.save_config(
+        {
+          "__avibe_list_ops": {"platforms.enabled": {"remove": ["discord"]}},
+        }
+    )
+
+    assert "discord" not in updated.platforms.enabled
+    assert "lark" in updated.platforms.enabled
