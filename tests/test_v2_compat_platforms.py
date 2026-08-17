@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import json
 import sys
 from pathlib import Path
 
@@ -126,6 +128,48 @@ def test_to_app_config_uses_shared_agent_defaults() -> None:
         compat.opencode.active_turn_timeout_seconds
         == DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     )
+    assert DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS == 0
+
+
+def test_config_load_neutralizes_legacy_opencode_turn_timeout_default(
+    monkeypatch, tmp_path
+) -> None:
+    """The shipped 5400-second cap is the old default's echo, not a choice.
+
+    Seeding every persisted shape proves the property in one pass: the legacy
+    default value loads as disabled, while an explicit custom value and an
+    absent key keep their meaning. A different value written later cannot be
+    silently rewritten because only the exact legacy constant matches.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.services.settings import default_config
+    from vibe import api
+
+    base = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    cases = {
+        90 * 60: 0,  # legacy default echo -> disabled
+        7200: 7200,  # explicit operator choice survives
+        0: 0,  # explicit opt-out survives
+    }
+    for index, (persisted, expected) in enumerate(cases.items()):
+        payload = copy.deepcopy(base)
+        payload["agents"]["opencode"]["active_turn_timeout_seconds"] = persisted
+        config_path = tmp_path / f"config-{index}.json"
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        loaded = V2Config.load(config_path=config_path)
+
+        assert loaded.agents.opencode.active_turn_timeout_seconds == expected
+
+    payload = copy.deepcopy(base)
+    payload["agents"]["opencode"].pop("active_turn_timeout_seconds", None)
+    config_path = tmp_path / "config-missing.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.agents.opencode.active_turn_timeout_seconds == 0
 
 
 def test_to_app_config_exposes_opencode_provider_and_reasoning_fields() -> None:

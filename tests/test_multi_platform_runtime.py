@@ -2027,6 +2027,122 @@ def test_opencode_active_turn_poll_propagates_cancellation_without_settlement():
     assert emitted == []
 
 
+def test_opencode_active_turn_timeout_reads_disabled_semantics():
+    """Every unset, non-positive, or non-finite shape reads as disabled.
+
+    The seed set is every value shape the config can carry once the shipped
+    default is disabled: the dataclass default (missing attribute), an
+    explicit opt-out, a negative number, None, NaN, infinity, and an
+    unparseable string. None of them may silently re-enable the historical
+    wall-clock cap; only a positive opt-in survives as itself.
+    """
+
+    def _config_with(value) -> type:
+        attrs = {"error_retry_limit": 0}
+        if value is not Ellipsis:
+            attrs["active_turn_timeout_seconds"] = value
+        return type("OpenCodeConfig", (), attrs)()
+
+    for raw_value in (Ellipsis, 0, -5, None, float("nan"), float("inf"), "garbage"):
+        loop = OpenCodePollLoop(type("A", (), {"opencode_config": _config_with(raw_value)})())
+        assert loop._active_turn_timeout_seconds() == 0.0, raw_value
+
+    loop = OpenCodePollLoop(type("A", (), {"opencode_config": _config_with(90 * 60)})())
+    assert loop._active_turn_timeout_seconds() == 5400.0
+
+    assert (
+        OpenCodePollLoop._deadline_from_persisted_start(0.0, time.time())
+        == float("inf")
+    )
+    assert OpenCodePollLoop._wait_timeout(float("inf")) is None
+    assert OpenCodePollLoop._wait_timeout(1.5) == 1.5
+
+
+def test_opencode_prompt_poll_has_no_wall_clock_deadline_when_disabled(monkeypatch):
+    """With the cap disabled the poll loop only stops on a terminal message."""
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
+    )
+
+    aborted = []
+    poll_count = {"n": 0}
+
+    class _Controller:
+        def _t(self, key, **kwargs):
+            return f"{key}:{kwargs}"
+
+        async def emit_agent_message(self, *args, **kwargs):
+            raise AssertionError("no emission expected on a clean terminal path")
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            poll_count["n"] += 1
+            if poll_count["n"] < 3:
+                return []
+            return [
+                {
+                    "info": {
+                        "id": "msg-final",
+                        "role": "assistant",
+                        "time": {"completed": True},
+                        "finish": "stop",
+                    },
+                    "parts": [{"type": "text", "text": "done"}],
+                }
+            ]
+
+        async def abort_session(self, session_id, directory):
+            aborted.append((session_id, directory))
+            return True
+
+    class _Agent:
+        opencode_config = type(
+            "OpenCodeConfig",
+            (),
+            {"error_retry_limit": 0, "active_turn_timeout_seconds": 0},
+        )()
+        controller = _Controller()
+
+        @staticmethod
+        def _extract_response_text(message):
+            return "done"
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            return False
+
+    async def _run():
+        request = AgentRequest(
+            context=MessageContext(
+                user_id="user",
+                channel_id="channel",
+                platform="slack",
+            ),
+            message="work",
+            user_message="work",
+            working_path="/tmp/work",
+            base_session_id="base",
+            composite_session_id="composite",
+            session_key="slack::channel",
+        )
+        return await OpenCodePollLoop(_Agent()).run_prompt_poll(
+            request,
+            _Server(),
+            "oc-no-deadline",
+            agent_to_use=None,
+            model_dict=None,
+            reasoning_effort=None,
+            baseline_message_ids=set(),
+        )
+
+    final_text, should_emit = asyncio.run(_run())
+
+    assert final_text == "done"
+    assert should_emit is True
+    assert poll_count["n"] == 3
+    assert aborted == []
+
+
 def test_mh_chan_001_opencode_restored_poll_records_source_failure():
     emitted = []
     removed = []

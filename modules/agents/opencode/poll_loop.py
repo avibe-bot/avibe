@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from config.v2_config import (
     DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
@@ -136,6 +136,15 @@ class OpenCodePollLoop:
             await record_failure(context, diagnostic)
 
     def _active_turn_timeout_seconds(self) -> float:
+        """The configured wall-clock bound, or ``0.0`` when it is disabled.
+
+        Non-positive, missing, or non-finite values all read as disabled. The
+        upstream runtime bounds its own retries and surfaces the exhausted
+        error on the message, which the poll loop's error path settles, so the
+        wall-clock cap is an explicit opt-in — an unset or invalid value must
+        not silently re-enable one.
+        """
+
         raw_timeout = getattr(
             self._agent.opencode_config,
             "active_turn_timeout_seconds",
@@ -144,19 +153,27 @@ class OpenCodePollLoop:
         try:
             timeout = float(raw_timeout)
         except (TypeError, ValueError):
-            timeout = float(DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS)
+            return 0.0
         if not math.isfinite(timeout) or timeout <= 0:
-            timeout = float(DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS)
+            return 0.0
         return timeout
 
     @staticmethod
     def _deadline_from_persisted_start(timeout_seconds: float, started_at: object) -> float:
+        if timeout_seconds <= 0:
+            return math.inf
         try:
             wall_started_at = float(started_at)
         except (TypeError, ValueError):
             wall_started_at = 0.0
         elapsed = max(0.0, time.time() - wall_started_at) if wall_started_at > 0 else 0.0
         return time.monotonic() + max(0.0, timeout_seconds - elapsed)
+
+    @staticmethod
+    def _wait_timeout(remaining: float) -> Union[float, None]:
+        """Map an infinite remaining budget to ``wait_for``'s no-timeout form."""
+
+        return None if math.isinf(remaining) else remaining
 
     @staticmethod
     async def _sleep_with_deadline(deadline: float) -> None:
@@ -284,7 +301,9 @@ class OpenCodePollLoop:
         emitted_assistant_messages: set[str] = set()
         final_text: Optional[str] = None
         timeout_seconds = self._active_turn_timeout_seconds()
-        deadline = time.monotonic() + timeout_seconds
+        deadline = (
+            time.monotonic() + timeout_seconds if timeout_seconds > 0 else math.inf
+        )
 
         error_retry_count = 0
         error_retry_limit = getattr(
@@ -316,7 +335,7 @@ class OpenCodePollLoop:
                         session_id=session_id,
                         directory=request.working_path,
                     ),
-                    timeout=remaining,
+                    timeout=self._wait_timeout(remaining),
                 )
                 if poll_iter % 5 == 0:
                     last_info = messages[-1].get("info", {}) if messages else {}
@@ -579,7 +598,7 @@ class OpenCodePollLoop:
                             session_id=session_id,
                             directory=poll_info.working_path,
                         ),
-                        timeout=remaining,
+                        timeout=self._wait_timeout(remaining),
                     )
                     if poll_iter % 5 == 0:
                         last_info = messages[-1].get("info", {}) if messages else {}

@@ -287,11 +287,18 @@ DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
-# A provider runtime can keep an accepted OpenCode prompt in retry forever without
-# surfacing a terminal message. Bound that lifecycle independently of per-request
-# HTTP timeouts; 90 minutes matches the watchdog threshold reported in #1190 and
-# remains adjustable for workloads that legitimately need longer turns.
-DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60
+# OpenCode >= 1.18.x bounds its own provider retries (RETRY_MAX_RETRIES = 5) and
+# writes the exhausted error onto the assistant message, which the poll loop's
+# error-driven settlement already turns into a failed terminal result. The
+# historical wall-clock cap from #1197 therefore default-offs here: a positive
+# value is an explicit opt-in for operators who still want a hard bound.
+DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 0
+# The shipped default before the opt-in change. A settings save materializes the
+# whole ``agents.opencode`` section, so a persisted value equal to this constant
+# is the old default's echo rather than an operator's choice; load-time
+# migration neutralizes exactly that value. Any other value is an explicit
+# choice and survives the migration.
+LEGACY_DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
@@ -892,9 +899,43 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     return migrated_payload, True, tuple(warnings)
 
 
+def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
+    """Neutralize the legacy wall-clock default echo on reload.
+
+    Configs saved while the cap shipped carry
+    ``agents.opencode.active_turn_timeout_seconds: 5400`` because a settings
+    save materializes the whole section. That value names the old default, not
+    an operator's choice, so exactly that value rewrites to the disabled
+    default. Idempotent: once rewritten (or never present) the pattern never
+    matches again.
+    """
+
+    agents = payload.get("agents")
+    if not isinstance(agents, dict):
+        return payload
+    opencode = agents.get("opencode")
+    if not isinstance(opencode, dict):
+        return payload
+    if (
+        opencode.get("active_turn_timeout_seconds")
+        != LEGACY_DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
+    ):
+        return payload
+    migrated = dict(payload)
+    migrated_agents = dict(agents)
+    migrated_opencode = dict(opencode)
+    migrated_opencode["active_turn_timeout_seconds"] = (
+        DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
+    )
+    migrated_agents["opencode"] = migrated_opencode
+    migrated["agents"] = migrated_agents
+    return migrated
+
+
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
     migrated = _migrate_fixed_menu_routes_on_load(migrated)
+    migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
     return migrated, changed, warnings
 
 

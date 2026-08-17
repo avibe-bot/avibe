@@ -2737,7 +2737,7 @@
     "errorRetryLimit": "错误重试次数",
     "errorRetryLimitHint": "当 LLM 流式响应出错时，自动发送 'continue' 重试（0 = 不重试）",
     "opencodeActiveTurnTimeout": "OpenCode Turn 上限",
-    "opencodeActiveTurnTimeoutHint": "已接受的 OpenCode Turn 在指定分钟内没有结果时中止并记为失败",
+    "opencodeActiveTurnTimeoutHint": "已接受的 OpenCode Turn 在指定分钟内没有结果时中止并记为失败。0 表示不限制；出错时 Turn 仍会记为失败",
     "showDuration": "显示耗时",
     "showDurationHint": "在结果消息中显示任务耗时",
     "includeTimeInfo": "携带时间信息",
