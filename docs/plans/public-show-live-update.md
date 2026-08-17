@@ -86,11 +86,14 @@ audience, instance, and same-origin JWKS authority. The Backend obtains the emai
 from a fresh verified identity record. Browser input cannot supply identity,
 membership, role, page, or share claims.
 
-Assertion, signed state, and correlation-cookie lifetimes are fixed at 300 seconds
+Assertion, signed state, and pending-flow-cookie lifetimes are fixed at 300 seconds
 with no post-expiry grace. One login flow is current for a browser and configured
 callback origin. Starting a newer flow replaces the prior flow; a stale, replayed,
 or expired callback returns a fixed retry result. This intentionally does not
-promise simultaneous flow success.
+promise simultaneous flow success. The opaque pending-flow cookie uses Path
+`/auth/show-identity`, so both local login start and callback receive it. The local
+store keeps at most one pending record for that handle; another browser has a
+different handle and an independent record.
 
 A known signing key is cached for at most 300 seconds. Once older, it is fetched
 once from the paired issuer before assertion validation; fetch failure returns
@@ -139,7 +142,10 @@ The capability is bound to instance, page, share, admitted revision, namespace,
 and document. Capture returns either that capability or one fixed sanitized
 `shared_runtime_unavailable`, `snapshot_too_large`, `capacity_exhausted`,
 `capture_timeout`, or `reload_required` result. User code receives no session ID,
-workspace/source path, identity material, HMR, or annotation bootstrap.
+workspace/source path, identity material, HMR, or annotation bootstrap. A limited
+admission always carries a nonempty verified identity subject; public admission may
+carry no subject. Namespace and document identifiers use only the URL-safe
+`A-Za-z0-9_-` alphabet.
 
 The trusted `/p/<share_id>/` shell places arbitrary page code in an iframe with
 exact sandbox token `allow-scripts`, without `allow-same-origin`. Its CSP includes
@@ -150,12 +156,15 @@ HMR, annotations, or another share's capability.
 
 Shared document, module, style, raw-asset, fallback, and page-API responses use
 one browser-compatible path prefix:
-`/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/{resource_handle}`.
-Nested imports are rewritten to absolute URLs under that same prefix. The opaque
-resource handle is never a source path; query strings, cookies, ambient identity,
-and custom request headers confer no authority. Capability-bearing path segments
-are redacted from access logs. Responses use credentialless CORS, never set
-cookies, and use `Referrer-Policy: no-referrer`.
+`/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/`. The root is
+the document, opaque assets use `asset/<handle>`, relative page APIs use
+`api/<safe-path>`, and a nested `/p` reload uses `history/<safe-path>`. API and
+history paths share the same normalized segment grammar and reject empty, dot, or
+encoded traversal segments. Nested imports are rewritten to absolute URLs under
+the same prefix. The opaque resource handle is never a source path; query strings,
+cookies, ambient identity, and custom request headers confer no authority.
+Capability-bearing path segments are redacted from access logs. Responses use
+credentialless CORS, never set cookies, and use `Referrer-Policy: no-referrer`.
 
 Admission is intentionally not continuous authorization. The document capability
 continues while its Runtime namespace and document handle exist. Membership, mode,

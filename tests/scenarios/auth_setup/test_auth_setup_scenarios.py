@@ -71,6 +71,20 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
         login = flow.start_login()
         self.assertEqual(set(login["authorize_request"]), {"state", "nonce", "redirect_uri"})
         self.assertEqual(
+            login["pending_flow_set_cookie"],
+            {
+                "name": "__Secure-avibe_show_identity_flow",
+                "value": login["pending_flow_cookie"],
+                "host_only": True,
+                "domain": None,
+                "secure": True,
+                "http_only": True,
+                "same_site": "None",
+                "path": "/auth/show-identity",
+                "maximum_age_seconds": 300,
+            },
+        )
+        self.assertEqual(
             (login["form_post"]["method"], login["form_post"]["path"]),
             ("POST", "/auth/show-identity/callback"),
         )
@@ -105,7 +119,7 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
                 "backend.authorize",
                 "local.callback_http_boundary",
                 "local.signed_state_verifier",
-                "local.correlation_cookie_verifier",
+                "local.pending_flow_cookie_verifier",
                 "local.assertion_verifier",
                 "local.identity_session_digest_store",
             ],
@@ -146,15 +160,49 @@ class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
         flow = bad_state.start_login()
         flow["form_post"]["form"]["state"] = "tampered-state"
         self.assertEqual(bad_state.complete_login(flow)["decision"], "identity_retry_required")
-        self.assertNotIn("local.correlation_cookie_verifier", bad_state.events)
+        self.assertNotIn("local.pending_flow_cookie_verifier", bad_state.events)
         self.assertFalse(bad_state.records)
 
         bad_cookie = ShowIdentityCallbackHarness()
         flow = bad_cookie.start_login()
-        flow["correlation_cookie"] = "wrong-secret"
+        flow["pending_flow_cookie"] = "wrong-secret"
         self.assertEqual(bad_cookie.complete_login(flow)["decision"], "identity_retry_required")
         self.assertNotIn("local.assertion_verifier", bad_cookie.events)
         self.assertFalse(bad_cookie.records)
+
+        concurrent = ShowIdentityCallbackHarness()
+        browser_a_first = concurrent.start_login(browser_id="browser-a")
+        browser_b = concurrent.start_login(browser_id="browser-b")
+        browser_a_latest = concurrent.start_login(browser_id="browser-a")
+        self.assertEqual(
+            browser_a_first["pending_flow_cookie"],
+            browser_a_latest["pending_flow_cookie"],
+        )
+        self.assertNotEqual(
+            browser_a_latest["pending_flow_cookie"],
+            browser_b["pending_flow_cookie"],
+        )
+        self.assertEqual(concurrent.pending_flow_count, 2)
+        self.assertEqual(
+            concurrent.complete_login(browser_a_first)["decision"],
+            "identity_retry_required",
+        )
+        self.assertEqual(concurrent.pending_flow_count, 2)
+        self.assertEqual(concurrent.complete_login(browser_b)["decision"], "return_to_share")
+        self.assertEqual(concurrent.pending_flow_count, 1)
+        self.assertEqual(
+            concurrent.complete_login(browser_a_latest)["decision"],
+            "return_to_share",
+        )
+        self.assertEqual(concurrent.pending_flow_count, 0)
+        self.assertEqual(
+            concurrent.navigate(browser_id="browser-b")["decision"],
+            "admitted_shared",
+        )
+        self.assertEqual(
+            concurrent.navigate(browser_id="browser-a")["decision"],
+            "admitted_shared",
+        )
 
         for field, value in (
             ("iss", "https://attacker.example"),

@@ -357,13 +357,27 @@ def test_identity_flow_has_one_fixed_lifetime_and_latest_flow_wins() -> None:
 
     assert contract["assertion"]["ttl_seconds"] == 300
     assert contract["assertion"]["clock_skew_seconds"] == 0
-    assert flow["state_and_correlation_cookie_lifetime_seconds"] == 300
+    assert flow["state_and_pending_flow_cookie_lifetime_seconds"] == 300
     assert flow["post_expiry_grace_seconds"] == 0
     assert flow["active_flow_cardinality"] == "one_per_browser_and_configured_callback_origin"
     assert flow["latest_login_start_replaces_previous"] is True
     assert flow["stale_or_replayed_callback"] == "identity_retry_required"
-    assert flow["correlation_cookie"]["maximum_age_seconds"] == 300
-    assert flow["correlation_cookie"]["same_site"] == "None"
+    assert flow["start_path"] == "/auth/show-identity/start"
+    assert flow["shared_cookie_path"] == "/auth/show-identity"
+    assert flow["pending_flow_cookie"]["maximum_age_seconds"] == 300
+    assert flow["pending_flow_cookie"]["same_site"] == "None"
+    assert flow["pending_flow_cookie"]["path"] == "/auth/show-identity"
+    assert flow["pending_flow_cookie"]["visible_to"] == ["login_start", "form_post_callback"]
+    assert flow["pending_flow_store"] == {
+        "key": "sha256_utf8_of_pending_flow_cookie_value",
+        "browser_correlation": "opaque_pending_flow_cookie_handle",
+        "value_fields_exact": ["flow_id", "signed_state_digest", "expires_at"],
+        "maximum_pending_flows_per_browser": 1,
+        "start_without_valid_handle": "mint_handle_and_create_one_pending_flow",
+        "start_with_current_handle": "atomically_replace_that_handle_pending_flow",
+        "different_browser_handles": "independent",
+        "callback_consumption": "delete_only_matching_handle_pending_flow",
+    }
     assert flow["callback_checks_in_order"][-1] == "reresolve_safe_return_share"
     assert key_lookup["maximum_forced_refreshes_per_login_attempt"] == 1
     assert key_lookup["refresh_is_coalesced_by_issuer"] is True
@@ -394,8 +408,17 @@ def test_identity_flow_has_one_fixed_lifetime_and_latest_flow_wins() -> None:
         for example in _load(ARTIFACTS["identity"])["x-examples"]
         if example["name"] == "signed_state_claims"
     )
+    pending_flow_cookie = next(
+        example["value"]
+        for example in _load(ARTIFACTS["identity"])["x-examples"]
+        if example["name"] == "pending_flow_cookie"
+    )
     assert claims["exp"] - claims["iat"] == 300
     assert state["exp"] - state["iat"] == 300
+    _validate(_load(ARTIFACTS["identity"]), "#/$defs/PendingFlowCookie", pending_flow_cookie)
+    callback_only_cookie = {**pending_flow_cookie, "path": "/auth/show-identity/callback"}
+    with pytest.raises(ValidationError):
+        _validate(_load(ARTIFACTS["identity"]), "#/$defs/PendingFlowCookie", callback_only_cookie)
 
 
 def test_identity_session_wire_is_minimal_fixed_lifetime_and_identity_only() -> None:
@@ -404,6 +427,15 @@ def test_identity_session_wire_is_minimal_fixed_lifetime_and_identity_only() -> 
     session = contract["identity_session"]
     interfaces = {interface["id"]: interface for interface in contract["interfaces"]}
 
+    assert interfaces["show_identity_login_start"] == {
+        "id": "show_identity_login_start",
+        "producer": "show_identity_browser",
+        "consumer": "avibe.local_http.GET /auth/show-identity/start",
+        "delivery": "browser_navigation_with_optional_pending_flow_cookie",
+        "request_cookie": "#/$defs/PendingFlowCookie",
+        "request_cookie_optional_on_first_start": True,
+        "result_cookie": "#/$defs/PendingFlowCookie",
+    }
     assert interfaces["show_identity_session_cookie"]["result"] == "#/$defs/IdentitySessionCookie"
     assert interfaces["show_identity_session_lookup"]["request"] == "#/$defs/IdentitySessionLookup"
     assert interfaces["show_identity_session_lookup"]["result"] == "#/$defs/IdentitySessionRecord"
@@ -577,6 +609,27 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     missing_session.pop("source_session_id")
     with pytest.raises(ValidationError):
         _validate(document, "#/$defs/SharedAdmission", missing_session)
+    limited = next(admission for admission in admissions if admission["audience"] == "limited")
+    limited_without_subject = {**limited, "identity_subject": None}
+    with pytest.raises(ValidationError):
+        _validate(document, "#/$defs/SharedAdmission", limited_without_subject)
+    public = next(admission for admission in admissions if admission["audience"] == "public")
+    _validate(document, "#/$defs/SharedAdmission", public)
+
+    capability = next(
+        example["value"] for example in document["x-examples"] if example["name"] == "document_capability"
+    )
+    for field in ("namespace_id", "document_id"):
+        for invalid_value in (
+            "identifier/invalid_01",
+            "identifier:invalid_01",
+            "identifier invalid_01",
+            "identifier_unicode_\u65e0\u6548",
+        ):
+            invalid_capability = deepcopy(capability)
+            invalid_capability[field] = invalid_value
+            with pytest.raises(ValidationError):
+                _validate(document, "#/$defs/SharedDocumentCapability", invalid_capability)
 
     failures = runtime["shared_admission"]["result"]["failures"]
     assert set(failures) == {
@@ -604,7 +657,8 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     assert transport["path_prefix_template"] == ("/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/")
     assert transport["document_url_has_trailing_slash"] is True
     assert transport["suffix_forms"] == {
-        "document_or_fallback": "<prefix>",
+        "document_root": "<prefix>",
+        "history_fallback": "<prefix>history/{normalized_relative_history_path}",
         "opaque_asset": "<prefix>asset/{resource_handle}",
         "page_api": "<prefix>api/{normalized_relative_api_path}",
     }
@@ -617,17 +671,40 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
     assert transport["capability_path_access_log_policy"].startswith("redact_")
     examples = {example["name"]: example["value"] for example in document["x-examples"]}
     document_path = examples["shared_document_request"]["path"]
+    history_path = examples["shared_history_fallback_request"]["path"]
     asset_path = examples["shared_module_request"]["path"]
     api_path = examples["shared_page_api_request"]["path"]
     assert document_path.endswith("/")
     assert urljoin(f"https://show.example.test{document_path}", "./api/data") == (
         f"https://show.example.test{api_path}"
     )
+    assert urljoin(f"https://show.example.test{document_path}", "history/reports/daily") == (
+        f"https://show.example.test{history_path}"
+    )
+    assert transport["top_level_history_mapping"] == {
+        "browser_url": "/p/<share_id>/{normalized_relative_history_path}",
+        "protected_request": "<prefix>history/{normalized_relative_history_path}",
+        "preserve_browser_url": True,
+    }
+    top_level_url = "/p/stable_alpha/reports/daily"
+    relative_history_path = top_level_url.removeprefix("/p/stable_alpha/")
+    assert history_path == f"{document_path}history/{relative_history_path}"
     for surface in ("document", "fallback"):
         _validate(
             document,
             "#/$defs/SharedResourceRequest",
             {"method": "GET", "surface": surface, "path": document_path},
+        )
+    _validate(
+        document,
+        "#/$defs/SharedResourceRequest",
+        {"method": "GET", "surface": "fallback", "path": history_path},
+    )
+    with pytest.raises(ValidationError):
+        _validate(
+            document,
+            "#/$defs/SharedResourceRequest",
+            {"method": "GET", "surface": "document", "path": history_path},
         )
     for surface in ("module", "style", "raw_asset"):
         _validate(
@@ -659,6 +736,23 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
                 document,
                 "#/$defs/SharedResourceRequest",
                 {"method": "GET", "surface": "page_api", "path": forbidden_path},
+            )
+
+    history_prefix = history_path.removesuffix("reports/daily")
+    for forbidden_path in (
+        history_prefix,
+        f"{history_prefix}/daily",
+        f"{history_prefix}./daily",
+        f"{history_prefix}../daily",
+        f"{history_prefix}%2e%2e/daily",
+        f"{history_prefix}reports%2Fdaily",
+        f"{history_path}?identity=ambient",
+    ):
+        with pytest.raises(ValidationError):
+            _validate(
+                document,
+                "#/$defs/SharedResourceRequest",
+                {"method": "GET", "surface": "fallback", "path": forbidden_path},
             )
 
 

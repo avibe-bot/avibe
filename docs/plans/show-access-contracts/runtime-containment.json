@@ -112,15 +112,21 @@
       "carrier": "versioned_opaque_path_prefix",
       "path_prefix_template": "/__avibe_show_shared/v1/{namespace_id}/{document_id}/{capability}/",
       "suffix_forms": {
-        "document_or_fallback": "<prefix>",
+        "document_root": "<prefix>",
+        "history_fallback": "<prefix>history/{normalized_relative_history_path}",
         "opaque_asset": "<prefix>asset/{resource_handle}",
         "page_api": "<prefix>api/{normalized_relative_api_path}"
       },
       "document_url_has_trailing_slash": true,
       "relative_page_api_resolution": "fetch(./api/data)_resolves_to_same_prefix_api/data",
       "page_api_namespace_mapping": "captured_page_api_only",
-      "page_api_path_segments": "one_or_more_ascii_alnum_underscore_or_hyphen_segments",
-      "page_api_forbidden_syntax": ["dot_segments", "empty_segments", "encoded_separator", "encoded_traversal", "query", "raw_source_path"],
+      "top_level_history_mapping": {
+        "browser_url": "/p/<share_id>/{normalized_relative_history_path}",
+        "protected_request": "<prefix>history/{normalized_relative_history_path}",
+        "preserve_browser_url": true
+      },
+      "history_and_api_path_segments": "one_or_more_ascii_alnum_underscore_or_hyphen_segments",
+      "history_and_api_forbidden_syntax": ["dot_segments", "empty_segments", "encoded_separator", "encoded_traversal", "query", "raw_source_path"],
       "nested_import_rewrite": "absolute_url_under_same_namespace_document_capability_prefix",
       "resource_handle": "opaque_non_path_source_identifier",
       "query_authority": false,
@@ -179,6 +185,7 @@
     {"name": "shared_admission_success", "schema_ref": "#/$defs/SharedAdmissionResult", "value": {"outcome": "success", "capability": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"}}},
     {"name": "shared_admission_unavailable", "schema_ref": "#/$defs/SharedAdmissionResult", "value": {"outcome": "failure", "code": "shared_runtime_unavailable", "http_status": 503, "body": "shared runtime unavailable"}},
     {"name": "shared_document_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "GET", "surface": "document", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/"}},
+    {"name": "shared_history_fallback_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "GET", "surface": "fallback", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/history/reports/daily"}},
     {"name": "shared_module_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "GET", "surface": "module", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/asset/res_opaque_01"}},
     {"name": "shared_page_api_request", "schema_ref": "#/$defs/SharedResourceRequest", "value": {"method": "POST", "surface": "page_api", "path": "/__avibe_show_shared/v1/ns_R4nd0mValue_01/doc_R4nd0mValue_01/cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-/api/data"}}
   ],
@@ -201,15 +208,21 @@
         "admitted_revision": {"type": "integer", "minimum": 0},
         "audience": {"enum": ["limited", "public"]},
         "identity_subject": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 512}, {"type": "null"}]}
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"audience": {"const": "limited"}}, "required": ["audience"]},
+          "then": {"properties": {"identity_subject": {"type": "string", "minLength": 1, "maxLength": 512}}}
+        }
+      ]
     },
     "SharedDocumentCapability": {
       "type": "object",
       "additionalProperties": false,
       "required": ["namespace_id", "document_id", "capability"],
       "properties": {
-        "namespace_id": {"type": "string", "minLength": 16, "maxLength": 256},
-        "document_id": {"type": "string", "minLength": 16, "maxLength": 256},
+        "namespace_id": {"type": "string", "minLength": 16, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$"},
+        "document_id": {"type": "string", "minLength": 16, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$"},
         "capability": {"type": "string", "minLength": 43, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$"}
       }
     },
@@ -255,13 +268,15 @@
           "type": "string",
           "oneOf": [
             {"pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/$"},
+            {"pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/history/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"},
             {"pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/asset/[A-Za-z0-9_-]+$"},
             {"pattern": "^/__avibe_show_shared/v1/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/api/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"}
           ]
         }
       },
       "allOf": [
-        {"if": {"properties": {"surface": {"enum": ["document", "fallback"]}}}, "then": {"properties": {"path": {"pattern": "/$"}}}},
+        {"if": {"properties": {"surface": {"const": "document"}}}, "then": {"properties": {"path": {"pattern": "/$"}}}},
+        {"if": {"properties": {"surface": {"const": "fallback"}}}, "then": {"properties": {"path": {"oneOf": [{"pattern": "/$"}, {"pattern": "/history/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"}]}}}},
         {"if": {"properties": {"surface": {"enum": ["module", "style", "raw_asset"]}}}, "then": {"properties": {"path": {"pattern": "/asset/[A-Za-z0-9_-]+$"}}}},
         {"if": {"properties": {"surface": {"const": "page_api"}}}, "then": {"properties": {"path": {"pattern": "/api/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"}}}}
       ]

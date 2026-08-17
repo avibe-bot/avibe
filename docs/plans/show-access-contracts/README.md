@@ -40,6 +40,10 @@ local identity session is one host-only `__Host-` cookie containing 32 random
 bytes plus a local record keyed only by the token's SHA-256 digest. It lasts a
 fixed 30 days without sliding refresh and proves identity only. Page admission
 remains a fresh local decision at each new top-level navigation or manual refresh.
+The pending-flow cookie is scoped to `/auth/show-identity`, so local login start
+and callback see the same opaque browser handle. Each presented handle owns at
+most one pending record; a repeat start replaces it without affecting another
+browser handle.
 
 After admission, the opaque document capability remains valid for that loaded
 document and its subresources while its Runtime namespace and document handle
@@ -56,10 +60,12 @@ capability and credentialless CORS; they never accept ambient identity or cookie
 Private editor edits never create, build, or rebase a shared graph. Shared graph
 keys include the internal source Session ID, but that value never crosses the
 browser boundary. Every protected resource uses one versioned opaque path with
-namespace, document, capability, and opaque resource-handle segments; nested
-imports are rewritten under the same prefix and those segments are redacted from
-access logs. Shared capture returns either a capability or one fixed sanitized
-failure result.
+URL-safe namespace, document, and capability segments. The document root ends in
+`/`; opaque assets use `asset/`, page APIs use `api/`, and nested-route reloads use
+`history/` with the same safe relative-path grammar. Nested imports are rewritten
+under the same prefix and capability segments are redacted from access logs. A
+limited admission always includes a nonempty verified subject. Shared capture
+returns either a capability or one fixed sanitized failure result.
 
 `/show` uses private Runtime context. Resource-editor authority is checked when
 an HMR/annotation connection is admitted. Permission changes do not require an

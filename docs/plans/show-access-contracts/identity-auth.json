@@ -9,6 +9,15 @@
     "purpose": "verified_identity_only",
     "interfaces": [
       {
+        "id": "show_identity_login_start",
+        "producer": "show_identity_browser",
+        "consumer": "avibe.local_http.GET /auth/show-identity/start",
+        "delivery": "browser_navigation_with_optional_pending_flow_cookie",
+        "request_cookie": "#/$defs/PendingFlowCookie",
+        "request_cookie_optional_on_first_start": true,
+        "result_cookie": "#/$defs/PendingFlowCookie"
+      },
+      {
         "id": "show_identity_authorize",
         "producer": "avibe.local_http.ShowIdentityLogin",
         "consumer": "avibe-backend.GET /api/v1/instances/{instanceId}/show-identity/authorize",
@@ -82,26 +91,39 @@
     "local_flow": {
       "active_flow_cardinality": "one_per_browser_and_configured_callback_origin",
       "latest_login_start_replaces_previous": true,
-      "state_and_correlation_cookie_lifetime_seconds": 300,
+      "start_path": "/auth/show-identity/start",
+      "shared_cookie_path": "/auth/show-identity",
+      "state_and_pending_flow_cookie_lifetime_seconds": 300,
       "post_expiry_grace_seconds": 0,
       "stale_or_replayed_callback": "identity_retry_required",
       "expired_flow_cleanup": "replace_or_delete_single_active_flow",
       "signed_state": "#/$defs/SignedStateClaims",
-      "correlation_cookie": {
+      "pending_flow_cookie": {
         "name": "__Secure-avibe_show_identity_flow",
-        "value": "independent_32_byte_random_secret",
+        "value": "base64url_without_padding_of_32_csprng_bytes",
         "host_only": true,
         "domain_attribute_allowed": false,
         "secure": true,
         "http_only": true,
         "same_site": "None",
-        "path": "/auth/show-identity/callback",
-        "maximum_age_seconds": 300
+        "path": "/auth/show-identity",
+        "maximum_age_seconds": 300,
+        "visible_to": ["login_start", "form_post_callback"]
+      },
+      "pending_flow_store": {
+        "key": "sha256_utf8_of_pending_flow_cookie_value",
+        "browser_correlation": "opaque_pending_flow_cookie_handle",
+        "value_fields_exact": ["flow_id", "signed_state_digest", "expires_at"],
+        "maximum_pending_flows_per_browser": 1,
+        "start_without_valid_handle": "mint_handle_and_create_one_pending_flow",
+        "start_with_current_handle": "atomically_replace_that_handle_pending_flow",
+        "different_browser_handles": "independent",
+        "callback_consumption": "delete_only_matching_handle_pending_flow"
       },
       "callback_checks_in_order": [
         "exact_configured_origin_and_fixed_path",
         "signed_state_valid_and_is_current_active_flow",
-        "correlation_cookie_secret_matches_current_flow",
+        "pending_flow_cookie_handle_matches_current_flow",
         "assertion_rs256_signature_issuer_audience_instance_nonce_and_expiry",
         "consume_current_flow_once",
         "create_or_replace_identity_only_session",
@@ -140,7 +162,7 @@
     "reference_evidence": {
       "scenario": "AUTH-SETUP-401",
       "harness": "tests/scenario_harness/show_identity_callback.py",
-      "closed_loop": ["authorize_request", "backend_form_post", "local_callback", "signed_state_check", "correlation_cookie_check", "assertion_binding_check", "digest_only_identity_session", "later_limited_navigation"],
+      "closed_loop": ["login_start_pending_flow_cookie", "authorize_request", "backend_form_post", "local_callback", "signed_state_check", "pending_flow_cookie_check", "assertion_binding_check", "digest_only_identity_session", "later_limited_navigation"],
       "production_crypto_browser_conformance": "future_backend_avibe_and_browser_lanes"
     },
     "backend_forbidden_behavior": ["receive_local_whitelist", "decide_page_membership", "derive_instance_role", "create_instance_access_context"],
@@ -166,6 +188,11 @@
       "name": "signed_state_claims",
       "schema_ref": "#/$defs/SignedStateClaims",
       "value": {"flow_id": "flow-1", "instance_id": "instance-1", "nonce": "nonce-value", "callback_origin": "https://show.example.test", "safe_return_path": "/p/stable_alpha/", "iat": 1786935600, "exp": 1786935900}
+    },
+    {
+      "name": "pending_flow_cookie",
+      "schema_ref": "#/$defs/PendingFlowCookie",
+      "value": {"name": "__Secure-avibe_show_identity_flow", "value": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "host_only": true, "domain": null, "secure": true, "http_only": true, "same_site": "None", "path": "/auth/show-identity", "maximum_age_seconds": 300}
     },
     {
       "name": "identity_session_cookie",
@@ -239,6 +266,22 @@
       "minLength": 43,
       "maxLength": 43,
       "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "PendingFlowCookie": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "host_only", "domain", "secure", "http_only", "same_site", "path", "maximum_age_seconds"],
+      "properties": {
+        "name": {"const": "__Secure-avibe_show_identity_flow"},
+        "value": {"$ref": "#/$defs/IdentitySessionToken"},
+        "host_only": {"const": true},
+        "domain": {"type": "null"},
+        "secure": {"const": true},
+        "http_only": {"const": true},
+        "same_site": {"const": "None"},
+        "path": {"const": "/auth/show-identity"},
+        "maximum_age_seconds": {"const": 300}
+      }
     },
     "IdentitySessionCookie": {
       "type": "object",
