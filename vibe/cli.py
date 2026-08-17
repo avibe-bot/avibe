@@ -10765,22 +10765,24 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
     except Exception:  # noqa: BLE001
         archive_cache = None
     if archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
+        doctor_language = _configured_cli_language()
         _add_doctor_item(
             items,
             "warn",
-            (
-                f"Show Runtime archive cache holds {archive_cache['candidate_count']} reclaimable archive(s) "
-                f"({_format_byte_size(int(archive_cache.get('candidate_bytes') or 0))}); "
-                "the current and rollback archives are kept."
+            i18n_t(
+                "runtime.doctor.archiveCacheReclaimable",
+                doctor_language,
+                count=int(archive_cache.get("candidate_count") or 0),
+                size=_format_byte_size(int(archive_cache.get("candidate_bytes") or 0)),
             ),
-            "Run `vibe runtime clean --dry-run` to preview, then `vibe runtime clean` to reclaim.",
+            i18n_t("runtime.doctor.archiveCacheReclaimableAction", doctor_language),
             code="show_runtime.archive_cache_reclaimable",
         )
     elif archive_cache is not None:
         _add_doctor_item(
             items,
             "pass",
-            "Show Runtime archive cache has no reclaimable archives",
+            i18n_t("runtime.doctor.archiveCacheClean", _configured_cli_language()),
             code="show_runtime.archive_cache_clean",
         )
 
@@ -14102,23 +14104,32 @@ def cmd_runtime(args) -> int:
         strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
+        dry_run = bool(getattr(args, "dry_run", False))
         payload = manager.clean(
             keep_previous=getattr(args, "keep_previous", 1),
-            dry_run=bool(getattr(args, "dry_run", False)),
+            dry_run=dry_run,
         )
-        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1))
+        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1), dry_run=dry_run)
         payload["git"] = git
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
-            prefix = "Would remove" if payload.get("dry_run") else "Removed"
+            language = _configured_cli_language()
+            prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
             removed = payload.get("removed") or []
             archives = payload.get("archives") or {}
-            print(f"{prefix} {len(removed)} Show Runtime cache item(s).")
-            archive_count = int(archives.get("candidate_count") or 0) if payload.get("dry_run") else int(archives.get("removed_count") or 0)
-            archive_bytes = int(archives.get("candidate_bytes") or 0) if payload.get("dry_run") else int(archives.get("removed_bytes") or 0)
-            print(f"{prefix} {archive_count} downloaded Show Runtime archive(s) ({_format_byte_size(archive_bytes)}).")
-            print(f"{prefix} {len(git.get('removed') or [])} Git Runtime cache item(s).")
+            print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+            archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
+            archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
+            print(
+                i18n_t(
+                    f"{prefix_key}Archives",
+                    language,
+                    count=archive_count,
+                    size=_format_byte_size(archive_bytes),
+                )
+            )
+            print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
         return 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
@@ -14217,11 +14228,11 @@ def _format_byte_size(size: int) -> str:
     return f"{size:.1f} PiB"
 
 
-def _clean_git_runtime(*, keep_previous: int) -> dict:
+def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
     try:
         from core.git_runtime import get_git_runtime_manager
 
-        return get_git_runtime_manager().clean(keep_previous=keep_previous)
+        return get_git_runtime_manager().clean(keep_previous=keep_previous, dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "removed": [], "message": str(exc)}
 
@@ -14477,7 +14488,7 @@ def build_parser():
     runtime_clean_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Report stale archives and cache entries without removing anything.",
+        help=i18n_t("runtime.clean.dryRunHelp", _configured_cli_language()),
     )
     runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
     remote_parser = subparsers.add_parser(

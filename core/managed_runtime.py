@@ -338,7 +338,7 @@ class ManagedRuntimeManager:
             user_agent=f"avibe-{self.spec.runtime_id}-doctor",
         )
 
-    def clean(self, *, keep_previous: int = 1) -> dict[str, Any]:
+    def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
         try:
             file_lock = self._acquire_mutation_lock()
         except Exception as exc:  # noqa: BLE001
@@ -356,15 +356,16 @@ class ManagedRuntimeManager:
                 "reason": self._reason("install_already_running"),
             }
         try:
-            return self._clean_locked(keep_previous=keep_previous)
+            return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run)
         finally:
             self._release_mutation_lock(file_lock)
 
-    def _clean_locked(self, *, keep_previous: int) -> dict[str, Any]:
+    def _clean_locked(self, *, keep_previous: int, dry_run: bool = False) -> dict[str, Any]:
         removed: list[str] = []
         for staging_dir in self.runtime_dir.glob("install-*"):
             if staging_dir.is_dir():
-                shutil.rmtree(staging_dir, ignore_errors=True)
+                if not dry_run:
+                    shutil.rmtree(staging_dir, ignore_errors=True)
                 removed.append(str(staging_dir))
 
         versions_dir = self.runtime_dir / "versions"
@@ -384,9 +385,11 @@ class ManagedRuntimeManager:
             reverse=True,
         )
         for path in candidates[max(0, keep_previous) :]:
-            shutil.rmtree(path, ignore_errors=True)
+            if not dry_run:
+                shutil.rmtree(path, ignore_errors=True)
             removed.append(str(path))
-        self._prune_empty_version_dirs(versions_dir)
+        if not dry_run:
+            self._prune_empty_version_dirs(versions_dir)
         return {"ok": True, "removed": removed}
 
     def _manifest_installable(self, manifest: ManagedRuntimeManifest) -> bool:

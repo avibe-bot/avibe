@@ -49,6 +49,11 @@ _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
 _PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
 _MANAGED_RUNTIME_ROLLBACK_INSTALLS = 1
 _CONTENT_ADDRESSED_ARCHIVE_RE = re.compile(r"^[0-9a-f]{64}\.tgz$")
+# Cross-process safety window: between a download finalizing ``<sha256>.tgz``
+# and the installing process writing install metadata / ``current.json``, the
+# archive is not yet protected. Archives younger than this window are never
+# pruned by automatic or manual cleanup; real stale archives are days old.
+_ARCHIVE_MTIME_GUARD_SECONDS = 15 * 60
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
@@ -742,26 +747,49 @@ class ShowRuntimeManager:
                         shutil.rmtree(path, ignore_errors=True)
                     removed.append(str(path))
         removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=dry_run))
+        # A dry run leaves stale install dirs in place, so their metadata would
+        # still read as "protected" below. Skip metadata under the dirs a real
+        # run would remove, so the archive preview matches the real outcome.
+        skip_metadata_under = {Path(path) for path in removed} if dry_run else None
         return {
             "ok": True,
             "dry_run": dry_run,
             # Paths removed by this run (or that a real run would remove, when dry_run).
             "removed": removed,
-            "archives": self._clean_downloaded_archives(dry_run=dry_run),
+            "archives": self._clean_downloaded_archives(
+                dry_run=dry_run,
+                skip_metadata_under=skip_metadata_under,
+            ),
         }
 
-    def archive_cache_status(self) -> dict[str, Any]:
-        """Report reclaimable content-addressed archives without deleting anything."""
-        return self._clean_downloaded_archives(dry_run=True)
+    def archive_cache_status(self, *, keep_previous: int = 1) -> dict[str, Any]:
+        """Report reclaimable content-addressed archives without deleting anything.
 
-    def _protected_archive_sha256s(self) -> set[str]:
+        Simulates the install-dir cleanup a real ``clean(keep_previous=...)``
+        would perform, so the reported candidates match what reclamation would
+        actually remove.
+        """
+        stale_plan = self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=True)
+        return self._clean_downloaded_archives(dry_run=True, skip_metadata_under=set(stale_plan))
+
+    def _protected_archive_sha256s(self, skip_metadata_under: set[Path] | None = None) -> set[str]:
         """SHA-256 digests of archives the current and retained installs still need.
 
         Sources: the ``current.json`` pointer plus every remaining managed
         install's ``.vibe-show-runtime.json`` metadata. Called after
         install-dir cleanup, so the remaining metadata files are exactly the
-        current install plus the retained rollback install(s).
+        current install plus the retained rollback install(s). Metadata under
+        ``skip_metadata_under`` is ignored, so dry runs can simulate the state
+        after removing those install dirs.
         """
+        skip_resolved = {path.resolve() for path in (skip_metadata_under or ())}
+
+        def _skipped(metadata_path: Path) -> bool:
+            if not skip_resolved:
+                return False
+            resolved = metadata_path.resolve()
+            return any(resolved == item or item in resolved.parents for item in skip_resolved)
+
         protected: set[str] = set()
         try:
             pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
@@ -774,6 +802,8 @@ class ShowRuntimeManager:
         if versions_dir.is_dir():
             for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
                 for metadata_path in versions_dir.glob(pattern):
+                    if _skipped(metadata_path):
+                        continue
                     try:
                         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                     except Exception:
@@ -790,12 +820,16 @@ class ShowRuntimeManager:
         download flow stages into ``<sha256>.tmp`` and atomically renames only
         after size + checksum verification, so a matching name implies a
         completed, verified archive; in-progress ``.tmp`` downloads, symlinks,
-        and unknown file names are never candidates.
+        and unknown file names are never candidates. Archives modified within
+        the cross-process safety window are also skipped: another process may
+        have just finalized a download whose install metadata does not exist
+        yet.
         """
         downloads_dir = self.runtime_dir / "downloads"
         candidates: list[tuple[Path, int]] = []
         if not downloads_dir.is_dir():
             return candidates
+        mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
         for path in sorted(downloads_dir.iterdir()):
             if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(path.name):
                 continue
@@ -805,13 +839,20 @@ class ShowRuntimeManager:
                 continue
             if not stat.S_ISREG(stat_result.st_mode):
                 continue
+            if stat_result.st_mtime > mtime_floor:
+                continue
             if path.stem in protected:
                 continue
             candidates.append((path, stat_result.st_size))
         return candidates
 
-    def _clean_downloaded_archives(self, *, dry_run: bool = False) -> dict[str, Any]:
-        protected = self._protected_archive_sha256s()
+    def _clean_downloaded_archives(
+        self,
+        *,
+        dry_run: bool = False,
+        skip_metadata_under: set[Path] | None = None,
+    ) -> dict[str, Any]:
+        protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
         candidates = self._archive_cleanup_candidates(protected)
         removed_count = 0
         removed_bytes = 0

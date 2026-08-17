@@ -20,11 +20,13 @@ def _make_manager(tmp_path: Path) -> ShowRuntimeManager:
     return ShowRuntimeManager(runtime_dir=tmp_path / "show-runtime", offline=True)
 
 
-def _write_archive(manager: ShowRuntimeManager, sha256: str, payload: bytes) -> Path:
+def _write_archive(manager: ShowRuntimeManager, sha256: str, payload: bytes, *, age_seconds: float = 3600) -> Path:
     downloads = manager.runtime_dir / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     path = downloads / f"{sha256}.tgz"
     path.write_bytes(payload)
+    stamp = time.time() - age_seconds
+    os.utime(path, (stamp, stamp))
     return path
 
 
@@ -169,3 +171,68 @@ def test_archive_cache_status_is_read_only(tmp_path: Path) -> None:
     assert report["candidate_count"] == 1
     assert report["candidate_bytes"] == len(b"stale")
     assert stale.exists()
+
+
+def test_recent_unprotected_archive_survives_mtime_guard(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    fresh_unprotected = _write_archive(manager, _sha(2), b"just downloaded", age_seconds=0)
+
+    result = manager.clean()
+
+    # Another process may have finalized this archive moments ago and not yet
+    # written install metadata; the safety window must keep it.
+    assert result["archives"]["removed_count"] == 0
+    assert fresh_unprotected.exists()
+
+
+def test_dry_run_preview_includes_archives_of_stale_install_dirs(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    # Current install (v2), retained rollback install (v1), stale install (v0)
+    # whose only protection is its own metadata.
+    current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
+    _write_current_pointer(manager, _sha(1), install_dir=current_install)
+    _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
+    stale_install = _write_install_metadata(manager, version="v0", sha256=_sha(9), mtime=-999999)
+    _write_archive(manager, _sha(1), b"current")
+    _write_archive(manager, _sha(8), b"rollback")
+    stale_archive = _write_archive(manager, _sha(9), b"stale-install-archive")
+
+    dry = manager.clean(dry_run=True)
+    assert dry["archives"]["candidate_count"] == 1
+    assert dry["archives"]["candidate_bytes"] == len(b"stale-install-archive")
+    assert stale_install.exists() and stale_archive.exists()  # dry run removed nothing
+
+    real = manager.clean()
+    # A real run removes the stale install dir and its archive together, while
+    # the current and rollback archives stay protected in both modes.
+    assert real["archives"]["removed_count"] == 1
+    assert not stale_install.exists() and not stale_archive.exists()
+    assert (manager.runtime_dir / "downloads" / f"{_sha(1)}.tgz").exists()
+    assert (manager.runtime_dir / "downloads" / f"{_sha(8)}.tgz").exists()
+
+
+def test_cli_clean_dry_run_is_read_only_for_git_runtime(monkeypatch, capsys) -> None:
+    from vibe import cli as vibe_cli
+
+    parser = vibe_cli.build_parser()
+    args = parser.parse_args(["runtime", "clean", "--dry-run", "--json"])
+
+    class FakeRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "dry_run": dry_run, "removed": [], "archives": {"candidate_count": 0}}
+
+    git_calls: list[dict] = []
+
+    def fake_git_clean(*, keep_previous, dry_run=False):
+        git_calls.append({"keep_previous": keep_previous, "dry_run": dry_run})
+        return {"ok": True, "removed": ["git-stale"]}
+
+    monkeypatch.setattr(vibe_cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(vibe_cli, "_clean_git_runtime", fake_git_clean)
+
+    assert vibe_cli.cmd_runtime(args) == 0
+    assert git_calls == [{"keep_previous": 1, "dry_run": True}]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert payload["git"]["removed"] == ["git-stale"]

@@ -193,15 +193,16 @@ def test_runtime_clean_cleans_git_runtime(monkeypatch, capsys):
     args = parser.parse_args(["runtime", "clean", "--json", "--keep-previous", "2"])
 
     class FakeRuntimeManager:
-        def clean(self, *, keep_previous=1):
+        def clean(self, *, keep_previous=1, dry_run=False):
             assert keep_previous == 2
-            return {"ok": True, "removed": ["show-old"]}
+            assert dry_run is False
+            return {"ok": True, "removed": ["show-old"], "archives": {"removed_count": 0}}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     monkeypatch.setattr(
         cli,
         "_clean_git_runtime",
-        lambda *, keep_previous: {"ok": True, "removed": [f"git-old-{keep_previous}"]},
+        lambda *, keep_previous, dry_run=False: {"ok": True, "removed": [f"git-old-{keep_previous}"], "dry_run": dry_run},
     )
 
     assert cli.cmd_runtime(args) == 0
