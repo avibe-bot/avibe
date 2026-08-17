@@ -102,3 +102,24 @@ def test_legacy_show_page_copy_is_removed_from_both_locales() -> None:
         assert removed_show_pages_keys.isdisjoint(payload["showPages"])
         assert removed_chat_keys.isdisjoint(payload["chat"]["showPage"])
         assert "show_page_email_access_transient" not in payload["errors"]
+
+
+def test_legacy_show_page_ui_plans_are_removed() -> None:
+    plans_dir = ROOT / "docs" / "plans"
+    assert not (plans_dir / "show-page-email-access.md").exists()
+
+    forbidden = {
+        "ShowPageEmailAccessEditor",
+        "ShowPageShareIdField",
+        "getShowPageAuthorizedEmails",
+        "replaceShowPageAuthorizedEmails",
+        "setShowPageVisibility",
+        "rotateShowPageShare",
+        "setShowPageShareId",
+        "visibility private/public/offline",
+        "Share visibility / rotate / share-id",
+    }
+    for source_path in plans_dir.glob("*.md"):
+        source = source_path.read_text(encoding="utf-8")
+        for symbol in forbidden:
+            assert symbol not in source, f"legacy Show Page UI plan remains in {source_path}: {symbol}"

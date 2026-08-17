@@ -448,7 +448,7 @@ helper's error passes through, so it announces the fact once via a new
   layer choice. Only its *message* is per-verb: `errors.session_archived` (what
   `handleApiError` resolves) is Show-Page-worded and wrong for a rename, so the
   catch substitutes the new `chat.archived.editBlocked`.
-- the child-component calls (Share visibility / rotate / share-id / icon, and the
+- the child-component calls (unified access Apply / availability / icon, and the
   store's own rename) converge without ChatPage plumbing a callback into any of them.
 - a future session-scoped write inherits it.
 

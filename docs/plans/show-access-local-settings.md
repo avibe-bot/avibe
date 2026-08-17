@@ -7,7 +7,7 @@ Local Avibe owns each page's access mode, stable `/p` binding, exact-email list,
 and revision. Avibe Backend must not store or decide that membership.
 
 This implementation consumes the contract in PR #1496 at head
-`5a51ec12c7e483223cff892ffde9ee1556cb7091`. The contract is not copied into
+`ff3ee55e389decc48496d03925b5c77328d5fecb`. The contract is not copied into
 this branch. This PR requires #1496 to merge first.
 
 ## Goal
@@ -61,3 +61,18 @@ end-to-end Limited guest access.
 - [x] Full focused backend and frontend suites
 - [x] Production UI build
 - [x] Desktop and mobile browser acceptance
+
+## Review-loop scope decision
+
+Three findings-bearing review heads exposed distinct root-cause classes: route
+selection and hidden draft state, incomplete Limited-mode product projection and
+stale async UI continuations, then an ambiguous IPC deadline around serialized
+writes. The third-head audit traced the complete settings Apply path.
+
+The controller's SQLite write runs in a worker thread and cannot be cancelled
+reliably after the IPC request is accepted. A finite client read deadline could
+therefore report failure while the write later commits. The smallest complete,
+contract-preserving fix is operation-aware transport timing: settings reads keep
+a finite deadline, while Apply bounds connection establishment only and waits for
+the controller's definitive CAS result. Controller serialization and aggregate
+semantics remain unchanged.

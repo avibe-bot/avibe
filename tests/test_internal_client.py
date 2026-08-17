@@ -1201,7 +1201,7 @@ def test_show_access_clients_report_missing_controller_socket(tmp_path, operatio
         asyncio.run(operation(tmp_path / "missing.sock"))
 
 
-def test_show_access_client_reports_read_timeout(socket_path):
+def test_show_access_settings_read_reports_read_timeout(socket_path):
     class _TimingOutClient:
         async def __aenter__(self):
             return self
@@ -1218,14 +1218,55 @@ def test_show_access_client_reports_read_timeout(socket_path):
     ):
         with pytest.raises(internal_client.InternalServerTimeout):
             asyncio.run(
-                internal_client.show_access_apply(
-                    {
-                        "page_id": "ses-show-access",
-                        "expected_revision": 0,
-                        "target_access_mode": "private",
-                        "target_share_id": None,
-                        "target_emails": [],
-                    },
+                internal_client.show_access_settings_read(
+                    {"page_id": "ses-show-access"},
                     socket_path=socket_path,
                 )
             )
+
+
+def test_show_access_apply_waits_for_a_definitive_controller_result(socket_path):
+    captured: dict[str, httpx.Timeout] = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured["timeout"] = kwargs["timeout"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _path, json):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "no_change",
+                    "show_access": {
+                        "page_id": json["page_id"],
+                        "access_mode": "private",
+                        "share_id": "stable-link",
+                        "revision": json["expected_revision"],
+                        "normalized_emails": [],
+                    },
+                },
+            )
+
+    with patch("vibe.internal_client.httpx.AsyncClient", _Client):
+        result = asyncio.run(
+            internal_client.show_access_apply(
+                {
+                    "page_id": "ses-show-access",
+                    "expected_revision": 0,
+                    "target_access_mode": "private",
+                    "target_share_id": "stable-link",
+                    "target_emails": [],
+                },
+                socket_path=socket_path,
+            )
+        )
+
+    assert result["body"]["status"] == "no_change"
+    assert captured["timeout"].connect == 1.0
+    assert captured["timeout"].read is None

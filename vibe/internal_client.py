@@ -1354,6 +1354,7 @@ async def _show_access_request(
     path: str,
     payload: dict[str, Any],
     *,
+    read_timeout: float | None,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     target = await _verified_socket_path_async(socket_path)
@@ -1362,7 +1363,7 @@ async def _show_access_request(
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://localhost",
-            timeout=httpx.Timeout(10.0, connect=1.0),
+            timeout=httpx.Timeout(read_timeout, connect=1.0),
         ) as client:
             resp = await client.post(path, json=payload)
     except httpx.ReadTimeout as exc:
@@ -1380,6 +1381,7 @@ async def show_access_settings_read(
     return await _show_access_request(
         "/internal/show-access/settings-read",
         payload,
+        read_timeout=10.0,
         socket_path=socket_path,
     )
 
@@ -1392,6 +1394,10 @@ async def show_access_apply(
     return await _show_access_request(
         "/internal/show-access/apply",
         payload,
+        # Once accepted, the controller serializes this non-cancellable SQLite
+        # write. Wait for its definitive CAS result so a slow commit is never
+        # reported as a timeout that invites an ambiguous retry.
+        read_timeout=None,
         socket_path=socket_path,
     )
 
