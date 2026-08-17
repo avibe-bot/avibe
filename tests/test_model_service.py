@@ -105,11 +105,12 @@ def _resolved(
     payload: dict,
     *,
     minted: dict | None = None,
+    instance_id: str = "instance-1",
 ) -> MemoryConfig:
     return model_service._resolved_memory(  # noqa: SLF001
         current,
         status=model_service._status_from_payload(payload),  # noqa: SLF001
-        instance_id="instance-1",
+        instance_id=instance_id,
         proxy_base_url="https://backend.example.test/v1/model",
         minted=(
             model_service._mint_from_payload(minted)  # noqa: SLF001
@@ -799,7 +800,7 @@ def test_org_release_preserves_disabled_memory_until_platform_capabilities_recov
     assert released.enabled is False
     assert released.cloud.applied_embedding_identity == "emb-org"
     assert released.runtime_source() == "unavailable"
-    assert released.recovery_intent == "rebuild"
+    assert released.recovery_intent is None
     assert resumed.enabled is False
     assert resumed.cloud.applied_embedding_identity == "emb-platform"
     assert resumed.runtime_source() == "cloud"
@@ -945,6 +946,50 @@ def test_pairing_a_different_instance_preserves_the_cloud_identity_baseline(
     assert repaired.cloud.applied_embedding_identity == new_identity
     assert repaired.recovery_intent == expected_recovery
     assert repaired.runtime_source() == "cloud"
+
+
+@pytest.mark.parametrize(
+    ("new_identity", "expected_recovery"),
+    [("emb-old", None), ("emb-new", "rebuild")],
+)
+def test_replaced_org_pairing_compares_platform_identity_before_key_mint(
+    new_identity: str,
+    expected_recovery: str | None,
+) -> None:
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="organization",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-old",
+            applied_embedding_identity="emb-old",
+            model_access_key="mak_old",
+            proxy_base_url="https://old.example.test/v1/model",
+            source_instance_id="instance-old",
+            organization_attached=True,
+        ),
+    )
+    status = _status(scope="platform", identity=new_identity, revision=2)
+
+    awaiting_key = _resolved(
+        current,
+        status,
+        instance_id="instance-new",
+    )
+    activated = _resolved(
+        awaiting_key,
+        status,
+        instance_id="instance-new",
+        minted=_mint("mak_new"),
+    )
+
+    assert awaiting_key.recovery_intent == expected_recovery
+    assert awaiting_key.cloud.applied_embedding_identity == "emb-old"
+    assert awaiting_key.runtime_source() == "unavailable"
+    assert activated.recovery_intent == expected_recovery
+    assert activated.cloud.applied_embedding_identity == new_identity
+    assert activated.runtime_source() == "cloud"
 
 
 def test_platform_mode_acknowledgement_records_the_confirmed_cloud_identity() -> None:

@@ -193,6 +193,11 @@ def _cancel_organization_transition(memory: MemoryConfig) -> bool:
     return True
 
 
+def _cloud_embedding_identity_changed(previous: MemoryConfig, identity: str) -> bool:
+    baseline = previous.cloud.applied_embedding_identity
+    return baseline is not None and baseline != identity
+
+
 def _adopt_cloud_embedding_identity(
     candidate: MemoryConfig,
     previous: MemoryConfig,
@@ -202,7 +207,7 @@ def _adopt_cloud_embedding_identity(
 
     baseline = previous.cloud.applied_embedding_identity
     first_activation = baseline is None and previous.recovery_intent is None
-    if previous.cloud_runtime_selected() and baseline is not None and baseline != identity:
+    if previous.cloud_runtime_selected() and _cloud_embedding_identity_changed(previous, identity):
         candidate.arm_rebuild_if_idle()
     candidate.cloud.applied_embedding_identity = identity
     return first_activation
@@ -289,10 +294,15 @@ def _resolved_memory(
             if first_platform_activation:
                 candidate.enabled = True
         elif was_organization_cloud:
-            candidate.arm_rebuild_if_idle()
+            if candidate.mode != "platform":
+                candidate.arm_rebuild_if_idle()
+            elif status.memory_available():
+                assert status.embedding_identity is not None
+                if _cloud_embedding_identity_changed(previous, status.embedding_identity):
+                    candidate.arm_rebuild_if_idle()
             # The applied identity is also the durable "not fresh" baseline.
             # Keep it across an unavailable release so later capability recovery
-            # cannot silently override an explicit user opt-out.
+            # can compare identities without overriding an explicit user opt-out.
 
     candidate.cloud.runtime_apply_pending = (
         current.cloud.runtime_apply_pending
