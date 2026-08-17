@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 from typing import Any, Mapping
 from urllib.parse import quote
@@ -23,6 +24,7 @@ CACHE_FILENAME = "permissions_projection.json"
 DEFAULT_TIMEOUT_SECONDS = 8.0
 _SENSITIVE_KEY_PARTS = ("secret", "token", "credential")
 logger = logging.getLogger(__name__)
+_CACHE_LOCK = threading.RLock()
 
 
 class PermissionsError(RuntimeError):
@@ -172,6 +174,65 @@ def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
     )
 
 
+def _cache_projection(instance_id: str, projection: dict[str, Any]) -> None:
+    with _CACHE_LOCK:
+        cached = _read_cache(instance_id)
+        if (
+            cached is not None
+            and cached.projection["instance"]["authorization_revision"]
+            > projection["instance"]["authorization_revision"]
+        ):
+            return
+        try:
+            _write_cache(instance_id, projection)
+        except OSError:
+            logger.warning("Unable to cache the current Permissions projection", exc_info=True)
+
+
+def _mutation_revision(result: Mapping[str, Any]) -> int:
+    revision = result.get("authorization_revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
+    return revision
+
+
+def _cache_mutation_result(
+    instance_id: str,
+    authorization_revision: int,
+    *,
+    access_entries: list[Any] | None = None,
+    project: Mapping[str, Any] | None = None,
+) -> None:
+    with _CACHE_LOCK:
+        cached = _read_cache(instance_id)
+        if cached is None:
+            return
+        projection = cached.projection
+        current_revision = projection["instance"]["authorization_revision"]
+        projection = {
+            **projection,
+            "instance": {
+                **projection["instance"],
+                "authorization_revision": max(current_revision, authorization_revision),
+            },
+        }
+        if access_entries is not None:
+            projection["access"] = {
+                **projection["access"],
+                "entries": access_entries,
+            }
+        if project is not None:
+            project_id = project.get("project_id")
+            projects = [
+                project if current.get("project_id") == project_id else current
+                for current in projection["projects"]
+            ]
+            if not any(current.get("project_id") == project_id for current in projects):
+                projects.append(project)
+            projection["projects"] = projects
+        _cache_projection(instance_id, _validated_projection(projection, instance_id))
+
+
 def _backend_request(
     config: V2Config,
     method: str,
@@ -224,10 +285,7 @@ def get_current_permissions(config: V2Config | None = None) -> PermissionsProjec
     try:
         payload, _ = _backend_request(config, "GET", "")
         projection = _validated_projection(payload, instance_id)
-        try:
-            _write_cache(instance_id, projection)
-        except OSError:
-            logger.warning("Unable to cache the current Permissions projection", exc_info=True)
+        _cache_projection(instance_id, projection)
         return PermissionsProjectionResult(projection=projection, source="live")
     except PermissionsUnavailableError:
         cached = _read_cache(instance_id)
@@ -247,7 +305,15 @@ def replace_authorized_users(
     config: V2Config | None = None,
 ) -> dict[str, Any]:
     config = config or V2Config.load()
-    result, _ = _backend_request(config, "PUT", "authorized-users", payload)
+    result, instance_id = _backend_request(config, "PUT", "authorized-users", payload)
+    entries = result.get("entries")
+    if not isinstance(entries, list):
+        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
+    _cache_mutation_result(
+        instance_id,
+        _mutation_revision(result),
+        access_entries=entries,
+    )
     return result
 
 
@@ -259,11 +325,19 @@ def update_project_access(
     if not isinstance(project_id, str) or not project_id or "/" in project_id:
         raise PermissionsInvalidResponseError("invalid_project_id")
     config = config or V2Config.load()
-    result, _ = _backend_request(
+    result, instance_id = _backend_request(
         config,
         "PUT",
         f"projects/{quote(project_id, safe='')}/access",
         payload,
+    )
+    project = result.get("project")
+    if not isinstance(project, Mapping) or project.get("project_id") != project_id:
+        raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
+    _cache_mutation_result(
+        instance_id,
+        _mutation_revision(result),
+        project=project,
     )
     return result
 

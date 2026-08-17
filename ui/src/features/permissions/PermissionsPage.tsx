@@ -198,14 +198,14 @@ function EmptyState({ icon: Icon, title, body }: {
 
 function AccessEntryDialog({
   open,
-  editingIndex,
+  editingKey,
   response,
   onOpenChange,
   onReload,
   onSaved,
 }: {
   open: boolean;
-  editingIndex: number | null;
+  editingKey: string | null;
   response: PermissionsResponse;
   onOpenChange: (open: boolean) => void;
   onReload: () => Promise<PermissionsResponse | null>;
@@ -214,7 +214,9 @@ function AccessEntryDialog({
   const { t } = useTranslation();
   const initialized = useRef(false);
   const entries = response.projection.access.entries;
-  const editing = editingIndex === null ? null : entries[editingIndex];
+  const editing = editingKey === null
+    ? null
+    : entries.find((entry) => accessEntryKey(entry) === editingKey) ?? null;
   const groups = response.projection.directory.groups;
   const [kind, setKind] = useState<PrincipalKind>('email');
   const [value, setValue] = useState('');
@@ -247,7 +249,7 @@ function AccessEntryDialog({
   const authoritativeIndex = originalKey === null
     ? -1
     : entries.findIndex((entry) => accessEntryKey(entry) === originalKey);
-  const nextEntries = editingIndex === null || authoritativeIndex < 0
+  const nextEntries = editingKey === null || authoritativeIndex < 0
     ? [...entries, candidate]
     : entries.map((entry, index) => (index === authoritativeIndex ? candidate : entry));
 
@@ -558,9 +560,9 @@ export function PermissionsPage() {
   const { capabilities, instanceRole } = useInstanceAuthorization();
   const [state, setState] = useState<PageState>({ kind: 'loading' });
   const [tab, setTab] = useState<'access' | 'projects'>('access');
-  const [editingAccess, setEditingAccess] = useState<number | null | undefined>(undefined);
+  const [editingAccess, setEditingAccess] = useState<string | null | undefined>(undefined);
   const [editingProject, setEditingProject] = useState<PermissionProject | null>(null);
-  const [removingAccess, setRemovingAccess] = useState<number | null>(null);
+  const [removingAccess, setRemovingAccess] = useState<string | null>(null);
   const [search, setSearch] = useState('');
 
   const load = useCallback(async (): Promise<PermissionsResponse | null> => {
@@ -617,7 +619,16 @@ export function PermissionsPage() {
 
   const removeAccess = async () => {
     if (removingAccess === null) return;
-    const entries = projection.access.entries.filter((_, index) => index !== removingAccess);
+    const targetExists = projection.access.entries.some(
+      (entry) => accessEntryKey(entry) === removingAccess,
+    );
+    if (!targetExists) {
+      setRemovingAccess(null);
+      return;
+    }
+    const entries = projection.access.entries.filter(
+      (entry) => accessEntryKey(entry) !== removingAccess,
+    );
     try {
       const result = await replaceAuthorizedUsers(entries, projection.instance.authorization_revision);
       updateResponse((current) => ({
@@ -715,10 +726,11 @@ export function PermissionsPage() {
             <EmptyState icon={Users} title={t('permissions.access.emptyTitle')} body={t('permissions.access.emptyBody')} />
           ) : (
             <div className="overflow-hidden rounded-lg border border-border bg-card">
-              {projection.access.entries.map((entry, index) => {
+              {projection.access.entries.map((entry) => {
                 const Icon = principalIcon(entry.kind);
+                const entryKey = accessEntryKey(entry);
                 return (
-                  <div key={`${entry.kind}:${entry.value}`} className="grid gap-3 border-b border-border px-4 py-3 last:border-0 md:grid-cols-[minmax(220px,1fr)_150px_120px_84px] md:items-center">
+                  <div key={entryKey} className="grid gap-3 border-b border-border px-4 py-3 last:border-0 md:grid-cols-[minmax(220px,1fr)_150px_120px_84px] md:items-center">
                     <div className="flex min-w-0 items-center gap-3">
                       <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 text-mint-ink"><Icon className="size-4" /></span>
                       <span className="truncate text-[12px] font-semibold">{displayPrincipal(entry.kind, entry.value, groups)}</span>
@@ -726,7 +738,7 @@ export function PermissionsPage() {
                     <Badge variant="secondary">{t(`permissions.principals.${entry.kind}`)}</Badge>
                     <Badge variant={entry.role === 'editor' ? 'success' : 'secondary'}>{entry.role === 'editor' ? <Pencil className="size-3" /> : <Eye className="size-3" />}{t(`permissions.roles.${entry.role}`)}</Badge>
                     <div className="flex justify-end gap-1">
-                      {editable ? <><Button size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(index)}><Pencil className="size-4" /></Button><Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => setRemovingAccess(index)}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
+                      {editable ? <><Button size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => setRemovingAccess(entryKey)}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
                     </div>
                   </div>
                 );
@@ -766,7 +778,7 @@ export function PermissionsPage() {
 
       <AccessEntryDialog
         open={editingAccess !== undefined}
-        editingIndex={editingAccess ?? null}
+        editingKey={editingAccess ?? null}
         response={response}
         onOpenChange={(open) => { if (!open) setEditingAccess(undefined); }}
         onReload={load}

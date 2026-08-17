@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
@@ -204,6 +204,55 @@ describe('PermissionsPage conflict handling', () => {
         { kind: 'email', value: 'beta@example.com', role: 'editor' },
         { kind: 'email', value: 'alpha@example.com', role: 'viewer' },
       ],
+      5,
+    ]);
+  });
+
+  it('re-resolves an access removal by principal after a conflict reorders the list', async () => {
+    const initial = response();
+    initial.projection.access.entries = [
+      { kind: 'email', value: 'alpha@example.com', role: 'viewer' },
+      { kind: 'email', value: 'beta@example.com', role: 'viewer' },
+    ];
+    const latest = response();
+    latest.projection.instance.authorization_revision = 5;
+    latest.projection.access.entries = [
+      { kind: 'email', value: 'beta@example.com', role: 'viewer' },
+      { kind: 'email', value: 'alpha@example.com', role: 'viewer' },
+    ];
+    api.getPermissions
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(latest);
+    api.replaceAuthorizedUsers
+      .mockRejectedValueOnce(new PermissionsApiError(409, {
+        error: 'permission_revision_conflict',
+        current_revision: 5,
+      }))
+      .mockResolvedValueOnce({
+        ok: true,
+        authorization_revision: 6,
+        entries: [{ kind: 'email', value: 'beta@example.com', role: 'viewer' }],
+      });
+    const user = userEvent.setup();
+    renderPage();
+
+    const removeButtons = await screen.findAllByRole('button', {
+      name: 'permissions.actions.removeAccess',
+    });
+    await user.click(removeButtons[0]!);
+    const dialog = await screen.findByRole('dialog');
+    const confirm = within(dialog).getByRole('button', {
+      name: 'permissions.actions.removeAccess',
+    });
+    await user.click(confirm);
+
+    await waitFor(() => expect(api.getPermissions).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(confirm.hasAttribute('disabled')).toBe(false));
+    await user.click(confirm);
+
+    await waitFor(() => expect(api.replaceAuthorizedUsers).toHaveBeenCalledTimes(2));
+    expect(api.replaceAuthorizedUsers.mock.calls[1]).toEqual([
+      [{ kind: 'email', value: 'beta@example.com', role: 'viewer' }],
       5,
     ]);
   });

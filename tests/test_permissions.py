@@ -206,6 +206,99 @@ def test_permissions_rejects_backend_projection_for_another_instance(monkeypatch
         permissions.get_current_permissions(_config())
 
 
+def test_authorized_users_mutation_refreshes_offline_cache(monkeypatch) -> None:
+    live = _projection()
+    live["access"]["entries"] = [
+        {"kind": "email", "value": "old@example.com", "role": "viewer"}
+    ]
+    updated_entries = [
+        {"kind": "email", "value": "new@example.com", "role": "editor"}
+    ]
+    backend_available = True
+
+    def request(method, _url, **_kwargs):
+        if method == "GET":
+            if not backend_available:
+                raise requests.ConnectionError()
+            return _Response(200, live)
+        return _Response(
+            200,
+            {
+                "ok": True,
+                "entries": updated_entries,
+                "authorization_revision": 4,
+            },
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+    config = _config()
+    permissions.get_current_permissions(config)
+
+    permissions.replace_authorized_users(
+        {"entries": updated_entries, "if_match_revision": 3},
+        config,
+    )
+    permissions._cache_projection("inst-123", live)  # noqa: SLF001
+    backend_available = False
+    cached = permissions.get_current_permissions(config)
+
+    assert cached.source == "cache"
+    assert cached.projection["instance"]["authorization_revision"] == 4
+    assert cached.projection["access"]["entries"] == updated_entries
+
+
+def test_project_access_mutation_refreshes_offline_cache(monkeypatch) -> None:
+    live = _projection()
+    project = {
+        "project_id": "project-1",
+        "organization_id": "org-1",
+        "display_name": "Launch Plan",
+        "access": {"mode": "restricted", "revision": 1, "bindings": []},
+        "sync": {
+            "status": "in_sync",
+            "desired_access_revision": 1,
+            "applied_access_revision": 1,
+            "last_synced_at": None,
+        },
+    }
+    live["projects"] = [project]
+    updated_project = {
+        **project,
+        "access": {"mode": "owner_only", "revision": 2, "bindings": []},
+    }
+    backend_available = True
+
+    def request(method, _url, **_kwargs):
+        if method == "GET":
+            if not backend_available:
+                raise requests.ConnectionError()
+            return _Response(200, live)
+        return _Response(
+            200,
+            {
+                "ok": True,
+                "project": updated_project,
+                "authorization_revision": 4,
+            },
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+    config = _config()
+    permissions.get_current_permissions(config)
+
+    permissions.update_project_access(
+        "project-1",
+        {"mode": "owner_only", "bindings": [], "if_match_revision": 1},
+        config,
+    )
+    backend_available = False
+    cached = permissions.get_current_permissions(config)
+
+    assert cached.source == "cache"
+    assert cached.projection["instance"]["authorization_revision"] == 4
+    assert cached.projection["projects"] == [updated_project]
+
+
 def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() -> None:
     assert http_authorization_policy("GET", "/api/permissions").minimum_role == "viewer"
     assert (
