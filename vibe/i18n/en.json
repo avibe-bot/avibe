@@ -896,6 +896,7 @@
   },
   "data": {
     "retention": {
+      "error": "Trace retention command failed: {error}",
       "plan": "{count} trace row(s) older than {days} day(s) are eligible ({size} of payload text).",
       "lastRun": "Last retention run: {at}, deleted {rows} row(s).",
       "neverRun": "No retention run has completed yet.",

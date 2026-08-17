@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from sqlalchemy import Engine, delete, func, select
+from sqlalchemy import Engine, LargeBinary, delete, func, select, cast
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.engine import Connection
 
@@ -50,7 +50,8 @@ LEASE_TTL_SECONDS = 3600
 # Compaction only when the free list alone would return at least this much,
 # so a daily run does not rewrite a large database for pocket change.
 VACUUM_MIN_RECLAIM_BYTES = 64 * 1024 * 1024
-# Never VACUUM unless free space covers the whole database copy plus margin.
+# VACUUM writes a full temp copy and the WAL rewrite can coexist with it, so
+# the preflight must reserve room for both copies plus margin.
 VACUUM_FREE_SPACE_MARGIN_BYTES = 256 * 1024 * 1024
 
 RETENTION_MARKER_KEY = "agent_events_trace_retention.last_run"
@@ -102,12 +103,21 @@ def eligible_filter(cutoff: str):
 
 
 def plan(conn: Connection, *, retention_days: int, now: Optional[datetime] = None) -> dict[str, Any]:
-    """Dry-run report: how many eligible rows exist and their logical payload size."""
+    """Dry-run report: how many eligible rows exist and their logical payload size.
+
+    Sizes are measured in UTF-8 bytes (``CAST(.. AS BLOB)``); SQLite's plain
+    ``length(TEXT)`` counts Unicode characters and underreports CJK payloads
+    several-fold.
+    """
     cutoff = cutoff_iso(retention_days, now=now)
+
+    def _blob_bytes(column) -> Any:
+        return func.length(cast(func.coalesce(column, ""), LargeBinary))
+
     logical_bytes = func.sum(
-        func.length(func.coalesce(agent_events.c.content_text, ""))
-        + func.length(agent_events.c.content_json)
-        + func.length(agent_events.c.metadata_json)
+        _blob_bytes(agent_events.c.content_text)
+        + _blob_bytes(agent_events.c.content_json)
+        + _blob_bytes(agent_events.c.metadata_json)
     )
     row = conn.execute(
         select(func.count(), logical_bytes).where(eligible_filter(cutoff))
@@ -232,8 +242,19 @@ def try_acquire_lease(conn: Connection, *, now: Optional[datetime] = None) -> Op
     return token
 
 
-def release_lease(conn: Connection) -> None:
-    conn.execute(state_meta.delete().where(state_meta.c.key == RETENTION_LEASE_KEY))
+def release_lease(conn: Connection, token: Optional[str] = None) -> None:
+    """Release the lease, deleting only the row this runner owns.
+
+    A long run can outlive the lease TTL; deleting unconditionally would then
+    remove a *newer* runner's lease. With ``token``, the row is removed only
+    while it still carries that token.
+    """
+    if token is None:
+        conn.execute(state_meta.delete().where(state_meta.c.key == RETENTION_LEASE_KEY))
+        return
+    stored = _read_meta(conn, RETENTION_LEASE_KEY)
+    if stored and stored.get("token") == token:
+        conn.execute(state_meta.delete().where(state_meta.c.key == RETENTION_LEASE_KEY))
 
 
 def compaction_status(conn: Connection) -> dict[str, Any]:
@@ -294,7 +315,7 @@ def maybe_compact(
         free_bytes = _disk_usage(str(db_path.parent)).free
     except OSError:
         return {"status": "deferred", "reason": "free_space_unknown", **status}
-    required = database_bytes + _wal_size(db_path) + free_space_margin_bytes
+    required = 2 * database_bytes + _wal_size(db_path) + free_space_margin_bytes
     if free_bytes < required:
         return {"status": "deferred", "reason": "insufficient_free_space", **status,
                 "free_bytes": free_bytes, "required_bytes": required}
@@ -305,9 +326,13 @@ def maybe_compact(
             conn.exec_driver_sql("VACUUM")
         # In WAL mode the compacted database lands in the -wal file; a
         # post-VACUUM checkpoint is what actually returns bytes to the OS.
-        _checkpoint(engine)
+        # A busy checkpoint here means the space is still trapped in the WAL:
+        # report it as deferred rather than a completed compaction.
+        post_checkpoint = _checkpoint(engine)
     except OperationalError as exc:
         return {"status": "deferred", "reason": f"vacuum_failed: {exc.__class__.__name__}", **status}
+    if post_checkpoint and int(post_checkpoint[0]) != 0:
+        return {"status": "deferred", "reason": "post_checkpoint_busy", **status}
     after = db_path.stat().st_size if db_path.exists() else 0
     return {
         "status": "vacuumed",
@@ -345,6 +370,16 @@ def run_once(
     if token is None:
         return {"status": "busy", "last_run": last_run}
 
+    # Recheck the cadence under the lease: a runner that finished between the
+    # gate above and this acquisition already did today's pass. Without this,
+    # overlapping controller startups would double-run deletion + compaction.
+    if not force:
+        with engine.connect() as conn:
+            if not should_run(conn, now=moment):
+                with engine.begin() as write_conn:
+                    release_lease(write_conn, token)
+                return {"status": "not_due", "last_run": get_last_run(conn)}
+
     started = time.monotonic()
     try:
         result = run_retention(engine, retention_days=retention_days, now=moment)
@@ -376,7 +411,7 @@ def run_once(
         }
     finally:
         with engine.begin() as conn:
-            release_lease(conn)
+            release_lease(conn, token)
 
 
 def retention_status(engine: Engine, *, retention_days: int, now: Optional[datetime] = None) -> dict[str, Any]:

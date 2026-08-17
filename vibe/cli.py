@@ -6708,7 +6708,7 @@ def cmd_data_retention(args):
             _print_data_retention_human(payload, language)
         return 0
     except Exception as exc:  # noqa: BLE001
-        print(f"Trace retention command failed: {exc}", file=sys.stderr)
+        print(i18n_t("data.retention.error", _configured_cli_language(), error=str(exc)), file=sys.stderr)
         return 1
 
 

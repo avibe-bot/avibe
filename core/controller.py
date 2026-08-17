@@ -354,6 +354,7 @@ class Controller:
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
         self.trace_retention_task: Optional[asyncio.Task] = None
+        self._trace_retention_executor: Optional[Any] = None
         self._memory_reconcile_task: Optional[asyncio.Task] = None
         self._memory_replacement_gate = asyncio.Lock()
         self._memory_factory_reset_task: Optional[asyncio.Task[dict[str, Any]]] = None
@@ -3095,48 +3096,96 @@ class Controller:
 
     _AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS = 3600
 
-    async def _agent_events_retention_loop(self) -> None:
-        """Bounded retention for internal agent trace events (avibe#1506).
+    def _agent_events_retention_config(self) -> dict[str, Any] | None:
+        """Read the retention window from the persisted V2 config, failing closed.
 
-        Checks hourly but does real work at most once per day — the storage
-        marker inside ``agent_events_retention.run_once`` owns the cadence —
-        so this loop never sits in a user request path and stays cheap when
-        disabled via config.
+        The controller's ``self.config`` is an ``AppCompatConfig`` shim without
+        the runtime section, so this reloads ``V2Config`` directly. A malformed
+        opt-out value (e.g. the string ``"false"``) disables the pass with a
+        warning rather than deleting traces against the user's intent.
+        """
+        try:
+            from config.v2_config import V2Config
+
+            runtime_cfg = getattr(V2Config.load(), "runtime", None)
+        except Exception:
+            logger.warning("Agent trace-event retention: config unreadable; using defaults", exc_info=True)
+            runtime_cfg = None
+        enabled = getattr(runtime_cfg, "agent_events_trace_retention_enabled", True)
+        if not isinstance(enabled, bool):
+            logger.warning(
+                "Agent trace-event retention: agent_events_trace_retention_enabled is malformed (%r); failing closed",
+                enabled,
+            )
+            return None
+        if not enabled:
+            return None
+        days_value = getattr(runtime_cfg, "agent_events_trace_retention_days", None)
+        if not isinstance(days_value, int) or isinstance(days_value, bool) or days_value < 1:
+            logger.warning(
+                "Agent trace-event retention: agent_events_trace_retention_days is malformed (%r); using default",
+                days_value,
+            )
+            days_value = None
+        return {"days": days_value or 30}
+
+    def _run_agent_events_retention_pass(self) -> dict[str, Any]:
+        """One maintenance pass on the worker thread (no VACUUM: manual-only).
+
+        Full ``VACUUM`` holds SQLite's sole write lock for the entire rewrite;
+        on a large live database that can exceed every writer's busy timeout.
+        The automatic path therefore deletes rows only and reports compaction
+        as not attempted — ``vibe data retention --run`` owns compaction.
         """
         from storage import agent_events_retention
         from storage.db import get_cached_sqlite_engine
 
+        config = self._agent_events_retention_config()
+        if config is None:
+            return {"status": "disabled"}
+        engine = get_cached_sqlite_engine()
+        return agent_events_retention.run_once(
+            engine, retention_days=int(config["days"]), compact=False
+        )
+
+    async def _agent_events_retention_loop(self) -> None:
+        """Bounded retention for internal agent trace events (avibe#1506).
+
+        Checks immediately and then hourly; the storage marker inside
+        ``agent_events_retention.run_once`` owns the once-per-day cadence, so
+        short-lived sessions still get their first pass on startup. Work runs
+        on a single-worker executor so shutdown can join it.
+        """
+        import concurrent.futures
+
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="trace-retention"
+        )
+        self._trace_retention_executor = executor
         logger.info(
             "Agent trace-event retention loop started (check interval=%ss)",
             self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS,
         )
-        while True:
-            await asyncio.sleep(self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS)
-            try:
-                runtime_cfg = getattr(self.config, "runtime", None)
-                if not bool(getattr(runtime_cfg, "agent_events_trace_retention_enabled", True)):
-                    continue
-                days = int(
-                    getattr(runtime_cfg, "agent_events_trace_retention_days", None)
-                    or agent_events_retention.DEFAULT_RETENTION_DAYS
-                )
-                engine = get_cached_sqlite_engine()
-                summary = await asyncio.to_thread(
-                    agent_events_retention.run_once, engine, retention_days=days
-                )
-                status = str(summary.get("status") or "unknown")
-                if status == "not_due":
-                    continue
-                logger.info(
-                    "Agent trace-event retention %s: deleted=%s compaction=%s",
-                    status,
-                    summary.get("deleted_rows"),
-                    (summary.get("compaction") or {}).get("status"),
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.error("Agent trace-event retention failed", exc_info=True)
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                try:
+                    summary = await loop.run_in_executor(executor, self._run_agent_events_retention_pass)
+                    status = str((summary or {}).get("status") or "unknown")
+                    if status not in {"not_due", "disabled"}:
+                        logger.info(
+                            "Agent trace-event retention %s: deleted=%s compaction=%s",
+                            status,
+                            (summary or {}).get("deleted_rows"),
+                            ((summary or {}).get("compaction") or {}).get("status"),
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.error("Agent trace-event retention failed", exc_info=True)
+                await asyncio.sleep(self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS)
+        finally:
+            executor.shutdown(wait=True)
 
     async def periodic_cleanup(self):
         """Sweep idle backend runtime state without interrupting active work."""
@@ -3229,6 +3278,13 @@ class Controller:
                 except asyncio.CancelledError:
                     pass
             self.trace_retention_task = None
+            # Cancelling the loop does not stop a pass already running on the
+            # worker thread; join it so a replacement controller never starts
+            # against maintenance that is supposedly stopped.
+            executor = getattr(self, "_trace_retention_executor", None)
+            if executor is not None:
+                executor.shutdown(wait=True)
+                self._trace_retention_executor = None
 
         async def _cancel_internal_server_task() -> None:
             task = getattr(self, "_internal_server_task", None)

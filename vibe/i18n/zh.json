@@ -896,6 +896,7 @@
   },
   "data": {
     "retention": {
+      "error": "trace \u4fdd\u7559\u547d\u4ee4\u6267\u884c\u5931\u8d25:{error}",
       "plan": "\u6709 {count} \u6761\u65e9\u4e8e {days} \u5929\u7684 trace \u8bb0\u5f55\u5f85\u6e05\u7406\uff08\u8f7d\u8377\u6587\u672c\u7ea6 {size}\uff09\u3002",
       "lastRun": "\u4e0a\u6b21\u4fdd\u7559\u6e05\u7406\uff1a{at}\uff0c\u5220\u9664 {rows} \u6761\u3002",
       "neverRun": "\u5c1a\u672a\u6267\u884c\u8fc7\u4fdd\u7559\u6e05\u7406\u3002",
