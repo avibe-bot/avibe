@@ -2231,6 +2231,38 @@ def test_public_show_runtime_html_rewrites_private_runtime_client_paths(monkeypa
     assert "etag" not in response.headers
 
 
+def test_public_show_runtime_css_rewrites_private_runtime_paths(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager(
+        body=(
+            b'@import "/show/ses123/src/theme.css";\n'
+            b'@font-face { src: url("/show/ses123/assets/font.woff2") format("woff2"); }\n'
+        ),
+        extra_headers={
+            "content-type": "text/css; charset=utf-8",
+            "cache-control": "no-cache",
+            "etag": "source-etag",
+        },
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/src/styles.css",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert f'@import "/p/{share_id}/src/theme.css"'.encode() in response.content
+    assert f'url("/p/{share_id}/assets/font.woff2")'.encode() in response.content
+    assert b"/show/ses123/" not in response.content
+    assert response.headers["cache-control"] == "no-store"
+    assert "etag" not in response.headers
+
+
 def test_show_runtime_public_client_shims_are_cacheable():
     client = app.test_client()
     vite_client = client.get("/_show-runtime/client-shim-v1.js", base_url="http://127.0.0.1:5123")
@@ -7323,14 +7355,21 @@ def test_public_show_page_materializes_workspace_before_runtime_proxy(monkeypatc
     assert "x-vibe-show-base" not in manager.calls[0][2]
 
 
-def test_public_show_page_rewrites_runtime_redirect_location(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "runtime_location",
+    [
+        "/sessions/ses123/app/foo/",
+        "/show/ses123/foo/",
+    ],
+)
+def test_public_show_page_rewrites_runtime_redirect_location(monkeypatch, tmp_path, runtime_location):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager(
         body=b"",
         status_code=302,
-        extra_headers={"location": "/sessions/ses123/app/foo/"},
+        extra_headers={"location": runtime_location},
     )
     set_show_runtime_manager_for_tests(manager)
     try:
@@ -7345,6 +7384,35 @@ def test_public_show_page_rewrites_runtime_redirect_location(monkeypatch, tmp_pa
 
     assert response.status_code == 302
     assert response.headers["location"] == f"/p/{share_id}/foo/"
+
+
+@pytest.mark.parametrize("asset_path", ["docs/", "robots"])
+def test_public_show_page_preserves_vite_public_dir_assets(monkeypatch, tmp_path, asset_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    public_path = paths.get_show_page_dir("ses123") / "public" / asset_path
+    if asset_path.endswith("/"):
+        public_path.mkdir(parents=True)
+        (public_path / "index.html").write_text("<h1>docs</h1>", encoding="utf-8")
+    else:
+        public_path.parent.mkdir(parents=True, exist_ok=True)
+        public_path.write_text("robots", encoding="utf-8")
+    manager = _FakeShowRuntimeManager(body=b"public asset", extra_headers={"content-type": "text/plain"})
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/{asset_path}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"public asset"
+    assert manager.calls[0][1] == f"/sessions/ses123/app/{asset_path}"
 
 
 def test_public_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):

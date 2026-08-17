@@ -13017,11 +13017,14 @@ def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
     relative = _decode_show_page_asset_path(asset_path)
     if not relative:
         return False
-    candidate = paths.get_show_page_dir(session_id) / relative
+    workspace = paths.get_show_page_dir(session_id)
     try:
-        return candidate.is_file() or (candidate.is_dir() and (candidate / "index.html").is_file())
+        for candidate in (workspace / relative, workspace / "public" / relative):
+            if candidate.is_file() or (candidate.is_dir() and (candidate / "index.html").is_file()):
+                return True
     except OSError:
         return False
+    return False
 
 
 def _decode_show_page_asset_path(asset_path: str) -> str:
@@ -14501,7 +14504,11 @@ def _show_response_is_compressible(content_type: str | None) -> bool:
 
 
 def _show_response_is_rewritable_show_runtime_source(content_type: str | None) -> bool:
-    return _show_response_is_javascript(content_type) or _show_response_is_html(content_type)
+    return (
+        _show_response_is_javascript(content_type)
+        or _show_response_is_html(content_type)
+        or bool(content_type and "text/css" in content_type.lower())
+    )
 
 
 def _rewrite_public_show_runtime_client(
@@ -14758,12 +14765,18 @@ def _inject_show_runtime_config(
 def _rewrite_show_runtime_location(session_id: str, location: str, *, external_prefix: str | None = None) -> str:
     parsed = urlsplit(location)
     internal_prefix = f"/sessions/{quote(session_id, safe='')}/app"
-    external_prefix = (external_prefix or f"/show/{quote(session_id, safe='')}").rstrip("/")
+    private_prefix = f"/show/{quote(session_id, safe='')}"
+    resolved_external_prefix = (external_prefix or private_prefix).rstrip("/")
     if parsed.path == internal_prefix:
-        public_path = f"{external_prefix}/"
+        public_path = f"{resolved_external_prefix}/"
     elif parsed.path.startswith(f"{internal_prefix}/"):
         suffix = parsed.path[len(internal_prefix) :].lstrip("/")
-        public_path = f"{external_prefix}/{suffix}"
+        public_path = f"{resolved_external_prefix}/{suffix}"
+    elif external_prefix and parsed.path == private_prefix:
+        public_path = f"{resolved_external_prefix}/"
+    elif external_prefix and parsed.path.startswith(f"{private_prefix}/"):
+        suffix = parsed.path[len(private_prefix) :].lstrip("/")
+        public_path = f"{resolved_external_prefix}/{suffix}"
     else:
         return location
     return urlunsplit(("", "", public_path, parsed.query, parsed.fragment))
