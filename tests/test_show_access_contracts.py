@@ -475,6 +475,11 @@ def test_identity_session_wire_is_minimal_fixed_lifetime_and_identity_only() -> 
     login_start = examples["login_start_request"]
     _validate(document, "#/$defs/LoginStartRequest", login_start)
     assert login_start["safe_return_path"] == ("/p/stable_alpha/users/alice@example.com")
+    _validate(
+        document,
+        "#/$defs/LoginStartRequest",
+        {"safe_return_path": "/p/stable_alpha/users/alice@example.com/"},
+    )
     for invalid_path in (
         "https://attacker.example/p/stable_alpha/",
         "/show/session-1/",
@@ -787,6 +792,7 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
         "browser_url": "/p/<share_id>/{normalized_relative_history_path}",
         "protected_request": "<prefix>history/{normalized_relative_history_path}",
         "preserve_browser_url": True,
+        "terminal_slash": "optional_and_preserved",
     }
     top_level_url = "/p/stable_alpha/users/alice@example.com"
     relative_history_path = top_level_url.removeprefix("/p/stable_alpha/")
@@ -801,6 +807,11 @@ def test_shared_admission_result_and_protected_resource_wire_are_closed() -> Non
         document,
         "#/$defs/SharedBrowserRequest",
         {"method": "GET", "surface": "fallback", "path": history_path},
+    )
+    _validate(
+        document,
+        "#/$defs/SharedBrowserRequest",
+        {"method": "GET", "surface": "fallback", "path": f"{history_path}/"},
     )
     history_prefix = history_path.removesuffix("users/alice@example.com")
     _validate(
@@ -1014,6 +1025,8 @@ def test_plan_and_readme_keep_contract_evidence_distinct_from_production() -> No
     readme = (CONTRACTS / "README.md").read_text(encoding="utf-8")
 
     assert "Production Avibe, Backend, Runtime, browser, and Incus behavior remains future" in plan
+    assert "Version 1 adds no server replay ledger" not in plan
+    assert "atomically records the assertion issuer/JTI fingerprint" in plan
     assert "does not yet prove production Avibe, Backend, Runtime, browser" in readme
     assert "SHOW-LIVE-" not in plan
     assert "scenario-bindings" not in readme

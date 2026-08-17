@@ -94,10 +94,12 @@ promise simultaneous flow success. The opaque pending-flow cookie uses Path
 `/auth/show-identity`, so both local login start and callback receive it. Login
 start signs the cookie value's SHA-256 digest into the state and stores no pending
 flow. Callback receives the HTTP cookie name/value pair, validates its digest,
-and expires the matching cookie before creating the identity session. Repeated
-cookie-less starts therefore allocate no durable or in-memory pending records;
-separate browser cookie jars remain independent. Version 1 adds no server replay
-ledger; ordinary replay fails because the matching browser cookie was expired.
+and expires the matching cookie. After complete assertion verification, it
+atomically records the assertion issuer/JTI fingerprint until assertion expiry
+before creating the identity session; a duplicate returns the fixed retry result
+without creating or extending a session. Repeated cookie-less starts therefore
+allocate no durable or in-memory pending-flow records; separate browser cookie
+jars remain independent.
 
 A known signing key is cached for at most 300 seconds. Once older, it is fetched
 once from the paired issuer before assertion validation; fetch failure returns
@@ -164,8 +166,9 @@ one browser-compatible path prefix:
 the document, opaque assets use `asset/<handle>`, relative page APIs use
 `api/<safe-path>`, and a nested `/p` reload uses `history/<safe-path>`. API and
 history paths accept practical segments containing ASCII letters, digits,
-underscore, hyphen, dot, and at-sign while rejecting empty or exact dot segments,
-encoded separators/traversal, queries, and raw source paths. The transformed
+underscore, hyphen, dot, and at-sign while rejecting interior empty or exact dot
+segments, encoded separators/traversal, queries, and raw source paths. A nested
+history path may preserve one canonical terminal slash. The transformed
 fallback document removes page-authored base elements and establishes the exact
 capability root as its base URL, so relative APIs, modules, styles, and raw assets
 resolve identically on root and nested history documents. Nested imports are also
