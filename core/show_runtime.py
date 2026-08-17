@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import contextlib
+import fnmatch
 import hashlib
 import importlib.resources as package_resources
 import json
@@ -26,7 +27,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from sysconfig import get_platform
-from typing import Any, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 import httpx
 
@@ -825,6 +826,46 @@ class ShowRuntimeManager:
             logger.warning("Show Runtime archive cache inspection failed", exc_info=True)
             return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
 
+    @staticmethod
+    def _iter_install_metadata(versions_dir: Path, pattern: str) -> Iterator[Path]:
+        """Glob install metadata with error-preserving traversal.
+
+        ``Path.glob`` suppresses per-directory OSError and silently omits
+        retained installs whose subtree cannot be scanned; that would unprotect
+        their rollback archives, so traversal failures raise instead.
+        """
+        try:
+            parts = pattern.split("/")
+            current: Iterable[Path] = [versions_dir]
+            for depth, part in enumerate(parts):
+                next_paths: list[Path] = []
+                for parent in current:
+                    try:
+                        iterator = os.scandir(parent)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise _ArchiveInspectionError(f"versions traversal failed: {parent}") from exc
+                    try:
+                        for entry in iterator:
+                            if not fnmatch.fnmatch(entry.name, part):
+                                continue
+                            child = parent / entry.name
+                            if depth < len(parts) - 1:
+                                next_paths.append(child)
+                            else:
+                                next_paths.append(child)
+                    except OSError as exc:
+                        raise _ArchiveInspectionError(f"versions traversal failed: {parent}") from exc
+                    finally:
+                        iterator.close()
+                current = next_paths
+            for path in current:
+                if path.name == ".vibe-show-runtime.json":
+                    yield path
+        except _ArchiveInspectionError:
+            raise
+
     def _protected_archive_sha256s(self, skip_metadata_under: set[Path] | None = None) -> set[str]:
         """SHA-256 digests of archives the current and retained installs still need.
 
@@ -871,7 +912,7 @@ class ShowRuntimeManager:
             raise _ArchiveInspectionError("versions directory cannot be inspected") from exc
         if versions_is_dir:
             for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
-                for metadata_path in versions_dir.glob(pattern):
+                for metadata_path in self._iter_install_metadata(versions_dir, pattern):
                     if _skipped(metadata_path):
                         continue
                     try:
@@ -912,9 +953,36 @@ class ShowRuntimeManager:
         if downloads_dir.is_symlink() or not stat.S_ISDIR(downloads_exists):
             raise _ArchiveInspectionError("downloads directory is a symlink or not a directory")
         mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
-        # Bind enumeration and unlinking to the directory we validated: a
-        # concurrent path swap (symlink replacing ``downloads`` between the
-        # stat above and iterdir/unlink below) cannot redirect operations.
+        if os.name == "nt":
+            # Directory descriptors (dir_fd) are unsupported on native
+            # Windows; fall back to path-based enumeration. The lock guard
+            # still serializes against concurrent installs in this process.
+            entries: list[str] = []
+            iterator = os.scandir(downloads_dir)
+            try:
+                entries = [entry.name for entry in iterator]
+            finally:
+                iterator.close()
+            for name in sorted(entries):
+                if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(name):
+                    continue
+                try:
+                    entry_stat = os.stat(downloads_dir / name, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise _ArchiveInspectionError(f"archive is not stat-able: {name}") from exc
+                if not stat.S_ISREG(entry_stat.st_mode):
+                    continue
+                if entry_stat.st_mtime > mtime_floor:
+                    continue
+                if name[: -len(".tgz")] in protected:
+                    continue
+                candidates.append((downloads_dir / name, entry_stat.st_size, name))
+            return candidates
+        # POSIX: bind enumeration and unlinking to the directory we validated
+        # so a concurrent path swap (symlink replacing ``downloads`` between
+        # the stat above and iterdir/unlink below) cannot redirect operations.
         dir_fd = os.open(downloads_dir, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0))
         try:
             with os.scandir(dir_fd) as entries:
@@ -983,24 +1051,38 @@ class ShowRuntimeManager:
                 removed_count = 0
                 removed_bytes = 0
                 failed_count = 0
-                # Unlink by name through the same validated directory (no
-                # path resolution that a concurrent swap could redirect).
-                dir_fd = os.open(
-                    self.runtime_dir / "downloads",
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0),
-                )
-                try:
-                    for path, size, name in candidates:
+                # Unlink through the same validated directory on POSIX (no
+                # path resolution that a concurrent swap could redirect); on
+                # Windows unlink by path. A fresh runtime with no candidates
+                # never opens the directory at all.
+                if candidates:
+                    if os.name == "nt":
+                        for path, size, name in candidates:
+                            try:
+                                os.unlink(path)
+                            except OSError:
+                                logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
+                                failed_count += 1
+                                continue
+                            removed_count += 1
+                            removed_bytes += size
+                    else:
+                        dir_fd = os.open(
+                            self.runtime_dir / "downloads",
+                            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0),
+                        )
                         try:
-                            os.unlink(name, dir_fd=dir_fd)
-                        except OSError:
-                            logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
-                            failed_count += 1
-                            continue
-                        removed_count += 1
-                        removed_bytes += size
-                finally:
-                    os.close(dir_fd)
+                            for path, size, name in candidates:
+                                try:
+                                    os.unlink(name, dir_fd=dir_fd)
+                                except OSError:
+                                    logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
+                                    failed_count += 1
+                                    continue
+                                removed_count += 1
+                                removed_bytes += size
+                        finally:
+                            os.close(dir_fd)
                 report = {
                     "protected_count": len(protected),
                     "candidate_count": len(candidates),

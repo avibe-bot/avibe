@@ -342,14 +342,16 @@ class ManagedRuntimeManager:
         if dry_run:
             # Read-only preview: no lock acquisition (the file lock would create
             # ``.install.lock`` and mutate persistent state), so previews also
-            # work on read-only runtime directories. An install that is
-            # actively staging right now is excluded via the in-process lock —
-            # a preview must not advertise removing live staging state.
-            if not self._install_lock.acquire(blocking=False):
+            # work on read-only runtime directories. Busy checks exclude both
+            # same-process staging (in-process lock) and cross-process staging
+            # (read-only existence probe of the lock file) — a preview must not
+            # advertise removing live staging state.
+            busy_reason = self._preview_busy_reason()
+            if busy_reason:
                 return {
                     "ok": False,
                     "removed": [],
-                    "reason": self._reason("install_already_running"),
+                    "reason": busy_reason,
                     "message": "an install is currently running",
                 }
             try:
@@ -366,8 +368,6 @@ class ManagedRuntimeManager:
                     "reason": self._reason("clean_inspection_failed"),
                     "message": str(exc),
                 }
-            finally:
-                self._install_lock.release()
         try:
             file_lock = self._acquire_mutation_lock()
         except Exception as exc:  # noqa: BLE001
@@ -388,6 +388,35 @@ class ManagedRuntimeManager:
             return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run)
         finally:
             self._release_mutation_lock(file_lock)
+
+    def _preview_busy_reason(self) -> str | None:
+        """Read-only busy check for previews: never creates or locks files."""
+        if not self._install_lock.acquire(blocking=False):
+            return self._reason("install_already_running")
+        try:
+            # Cross-process installs hold flock on .install.lock. Probing with
+            # LOCK_EX|LOCK_NB on an existing file is read-only (no create, no
+            # truncate); failure to take it means another process is active.
+            try:
+                lock_stat = self._install_file_lock_path.stat()
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return None
+            del lock_stat
+            import fcntl
+
+            fd = os.open(self._install_file_lock_path, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return None
+            except OSError:
+                return self._reason("install_already_running")
+            finally:
+                os.close(fd)
+        finally:
+            self._install_lock.release()
 
     def _clean_locked(self, *, keep_previous: int, dry_run: bool = False) -> dict[str, Any]:
         removed: list[str] = []
