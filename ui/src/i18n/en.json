@@ -3559,6 +3559,7 @@
       },
       "limitedEmails": "Limited access emails",
       "limitedEmailRequired": "Add at least one email address.",
+      "limitedEmailLimit": "Up to {{count}} email addresses.",
       "sharingErrors": {
         "conflict": "Link access changed elsewhere. The latest version has been loaded.",
         "invalid": "Review the mode, link, and email list.",

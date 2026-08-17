@@ -7,6 +7,7 @@ import pytest
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from core.show_pages import (
+    SHOW_ACCESS_EMAIL_MAX_COUNT,
     ShowPage,
     ShowPageError,
     ShowPageStore,
@@ -596,6 +597,38 @@ def test_show_access_apply_rejects_email_outside_contract(monkeypatch, tmp_path,
         assert result.show_access.revision == 0
         assert result.show_access.access_mode == "private"
         assert result.show_access.normalized_emails == ()
+    finally:
+        store.close()
+
+
+def test_show_access_apply_rejects_email_audience_over_limit_without_write(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-email-limit")
+        allowed_emails = [
+            f"guest-{index}@example.com"
+            for index in range(SHOW_ACCESS_EMAIL_MAX_COUNT)
+        ]
+        allowed = store.apply_access(
+            "ses-email-limit",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=allowed_emails,
+        )
+        result = store.apply_access(
+            "ses-email-limit",
+            expected_revision=allowed.show_access.revision,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=[*allowed_emails, "one-too-many@example.com"],
+        )
+
+        assert allowed.status == "applied"
+        assert len(allowed.show_access.normalized_emails) == SHOW_ACCESS_EMAIL_MAX_COUNT
+        assert result.status == "invalid"
+        assert result.show_access == allowed.show_access
     finally:
         store.close()
 
@@ -2245,6 +2278,14 @@ def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
     store = ShowPageStore()
     try:
         store.ensure("ses-private")
+        limited = store.ensure("ses-limited")
+        store.apply_access(
+            "ses-limited",
+            expected_revision=limited.access_revision,
+            target_access_mode="limited",
+            target_share_id=limited.share_id,
+            target_emails=["guest@example.com"],
+        )
         store.update_visibility("ses-public", "public")
     finally:
         store.close()
@@ -2256,6 +2297,17 @@ def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
     assert "Count: 1" in output
     assert "Filter: visibility=private" in output
     assert "- ses-private" in output
+    assert "- ses-limited" not in output
+    assert "- ses-public" not in output
+
+    args = cli.build_parser().parse_args(["show", "list", "--visibility", "limited"])
+    assert cli.cmd_show_list(args) == 0
+
+    output = capsys.readouterr().out
+    assert "Count: 1" in output
+    assert "Filter: visibility=limited" in output
+    assert "- ses-private" not in output
+    assert "- ses-limited" in output
     assert "- ses-public" not in output
 
 

@@ -123,7 +123,7 @@
       "@typescript-eslint/no-explicit-any": 5
     },
     "src/context/ApiContext.tsx": {
-      "@typescript-eslint/no-explicit-any": 51,
+      "@typescript-eslint/no-explicit-any": 50,
       "react-refresh/only-export-components": 1
     },
     "src/context/DockProvider.tsx": {

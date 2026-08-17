@@ -147,7 +147,8 @@ def _seed_named_resources() -> dict[str, str]:
         connection.execute(
             show_pages.insert().values(
                 session_id=resource_ids["show_page"],
-                visibility="private",
+                access_mode="private",
+                access_revision=0,
                 share_id=None,
                 offline_at=None,
                 created_at=created_at,

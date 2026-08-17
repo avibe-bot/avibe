@@ -99,6 +99,47 @@ describe('ShowPageSharingSettings', () => {
     });
   });
 
+  it('does not let a hidden Limited email draft block another mode', async () => {
+    api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: showAccess({ access_mode: 'public', revision: 1 }),
+    });
+    renderSettings();
+    await screen.findByRole('radio', { name: 'Private' });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Limited' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Limited access emails' }), {
+      target: { value: 'unfinished@example.com' },
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'Fully public' }));
+
+    const apply = screen.getByRole('button', { name: 'Apply' });
+    expect((apply as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(apply);
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+      expected_revision: 0,
+      target_access_mode: 'public',
+      target_share_id: 'stable-link',
+      target_emails: [],
+    });
+  });
+
+  it('disables new Limited email input at the audience limit', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: Array.from({ length: 64 }, (_, index) => `guest-${index}@example.com`),
+      }),
+    });
+    renderSettings();
+
+    const input = await screen.findByRole('textbox', { name: 'Limited access emails' });
+    expect((input as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText('Up to 64 email addresses.')).toBeTruthy();
+  });
+
   it('reloads the latest snapshot after a CAS conflict', async () => {
     api.getShowAccessSettings
       .mockResolvedValueOnce({ show_access: showAccess() })

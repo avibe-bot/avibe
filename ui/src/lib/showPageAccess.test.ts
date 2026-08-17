@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { isRevisionConflict, OrganizationApiError } from '@/features/organization/api/client';
 import {
+  SHOW_ACCESS_EMAIL_MAX_COUNT,
   buildShowPageAccessPatch,
   classifyShowPageAccessProbe,
   normalizeShowAccessEmail,
@@ -65,6 +66,11 @@ describe('Show Page access policy helpers', () => {
     ]) {
       expect(normalizeShowAccessEmail(invalid)).toBeNull();
     }
+    expect(normalizeShowAccessEmails(
+      Array.from({ length: SHOW_ACCESS_EMAIL_MAX_COUNT + 1 }, (_, index) => (
+        `guest-${index}@example.com`
+      )),
+    )).toBeNull();
   });
 
   it('keeps emails only for Limited and compares canonical drafts', () => {

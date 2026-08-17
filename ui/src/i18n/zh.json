@@ -3559,6 +3559,7 @@
       },
       "limitedEmails": "指定用户邮箱",
       "limitedEmailRequired": "请至少添加一个邮箱。",
+      "limitedEmailLimit": "最多添加 {{count}} 个邮箱。",
       "sharingErrors": {
         "conflict": "链接访问设置已在其他位置更新，已载入最新版本。",
         "invalid": "请检查访问模式、链接和邮箱列表。",

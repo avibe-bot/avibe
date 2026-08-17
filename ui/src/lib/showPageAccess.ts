@@ -44,6 +44,7 @@ export type ShowAccessApplyResult = {
   show_access: ShowAccess;
 };
 
+export const SHOW_ACCESS_EMAIL_MAX_COUNT = 64;
 const SHOW_ACCESS_EMAIL_PATTERN = /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const ASCII_SURROUNDING_WHITESPACE = /^[\t\n\f\r\v ]+|[\t\n\f\r\v ]+$/g;
 
@@ -57,6 +58,7 @@ export function normalizeShowAccessEmail(raw: string): string | null {
 }
 
 export function normalizeShowAccessEmails(emails: string[]): string[] | null {
+  if (emails.length > SHOW_ACCESS_EMAIL_MAX_COUNT) return null;
   const normalized = emails.map(normalizeShowAccessEmail);
   if (normalized.some((email) => email === null)) return null;
   return [...new Set(normalized as string[])].sort();

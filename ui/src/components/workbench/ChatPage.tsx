@@ -25,7 +25,7 @@ import {
   isVaultApprovalRequest,
   placeVaultProvisionRequests,
 } from '../../lib/vaultRequestPlacement';
-import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
+import { editorPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import {
   showPageHeaderAccess,
   showPageRestoreAccessDecision,
@@ -912,8 +912,8 @@ export const ChatPage: React.FC = () => {
   );
 
   // Every write that goes through the shared JSON helpers (updateSession,
-  // forkSession, ensureShowPage, the Show Page visibility / share-id / rotate /
-  // icon mutations …) reports its archived 409 through this one API-layer
+  // forkSession, ensureShowPage, Show Page access / availability / icon
+  // mutations …) reports its archived 409 through this one API-layer
   // subscription, including the ones issued by components this page owns rather
   // than by the page itself. ``sendMessage`` is the exception by construction: it
   // uses a raw ``apiFetch`` so it can read ``queued``/``already_answered`` off a
@@ -1860,11 +1860,11 @@ export const ChatPage: React.FC = () => {
     });
   }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal, showPageRestoreAccess]);
 
-  // When the share control resolves the page (open) or flips its visibility, the
-  // serving route changes (private → /show/, public → /p/). Re-point the iframe
-  // so it never stays on a route that now 404s.
+  // Keep the author preview on the authenticated route. The guest-facing /p
+  // route has separate admission rules and intentionally rejects Limited pages
+  // until signed-in guest admission is available.
   const handleShowPagePayload = useCallback((next: ShowPageLinkInfo) => {
-    const path = localPath(next);
+    const path = editorPath(next);
     if (path) setShowPageUrl(showPageEmbeddedPath(path));
   }, []);
 
@@ -2465,8 +2465,7 @@ export const ChatPage: React.FC = () => {
         />
 
       {showPageActive && showPageUrl && (
-        // The session's Show Page (same-origin /show/<id>/ private or /p/<share>/
-        // public; URL resolved from ensureShowPage) fills the chat area while the
+        // The session's authenticated /show/<id>/ author surface fills the chat area while the
         // header bar stays. The chat surface below is kept mounted but hidden.
         //
         // Sandbox is deliberately LIGHT: `allow-same-origin` is required (the page

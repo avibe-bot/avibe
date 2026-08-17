@@ -40,6 +40,7 @@ ACCESS_MODE_PRIVATE = "private"
 ACCESS_MODE_LIMITED = "limited"
 ACCESS_MODE_PUBLIC = "public"
 ACCESS_MODES = {ACCESS_MODE_PRIVATE, ACCESS_MODE_LIMITED, ACCESS_MODE_PUBLIC}
+SHOW_ACCESS_EMAIL_MAX_COUNT = 64
 SHARE_ID_BYTES = 8
 SHOW_EVENT_WRITE_TOKEN_COOKIE = "vibe_show_event_token"
 SHOW_EVENT_WRITE_TOKEN_HEADER = "X-Vibe-Show-Token"
@@ -204,6 +205,11 @@ def normalize_show_access_email(raw: str) -> str:
 def normalize_show_access_emails(emails: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     if not isinstance(emails, (list, tuple)):
         raise ShowPageError("Invalid Show Page email list.", code="invalid_email")
+    if len(emails) > SHOW_ACCESS_EMAIL_MAX_COUNT:
+        raise ShowPageError(
+            f"A Show Page may grant access to at most {SHOW_ACCESS_EMAIL_MAX_COUNT} emails.",
+            code="invalid_email",
+        )
     return tuple(sorted({normalize_show_access_email(email) for email in emails}))
 
 

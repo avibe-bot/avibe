@@ -12,6 +12,7 @@ import {
   normalizeShowAccessEmail,
   showAccessDraftChanged,
   showAccessTargetEmails,
+  SHOW_ACCESS_EMAIL_MAX_COUNT,
   type ShowAccess,
   type ShowAccessMode,
 } from '@/lib/showPageAccess';
@@ -118,11 +119,14 @@ export function ShowPageSharingSettings({
   const dirty = Boolean(
     saved && showAccessDraftChanged(saved, mode, normalizedShareId, emails),
   );
-  const draftBlocked = Boolean(emailDraft.replace(/^[\t\n\f\r\v ]+|[\t\n\f\r\v ]+$/g, ''));
+  const draftBlocked = mode === 'limited'
+    && Boolean(emailDraft.replace(/^[\t\n\f\r\v ]+|[\t\n\f\r\v ]+$/g, ''));
+  const emailLimitReached = emails.length >= SHOW_ACCESS_EMAIL_MAX_COUNT;
   const invalid = shareIdInvalid || (mode === 'limited' && targetEmails.length === 0);
   const editable = canManage && gate !== 'loading' && !saving;
 
   const addEmail = () => {
+    if (emailLimitReached) return;
     const normalized = normalizeShowAccessEmail(emailDraft);
     if (!normalized) {
       setEmailInvalid(true);
@@ -215,7 +219,7 @@ export function ShowPageSharingSettings({
                     <Input
                       type="email"
                       value={emailDraft}
-                      disabled={!editable}
+                      disabled={!editable || emailLimitReached}
                       onChange={(event) => {
                         setEmailDraft(event.target.value);
                         setEmailInvalid(false);
@@ -241,7 +245,7 @@ export function ShowPageSharingSettings({
                     size="icon"
                     variant="outline"
                     className="size-8 shrink-0"
-                    disabled={!editable || !emailDraft}
+                    disabled={!editable || !emailDraft || emailLimitReached}
                     onClick={addEmail}
                     aria-label={t('chat.showPage.addEmail')}
                   >
@@ -272,6 +276,9 @@ export function ShowPageSharingSettings({
                     {t('chat.showPage.limitedEmailRequired')}
                   </p>
                 )}
+                <p className="text-[11px] text-muted">
+                  {t('chat.showPage.limitedEmailLimit', { count: SHOW_ACCESS_EMAIL_MAX_COUNT })}
+                </p>
               </div>
             ) : null}
 

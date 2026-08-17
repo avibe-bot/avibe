@@ -13,6 +13,7 @@ def test_hosted_email_routes_and_clients_are_removed() -> None:
         ROOT / "vibe" / "authorization.py",
         ROOT / "vibe" / "remote_access.py",
         ROOT / "vibe" / "ui_server.py",
+        ROOT / "tests" / "test_instance_authorization.py",
     ]
     forbidden = {
         "authorized-emails",

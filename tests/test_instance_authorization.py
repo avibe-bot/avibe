@@ -193,11 +193,6 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/future-owner-capability"),
         ("POST", "/api/browse"),
         ("POST", "/api/browse/mkdir"),
-        ("POST", "/api/show-pages/session-1/visibility"),
-        ("POST", "/api/show-pages/session-1/rotate-share"),
-        ("POST", "/api/show-pages/session-1/share-id"),
-        ("GET", "/api/show-pages/session-1/authorized-emails"),
-        ("PUT", "/api/show-pages/session-1/authorized-emails"),
     )
     for method, path in owner_examples:
         assert http_authorization_policy(method, path).minimum_role == "owner", path

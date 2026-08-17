@@ -42,8 +42,8 @@ export function useShowPageInventory(enabled = true) {
   };
 }
 
-// The Show Pages inventory: fetch + the visibility / share-id / rotate mutations,
-// with their toasts. Lifted out of the view so the App Library owns one copy of
+// The Show Pages inventory and availability mutations, with their toasts.
+// Lifted out of the view so the App Library owns one copy of
 // the pages state and projects it into both the Apps and Show Pages views (kept
 // in a hook module so the view file exports only components — fast-refresh safe).
 export function useShowPages() {

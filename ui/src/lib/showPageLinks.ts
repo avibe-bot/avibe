@@ -20,6 +20,15 @@ export function localPath(page: ShowPageLinkInfo): string | null {
   return null;
 }
 
+// The Workbench always uses the authenticated author route. Shared /p links
+// have separate admission rules and may intentionally reject non-public pages.
+export function editorPath(page: ShowPageLinkInfo): string | null {
+  if (page.visibility === 'private' || page.visibility === 'limited' || page.visibility === 'public') {
+    return `/show/${encodeURIComponent(page.session_id)}/`;
+  }
+  return null;
+}
+
 export function liveHref(page: ShowPageLinkInfo): string | null {
   return page.active_url || localPath(page);
 }
