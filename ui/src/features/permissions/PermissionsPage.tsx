@@ -72,6 +72,31 @@ type PageState =
   | { kind: 'denied'; code: string }
   | { kind: 'unavailable'; code: string; offline: boolean };
 
+type PageLoadResult = {
+  state: Exclude<PageState, { kind: 'loading' }>;
+  response: PermissionsResponse | null;
+};
+
+async function fetchPermissionsPage(): Promise<PageLoadResult> {
+  try {
+    const response = await getPermissions();
+    return { state: { kind: 'ready', response }, response };
+  } catch (caught) {
+    const error = caught instanceof PermissionsApiError ? caught : null;
+    if (error?.code === 'instance_access_forbidden') {
+      return { state: { kind: 'denied', code: error.code }, response: null };
+    }
+    return {
+      state: {
+        kind: 'unavailable',
+        code: error?.code ?? 'permissions_unavailable',
+        offline: error?.offline === true,
+      },
+      response: null,
+    };
+  }
+}
+
 const principalIcon = (kind: PrincipalKind) => {
   if (kind === 'organization_group') return Users;
   if (kind === 'email_domain') return Globe2;
@@ -539,26 +564,18 @@ export function PermissionsPage() {
   const [search, setSearch] = useState('');
 
   const load = useCallback(async (): Promise<PermissionsResponse | null> => {
-    try {
-      const response = await getPermissions();
-      setState({ kind: 'ready', response });
-      return response;
-    } catch (caught) {
-      const error = caught instanceof PermissionsApiError ? caught : null;
-      if (error?.code === 'instance_access_forbidden') {
-        setState({ kind: 'denied', code: error.code });
-      } else {
-        setState({
-          kind: 'unavailable',
-          code: error?.code ?? 'permissions_unavailable',
-          offline: error?.offline === true,
-        });
-      }
-      return null;
-    }
+    const result = await fetchPermissionsPage();
+    setState(result.state);
+    return result.response;
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    let active = true;
+    void fetchPermissionsPage().then((result) => {
+      if (active) setState(result.state);
+    });
+    return () => { active = false; };
+  }, []);
 
   if (state.kind === 'loading') {
     return (
