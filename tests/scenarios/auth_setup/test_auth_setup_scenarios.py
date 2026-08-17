@@ -259,6 +259,8 @@ class _CodexProviderBindingSessions:
 
     def bind_agent_session(self, *_args, **_kwargs):
         return "ses-provider"
+
+
 class OrganizationManagementAuthScenarioTests(unittest.TestCase):
     def setUp(self):
         self.harness = OrganizationManagementScenarioHarness()
@@ -883,11 +885,14 @@ def test_organization_remote_session_recovers_and_revokes_without_oauth(
 
     def enter_control_plane_grace(current):
         now = int(time.time())
-        assert remote_access_authorization_service.mark_matching_revision_checked(
-            instance_id="inst_123",
-            authorization_revision=1,
-            checked_at=now,
-        ) == 1
+        assert (
+            remote_access_authorization_service.mark_matching_revision_checked(
+                instance_id="inst_123",
+                authorization_revision=1,
+                checked_at=now,
+            )
+            == 1
+        )
         remote_access._replace_authorization_revision(current.config, 2)
         session = current.client.get(
             "/api/session",
@@ -1252,9 +1257,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         agent._connection_probes = {}
         agent._connection_probe_turns = {}
         agent._connection_probe_cwds = {}
-        agent._get_or_create_transport = AsyncMock(
-            return_value=agent._transports[str(home)]
-        )
+        agent._get_or_create_transport = AsyncMock(return_value=agent._transports[str(home)])
         controller.agent_service = SimpleNamespace(agents={"codex": agent})
         service = AgentAuthService(controller)
 
@@ -1291,15 +1294,12 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 (
                     "thread/start",
                     {
-                        "cwd": str(
-                            (home / ".avibe" / "runtime" / "codex-connection-probe").resolve()
-                        ),
+                        "cwd": str((home / ".avibe" / "runtime" / "codex-connection-probe").resolve()),
                         "approvalPolicy": "never",
                         "sandbox": "read-only",
                         "ephemeral": True,
                         "developerInstructions": (
-                            "This is a connection probe. Do not use tools. "
-                            "Reply with a short greeting."
+                            "This is a connection probe. Do not use tools. Reply with a short greeting."
                         ),
                     },
                 ),
@@ -1321,9 +1321,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):
         """Scenario: AUTH-SETUP-903"""
         agent = object.__new__(CodexAgent)
-        agent.controller = SimpleNamespace(
-            config=SimpleNamespace(platform="avibe", reply_enhancements=True)
-        )
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=True))
         agent.codex_config = SimpleNamespace(
             default_model=None,
             auth_mode="api_key",
@@ -1413,12 +1411,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         harness.store.config.sources.append(source)
         harness.store.config.agents["claude"].sources.order.append(source.id)
-        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = (
-            ModelHubRouteConfig(
-                hops=(
-                    ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),
-                )
-            )
+        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
         )
 
         with self.assertRaises(ModelHubError) as refused:
@@ -1500,12 +1494,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         harness.store.config.sources.append(source)
         harness.store.config.agents["claude"].sources.order.append(source.id)
-        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = (
-            ModelHubRouteConfig(
-                hops=(
-                    ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),
-                )
-            )
+        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
         )
         ack = {"acknowledge_irreversible": True}
 
@@ -1599,9 +1589,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         harness.store.config.sources.append(source)
 
         with self.assertRaises(ModelHubError) as refused:
-            await harness.service.oauth_start(
-                {"vendor": "anthropic", "channel": "native_cli"}
-            )
+            await harness.service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
 
         self.assertEqual(refused.exception.code, "native_source_already_exists")
         self.assertEqual(
@@ -1610,9 +1598,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(harness.agent_auth.start_calls, [])
 
-        started = await harness.service.oauth_start(
-            {"vendor": "openai", "channel": "native_cli"}
-        )
+        started = await harness.service.oauth_start({"vendor": "openai", "channel": "native_cli"})
         self.assertEqual(started["flow"]["channel"], "native_cli")
         self.assertEqual(harness.agent_auth.start_calls, [("codex", False)])
 
@@ -1663,12 +1649,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         harness.store.config.sources.append(source)
         harness.store.config.agents["claude"].sources.order.append(source.id)
-        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = (
-            ModelHubRouteConfig(
-                hops=(
-                    ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),
-                )
-            )
+        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)
         )
 
         for acknowledgement in ({}, {"acknowledge_irreversible": False}):
@@ -1978,7 +1960,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         harness.service._wait_for_claude_completion = AsyncMock(return_value=None)
         harness.service._send_claude_callback = AsyncMock(
-            side_effect=lambda client, authorization_code, state: callback_payloads.append((client, authorization_code, state))
+            side_effect=lambda client, authorization_code, state: callback_payloads.append(
+                (client, authorization_code, state)
+            )
         )
 
         await runner.run(
@@ -2069,7 +2053,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        ScenarioExpect.step_history(runner, ["start_setup", "submit_plain_callback", "submit_fallback_after_completion"])
+        ScenarioExpect.step_history(
+            runner, ["start_setup", "submit_plain_callback", "submit_fallback_after_completion"]
+        )
         ScenarioExpect.text_contains(harness, "submitted")
         ScenarioExpect.text_contains(harness, "there is no active setup flow")
         self.assertEqual(callback_payloads, [("auth-code", "oauth-state")])
@@ -2488,7 +2474,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         runner = ScenarioRunner(harness)
         harness.service._start_codex_process = AsyncMock(side_effect=[first_process, second_process])
         harness.service._read_codex_output = AsyncMock(return_value=None)
-        harness.service._verify_login = AsyncMock(side_effect=[(False, "not logged in"), (True, "Logged in using ChatGPT")])
+        harness.service._verify_login = AsyncMock(
+            side_effect=[(False, "not logged in"), (True, "Logged in using ChatGPT")]
+        )
         harness.service._refresh_backend_runtime = AsyncMock()
 
         await runner.run(
@@ -2617,7 +2605,7 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
                     "[model_providers.openai-managed]",
                     'name = "OpenAI"',
                     'wire_api = "responses"',
-                    'requires_openai_auth = true',
+                    "requires_openai_auth = true",
                     'base_url = "https://relay.example/v1"',
                     "supports_websockets = false",
                 ]
@@ -2695,9 +2683,7 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
 
         toml = (self.home / ".codex" / "config.toml").read_text(encoding="utf-8")
-        top_level_pointer = [
-            line for line in toml.splitlines() if line.startswith("model_provider")
-        ]
+        top_level_pointer = [line for line in toml.splitlines() if line.startswith("model_provider")]
         self.assertEqual(top_level_pointer, [])
         self.assertEqual(self.codex_cfg.auth_mode, "oauth")
         self.assertEqual(
@@ -2750,9 +2736,7 @@ class CodexRelayRoundTripScenarioTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("[model_providers.openai-managed]", toml)
         self.assertIsNone(self.codex_cfg.oauth_relay_marker)
 
-        ScenarioExpect.step_history(
-            runner, ["oauth_transition", "settings_reload", "api_key_save"]
-        )
+        ScenarioExpect.step_history(runner, ["oauth_transition", "settings_reload", "api_key_save"])
 
     _expected_provider_id = "OpenAI"
 
