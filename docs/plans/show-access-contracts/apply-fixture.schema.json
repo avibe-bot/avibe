@@ -3,7 +3,7 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/apply-fixture.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "fixtures", "boundary_cases", "concurrency_cases", "receipt_digest_vectors", "receipt_sequences", "sequences"],
+  "required": ["schema_version", "fixtures", "boundary_cases", "concurrency_cases", "availability_race_sequences", "receipt_digest_vectors", "receipt_sequences", "sequences"],
   "properties": {
     "schema_version": { "const": 2 },
     "fixtures": {
@@ -20,6 +20,12 @@
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/concurrency_case" }
+    },
+    "availability_race_sequences": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/availability_race_sequence"}
     },
     "receipt_digest_vectors": {
       "type": "array",
@@ -124,6 +130,35 @@
           }
         },
         "assertions": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "availability_race_sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scenario_ids", "initial_state", "steps", "final_state", "assertions"],
+      "properties": {
+        "id": {"enum": ["RACE-APPLY-BEFORE-OFFLINE", "RACE-OFFLINE-BEFORE-APPLY"]},
+        "scenario_ids": {"$ref": "#/$defs/scenario_ids"},
+        "initial_state": {"$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json"},
+        "steps": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["operation", "expected_audience_revision", "outcome", "result_audience_revision", "store_write"],
+            "properties": {
+              "operation": {"enum": ["apply", "durable_offline_transition", "retry_apply"]},
+              "expected_audience_revision": {"$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision"},
+              "outcome": {"enum": ["applied", "availability_changed", "revision_conflict"]},
+              "result_audience_revision": {"$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision"},
+              "store_write": {"type": "boolean"}
+            }
+          }
+        },
+        "final_state": {"$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json"},
+        "assertions": {"type": "array", "minItems": 4, "uniqueItems": true, "items": {"type": "string"}}
       }
     },
     "receipt_digest_vector": {

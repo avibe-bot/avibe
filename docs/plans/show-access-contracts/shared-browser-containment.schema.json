@@ -3,7 +3,7 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/shared-browser-containment.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "owner", "canonical_public_url", "trusted_shell", "admission_rule", "runtime_capture_admission", "share_browsing_credential", "protected_request_validation", "browser_request_shapes", "credentialless_cors", "api_mutation_cases", "vendor_assets", "cross_share_isolation", "expiry_reclamation", "failure_responses", "dependency_cases", "residual_evidence", "cases"],
+  "required": ["schema_version", "owner", "canonical_public_url", "trusted_shell", "service_worker_policy", "admission_rule", "runtime_capture_admission", "share_browsing_credential", "protected_request_validation", "browser_request_shapes", "credentialless_cors", "api_mutation_cases", "vendor_assets", "cross_share_isolation", "expiry_reclamation", "failure_responses", "dependency_cases", "residual_evidence", "cases"],
   "properties": {
     "schema_version": { "const": 2 },
     "owner": { "const": "SharedViewerBrowserContainment" },
@@ -24,6 +24,19 @@
           "opener": false,
           "ambient_identity_credential": false
         }
+      }
+    },
+    "service_worker_policy": {
+      "const": {
+        "execution_context": "sandboxed_opaque_origin_iframe_without_allow_same_origin",
+        "registration_supported": false,
+        "registration_outcome": "security_error",
+        "service_worker_allowed_header_emitted": false,
+        "controls_public_show": false,
+        "controls_canonical_show": false,
+        "private_bytes_exposed": false,
+        "ordinary_web_worker_support_is_separate": true,
+        "residual_browser_evidence": "future_local_incus_real_browser"
       }
     },
     "admission_rule": {
@@ -243,7 +256,7 @@
         "public_sibling_can_read_platform_cookies": false,
         "public_sibling_can_read_limited_dom": false,
         "public_sibling_can_read_protected_cors_response": false,
-        "public_sibling_can_expand_service_worker_scope": false,
+        "public_sibling_can_register_service_worker": false,
         "public_sibling_can_retain_readable_opener": false,
         "public_sibling_can_read_protected_bytes": false,
         "trusted_shell_current_member_can_load": true,

@@ -5,8 +5,8 @@
     "source_issue_updated_at": "2026-08-16T18:44:25Z",
     "source_design_path": "docs/plans/public-show-live-update.md",
     "source_ref_kind": "git_blob",
-    "source_sha": "b4afbcb4949352a044b45ddf62f2c21300d6744c",
-    "source_design_blob_sha": "b4afbcb4949352a044b45ddf62f2c21300d6744c"
+    "source_sha": "556f73095bc02c91cbbbf1158acb21e60625e40c",
+    "source_design_blob_sha": "556f73095bc02c91cbbbf1158acb21e60625e40c"
   },
   "repositories": [
     {
@@ -35,8 +35,8 @@
     "share_binding_allocator": "controller_process.ShowAccessStore under stable_writer_lease",
     "settings_projection_owner": "controller_process.ShowAccessService.project_owner_settings",
     "ui_process_coordinator_allowed": false,
-    "atomic_fields": ["access_mode", "share_binding", "emails", "audience_revision", "last_mutation", "apply_receipt"],
-    "serialized_operations": ["apply"]
+    "atomic_fields": ["availability", "access_mode", "share_binding", "emails", "audience_revision", "last_mutation", "apply_receipt"],
+    "serialized_operations": ["apply", "durable_availability_transition"]
   },
   "interfaces": [
     {
@@ -71,28 +71,28 @@
       "id": "C05",
       "producer": { "repository": "avibe", "path": "ui/src/lib/showPageAccess.ts", "symbol": "OwnerShowAccessSettingsRequest" },
       "consumers": [{ "repository": "avibe", "path": "vibe/ui_server.py", "symbol": "show_page_owner_settings_get" }],
-      "signature": { "schema": "owner-settings.schema.json", "request": "page-bound settings read", "result": "local user-facing settings projection including exact emails and excluding mutation receipts", "covered_fields": ["page_id", "availability", "access_mode", "share_binding", "audience_revision", "emails", "storage_source", "cache_control"] },
-      "delivery": { "mechanism": "local_http_json", "route_or_channel": "GET /api/show-pages/{page_id}/access/settings", "authentication": "owner_or_sharing_control_resource_authority", "serialization_owner": "controller_process.ShowAccessService", "version": 2 }
+      "signature": { "schema": "owner-settings.schema.json#/$defs/settings_http_response", "request": "authorized route page ID plus equal local HTTP request page ID", "result": "receipt-free local settings body with exact page identity and HTTP delivery metadata", "covered_fields": ["authorized_route_page_id", "http_request.page_id", "http_response.body.page_id", "http_response.body.show_access.page_id", "availability", "access_mode", "share_binding", "audience_revision", "emails", "storage_source", "Cache-Control", "Vary"] },
+      "delivery": { "mechanism": "local_http_json", "route_or_channel": "GET /api/show-pages/{page_id}/access/settings with Cache-Control private,no-store and Vary Cookie", "authentication": "owner_or_sharing_control_resource_authority", "serialization_owner": "controller_process.ShowAccessService", "version": 2 }
     },
     {
       "id": "C06",
       "producer": { "repository": "avibe", "path": "vibe/ui_server.py", "symbol": "show_page_owner_settings_get" },
       "consumers": [{ "repository": "avibe", "path": "vibe/internal_server.py", "symbol": "show_page_owner_settings_read" }],
-      "signature": { "schema": "owner-settings.schema.json#/$defs/settings_projection", "request": "authorized page_id", "result": "local receipt-free settings projection", "covered_fields": ["page_id", "availability", "access_mode", "share_binding", "audience_revision", "emails", "private, no-store"] },
+      "signature": { "schema": "owner-settings.schema.json#/$defs/settings_ipc_result", "request": "equal authorized route HTTP and IPC page IDs", "result": "equal IPC result and receipt-free projection page IDs or internal protocol failure", "covered_fields": ["authorized_route_page_id", "http_request.page_id", "ipc_request.page_id", "ipc_result.page_id", "ipc_result.show_access.page_id", "no_store_read_before_request_identity_match", "no_settings_on_result_identity_mismatch"] },
       "delivery": { "mechanism": "internal_socket_json", "route_or_channel": "controller internal socket settings read", "authentication": "controller_internal_socket_peer", "serialization_owner": "controller_process.ShowAccessService", "version": 2 }
     },
     {
       "id": "C07",
       "producer": { "repository": "avibe", "path": "vibe/ui_server.py", "symbol": "start_limited_page_identity_login" },
       "consumers": [{ "repository": "avibe-backend", "path": "app/api/v1/instances/[instanceId]/show-identity/authorize/route.ts", "symbol": "GET" }],
-      "signature": { "schema": "identity-auth.json#/local_handshake", "request": "GET authorize with exactly state nonce and redirect_uri", "result": "flow-specific host-only correlation plus RS256 identity assertion only", "covered_fields": ["state", "nonce", "redirect_uri", "page_id", "correlation_cookie_sha256", "correlation_cookie.name_template", "callback_hostname", "consumption_store"] },
+      "signature": { "schema": "identity-auth.json#/local_handshake", "request": "GET authorize with exactly state nonce and redirect_uri", "result": "bounded signed state flow correlation and identity-only server session", "covered_fields": ["state", "nonce", "redirect_uri", "page_id", "correlation_cookie_sha256", "correlation_cookie.name_template", "signed_state_lifecycle", "callback_hostname", "consumption_store", "identity_session"] },
       "delivery": { "mechanism": "authorization_redirect", "route_or_channel": "GET /api/v1/instances/{instanceId}/show-identity/authorize", "authentication": "signed_local_state_flow_specific_cookie_and_paired_instance", "serialization_owner": "avibe.ExecutableIdentityHandshake", "version": 2 }
     },
     {
       "id": "C08",
       "producer": { "repository": "avibe-backend", "path": "lib/show-identity/assertion.ts", "symbol": "issueVerifiedIdentityAssertion" },
       "consumers": [{ "repository": "avibe", "path": "vibe/ui_server.py", "symbol": "limited_page_identity_callback" }],
-      "signature": { "schema": "identity-auth.json#/backend_assertion", "request": "authenticated identity and paired instance", "result": "RFC 7519 compact RS256 JWT form_post plus returned state and paired JWKS verification", "covered_fields": ["alg", "typ", "kid", "iss", "aud", "sub", "iat", "exp", "jti", "nonce", "instance_id", "verified_email", "state", "assertion", "paired_jwks_uri", "unknown_kid_refresh"] },
+      "signature": { "schema": "identity-auth.json#/backend_assertion", "request": "authenticated identity and paired instance", "result": "RFC 7519 compact RS256 JWT form_post plus bounded paired JWKS verification", "covered_fields": ["alg", "typ", "kid", "iss", "aud", "sub", "iat", "exp", "jti", "nonce", "instance_id", "verified_email", "state", "assertion", "paired_jwks_uri", "unknown_kid_refresh", "jwks_cache_max_age", "jwks_must_revalidate", "removed_key_rejection"] },
       "delivery": { "mechanism": "form_post_rs256_identity_jwt", "route_or_channel": "POST /auth/show-identity/callback without query or fragment plus exact paired issuer /oauth/jwks.json", "authentication": "backend_verified_identity_plus_local_pairing_cookie_state_nonce_jti", "serialization_owner": "avibe.ExecutableIdentityHandshake", "version": 2 }
     },
     {
@@ -134,8 +134,8 @@
       "id": "C14",
       "producer": { "repository": "avibe", "path": "core/show_access.py", "symbol": "PrivateHmrAuthority" },
       "consumers": [{ "repository": "avibe", "path": "vibe/ui_server.py", "symbol": "show_runtime_hmr_websocket" }],
-      "signature": { "schema": "runtime-context.json#/avibe_private_hmr_monitor", "request": "closed server-validated Origin source algebra plus resource editor and durable offline facts", "result": "pre-upstream exact Origin decision and bounded unauthorized socket closure", "covered_fields": ["websocket_admission.request_trust_classifier", "websocket_admission.positive_source_cases", "websocket_admission.negative_mutations", "websocket_admission.origin_header_cardinality", "websocket_admission.origin_match", "websocket_admission.validation_order", "post_connect_policy", "durable_offline_deadline.total_close_deadline_seconds"] },
-      "delivery": { "mechanism": "in_process_value", "route_or_channel": "canonical HMR admission reusing WebSocket local/remote trust classification plus one coalesced monitor per active Session", "authentication": "server_validated_origin_source_and_resource_editor_before_upstream", "serialization_owner": "avibe.PrivateHmrAuthority", "version": 1 }
+      "signature": { "schema": "runtime-context.json#/avibe_private_hmr_monitor", "request": "closed server-validated Origin plus persistent editor resource remote-auth revision and availability facts", "result": "pre-upstream exact Origin decision and five-second fail-closed socket revocation", "covered_fields": ["websocket_admission.request_trust_classifier", "websocket_admission.positive_source_cases", "websocket_admission.negative_mutations", "websocket_admission.origin_header_cardinality", "websocket_admission.origin_match", "websocket_admission.validation_order", "authority_monitor.persistent_sources", "authority_monitor.trace_matrix_ms", "post_connect_policy"] },
+      "delivery": { "mechanism": "persistent_polling_authority_monitor", "route_or_channel": "canonical HMR admission plus one coalesced persistent monitor per active Session polling at most every four seconds", "authentication": "server_validated_origin_source_and_resource_editor_before_upstream", "serialization_owner": "avibe.PrivateHmrAuthority", "version": 1 }
     },
     {
       "id": "C15",
@@ -165,7 +165,7 @@
         { "repository": "avibe", "path": "ui/src/lib/showPageAccess.ts", "symbol": "SharedPageSandboxHost" },
         { "repository": "avibe", "path": "core/show_access.py", "symbol": "verify_share_browsing_credential" }
       ],
-      "signature": { "schema": "shared-browser-containment.schema.json", "request": "trusted shell admission followed by every-request local ShowAccess validation and Runtime handle pin", "result": "opaque-origin shared page with capability-path credentialless protected requests and closed stale outcomes", "covered_fields": ["instance_id", "page_id", "share_id", "audience_revision", "admitted_normalized_email_if_limited", "namespace_handle", "document_handle", "capability", "protected_request_validation", "credentialless_cors.options", "iframe_sandbox_tokens", "required_surfaces"] },
+      "signature": { "schema": "shared-browser-containment.schema.json", "request": "trusted shell admission followed by every-request local ShowAccess validation and Runtime handle pin", "result": "opaque-origin shared page with capability-path protected requests and no Service Worker authority", "covered_fields": ["instance_id", "page_id", "share_id", "audience_revision", "admitted_normalized_email_if_limited", "namespace_handle", "document_handle", "capability", "protected_request_validation", "credentialless_cors.options", "iframe_sandbox_tokens", "service_worker_policy", "required_surfaces"] },
       "delivery": { "mechanism": "local_http_sandboxed_iframe", "route_or_channel": "canonical /p/<share_id>/ shell and every capability-path document resource fallback and API request", "authentication": "full_current_local_show_access_validation_then_atomic_runtime_pin", "serialization_owner": "avibe.SharedViewerBrowserContainment.protected_request_validation", "version": 2 }
     },
     {
@@ -174,6 +174,16 @@
       "consumers": [{ "repository": "avibe", "path": "storage/migrations/show_access.py", "symbol": "LocalLegacyShowAccessMapper" }],
       "signature": { "schema": "local-legacy-mapping.schema.json", "request": "legacy local private public or offline row with nullable share_id", "result": "deterministic fail-closed local ShowAccess v2 row", "covered_fields": ["availability", "access_mode", "share_binding", "null_share_binding", "audience_revision", "emails"] },
       "delivery": { "mechanism": "local_sqlite_schema_migration", "route_or_channel": "single local database transaction without hosted import or dual write", "authentication": "controller_internal_only", "serialization_owner": "controller_process.ShowAccessStore under stable_writer_lease", "version": 2 }
+    },
+    {
+      "id": "C20",
+      "producer": { "repository": "avibe", "path": "vibe/controller.py", "symbol": "WorkbenchLifecycle archive and reactivate" },
+      "consumers": [
+        { "repository": "avibe", "path": "core/show_access.py", "symbol": "ShowAccessService.transition_availability" },
+        { "repository": "avibe", "path": "storage/show_access.py", "symbol": "ShowAccessStore.replace_transactionally" }
+      ],
+      "signature": { "schema": "apply-transition-algebra.json#/stable_writer", "request": "page_id target availability and expected audience revision from workbench archive or reactivate", "result": "serialized availability transition preserving mode binding and emails with exactly one revision advance or no-op", "covered_fields": ["page_id", "availability", "expected_audience_revision", "audience_revision", "access_mode", "share_binding", "emails", "workbench_archive", "workbench_reactivate"] },
+      "delivery": { "mechanism": "in_process_stable_writer_transaction", "route_or_channel": "Workbench archive and reactivate through ShowAccessService stable writer lease", "authentication": "controller_internal_workbench_lifecycle", "serialization_owner": "controller_process.ShowAccessService under stable_writer_lease", "version": 2 }
     }
   ],
   "release_gates": {

@@ -282,8 +282,15 @@
     "shared_proxy_policy": {
       "const": {
         "id": "AVIBE-SHARED-PROXY-CONFINEMENT",
-        "service_worker_allowed_header": "strip",
-        "maximum_service_worker_scope": "/p/<share_id>/",
+        "service_worker_policy": {
+          "shared_execution_origin": "opaque_origin_iframe_without_allow_same_origin",
+          "registration": "unsupported_and_rejected_with_security_error",
+          "service_worker_allowed_header": "absent",
+          "controls_public_show": false,
+          "controls_canonical_show": false,
+          "private_bytes_exposed": false,
+          "ordinary_web_worker_support_is_separate": true
+        },
         "editor_redirect_cache_control": "private, no-store",
         "response_policy_matrix": {
           "axes": {
@@ -301,7 +308,7 @@
     "avibe_private_hmr_monitor": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "owner", "implementation_owner", "runtime_implementation_owner", "websocket_admission", "monitor_scope", "authorization_triggers", "authorization_trigger_action", "post_connect_policy", "durable_offline_source", "durable_offline_deadline", "share_mode_or_binding_change_closes_private_hmr_when_editor_access_remains"],
+      "required": ["id", "owner", "implementation_owner", "runtime_implementation_owner", "websocket_admission", "authority_monitor", "post_connect_policy", "share_mode_or_binding_change_closes_private_hmr_when_editor_access_remains"],
       "properties": {
         "id": {"const": "AVIBE-PRIVATE-HMR-AUTHORITY"},
         "owner": {"const": "PrivateHmrAuthority"},
@@ -368,24 +375,42 @@
             }
           }
         },
-        "monitor_scope": {"const": "one_coalesced_monitor_per_active_session"},
-        "authorization_triggers": {"const": ["editor_capability_loss", "resource_access_revocation", "authorization_revision_change"]},
-        "authorization_trigger_action": {"const": "reevaluate_and_close_unauthorized_existing_sockets"},
-        "post_connect_policy": {
+        "authority_monitor": {
           "const": {
-            "close_triggers": ["editor_capability_loss", "resource_access_revocation", "remote_authorization_loss", "durable_offline_state"],
-            "non_close_triggers_while_active_editor_remains": ["access_mode_change", "share_binding_change", "guest_membership_change", "audience_revision_change"]
+            "scope": "one_coalesced_persistent_monitor_per_active_session",
+            "poll_interval_max_seconds": 4,
+            "notification_policy": "optional_wakeup_only_not_required_for_correctness",
+            "persistence_read_uncertainty_outcome": "close_all_sockets_fail_closed",
+            "persistent_sources": [
+              {"trigger": "editor_capability_loss", "source": "ResourceAccessStore.editor_capability"},
+              {"trigger": "resource_access_revocation", "source": "ResourceAccessStore.resource_authority"},
+              {"trigger": "remote_authorization_loss", "source": "RemoteAccessSessionStore.authorization"},
+              {"trigger": "authorization_revision_change", "source": "RemoteAccessSessionStore.authorization_revision"},
+              {"trigger": "durable_offline_state", "source": "ShowPageStore.availability"}
+            ],
+            "deadline": {
+              "measured_from": "durable_authority_change_commit",
+              "post_detection_close_budget_seconds": 1,
+              "total_close_deadline_seconds": 5,
+              "poll_plus_close_budget_must_not_exceed_total": true
+            },
+            "trace_matrix_ms": {
+              "triggers": ["editor_capability_loss", "resource_access_revocation", "remote_authorization_loss", "authorization_revision_change", "durable_offline_state"],
+              "event_delivery": ["just_after_poll", "notification_lost"],
+              "last_poll": 0,
+              "durable_change_commit": 1,
+              "next_poll_no_later_than": 4000,
+              "detected_no_later_than": 4000,
+              "all_sockets_closed_no_later_than": 5000,
+              "elapsed_from_change_commit": 4999,
+              "elapsed_after_detection": 1000
+            }
           }
         },
-        "durable_offline_source": {"const": "ShowPageStore"},
-        "durable_offline_deadline": {
+        "post_connect_policy": {
           "const": {
-            "measured_from": "durable_offline_transaction_commit",
-            "poll_interval_max_seconds": 4,
-            "post_detection_close_budget_seconds": 1,
-            "total_close_deadline_seconds": 5,
-            "sum_of_poll_and_close_budget_must_not_exceed_total": true,
-            "worst_case_just_after_poll_trace_ms": {"last_poll": 0, "durable_offline_commit": 1, "next_poll_no_later_than": 4000, "all_sockets_closed_no_later_than": 5000, "elapsed_from_offline_commit": 4999}
+            "close_triggers": ["editor_capability_loss", "resource_access_revocation", "remote_authorization_loss", "authorization_revision_change", "durable_offline_state"],
+            "non_close_triggers_while_active_editor_remains": ["access_mode_change", "share_binding_change", "guest_membership_change", "audience_revision_change"]
           }
         },
         "share_mode_or_binding_change_closes_private_hmr_when_editor_access_remains": {"const": false}

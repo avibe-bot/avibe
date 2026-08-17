@@ -114,6 +114,16 @@
               "maximum_verification_retries": 1,
               "still_unknown_or_refresh_failure_outcome": "reject_identity_assertion"
             },
+            "cache_policy": {
+              "scope": "paired_issuer",
+              "maximum_age_seconds": 300,
+              "revalidation": "must_revalidate_at_expiry_including_known_kid",
+              "refresh_coalescing": "one_in_flight_fetch_per_issuer",
+              "replacement": "successful_refresh_atomically_replaces_cached_key_set",
+              "stale_key_acceptance_after_expiry": false,
+              "removed_key_acceptance_after_refresh": false,
+              "refresh_failure_outcome": "reject_identity_assertion"
+            },
             "malformed_or_unavailable_outcome": "reject_identity_assertion"
           }
         },
@@ -161,8 +171,8 @@
         "page_membership_decided": { "const": false },
         "interoperability_vectors": {
           "type": "array",
-          "minItems": 8,
-          "maxItems": 8,
+          "minItems": 12,
+          "maxItems": 12,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -170,7 +180,7 @@
             "properties": {
               "id": {"type": "string", "pattern": "^(JWT|JWKS)-[A-Z0-9-]+$"},
               "token_key": {"enum": ["current", "previous", "new_current", "unknown"]},
-              "jwks_state": {"enum": ["current_plus_previous", "previous_cache_then_rotated_refresh", "unchanged_after_refresh", "duplicate_kid", "changed_material_same_kid_on_refresh", "cross_origin_uri_or_redirect"]},
+              "jwks_state": {"enum": ["current_plus_previous", "previous_cache_then_rotated_refresh", "unchanged_after_refresh", "duplicate_kid", "changed_material_same_kid_on_refresh", "cross_origin_uri_or_redirect", "known_key_cache_expired", "old_key_removed_after_overlap", "expired_cache_refresh_unavailable", "issuer_coalesced_concurrent_refresh"]},
               "refreshes": {"type": "integer", "minimum": 0, "maximum": 1},
               "outcome": {"enum": ["verified_identity", "reject_identity_assertion"]}
             }
@@ -185,10 +195,12 @@
         "producer",
         "server_resolved_before_start",
         "signed_state_fields",
+        "signed_state_lifecycle",
         "correlation_cookie",
         "callback_checks",
         "consumption_store",
         "concurrent_flow_state_machine",
+        "identity_session",
         "membership_lookup",
         "identity_session_is_authorization",
         "unlisted_outcome",
@@ -202,6 +214,23 @@
         },
         "signed_state_fields": {
           "const": ["instance_id", "page_id", "share_id", "safe_public_return_target", "callback_hostname", "nonce", "correlation_cookie_sha256", "issued_at", "expires_at"]
+        },
+        "signed_state_lifecycle": {
+          "const": {
+            "numeric_date_fields": ["issued_at", "expires_at"],
+            "numeric_date_type": "integer",
+            "maximum_lifetime_seconds": 600,
+            "verifier_clock_skew_seconds": 60,
+            "renewable": false,
+            "validation": "issued_at_minus_skew_not_future_and_now_not_after_expires_at_plus_skew_and_lifetime_within_maximum",
+            "vectors": [
+              {"id": "STATE-VALID-BOUNDARY", "issued_at_delta_seconds": 60, "lifetime_seconds": 600, "outcome": "accept_state"},
+              {"id": "STATE-OVERSIZED", "issued_at_delta_seconds": 0, "lifetime_seconds": 601, "outcome": "reject_without_cookie_selection"},
+              {"id": "STATE-EXPIRED", "issued_at_delta_seconds": -661, "lifetime_seconds": 600, "outcome": "reject_and_delete_matching_flow_cookie"},
+              {"id": "STATE-FUTURE", "issued_at_delta_seconds": 61, "lifetime_seconds": 300, "outcome": "reject_and_delete_matching_flow_cookie"},
+              {"id": "STATE-NONINTEGER", "issued_at_delta_seconds": 0, "lifetime_seconds": 300, "outcome": "reject_without_cookie_selection"}
+            ]
+          }
         },
         "correlation_cookie": {
           "const": {
@@ -229,7 +258,7 @@
           "const": {
             "scenario_id": "AUTH-SETUP-404",
             "actual_http_boundary": "POST /auth/show-identity/callback",
-            "components": ["local_state_signer", "backend_rs256_issuer_and_jwks", "avibe_jwt_verifier"],
+            "components": ["local_state_signer", "backend_rs256_issuer_and_jwks", "avibe_jwt_verifier", "local_identity_session_store"],
             "content_type": "application/x-www-form-urlencoded",
             "active_custom_callback_origin": "https://show.example.test",
             "contract_evidence": "http_form_jwt_jwks_and_atomic_state_machine",
@@ -269,6 +298,42 @@
                 }
               }
             }
+          }
+        },
+        "identity_session": {
+          "const": {
+            "owner": "avibe.ExecutableIdentityHandshake",
+            "purpose": "verified_identity_only",
+            "cookie": {
+              "name": "__Host-avibe_show_identity_session",
+              "value": "opaque_32_byte_csprng_secret",
+              "host_only": true,
+              "domain_attribute_allowed": false,
+              "secure": true,
+              "http_only": true,
+              "same_site": "Lax",
+              "path": "/"
+            },
+            "server_record_key": "sha256_of_cookie_token",
+            "server_record_fields": ["paired_instance_id", "issuer", "subject", "normalized_verified_email", "callback_hostname", "issued_at", "expires_at"],
+            "maximum_lifetime_seconds": 86400,
+            "renewable": false,
+            "rotation": "every_successful_login_replaces_prior_session_for_that_browser_flow",
+            "reset_policy": "key_or_session_store_reset_invalidates_all_existing_cookies",
+            "request_validation": ["token_hash_record_exists", "integer_times_and_not_expired", "paired_instance_matches", "issuer_matches_pairing", "request_host_matches_record", "local_key_and_session_generation_match"],
+            "failure_outcome": "identity_required_without_page_bytes",
+            "page_authorization": false,
+            "later_limited_request": ["resolve_current_share", "load_current_ShowAccess", "require_active_limited", "match_current_local_membership", "mint_page_bound_browsing_credential"],
+            "forbidden_capabilities": ["instance_access", "canonical_show", "hmr", "annotations", "agents", "resource_authority"],
+            "vectors": [
+              {"id": "SESSION-LATER-REQUEST", "mutation": "none", "outcome": "serve_shared_after_current_membership"},
+              {"id": "SESSION-EXPIRED", "mutation": "advance_past_24_hours", "outcome": "identity_required_without_page_bytes"},
+              {"id": "SESSION-HOST-MISMATCH", "mutation": "request_from_other_host", "outcome": "identity_required_without_page_bytes"},
+              {"id": "SESSION-INSTANCE-MISMATCH", "mutation": "request_other_instance_share", "outcome": "identity_required_without_page_bytes"},
+              {"id": "SESSION-MISSING-RECORD", "mutation": "delete_server_record", "outcome": "identity_required_without_page_bytes"},
+              {"id": "SESSION-STORE-RESET", "mutation": "rotate_local_session_generation", "outcome": "identity_required_without_page_bytes"},
+              {"id": "SESSION-MEMBER-REMOVED", "mutation": "remove_email_from_current_ShowAccess", "outcome": "generic_deny_without_page_bytes_or_login_loop"}
+            ]
           }
         }
       }
@@ -327,14 +392,16 @@
             "resolved_share_id": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/share_id" },
             "resolved_audience_revision": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/revision" },
             "current_local_emails": { "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/non_empty_canonical_email_set" },
-            "outcome": { "const": "issue_share_bound_browsing_credential" }
+            "outcome": { "const": "issue_identity_session_and_redirect" }
           }
         },
         "protected_request": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["credential_binding", "membership_rechecked", "outcome"],
+          "required": ["identity_session_cookie", "identity_session_record_revalidated", "credential_binding", "membership_rechecked", "outcome"],
           "properties": {
+            "identity_session_cookie": {"const": "__Host-avibe_show_identity_session"},
+            "identity_session_record_revalidated": {"const": true},
             "credential_binding": {
               "type": "object",
               "additionalProperties": false,

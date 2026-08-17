@@ -32,8 +32,11 @@ The executable identity owner derives one host-only, callback-scoped,
 `SameSite=None`, `Secure`, `HttpOnly` cookie per signed nonce. The cookie value is
 an independent 32-byte secret, state is verified before cookie selection, and atomic
 nonce/`jti` retention supports concurrent flows. The reference harness performs a
-real HTTP form POST plus compact JWT/JWKS verification; browser cookie delivery is
-residual real-browser evidence.
+real HTTP form POST plus compact JWT/JWKS verification. Signed state and paired-issuer
+JWKS caches have closed clocks and fail-closed refresh behavior. Callback success
+rotates a token-hash-backed, host-bound, identity-only local session with a
+non-renewable 24-hour maximum; every later limited request still checks current local
+membership. Browser cookie delivery is residual real-browser evidence.
 
 There is no migration or compatibility phase. The unused hosted storage, endpoints,
 clients, and Instance authorization source are direct deletion targets.
@@ -47,8 +50,8 @@ clients, and Instance authorization source are direct deletion targets.
 | `apply-mutation.schema.json` | Local Apply request, terminal result, and rejected result |
 | `apply-transition-algebra.json` | Exhaustive CAS, idempotency, binding, membership, and revision algebra |
 | `fixtures/apply-mutations.json` | Canonical transitions, crash/idempotency trace, next-request revocation |
-| `owner-settings.schema.json` | Local authorized exact-email settings read with `private, no-store` |
-| `identity-auth.json` | Compact RS256/JWKS identity wire contract and concurrent local callback state machine |
+| `owner-settings.schema.json` | Page-correlated local settings IPC and actual private/no-store HTTP metadata |
+| `identity-auth.json` | Compact RS256/JWKS, bounded state/cache, concurrent callback, and identity-session state machines |
 | `local-legacy-mapping.json` | Deterministic local SQLite private/public/offline mapping with offline fail-closed |
 | `capability-matrix.json` | Closed `/p` and `/show` decision over independent resource and membership axes |
 | `shared-browser-containment.json` | Trusted shell, opaque Runtime capture, every-request validation, sibling isolation |
@@ -61,8 +64,9 @@ clients, and Instance authorization source are direct deletion targets.
 
 - Private disables but retains a stable binding; limited/public reuse it; explicit
   rotation or custom binding replaces it.
-- Apply never changes availability and never calls Backend. A separate durable
-  availability transition advances the same `audience_revision` exactly once.
+- Apply never changes availability and never calls Backend. Apply and durable
+  availability transitions share one page writer; an effective transition advances
+  the same `audience_revision` exactly once and a no-op advances zero.
 - Canonical mode, binding, or email-set change advances `audience_revision` once;
   canonical no-op does not.
 - Same mutation and payload replays its stored terminal result even after later
@@ -79,8 +83,9 @@ clients, and Instance authorization source are direct deletion targets.
 - `/p` always selects shared Runtime and never exposes HMR, annotations, private
   context, Session internals, Workbench, APIs, or Agents.
 - Arbitrary shared code runs in an opaque-origin sandbox and cannot obtain or reuse
-  another share's bootstrap, handle, capability, cookie, DOM, CORS response, worker
-  scope, opener, or protected bytes.
+  another share's bootstrap, handle, capability, cookie, DOM, CORS response, opener,
+  or protected bytes. Service Worker registration is unsupported and no
+  Service-Worker-Allowed header is emitted; ordinary Web Workers remain separate.
 - Public anonymous and current-member limited admission both mint opaque capability-
   path authority. Protected document/module/resource/API requests are credentialless;
   JSON mutation preflight has an exact closed method/header policy.
@@ -95,8 +100,9 @@ clients, and Instance authorization source are direct deletion targets.
 - Canonical HMR accepts only one exact Origin resolved by the existing WebSocket trust
   classifier across hosted/custom, loopback, setup, enumerated wildcard interface,
   Docker-loopback, and trusted-proxy sources. Origin and resource-editor authority
-  both pass before upstream open; durable offline polling plus closure has one
-  five-second total bound.
+  both pass before upstream open. One coalesced persistent monitor polls every durable
+  editor/resource/remote-auth/revision/offline source and gives each a five-second
+  total closure bound even without notifications.
 
 ## Validation
 

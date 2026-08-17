@@ -52,6 +52,11 @@ def test_form_post_closes_custom_host_identity_and_membership_loop() -> None:
     assert response.headers["Location"] == "/p/identity-contract-share/"
     assert response.headers["Cache-Control"] == "no-store"
     assert harness.http_callback_count == 1
+    assert harness.issued_credential is None
+    assert "__Host-avibe_show_identity_session=" in response.headers["Set-Cookie"]
+    assert "samesite=lax" in response.headers["Set-Cookie"].lower()
+    assert "Path=/" in response.headers["Set-Cookie"]
+    assert harness.later_request().status_code == 200
     assert harness.issued_credential == {
         "instance_id": "ins_identity_contract",
         "page_id": "ses_identity_contract",
@@ -156,6 +161,52 @@ def test_rs256_jwt_jwks_rotation_and_failure_vectors_are_executable() -> None:
     wrong_pairing = PairingRecord(jwks_uri="https://keys.evil.test/oauth/jwks.json")
     with pytest.raises(ValueError, match="jwks_not_exact_paired_same_origin_uri"):
         AvibeJwtVerifier(wrong_pairing, JwksProvider(harness.issuer.jwks()), harness.backend)
+
+    clock = {"now": REFERENCE_NOW}
+    expiring_provider = JwksProvider(harness.issuer.jwks())
+    expiring_verifier = AvibeJwtVerifier(
+        harness.pairing,
+        expiring_provider,
+        harness.backend,
+        lambda: clock["now"],
+    )
+    assert expiring_verifier.verify(token) == claims
+    clock["now"] += 300
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert list(executor.map(expiring_verifier.verify, [token, token])) == [claims, claims]
+    assert expiring_provider.forced_refresh_count == 1
+
+    removal_issuer = BackendRs256Issuer(harness.pairing)
+    old_claims = {**claims, "jti": "jti_removed_old_key_contract_0005"}
+    removed_token = removal_issuer.issue(old_claims)
+    initial_keys = removal_issuer.jwks()
+    removal_issuer.rotate()
+    removal_issuer.rotate()
+    removal_provider = JwksProvider(initial_keys, removal_issuer.jwks())
+    removal_clock = {"now": REFERENCE_NOW}
+    removal_verifier = AvibeJwtVerifier(
+        harness.pairing,
+        removal_provider,
+        harness.backend,
+        lambda: removal_clock["now"],
+    )
+    assert removal_verifier.verify(removed_token) == old_claims
+    removal_clock["now"] += 300
+    assert removal_verifier.verify(removed_token) is None
+    assert removal_provider.forced_refresh_count == 1
+
+    unavailable_at_expiry = JwksProvider(harness.issuer.jwks())
+    unavailable_clock = {"now": REFERENCE_NOW}
+    unavailable_at_expiry_verifier = AvibeJwtVerifier(
+        harness.pairing,
+        unavailable_at_expiry,
+        harness.backend,
+        lambda: unavailable_clock["now"],
+    )
+    unavailable_at_expiry.available = False
+    unavailable_clock["now"] += 300
+    assert unavailable_at_expiry_verifier.verify(token) is None
+    assert unavailable_at_expiry.forced_refresh_count == 1
 
 
 def test_flow_specific_cookies_and_atomic_consumption_support_concurrency() -> None:
@@ -273,3 +324,63 @@ def test_flow_specific_cookies_and_atomic_consumption_support_concurrency() -> N
     new_token = rotated_flows.issue_assertion(new_flow)
     assert rotated_flows.form_post(old_flow, old_token).status_code == 303
     assert rotated_flows.form_post(new_flow, new_token).status_code == 303
+
+
+def test_state_and_identity_session_lifecycles_are_executable() -> None:
+    harness = ShowIdentityScenarioHarness()
+    lifecycle = harness.handshake["signed_state_lifecycle"]
+
+    for vector in lifecycle["vectors"]:
+        candidate = ShowIdentityScenarioHarness()
+        start = candidate.begin()
+        state = candidate.state_signer.verify(start.state)
+        assert state is not None
+        if vector["id"] == "STATE-NONINTEGER":
+            state["issued_at"] = float(candidate.now)
+        else:
+            state["issued_at"] = candidate.now + vector["issued_at_delta_seconds"]
+            state["expires_at"] = state["issued_at"] + vector["lifetime_seconds"]
+        response = candidate.form_post(
+            start,
+            candidate.issue_assertion(start),
+            state=candidate.state_signer.sign(state),
+        )
+        expected_status = 303 if vector["outcome"] == "accept_state" else 403
+        assert response.status_code == expected_status, vector["id"]
+
+    callback = ShowIdentityScenarioHarness()
+    start = callback.begin()
+    assert callback.form_post(start, callback.issue_assertion(start)).status_code == 303
+    session_name = callback.session_contract["cookie"]["name"]
+    session_token = callback.client.cookies.get(session_name)
+    assert session_token is not None
+    assert session_token not in callback.identity_sessions.records
+    record = callback.identity_sessions.records[callback.identity_sessions.token_hash(session_token)]
+    assert record["expires_at"] - record["issued_at"] == 86400
+    assert callback.later_request().json()["outcome"] == "serve_shared_after_current_membership"
+
+    callback.pages[start.share_id]["emails"] = []
+    removed = callback.later_request()
+    assert removed.status_code == 403
+    assert removed.json()["outcome"] == "generic_deny_without_page_bytes_or_login_loop"
+    callback.pages[start.share_id]["emails"] = ["bob@example.com"]
+    assert callback.later_request(base_url="https://attacker.example").status_code == 403
+
+    callback.now += 86401
+    assert callback.later_request().json()["outcome"] == "identity_required_without_page_bytes"
+
+    reset = ShowIdentityScenarioHarness()
+    reset_start = reset.begin()
+    assert reset.form_post(reset_start, reset.issue_assertion(reset_start)).status_code == 303
+    reset.identity_sessions.reset()
+    assert reset.later_request().json()["outcome"] == "identity_required_without_page_bytes"
+
+    rotation = ShowIdentityScenarioHarness()
+    first = rotation.begin()
+    assert rotation.form_post(first, rotation.issue_assertion(first)).status_code == 303
+    first_token = rotation.client.cookies.get(rotation.session_contract["cookie"]["name"])
+    second = rotation.begin()
+    assert rotation.form_post(second, rotation.issue_assertion(second)).status_code == 303
+    second_token = rotation.client.cookies.get(rotation.session_contract["cookie"]["name"])
+    assert first_token != second_token
+    assert rotation.identity_sessions.token_hash(first_token) not in rotation.identity_sessions.records

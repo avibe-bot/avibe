@@ -494,6 +494,31 @@
       ]
     }
   ],
+  "availability_race_sequences": [
+    {
+      "id": "RACE-APPLY-BEFORE-OFFLINE",
+      "scenario_ids": ["SHOW-LIVE-018", "SHOW-LIVE-019"],
+      "initial_state": {"schema_version": 2, "page_id": "ses_race_apply_offline", "availability": "active", "access_mode": "public", "share_binding": {"share_id": "race-apply-offline"}, "audience_revision": 40, "emails": [], "last_mutation": null},
+      "steps": [
+        {"operation": "apply", "expected_audience_revision": 40, "outcome": "applied", "result_audience_revision": 41, "store_write": true},
+        {"operation": "durable_offline_transition", "expected_audience_revision": 41, "outcome": "availability_changed", "result_audience_revision": 42, "store_write": true}
+      ],
+      "final_state": {"schema_version": 2, "page_id": "ses_race_apply_offline", "availability": "offline", "access_mode": "limited", "share_binding": {"share_id": "race-apply-offline"}, "audience_revision": 42, "emails": ["viewer@example.com"], "last_mutation": {"mutation_id": "mut_race_apply_offline_0001", "canonical_request_sha256": "4000000000000000000000000000000000000000000000000000000000000004", "result_audience_revision": 41}},
+      "assertions": ["apply_and_offline_share_one_page_writer_lease", "apply_preserves_active_availability", "offline_preserves_applied_mode_binding_and_emails", "final_revision_contains_both_ordered_effects"]
+    },
+    {
+      "id": "RACE-OFFLINE-BEFORE-APPLY",
+      "scenario_ids": ["SHOW-LIVE-018", "SHOW-LIVE-019"],
+      "initial_state": {"schema_version": 2, "page_id": "ses_race_offline_apply", "availability": "active", "access_mode": "public", "share_binding": {"share_id": "race-offline-apply"}, "audience_revision": 50, "emails": [], "last_mutation": null},
+      "steps": [
+        {"operation": "durable_offline_transition", "expected_audience_revision": 50, "outcome": "availability_changed", "result_audience_revision": 51, "store_write": true},
+        {"operation": "apply", "expected_audience_revision": 50, "outcome": "revision_conflict", "result_audience_revision": 51, "store_write": false},
+        {"operation": "retry_apply", "expected_audience_revision": 51, "outcome": "applied", "result_audience_revision": 52, "store_write": true}
+      ],
+      "final_state": {"schema_version": 2, "page_id": "ses_race_offline_apply", "availability": "offline", "access_mode": "limited", "share_binding": {"share_id": "race-offline-apply"}, "audience_revision": 52, "emails": ["viewer@example.com"], "last_mutation": {"mutation_id": "mut_race_offline_apply_0001", "canonical_request_sha256": "5000000000000000000000000000000000000000000000000000000000000005", "result_audience_revision": 52}},
+      "assertions": ["offline_and_apply_share_one_page_writer_lease", "stale_apply_rejects_without_write", "retry_preserves_offline_availability", "final_revision_contains_both_ordered_effects"]
+    }
+  ],
   "receipt_digest_vectors": [
     {
       "id": "RECEIPT-DIGEST-APPLY-A",

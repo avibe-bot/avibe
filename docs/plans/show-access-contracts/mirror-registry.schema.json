@@ -49,13 +49,13 @@
         "settings_projection_owner": { "type": "string" },
         "ui_process_coordinator_allowed": { "const": false },
         "atomic_fields": { "type": "array", "minItems": 5, "uniqueItems": true, "items": { "type": "string" } },
-        "serialized_operations": { "const": ["apply"] }
+        "serialized_operations": { "const": ["apply", "durable_availability_transition"] }
       }
     },
     "interfaces": {
       "type": "array",
-      "minItems": 19,
-      "maxItems": 19,
+      "minItems": 20,
+      "maxItems": 20,
       "items": { "$ref": "#/$defs/interface" }
     },
     "release_gates": {

@@ -142,6 +142,8 @@
         "canonical_receipt_digest",
         "legacy_null_binding",
         "private_hmr_authority",
+            "settings_identity_and_delivery",
+            "availability_races",
             "settings_projection_excludes_receipts",
             "sibling_isolation"
           ]

@@ -13,6 +13,23 @@
     "expected_revision": ["current", "stale"],
     "mutation_status": ["new", "same_payload", "different_payload"]
   },
+  "stable_writer": {
+    "owner": "controller_process.ShowAccessService under ShowAccessService.stable_writer_lease",
+    "scope": "page_id",
+    "serialized_operations": ["apply", "durable_availability_transition"],
+    "direct_availability_writer_allowed": false,
+    "transaction_fields": ["availability", "access_mode", "share_binding", "emails", "audience_revision", "last_mutation", "apply_receipt"],
+    "availability_transition": {
+      "input": ["page_id", "target_availability", "expected_audience_revision"],
+      "apply_may_change_availability": false,
+      "effective_change_preserves": ["access_mode", "share_binding", "emails"],
+      "effective_change_revision_delta": 1,
+      "canonical_no_op_revision_delta": 0,
+      "stale_revision_outcome": "revision_conflict_without_write"
+    },
+    "race_linearization": "lease_order_then_expected_audience_revision_cas",
+    "lost_effect_allowed": false
+  },
   "precondition_rules": [
     {
       "id": "PRECONDITION-IDEMPOTENT-REPLAY",

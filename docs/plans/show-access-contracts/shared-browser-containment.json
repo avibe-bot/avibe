@@ -18,6 +18,17 @@
       "ambient_identity_credential": false
     }
   },
+  "service_worker_policy": {
+    "execution_context": "sandboxed_opaque_origin_iframe_without_allow_same_origin",
+    "registration_supported": false,
+    "registration_outcome": "security_error",
+    "service_worker_allowed_header_emitted": false,
+    "controls_public_show": false,
+    "controls_canonical_show": false,
+    "private_bytes_exposed": false,
+    "ordinary_web_worker_support_is_separate": true,
+    "residual_browser_evidence": "future_local_incus_real_browser"
+  },
   "admission_rule": {
     "owner": "avibe.SharedViewerBrowserContainment",
     "inputs": ["availability", "access_mode", "verified_identity", "current_local_membership"],
@@ -216,7 +227,7 @@
     "public_sibling_can_read_platform_cookies": false,
     "public_sibling_can_read_limited_dom": false,
     "public_sibling_can_read_protected_cors_response": false,
-    "public_sibling_can_expand_service_worker_scope": false,
+    "public_sibling_can_register_service_worker": false,
     "public_sibling_can_retain_readable_opener": false,
     "public_sibling_can_read_protected_bytes": false,
     "trusted_shell_current_member_can_load": true,

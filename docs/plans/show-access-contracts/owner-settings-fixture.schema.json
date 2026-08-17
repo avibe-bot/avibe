@@ -3,56 +3,57 @@
   "$id": "https://contracts.avibe.bot/show-access/v2/owner-settings-fixture.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "allowed_cases", "denied_cases"],
+  "required": ["schema_version", "allowed_cases", "failure_cases"],
   "properties": {
-    "schema_version": { "const": 2 },
+    "schema_version": {"const": 2},
     "allowed_cases": {
       "type": "array",
       "minItems": 2,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "scenario_ids", "route_page_id", "authority", "request", "result"],
+        "required": ["id", "scenario_ids", "route_page_id", "authority", "http_request", "ipc_request", "ipc_result", "http_response", "store_read"],
         "properties": {
-          "id": { "type": "string", "pattern": "^SETTINGS-[A-Z0-9-]+$" },
-          "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
-          "route_page_id": {
-            "$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id"
-          },
-          "authority": { "enum": ["owner", "sharing_control"] },
-          "request": {
-            "$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_read_request"
-          },
-          "result": {
-            "$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_read_result"
-          }
+          "id": {"type": "string", "pattern": "^SETTINGS-[A-Z0-9-]+$"},
+          "scenario_ids": {"$ref": "#/$defs/scenario_ids"},
+          "route_page_id": {"$ref": "#/$defs/page_id"},
+          "authority": {"enum": ["owner", "sharing_control"]},
+          "http_request": {"$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_http_request"},
+          "ipc_request": {"$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_ipc_request"},
+          "ipc_result": {"$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_ipc_result"},
+          "http_response": {"$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_http_response"},
+          "store_read": {"const": true}
         }
       }
     },
-    "denied_cases": {
+    "failure_cases": {
       "type": "array",
-      "minItems": 2,
+      "minItems": 6,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "scenario_ids", "authority", "result"],
+        "required": ["id", "scenario_ids", "authority", "route_page_id", "http_request", "failure"],
         "properties": {
-          "id": { "type": "string", "pattern": "^SETTINGS-[A-Z0-9-]+$" },
-          "scenario_ids": { "$ref": "#/$defs/scenario_ids" },
-          "authority": { "enum": ["resource_viewer", "page_member_only", "anonymous"] },
-          "result": {
-            "$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_read_denied"
-          }
+          "id": {"type": "string", "pattern": "^SETTINGS-[A-Z0-9-]+$"},
+          "scenario_ids": {"$ref": "#/$defs/scenario_ids"},
+          "authority": {"enum": ["owner", "sharing_control", "resource_viewer", "page_member_only", "anonymous"]},
+          "route_page_id": {"$ref": "#/$defs/page_id"},
+          "http_request": {"$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_http_request"},
+          "ipc_request": {"$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_ipc_request"},
+          "ipc_result_page_id": {"$ref": "#/$defs/page_id"},
+          "projection_page_id": {"$ref": "#/$defs/page_id"},
+          "failure": {"$ref": "https://contracts.avibe.bot/show-access/v2/owner-settings.schema.json#/$defs/settings_read_failure"}
         }
       }
     }
   },
   "$defs": {
+    "page_id": {"$ref": "https://contracts.avibe.bot/show-access/v2/show-access.schema.json#/$defs/page_id"},
     "scenario_ids": {
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$" }
+      "items": {"type": "string", "pattern": "^SHOW-LIVE-[0-9]{3}$"}
     }
   }
 }

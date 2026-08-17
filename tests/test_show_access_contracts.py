@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from referencing import Registry, Resource
+from starlette.responses import JSONResponse
 
 from core.show_runtime import (
     SHOW_RUNTIME_CONTEXT_HEADER,
@@ -248,6 +249,9 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and callback["verified_email"] in callback["current_local_emails"]
                 and callback["resolved_audience_revision"] == request["credential_binding"]["audience_revision"]
                 and request["membership_rechecked"] is True
+                and request["identity_session_record_revalidated"] is True
+                and handshake["identity_session"]["purpose"] == "verified_identity_only"
+                and handshake["identity_session"]["page_authorization"] is False
             )
         if check == "identity_wire_state_machine":
             wire = document["backend_assertion"]["wire_protocol"]
@@ -266,10 +270,15 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                 and jwks["matching_key_count"] == "exactly_one"
                 and jwks["unknown_kid_policy"]["maximum_forced_refreshes"] == 1
                 and jwks["unknown_kid_policy"]["maximum_verification_retries"] == 1
+                and jwks["cache_policy"]["maximum_age_seconds"] == 300
+                and jwks["cache_policy"]["stale_key_acceptance_after_expiry"] is False
+                and jwks["cache_policy"]["refresh_failure_outcome"] == "reject_identity_assertion"
                 and vectors["JWT-PREVIOUS-KEY-OVERLAP"]["outcome"] == "verified_identity"
                 and vectors["JWT-NEW-KEY-AFTER-REFRESH"]["refreshes"] == 1
                 and vectors["JWT-UNKNOWN-KID"]["outcome"] == "reject_identity_assertion"
                 and vectors["JWKS-DUPLICATE-KID"]["outcome"] == "reject_identity_assertion"
+                and vectors["JWKS-OLD-KEY-REMOVED"]["outcome"] == "reject_identity_assertion"
+                and vectors["JWKS-EXPIRED-REFRESH-UNAVAILABLE"]["outcome"] == "reject_identity_assertion"
                 and flows["independent_same_host_flows"] is True
                 and flows["terminal_callback_affects_other_flows"] is False
                 and {item["id"] for item in flows["cases"]}
@@ -452,13 +461,59 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
             return all(case["result"]["share_binding"] is None for case in null_cases) and all(
                 case["result"]["share_binding"] == {"share_id": case["source"]["share_id"]} for case in retained
             )
+        if check == "settings_identity_and_delivery":
+            allowed = document["allowed_cases"]
+            failures = {item["id"]: item for item in document["failure_cases"]}
+            return all(
+                len(
+                    {
+                        case["route_page_id"],
+                        case["http_request"]["page_id"],
+                        case["ipc_request"]["page_id"],
+                        case["ipc_result"]["page_id"],
+                        case["ipc_result"]["show_access"]["page_id"],
+                        case["http_response"]["body"]["page_id"],
+                        case["http_response"]["body"]["show_access"]["page_id"],
+                    }
+                )
+                == 1
+                and case["http_response"]["headers"] == {"Cache-Control": "private, no-store", "Vary": "Cookie"}
+                and "cache_control" not in case["http_response"]["body"]
+                for case in allowed
+            ) and all(
+                case["failure"]["settings_returned"] is False
+                and case["failure"]["exact_emails_returned"] is False
+                and (
+                    case["failure"]["store_read"] is False
+                    if case["id"]
+                    in {
+                        "SETTINGS-PAGE-MEMBER-DENIED",
+                        "SETTINGS-RESOURCE-VIEWER-DENIED",
+                        "SETTINGS-ROUTE-HTTP-PAGE-MISMATCH",
+                        "SETTINGS-HTTP-IPC-PAGE-MISMATCH",
+                    }
+                    else case["failure"]["outcome"] == "internal_protocol_failure"
+                )
+                for case in failures.values()
+            )
+        if check == "availability_races":
+            races = {item["id"]: item for item in document["availability_race_sequences"]}
+            return set(races) == {"RACE-APPLY-BEFORE-OFFLINE", "RACE-OFFLINE-BEFORE-APPLY"} and all(
+                race["final_state"]["availability"] == "offline"
+                and race["final_state"]["access_mode"] == "limited"
+                and race["final_state"]["emails"] == ["viewer@example.com"]
+                and race["final_state"]["audience_revision"] == race["initial_state"]["audience_revision"] + 2
+                and "final_revision_contains_both_ordered_effects" in race["assertions"]
+                for race in races.values()
+            )
         if check == "private_hmr_authority":
             authority = document["avibe_private_hmr_monitor"]
             admission = authority["websocket_admission"]
-            deadline = authority["durable_offline_deadline"]
+            monitor = authority["authority_monitor"]
+            deadline = monitor["deadline"]
             positive = admission["positive_source_cases"]
             negative = admission["negative_mutations"]
-            trace = deadline["worst_case_just_after_poll_trace_ms"]
+            trace = monitor["trace_matrix_ms"]
             return (
                 authority["owner"] == "PrivateHmrAuthority"
                 and admission["origin_header_cardinality"] == "exactly_one"
@@ -489,11 +544,14 @@ def _evaluate_claim(claim: dict[str, Any]) -> Any:
                     "resource_editor_authority_false",
                 }
                 and admission["rejection"]["upstream_websocket_opened"] is False
-                and deadline["poll_interval_max_seconds"] + deadline["post_detection_close_budget_seconds"]
+                and monitor["poll_interval_max_seconds"] + deadline["post_detection_close_budget_seconds"]
                 <= deadline["total_close_deadline_seconds"]
-                and trace["all_sockets_closed_no_later_than"] - trace["durable_offline_commit"]
-                == trace["elapsed_from_offline_commit"]
-                and trace["elapsed_from_offline_commit"] <= 5000
+                and trace["all_sockets_closed_no_later_than"] - trace["durable_change_commit"]
+                == trace["elapsed_from_change_commit"]
+                and trace["elapsed_from_change_commit"] <= 5000
+                and trace["elapsed_after_detection"] <= 1000
+                and trace["triggers"] == [item["trigger"] for item in monitor["persistent_sources"]]
+                and trace["event_delivery"] == ["just_after_poll", "notification_lost"]
             )
         if check == "settings_projection_excludes_receipts":
             invariant = document["x-avibe-projection-invariants"]
@@ -749,6 +807,17 @@ def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
         "canonical_set_comparison": "exact",
         "reject_noncanonical_persisted_or_result": True,
     }
+    stable_writer = algebra["stable_writer"]
+    assert stable_writer["serialized_operations"] == ["apply", "durable_availability_transition"]
+    assert stable_writer["direct_availability_writer_allowed"] is False
+    assert stable_writer["availability_transition"] == {
+        "input": ["page_id", "target_availability", "expected_audience_revision"],
+        "apply_may_change_availability": False,
+        "effective_change_preserves": ["access_mode", "share_binding", "emails"],
+        "effective_change_revision_delta": 1,
+        "canonical_no_op_revision_delta": 0,
+        "stale_revision_outcome": "revision_conflict_without_write",
+    }
     assert algebra["idempotency"] == {
         "store_owner": "controller_process.ShowAccessStore",
         "key_fields": ["page_id", "mutation_id"],
@@ -848,7 +917,8 @@ def test_apply_algebra_exhaustively_selects_one_transition_or_reject() -> None:
 
 
 def test_local_removal_and_crash_traces_need_no_backend_or_reconciliation() -> None:
-    sequences = {item["id"]: item for item in _load("fixtures/apply-mutations.json")["sequences"]}
+    fixtures = _load("fixtures/apply-mutations.json")
+    sequences = {item["id"]: item for item in fixtures["sequences"]}
     removal = sequences["SEQUENCE-LOCAL-REMOVAL-NEXT-REQUEST"]
     assert "bob@example.com" in removal["steps"][0]["state"]["emails"]
     assert "bob@example.com" not in removal["steps"][1]["state"]["emails"]
@@ -867,7 +937,24 @@ def test_local_removal_and_crash_traces_need_no_backend_or_reconciliation() -> N
         "no_external_coordinator_or_reconciliation",
     ]
 
-    receipt = _load("fixtures/apply-mutations.json")["receipt_sequences"][0]
+    availability_races = {item["id"]: item for item in fixtures["availability_race_sequences"]}
+    assert set(availability_races) == {"RACE-APPLY-BEFORE-OFFLINE", "RACE-OFFLINE-BEFORE-APPLY"}
+    for race in availability_races.values():
+        revisions = [race["initial_state"]["audience_revision"]]
+        for step in race["steps"]:
+            if step["store_write"]:
+                revisions.append(step["result_audience_revision"])
+        assert revisions == list(range(revisions[0], revisions[-1] + 1))
+        final = race["final_state"]
+        assert final["availability"] == "offline"
+        assert final["access_mode"] == "limited"
+        assert final["emails"] == ["viewer@example.com"]
+        assert any("share_one_page_writer_lease" in assertion for assertion in race["assertions"])
+        assert "final_revision_contains_both_ordered_effects" in race["assertions"]
+    assert availability_races["RACE-OFFLINE-BEFORE-APPLY"]["steps"][1]["outcome"] == "revision_conflict"
+    assert availability_races["RACE-OFFLINE-BEFORE-APPLY"]["steps"][1]["store_write"] is False
+
+    receipt = fixtures["receipt_sequences"][0]
     apply_a, apply_b, replay_a = receipt["steps"]
     assert (apply_a["mutation_id"], apply_a["returned_audience_revision"]) == (
         "mut_receipt_sequence_a_0001",
@@ -928,20 +1015,46 @@ def test_owner_settings_reads_exact_emails_only_from_local_authorized_state() ->
     settings = _load("fixtures/owner-settings.json")
     assert {case["authority"] for case in settings["allowed_cases"]} == {"owner", "sharing_control"}
     for case in settings["allowed_cases"]:
-        result = case["result"]
-        assert case["route_page_id"] == case["request"]["page_id"] == result["page_id"]
-        assert result["page_id"] == result["show_access"]["page_id"]
-        assert result["storage_source"] == "local_authoritative_transactional_store"
-        assert result["cache_control"] == "private, no-store"
-        assert result["show_access"]["emails"]
-        assert "last_mutation" not in result["show_access"]
-    invalid_projection = copy.deepcopy(settings["allowed_cases"][0]["result"])
+        ipc_result = case["ipc_result"]
+        http_response = case["http_response"]
+        body = http_response["body"]
+        page_ids = {
+            case["route_page_id"],
+            case["http_request"]["page_id"],
+            case["ipc_request"]["page_id"],
+            ipc_result["page_id"],
+            ipc_result["show_access"]["page_id"],
+            body["page_id"],
+            body["show_access"]["page_id"],
+        }
+        assert page_ids == {case["route_page_id"]}
+        assert ipc_result["storage_source"] == "local_authoritative_transactional_store"
+        response = JSONResponse(body, status_code=http_response["status"], headers=http_response["headers"])
+        assert response.headers["Cache-Control"] == "private, no-store"
+        assert response.headers["Vary"] == "Cookie"
+        assert "cache_control" not in body
+        assert body["show_access"]["emails"]
+        assert "last_mutation" not in body["show_access"]
+        assert case["store_read"] is True
+    invalid_projection = copy.deepcopy(settings["allowed_cases"][0]["http_response"]["body"])
     invalid_projection["show_access"]["last_mutation"] = None
     with pytest.raises(ValidationError):
         _validator("owner-settings.schema.json").validate(invalid_projection)
-    for case in settings["denied_cases"]:
-        assert case["authority"] in {"resource_viewer", "page_member_only", "anonymous"}
-        assert case["result"]["store_read"] is case["result"]["settings_returned"] is False
+    failures = {case["id"]: case for case in settings["failure_cases"]}
+    assert len(failures) == 6
+    for case in failures.values():
+        failure = case["failure"]
+        assert failure["settings_returned"] is failure["exact_emails_returned"] is False
+        if case["id"] in {
+            "SETTINGS-PAGE-MEMBER-DENIED",
+            "SETTINGS-RESOURCE-VIEWER-DENIED",
+            "SETTINGS-ROUTE-HTTP-PAGE-MISMATCH",
+        }:
+            assert failure["ipc_called"] is failure["store_read"] is False
+        elif case["id"] == "SETTINGS-HTTP-IPC-PAGE-MISMATCH":
+            assert failure["ipc_called"] is True and failure["store_read"] is False
+        else:
+            assert failure["ipc_called"] is failure["store_read"] is True
 
 
 def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fresh() -> None:
@@ -987,6 +1100,16 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "maximum_forced_refreshes": 1,
         "maximum_verification_retries": 1,
         "still_unknown_or_refresh_failure_outcome": "reject_identity_assertion",
+    }
+    assert verification["cache_policy"] == {
+        "scope": "paired_issuer",
+        "maximum_age_seconds": 300,
+        "revalidation": "must_revalidate_at_expiry_including_known_kid",
+        "refresh_coalescing": "one_in_flight_fetch_per_issuer",
+        "replacement": "successful_refresh_atomically_replaces_cached_key_set",
+        "stale_key_acceptance_after_expiry": False,
+        "removed_key_acceptance_after_refresh": False,
+        "refresh_failure_outcome": "reject_identity_assertion",
     }
     assert assertion["delivery"] == {
         "response_mode": "form_post",
@@ -1060,10 +1183,48 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
         "retention_deadline": "max_signed_state_or_assertion_expiry_plus_verifier_clock_skew",
         "same_callback_race_successes": 1,
     }
+    state_lifecycle = contract["local_handshake"]["signed_state_lifecycle"]
+    assert state_lifecycle["maximum_lifetime_seconds"] == 600
+    assert state_lifecycle["verifier_clock_skew_seconds"] == 60
+    assert state_lifecycle["renewable"] is False
+    assert {vector["id"] for vector in state_lifecycle["vectors"]} == {
+        "STATE-VALID-BOUNDARY",
+        "STATE-OVERSIZED",
+        "STATE-EXPIRED",
+        "STATE-FUTURE",
+        "STATE-NONINTEGER",
+    }
+    identity_session = contract["local_handshake"]["identity_session"]
+    assert identity_session["cookie"] == {
+        "name": "__Host-avibe_show_identity_session",
+        "value": "opaque_32_byte_csprng_secret",
+        "host_only": True,
+        "domain_attribute_allowed": False,
+        "secure": True,
+        "http_only": True,
+        "same_site": "Lax",
+        "path": "/",
+    }
+    assert identity_session["server_record_key"] == "sha256_of_cookie_token"
+    assert identity_session["maximum_lifetime_seconds"] == 86400
+    assert identity_session["renewable"] is identity_session["page_authorization"] is False
+    assert set(identity_session["forbidden_capabilities"]) == {
+        "instance_access",
+        "canonical_show",
+        "hmr",
+        "annotations",
+        "agents",
+        "resource_authority",
+    }
     assert contract["local_handshake"]["reference_harness"] == {
         "scenario_id": "AUTH-SETUP-404",
         "actual_http_boundary": "POST /auth/show-identity/callback",
-        "components": ["local_state_signer", "backend_rs256_issuer_and_jwks", "avibe_jwt_verifier"],
+        "components": [
+            "local_state_signer",
+            "backend_rs256_issuer_and_jwks",
+            "avibe_jwt_verifier",
+            "local_identity_session_store",
+        ],
         "content_type": "application/x-www-form-urlencoded",
         "active_custom_callback_origin": "https://show.example.test",
         "contract_evidence": "http_form_jwt_jwks_and_atomic_state_machine",
@@ -1099,6 +1260,7 @@ def test_identity_assertion_is_instance_bound_identity_only_and_membership_is_fr
     assert closed_loop["start"]["correlation_cookie_name"] == closed_loop["callback"]["correlation_cookie_name"]
     assert closed_loop["callback"]["verified_email"] in closed_loop["callback"]["current_local_emails"]
     assert closed_loop["protected_request"]["membership_rechecked"] is True
+    assert closed_loop["protected_request"]["identity_session_record_revalidated"] is True
     assert {case["mutation"] for case in closed_loop["negative_callbacks"]} == {
         "reuse_consumed_nonce",
         "replace_assertion_instance_id",
@@ -1123,6 +1285,18 @@ def test_shared_browser_containment_denies_sibling_code_and_binds_protected_requ
     assert shell["iframe_sandbox_tokens"] == ["allow-scripts"]
     assert shell["allow_same_origin"] is False
     assert all(value is False for value in shell["page_code_access"].values())
+    service_worker = contract["service_worker_policy"]
+    assert service_worker == {
+        "execution_context": "sandboxed_opaque_origin_iframe_without_allow_same_origin",
+        "registration_supported": False,
+        "registration_outcome": "security_error",
+        "service_worker_allowed_header_emitted": False,
+        "controls_public_show": False,
+        "controls_canonical_show": False,
+        "private_bytes_exposed": False,
+        "ordinary_web_worker_support_is_separate": True,
+        "residual_browser_evidence": "future_local_incus_real_browser",
+    }
 
     admission = contract["admission_rule"]
     assert admission["authorization_precedes_capture"] is True
@@ -1708,6 +1882,7 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
             "editor_capability_loss",
             "resource_access_revocation",
             "remote_authorization_loss",
+            "authorization_revision_change",
             "durable_offline_state",
         ],
         "non_close_triggers_while_active_editor_remains": [
@@ -1718,13 +1893,30 @@ def test_runtime_safety_owners_and_repeated_edit_trace_are_executable() -> None:
         ],
     }
 
-    deadline = hmr_authority["durable_offline_deadline"]
-    assert deadline["measured_from"] == "durable_offline_transaction_commit"
-    assert deadline["poll_interval_max_seconds"] + deadline["post_detection_close_budget_seconds"] <= 5
+    monitor = hmr_authority["authority_monitor"]
+    assert monitor["scope"] == "one_coalesced_persistent_monitor_per_active_session"
+    assert monitor["notification_policy"] == "optional_wakeup_only_not_required_for_correctness"
+    assert monitor["persistence_read_uncertainty_outcome"] == "close_all_sockets_fail_closed"
+    sources = {item["trigger"]: item["source"] for item in monitor["persistent_sources"]}
+    assert sources == {
+        "editor_capability_loss": "ResourceAccessStore.editor_capability",
+        "resource_access_revocation": "ResourceAccessStore.resource_authority",
+        "remote_authorization_loss": "RemoteAccessSessionStore.authorization",
+        "authorization_revision_change": "RemoteAccessSessionStore.authorization_revision",
+        "durable_offline_state": "ShowPageStore.availability",
+    }
+    deadline = monitor["deadline"]
+    assert deadline["measured_from"] == "durable_authority_change_commit"
+    assert monitor["poll_interval_max_seconds"] + deadline["post_detection_close_budget_seconds"] <= 5
     assert deadline["total_close_deadline_seconds"] == 5
-    trace = deadline["worst_case_just_after_poll_trace_ms"]
-    assert trace["all_sockets_closed_no_later_than"] - trace["durable_offline_commit"] == 4999
-    assert trace["elapsed_from_offline_commit"] <= 5000
+    trace = monitor["trace_matrix_ms"]
+    assert trace["triggers"] == list(sources)
+    for trigger, event_delivery in itertools.product(trace["triggers"], trace["event_delivery"]):
+        assert trigger in sources
+        assert event_delivery in {"just_after_poll", "notification_lost"}
+        assert trace["all_sockets_closed_no_later_than"] - trace["durable_change_commit"] == 4999
+        assert trace["elapsed_from_change_commit"] <= 5000
+        assert trace["elapsed_after_detection"] <= 1000
 
 
 def test_runtime_release_advertisement_is_pinned_to_one_reviewed_smoked_sha() -> None:
@@ -1774,7 +1966,7 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "vibe-show-runtime",
     }
     interfaces = {item["id"]: item for item in registry["interfaces"]}
-    assert set(interfaces) == {f"C{index:02d}" for index in range(1, 20)}
+    assert set(interfaces) == {f"C{index:02d}" for index in range(1, 21)}
     assert len(interfaces) == len(registry["interfaces"])
     assert registry["process_ownership"] == {
         "stable_writer_lease": "ShowAccessService.stable_writer_lease",
@@ -1787,6 +1979,7 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "settings_projection_owner": "controller_process.ShowAccessService.project_owner_settings",
         "ui_process_coordinator_allowed": False,
         "atomic_fields": [
+            "availability",
             "access_mode",
             "share_binding",
             "emails",
@@ -1794,7 +1987,7 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
             "last_mutation",
             "apply_receipt",
         ],
-        "serialized_operations": ["apply"],
+        "serialized_operations": ["apply", "durable_availability_transition"],
     }
     assert interfaces["C02"]["delivery"]["authentication"] == ("owner_or_sharing_control_resource_authority")
     assert interfaces["C03"]["delivery"]["mechanism"] == "internal_socket_json"
@@ -1816,6 +2009,9 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "assertion",
         "paired_jwks_uri",
         "unknown_kid_refresh",
+        "jwks_cache_max_age",
+        "jwks_must_revalidate",
+        "removed_key_rejection",
     ]
     assert interfaces["C09"]["delivery"]["authentication"] == "server_owned_orthogonal_facts"
     assert interfaces["C13"]["signature"]["covered_fields"] == [
@@ -1835,6 +2031,11 @@ def test_mirror_registry_names_exact_local_identity_retirement_and_runtime_bound
         "full_current_local_show_access_validation_then_atomic_runtime_pin"
     )
     assert interfaces["C19"]["signature"]["schema"] == "local-legacy-mapping.schema.json"
+    assert interfaces["C20"]["signature"]["schema"] == "apply-transition-algebra.json#/stable_writer"
+    assert interfaces["C20"]["signature"]["covered_fields"][-2:] == [
+        "workbench_archive",
+        "workbench_reactivate",
+    ]
     assert interfaces["C04"]["delivery"]["serialization_owner"].startswith("CanonicalApplyReceipt")
     assert interfaces["C07"]["delivery"]["serialization_owner"] == "avibe.ExecutableIdentityHandshake"
     assert interfaces["C14"]["delivery"]["serialization_owner"] == "avibe.PrivateHmrAuthority"

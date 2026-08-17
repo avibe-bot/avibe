@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "design_source": "docs/plans/public-show-live-update.md",
-  "design_sha": "b4afbcb4949352a044b45ddf62f2c21300d6744c",
-  "design_blob_sha": "b4afbcb4949352a044b45ddf62f2c21300d6744c",
+  "design_sha": "556f73095bc02c91cbbbf1158acb21e60625e40c",
+  "design_blob_sha": "556f73095bc02c91cbbbf1158acb21e60625e40c",
   "evidence_boundaries": {
     "contract": "machine_contract_proof",
     "residual_browser": "future_browser_conformance",
@@ -29,7 +29,7 @@
     { "id": "CLAIM-GRAPH-KEY-CONTEXT", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/runtime_graph_ownership/graph_key/1" }, "expected": "context" },
     { "id": "CLAIM-SHARED-DOES-NOT-CLOSE-PRIVATE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/runtime_graph_ownership/shared_activity_closes_private_hmr" }, "expected": false },
     { "id": "CLAIM-LIMITED-LOGIN-REQUIRED", "source": { "kind": "matrix", "point": { "surface": "/p", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "none", "identity_state": "unverified", "page_membership": "absent", "keyed_context": "transient-unknown" }, "field": "read_decision" }, "expected": "login_required" },
-    { "id": "CLAIM-HMR-REVOCATION-ACTION", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/authorization_trigger_action" }, "expected": "reevaluate_and_close_unauthorized_existing_sockets" },
+    { "id": "CLAIM-HMR-REVOCATION-ACTION", "source": { "kind": "semantic", "document": "runtime-context.json", "check": "private_hmr_authority" }, "expected": true },
     { "id": "CLAIM-SHOW-VIEWER-READ", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "limited", "request_kind": "other", "resource_authority": "viewer", "identity_state": "verified", "page_membership": "absent", "keyed_context": "supported" }, "field": "read_decision" }, "expected": "serve_private" },
     { "id": "CLAIM-SHOW-VIEWER-NO-HMR", "source": { "kind": "matrix", "point": { "surface": "/show", "availability": "active", "access_mode": "public", "request_kind": "other", "resource_authority": "viewer", "identity_state": "unverified", "page_membership": "absent", "keyed_context": "unsupported" }, "field": "hmr" }, "expected": false },
     { "id": "CLAIM-REMOVED-EMAIL-ABSENT", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/sequences/0/steps/2/state/emails", "value": "bob@example.com" }, "expected": false },
@@ -42,7 +42,7 @@
     { "id": "CLAIM-EDIT-NO-SHARED-BUILD", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/ordinary_editor_file_edit/shared_background_build" }, "expected": false },
     { "id": "CLAIM-EDIT-RESOURCE-BOUND", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/ordinary_editor_file_edit/resource_bound" }, "expected": "resource_governance" },
     { "id": "CLAIM-SHARED-NO-PRIVATE-BYTES", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/route_invariants/shared_route/private_bytes" }, "expected": false },
-    { "id": "CLAIM-SW-SCOPE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_proxy_policy/maximum_service_worker_scope" }, "expected": "/p/<share_id>/" },
+    { "id": "CLAIM-SW-REGISTRATION-REJECT", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/service_worker_policy/registration_outcome" }, "expected": "security_error" },
     { "id": "CLAIM-REDIRECT-SUFFIX", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/route_invariants/resource_redirect/preserve_route_suffix" }, "expected": true },
     { "id": "CLAIM-REDIRECT-QUERY", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/route_invariants/resource_redirect/preserve_query" }, "expected": true },
     { "id": "CLAIM-LEGACY-OUTCOME", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/negotiation_cases/1/outcome" }, "expected": "unsupported" },
@@ -58,8 +58,8 @@
     { "id": "CLAIM-PREWARM-TYPED", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/shared_prewarm_requires", "value": "shared_context_envelope" }, "expected": true },
     { "id": "CLAIM-PROTOCOL-PRECEDES-MUTATION", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/protocol1_validation/validation_precedes", "value": "graph_ownership_mutation" }, "expected": true },
     { "id": "CLAIM-IMPLICIT-PREWARM-FALSE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/operation_context_eligibility/implicit_shared_work_from_private_edit" }, "expected": false },
-    { "id": "CLAIM-HMR-MONITOR-COALESCED", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/monitor_scope" }, "expected": "one_coalesced_monitor_per_active_session" },
-    { "id": "CLAIM-HMR-OFFLINE-DEADLINE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/durable_offline_deadline/total_close_deadline_seconds" }, "expected": 5 },
+    { "id": "CLAIM-HMR-MONITOR-COALESCED", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/authority_monitor/scope" }, "expected": "one_coalesced_persistent_monitor_per_active_session" },
+    { "id": "CLAIM-HMR-OFFLINE-DEADLINE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/authority_monitor/deadline/total_close_deadline_seconds" }, "expected": 5 },
     { "id": "CLAIM-P2L-STABLE-BINDING", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-PRIVATE-TO-LIMITED", "pointer": "/result/show_access/share_binding/share_id" }, "expected": "stable-custom" },
     { "id": "CLAIM-P2L-LOCAL-MEMBER", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/fixtures/0/result/show_access/emails", "value": "bob@example.com" }, "expected": true },
     { "id": "CLAIM-P2L-NO-EXTERNAL", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-PRIVATE-TO-LIMITED", "pointer": "/external_service_calls" }, "expected": 0 },
@@ -100,15 +100,15 @@
     { "id": "CLAIM-INSTANCE-ROLE-FALSE", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/instance_role_derived" }, "expected": false },
     { "id": "CLAIM-BACKEND-MEMBERSHIP-FALSE", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/page_membership_decided" }, "expected": false },
     { "id": "CLAIM-CUSTOM-PRESERVED", "source": { "kind": "object", "document": "fixtures/apply-mutations.json", "collection": "fixtures", "id": "APPLY-PRIVATE-TO-LIMITED", "pointer": "/source_show_access/share_binding/share_id" }, "expected": "stable-custom" },
-    { "id": "CLAIM-SETTINGS-LOCAL-SOURCE", "source": { "kind": "object", "document": "fixtures/owner-settings.json", "collection": "allowed_cases", "id": "SETTINGS-LIMITED-OWNER-LOCAL", "pointer": "/result/storage_source" }, "expected": "local_authoritative_transactional_store" },
-    { "id": "CLAIM-SETTINGS-PRIVATE-NOSTORE", "source": { "kind": "object", "document": "fixtures/owner-settings.json", "collection": "allowed_cases", "id": "SETTINGS-LIMITED-OWNER-LOCAL", "pointer": "/result/cache_control" }, "expected": "private, no-store" },
-    { "id": "CLAIM-SETTINGS-LOCAL-EMAIL", "source": { "kind": "contains", "document": "fixtures/owner-settings.json", "pointer": "/allowed_cases/0/result/show_access/emails", "value": "bob@example.com" }, "expected": true },
+    { "id": "CLAIM-SETTINGS-LOCAL-SOURCE", "source": { "kind": "object", "document": "fixtures/owner-settings.json", "collection": "allowed_cases", "id": "SETTINGS-LIMITED-OWNER-LOCAL", "pointer": "/http_response/body/storage_source" }, "expected": "local_authoritative_transactional_store" },
+    { "id": "CLAIM-SETTINGS-PRIVATE-NOSTORE", "source": { "kind": "object", "document": "fixtures/owner-settings.json", "collection": "allowed_cases", "id": "SETTINGS-LIMITED-OWNER-LOCAL", "pointer": "/http_response/headers/Cache-Control" }, "expected": "private, no-store" },
+    { "id": "CLAIM-SETTINGS-LOCAL-EMAIL", "source": { "kind": "contains", "document": "fixtures/owner-settings.json", "pointer": "/allowed_cases/0/http_response/body/show_access/emails", "value": "bob@example.com" }, "expected": true },
     { "id": "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/forbidden_claims", "value": "show_page_email" }, "expected": true },
     { "id": "CLAIM-IDENTITY-LISTED-SHARED", "source": { "kind": "object", "document": "identity-auth.json", "collection": "cases", "id": "IDENTITY-LISTED-CURRENT", "pointer": "/outcome" }, "expected": "serve_shared" },
     { "id": "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "source": { "kind": "object", "document": "identity-auth.json", "collection": "cases", "id": "IDENTITY-LISTED-CURRENT", "pointer": "/instance_access" }, "expected": false },
     { "id": "CLAIM-SHARE-RERESOLVE", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/local_handshake/callback_checks", "value": "share_reresolves_before_membership_check" }, "expected": true },
     { "id": "CLAIM-REDIRECT-PRIVATE-NOSTORE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/shared_proxy_policy/editor_redirect_cache_control" }, "expected": "private, no-store" },
-    { "id": "CLAIM-OFFLINE-DURABLE-SOURCE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/durable_offline_source" }, "expected": "ShowPageStore" },
+    { "id": "CLAIM-OFFLINE-DURABLE-SOURCE", "source": { "kind": "pointer", "document": "runtime-context.json", "pointer": "/avibe_private_hmr_monitor/authority_monitor/persistent_sources/4/source" }, "expected": "ShowPageStore.availability" },
     { "id": "CLAIM-RETIRE-STORAGE-ACTION", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/retired_surfaces/0/future_action" }, "expected": "delete_storage" },
     { "id": "CLAIM-RETIRE-ENDPOINT-ACTION", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/retired_surfaces/1/future_action" }, "expected": "delete_endpoints" },
     { "id": "CLAIM-RETIRE-CLIENT-ACTION", "source": { "kind": "pointer", "document": "retirement.json", "pointer": "/retired_surfaces/2/future_action" }, "expected": "delete_clients" },
@@ -138,7 +138,7 @@
     { "id": "CLAIM-HEADERLESS-STARTUP-PREWARM", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/legacy_base_propagation", "value": "startup_reconciliation_prewarm" }, "expected": true },
     { "id": "CLAIM-HEADERLESS-UPDATE-PREWARM", "source": { "kind": "contains", "document": "runtime-context.json", "pointer": "/request_protocol_cases/0/legacy_base_propagation", "value": "show_update_prewarm" }, "expected": true },
     { "id": "CLAIM-CRASH-NEW-EMAIL", "source": { "kind": "contains", "document": "fixtures/apply-mutations.json", "pointer": "/sequences/1/steps/1/state/emails", "value": "new@example.com" }, "expected": true },
-    { "id": "CLAIM-SETTINGS-NORMALIZED-EMAILS", "source": { "kind": "canonical_emails", "document": "fixtures/owner-settings.json", "pointer": "/allowed_cases/0/result/show_access/emails" }, "expected": "alice@example.com,bob@example.com" },
+    { "id": "CLAIM-SETTINGS-NORMALIZED-EMAILS", "source": { "kind": "canonical_emails", "document": "fixtures/owner-settings.json", "pointer": "/allowed_cases/0/http_response/body/show_access/emails" }, "expected": "alice@example.com,bob@example.com" },
     { "id": "CLAIM-IDENTITY-INSTANCE-BOUND", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/required_signed_claims", "value": "instance_id" }, "expected": true },
     { "id": "CLAIM-IDENTITY-VERIFIED-EMAIL", "source": { "kind": "contains", "document": "identity-auth.json", "pointer": "/backend_assertion/required_signed_claims", "value": "verified_email" }, "expected": true },
     { "id": "CLAIM-IDENTITY-SIGNED-ONLY", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/format" }, "expected": "rfc7519_compact_jwt_jws" },
@@ -167,11 +167,22 @@
     { "id": "CLAIM-SIBLING-FETCH-DENY", "source": { "kind": "object", "document": "shared-browser-containment.json", "collection": "cases", "id": "CONTAINMENT-PUBLIC-SIBLING-FETCH", "pointer": "/outcome" }, "expected": "generic_deny_without_page_bytes" },
     { "id": "CLAIM-SIBLING-FRAME-DENY", "source": { "kind": "object", "document": "shared-browser-containment.json", "collection": "cases", "id": "CONTAINMENT-PUBLIC-SIBLING-FRAME", "pointer": "/outcome" }, "expected": "generic_deny_without_page_bytes" },
     { "id": "CLAIM-SIBLING-OPEN-DENY", "source": { "kind": "object", "document": "shared-browser-containment.json", "collection": "cases", "id": "CONTAINMENT-PUBLIC-SIBLING-OPEN", "pointer": "/outcome" }, "expected": "generic_deny_without_page_bytes" },
-    { "id": "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/share_browsing_credential/editor_capability" }, "expected": false }
+    { "id": "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/share_browsing_credential/editor_capability" }, "expected": false },
+    { "id": "CLAIM-SW-HEADER-ABSENT", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/service_worker_policy/service_worker_allowed_header_emitted" }, "expected": false },
+    { "id": "CLAIM-SW-NO-P-CONTROL", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/service_worker_policy/controls_public_show" }, "expected": false },
+    { "id": "CLAIM-SW-NO-SHOW-CONTROL", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/service_worker_policy/controls_canonical_show" }, "expected": false },
+    { "id": "CLAIM-SW-NO-PRIVATE-BYTES", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/service_worker_policy/private_bytes_exposed" }, "expected": false },
+    { "id": "CLAIM-WEB-WORKER-SEPARATE", "source": { "kind": "pointer", "document": "shared-browser-containment.json", "pointer": "/service_worker_policy/ordinary_web_worker_support_is_separate" }, "expected": true },
+    { "id": "CLAIM-SETTINGS-IDENTITY-DELIVERY", "source": { "kind": "semantic", "document": "fixtures/owner-settings.json", "check": "settings_identity_and_delivery" }, "expected": true },
+    { "id": "CLAIM-STABLE-WRITER-AVAILABILITY", "source": { "kind": "contains", "document": "apply-transition-algebra.json", "pointer": "/stable_writer/serialized_operations", "value": "durable_availability_transition" }, "expected": true },
+    { "id": "CLAIM-AVAILABILITY-RACES", "source": { "kind": "semantic", "document": "fixtures/apply-mutations.json", "check": "availability_races" }, "expected": true },
+    { "id": "CLAIM-STATE-MAX-LIFETIME", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/local_handshake/signed_state_lifecycle/maximum_lifetime_seconds" }, "expected": 600 },
+    { "id": "CLAIM-JWKS-MUST-REVALIDATE", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/backend_assertion/jwks_verification/cache_policy/revalidation" }, "expected": "must_revalidate_at_expiry_including_known_kid" },
+    { "id": "CLAIM-IDENTITY-SESSION-ONLY", "source": { "kind": "pointer", "document": "identity-auth.json", "pointer": "/local_handshake/identity_session/purpose" }, "expected": "verified_identity_only" }
   ],
   "bindings": [
-    { "scenario_id": "SHOW-LIVE-001", "expected_evidence": "Trusted top-level navigation redirects to canonical `/show/`; resource editor receives HMR and annotations only on `/show/`; missing multiple or untrusted HMR Origin rejects before upstream WebSocket; React Fast Refresh preservation remains a future browser check", "clauses": [
-      { "text": "Trusted top-level navigation redirects to canonical `/show/`", "claim_ids": ["CLAIM-EDITOR-P-REDIRECT"] },
+    { "scenario_id": "SHOW-LIVE-001", "expected_evidence": "Trusted top-level navigation redirects to canonical `/show/` with private no-store metadata and safe suffix/query preservation; resource editor receives HMR and annotations only on `/show/`; missing multiple or untrusted HMR Origin rejects before upstream WebSocket; React Fast Refresh preservation remains a future browser check", "clauses": [
+      { "text": "Trusted top-level navigation redirects to canonical `/show/` with private no-store metadata and safe suffix/query preservation", "claim_ids": ["CLAIM-EDITOR-P-REDIRECT", "CLAIM-REDIRECT-PRIVATE-NOSTORE", "CLAIM-REDIRECT-SUFFIX", "CLAIM-REDIRECT-QUERY"] },
       { "text": "resource editor receives HMR and annotations only on `/show/`", "claim_ids": ["CLAIM-SHOW-EDITOR-HMR", "CLAIM-SHOW-EDITOR-ANNOTATIONS", "CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] },
       { "text": "missing multiple or untrusted HMR Origin rejects before upstream WebSocket", "claim_ids": ["CLAIM-PRIVATE-HMR-AUTHORITY"] },
       { "text": "React Fast Refresh preservation remains a future browser check", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
@@ -182,11 +193,11 @@
       { "text": "`/p/` has no HMR or annotations", "claim_ids": ["CLAIM-P-NO-HMR", "CLAIM-P-NO-ANNOTATIONS"] },
       { "text": "new content appears only after a later refresh", "claim_ids": ["CLAIM-RESIDUAL-BROWSER"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-003", "expected_evidence": "Callback-scoped SameSite=None Secure HttpOnly single-use cookie plus signed state nonce assertion and instance binding close one cross-site form POST loop; signed state returns only to the resolved share; current local membership is absent; one generic denial returns no page bytes and does not loop", "clauses": [
-      { "text": "Callback-scoped SameSite=None Secure HttpOnly single-use cookie plus signed state nonce assertion and instance binding close one cross-site form POST loop", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-WIRE-STATE-MACHINE"] },
-      { "text": "signed state returns only to the resolved share", "claim_ids": ["CLAIM-SAFE-RETURN-BOUND"] },
-      { "text": "current local membership is absent", "claim_ids": ["CLAIM-UNLISTED-MEMBER-ABSENT", "CLAIM-UNLISTED-DENY"] },
-      { "text": "one generic denial returns no page bytes and does not loop", "claim_ids": ["CLAIM-UNLISTED-NO-BYTES-OR-LOOP"] }
+    { "scenario_id": "SHOW-LIVE-003", "expected_evidence": "Bounded signed state and paired JWKS lifecycles close one cross-site form POST; callback rotates a local identity-only session; the later limited request re-resolves current membership; absent membership returns one generic denial with no page bytes or loop", "clauses": [
+      { "text": "Bounded signed state and paired JWKS lifecycles close one cross-site form POST", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-WIRE-STATE-MACHINE", "CLAIM-STATE-MAX-LIFETIME", "CLAIM-JWKS-MUST-REVALIDATE"] },
+      { "text": "callback rotates a local identity-only session", "claim_ids": ["CLAIM-IDENTITY-SESSION-ONLY"] },
+      { "text": "the later limited request re-resolves current membership", "claim_ids": ["CLAIM-SAFE-RETURN-BOUND", "CLAIM-FRESH-LOCAL-LOOKUP"] },
+      { "text": "absent membership returns one generic denial with no page bytes or loop", "claim_ids": ["CLAIM-UNLISTED-MEMBER-ABSENT", "CLAIM-UNLISTED-DENY", "CLAIM-UNLISTED-NO-BYTES-OR-LOOP"] }
     ] },
     { "scenario_id": "SHOW-LIVE-004", "expected_evidence": "Local Apply preserves the binding and advances audience revision once; anonymous `/p/` receives an admitted protected-content capability and becomes readable; shared readers still have no HMR or annotations", "clauses": [
       { "text": "Local Apply preserves the binding and advances audience revision once", "claim_ids": ["CLAIM-LIMITED-PUBLIC-BINDING", "CLAIM-LIMITED-PUBLIC-REVISION"] },
@@ -203,8 +214,8 @@
       { "text": "limited `/p/` fails closed", "claim_ids": ["CLAIM-LIMITED-LOGIN-REQUIRED"] },
       { "text": "neither outcome selects HMR", "claim_ids": ["CLAIM-P-NO-HMR"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-007", "expected_evidence": "Existing unauthorized HMR sockets close; remaining resource viewer can still read private modules; page membership does not affect the result", "clauses": [
-      { "text": "Existing unauthorized HMR sockets close", "claim_ids": ["CLAIM-HMR-REVOCATION-ACTION"] },
+    { "scenario_id": "SHOW-LIVE-007", "expected_evidence": "One persistent authority monitor closes every unauthorized socket within five seconds even after a lost notification; remaining resource viewer can still read private modules; page membership does not affect the result", "clauses": [
+      { "text": "One persistent authority monitor closes every unauthorized socket within five seconds even after a lost notification", "claim_ids": ["CLAIM-HMR-REVOCATION-ACTION", "CLAIM-HMR-MONITOR-COALESCED", "CLAIM-HMR-OFFLINE-DEADLINE"] },
       { "text": "remaining resource viewer can still read private modules", "claim_ids": ["CLAIM-SHOW-VIEWER-READ"] },
       { "text": "page membership does not affect the result", "claim_ids": ["CLAIM-SHOW-VIEWER-READ", "CLAIM-SHOW-VIEWER-CURRENT-MEMBER-READ", "CLAIM-SHOW-VIEWER-NO-HMR"] }
     ] },
@@ -232,10 +243,10 @@
       { "text": "Complete private modules are readable", "claim_ids": ["CLAIM-SHOW-VIEWER-READ"] },
       { "text": "HMR and annotations remain editor-only", "claim_ids": ["CLAIM-SHOW-VIEWER-NO-HMR", "CLAIM-SHOW-EDITOR-HMR", "CLAIM-SHOW-EDITOR-ANNOTATIONS"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-013", "expected_evidence": "Shared worker scope cannot include `/show/`; no private bytes are served at `/p/`; redirect responses are private and preserve safe suffix and query", "clauses": [
-      { "text": "Shared worker scope cannot include `/show/`", "claim_ids": ["CLAIM-SW-SCOPE"] },
-      { "text": "no private bytes are served at `/p/`", "claim_ids": ["CLAIM-SHARED-NO-PRIVATE-BYTES"] },
-      { "text": "redirect responses are private and preserve safe suffix and query", "claim_ids": ["CLAIM-REDIRECT-PRIVATE-NOSTORE", "CLAIM-REDIRECT-SUFFIX", "CLAIM-REDIRECT-QUERY"] }
+    { "scenario_id": "SHOW-LIVE-013", "expected_evidence": "Opaque-origin registration fails with a security error and no Service-Worker-Allowed header; no worker controls `/p/` or `/show/` and no private bytes are exposed; ordinary Web Worker support remains separate", "clauses": [
+      { "text": "Opaque-origin registration fails with a security error and no Service-Worker-Allowed header", "claim_ids": ["CLAIM-SW-REGISTRATION-REJECT", "CLAIM-SW-HEADER-ABSENT"] },
+      { "text": "no worker controls `/p/` or `/show/` and no private bytes are exposed", "claim_ids": ["CLAIM-SW-NO-P-CONTROL", "CLAIM-SW-NO-SHOW-CONTROL", "CLAIM-SW-NO-PRIVATE-BYTES", "CLAIM-SHARED-NO-PRIVATE-BYTES"] },
+      { "text": "ordinary Web Worker support remains separate", "claim_ids": ["CLAIM-WEB-WORKER-SEPARATE"] }
     ] },
     { "scenario_id": "SHOW-LIVE-014", "expected_evidence": "Shared viewers use the explicit legacy singleton compatibility path; HMR stays disabled on `/p/`; compatibility is not advertised as isolation", "clauses": [
       { "text": "Shared viewers use the explicit legacy singleton compatibility path", "claim_ids": ["CLAIM-LEGACY-OUTCOME", "CLAIM-LEGACY-HEADERLESS-SINGLETON"] },
@@ -257,10 +268,10 @@
       { "text": "protocol validation occurs before graph mutation", "claim_ids": ["CLAIM-PROTOCOL-PRECEDES-MUTATION"] },
       { "text": "ordinary editor edits never implicitly prewarm shared context", "claim_ids": ["CLAIM-IMPLICIT-PREWARM-FALSE"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-018", "expected_evidence": "One coalesced monitor observes durable state; poll plus closure completes within five seconds from durable offline even just after a poll; no in-process event is required", "clauses": [
-      { "text": "One coalesced monitor observes durable state", "claim_ids": ["CLAIM-HMR-MONITOR-COALESCED"] },
-      { "text": "poll plus closure completes within five seconds from durable offline even just after a poll", "claim_ids": ["CLAIM-HMR-OFFLINE-DEADLINE", "CLAIM-PRIVATE-HMR-AUTHORITY"] },
-      { "text": "no in-process event is required", "claim_ids": ["CLAIM-OFFLINE-DURABLE-SOURCE"] }
+    { "scenario_id": "SHOW-LIVE-018", "expected_evidence": "Apply and offline transitions share one page writer and preserve both ordered effects; one coalesced persistent monitor observes durable state; polling plus closure completes within five seconds even after a lost event", "clauses": [
+      { "text": "Apply and offline transitions share one page writer and preserve both ordered effects", "claim_ids": ["CLAIM-STABLE-WRITER-AVAILABILITY", "CLAIM-AVAILABILITY-RACES"] },
+      { "text": "one coalesced persistent monitor observes durable state", "claim_ids": ["CLAIM-HMR-MONITOR-COALESCED", "CLAIM-OFFLINE-DURABLE-SOURCE"] },
+      { "text": "polling plus closure completes within five seconds even after a lost event", "claim_ids": ["CLAIM-HMR-OFFLINE-DEADLINE", "CLAIM-PRIVATE-HMR-AUTHORITY"] }
     ] },
     { "scenario_id": "SHOW-LIVE-019", "expected_evidence": "One local transaction preserves the stable binding and installs normalized membership; anonymous access stops immediately; Backend availability is irrelevant to Apply", "clauses": [
       { "text": "One local transaction preserves the stable binding and installs normalized membership", "claim_ids": ["CLAIM-P2L-STABLE-BINDING", "CLAIM-P2L-LOCAL-MEMBER", "CLAIM-P2L-NORMALIZED-EMAILS", "CLAIM-APPLY-ATOMIC-MEMBERSHIP"] },
@@ -351,23 +362,24 @@
       { "text": "viewer remains read-only", "claim_ids": ["CLAIM-SHOW-VIEWER-READ", "CLAIM-SHOW-VIEWER-NO-HMR"] },
       { "text": "editor HMR remains on the private canonical surface", "claim_ids": ["CLAIM-SHOW-EDITOR-HMR"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-036", "expected_evidence": "Exact normalized emails come only from local storage; response projection excludes mutation receipts and is private and no-store; Backend receives no whitelist data", "clauses": [
-      { "text": "Exact normalized emails come only from local storage", "claim_ids": ["CLAIM-SETTINGS-LOCAL-SOURCE", "CLAIM-SETTINGS-LOCAL-EMAIL", "CLAIM-SETTINGS-NORMALIZED-EMAILS"] },
-      { "text": "response projection excludes mutation receipts and is private and no-store", "claim_ids": ["CLAIM-SETTINGS-RECEIPT-FREE", "CLAIM-SETTINGS-PRIVATE-NOSTORE"] },
+    { "scenario_id": "SHOW-LIVE-036", "expected_evidence": "Route HTTP IPC result and projection page identities all match or no settings return; exact normalized emails come only from local storage; actual HTTP metadata is private and no-store while the projection excludes mutation receipts; Backend receives no whitelist data", "clauses": [
+      { "text": "Route HTTP IPC result and projection page identities all match or no settings return", "claim_ids": ["CLAIM-SETTINGS-IDENTITY-DELIVERY"] },
+      { "text": "exact normalized emails come only from local storage", "claim_ids": ["CLAIM-SETTINGS-LOCAL-SOURCE", "CLAIM-SETTINGS-LOCAL-EMAIL", "CLAIM-SETTINGS-NORMALIZED-EMAILS"] },
+      { "text": "actual HTTP metadata is private and no-store while the projection excludes mutation receipts", "claim_ids": ["CLAIM-SETTINGS-RECEIPT-FREE", "CLAIM-SETTINGS-PRIVATE-NOSTORE"] },
       { "text": "Backend receives no whitelist data", "claim_ids": ["CLAIM-BACKEND-MEMBERSHIP-FALSE", "CLAIM-FORBIDDEN-WHITELIST"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-037", "expected_evidence": "Backend returns only one signed verified instance-bound identity assertion; Avibe closes callback-scoped cross-site cookie signed-state nonce and jti correlation then re-resolves current membership; a binding-scoped credential serves only the opaque-origin shared `/p/` page", "clauses": [
-      { "text": "Backend returns only one signed verified instance-bound identity assertion", "claim_ids": ["CLAIM-IDENTITY-SIGNED-ONLY", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-INSTANCE-BOUND", "CLAIM-IDENTITY-VERIFIED-EMAIL", "CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL", "CLAIM-IDENTITY-WIRE-STATE-MACHINE"] },
-      { "text": "Avibe closes callback-scoped cross-site cookie signed-state nonce and jti correlation then re-resolves current membership", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-SHARE-RERESOLVE", "CLAIM-FRESH-LOCAL-LOOKUP"] },
-      { "text": "a binding-scoped credential serves only the opaque-origin shared `/p/` page", "claim_ids": ["CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-IDENTITY-LISTED-SHARED", "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR"] }
+    { "scenario_id": "SHOW-LIVE-037", "expected_evidence": "Backend returns one bounded signed verified instance-bound identity assertion with fail-closed JWKS revalidation; Avibe closes callback correlation and rotates a local identity-only session; a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/`", "clauses": [
+      { "text": "Backend returns one bounded signed verified instance-bound identity assertion with fail-closed JWKS revalidation", "claim_ids": ["CLAIM-IDENTITY-SIGNED-ONLY", "CLAIM-IDENTITY-FORM-POST", "CLAIM-IDENTITY-INSTANCE-BOUND", "CLAIM-IDENTITY-VERIFIED-EMAIL", "CLAIM-INSTANCE-CONTEXT-FALSE", "CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-FORBIDDEN-SHOW-PAGE-EMAIL", "CLAIM-IDENTITY-WIRE-STATE-MACHINE", "CLAIM-STATE-MAX-LIFETIME", "CLAIM-JWKS-MUST-REVALIDATE"] },
+      { "text": "Avibe closes callback correlation and rotates a local identity-only session", "claim_ids": ["CLAIM-IDENTITY-CLOSED-LOOP", "CLAIM-IDENTITY-SESSION-ONLY"] },
+      { "text": "a later current-membership check mints a binding-scoped credential only for opaque-origin shared `/p/`", "claim_ids": ["CLAIM-SHARE-RERESOLVE", "CLAIM-FRESH-LOCAL-LOOKUP", "CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-IDENTITY-LISTED-SHARED", "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR"] }
     ] },
     { "scenario_id": "SHOW-LIVE-038", "expected_evidence": "Current membership plus a binding-scoped credential positively serves limited `/p/`; canonical document module API and HMR remain denied; membership and browsing credential create no Instance role or editor capability", "clauses": [
       { "text": "Current membership plus a binding-scoped credential positively serves limited `/p/`", "claim_ids": ["CLAIM-LIMITED-MEMBER-SHARED", "CLAIM-TRUSTED-SHELL-SERVE"] },
       { "text": "canonical document module API and HMR remain denied", "claim_ids": ["CLAIM-LISTED-SHOW-DENY", "CLAIM-LISTED-SHOW-HMR-DENY"] },
       { "text": "membership and browsing credential create no Instance role or editor capability", "claim_ids": ["CLAIM-INSTANCE-ROLE-FALSE", "CLAIM-IDENTITY-LISTED-NO-INSTANCE", "CLAIM-BROWSING-CREDENTIAL-NO-EDITOR"] }
     ] },
-    { "scenario_id": "SHOW-LIVE-039", "expected_evidence": "Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker scope opener or protected bytes; every forged or ambient request is denied; capability-path OPTIONS and JSON mutations are credentialless and sibling attempts are sanitized; trusted shell plus current membership and public anonymous admission remain positive paths", "clauses": [
-      { "text": "Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker scope opener or protected bytes", "claim_ids": ["CLAIM-SIBLING-ISOLATION"] },
+    { "scenario_id": "SHOW-LIVE-039", "expected_evidence": "Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker registration opener or protected bytes; every forged or ambient request is denied; capability-path OPTIONS and JSON mutations are credentialless and sibling attempts are sanitized; trusted shell plus current membership and public anonymous admission remain positive paths", "clauses": [
+      { "text": "Public sibling code obtains no limited shell bootstrap handle capability cookie DOM CORS response Service Worker registration opener or protected bytes", "claim_ids": ["CLAIM-SIBLING-ISOLATION", "CLAIM-SW-REGISTRATION-REJECT"] },
       { "text": "every forged or ambient request is denied", "claim_ids": ["CLAIM-SIBLING-FETCH-DENY", "CLAIM-SIBLING-FRAME-DENY", "CLAIM-SIBLING-OPEN-DENY"] },
       { "text": "capability-path OPTIONS and JSON mutations are credentialless and sibling attempts are sanitized", "claim_ids": ["CLAIM-CREDENTIALLESS-API-PREFLIGHT"] },
       { "text": "trusted shell plus current membership and public anonymous admission remain positive paths", "claim_ids": ["CLAIM-TRUSTED-SHELL-SERVE", "CLAIM-LIMITED-MEMBER-SHARED", "CLAIM-PUBLIC-AND-LIMITED-ADMISSION"] }
