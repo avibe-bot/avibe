@@ -107,10 +107,14 @@ export const SettingsBackendsPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
 
-  const persist = async (nextAgents: Record<string, AgentState>) => {
+  // Patch-write shape: send only the edited backend's field. A whole
+  // ``agents`` section round-tripped from mount-time state would
+  // overwrite concurrent cross-process writes (e.g. an installer
+  // updating another backend's cli_path) inside the locked merge.
+  const persistBackendField = async (name: string, patch: Partial<AgentState>) => {
     try {
       await api.saveConfig({
-        agents: nextAgents,
+        agents: { [name]: patch },
       });
       showToast(t('common.saved'), 'success');
     } catch (e) {
@@ -119,9 +123,8 @@ export const SettingsBackendsPage: React.FC = () => {
   };
 
   const handleToggle = async (name: string, enabled: boolean) => {
-    const nextAgents = { ...agents, [name]: { ...agents[name], enabled } };
-    setAgents(nextAgents);
-    await persist(nextAgents);
+    setAgents((prev) => ({ ...prev, [name]: { ...prev[name], enabled } }));
+    await persistBackendField(name, { enabled });
   };
 
   const refreshDetectionFor = async (name: string, cli_path: string) => {

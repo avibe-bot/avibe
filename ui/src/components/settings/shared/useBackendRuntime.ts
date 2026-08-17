@@ -62,11 +62,6 @@ export interface BackendRuntimeState {
   handleLifecycleChanged: (info: { installedPath?: string | null } | undefined | null) => Promise<void>;
 }
 
-const withoutLegacyDefaultBackend = (agents: Record<string, any> | undefined | null) => {
-  const { default_backend: _legacyDefaultBackend, ...rest } = agents || {};
-  return rest;
-};
-
 type BackendRuntimeApplyResult = {
   hot_reconciled?: boolean;
   restart_scheduled?: boolean;
@@ -201,16 +196,20 @@ export function useBackendRuntime({
   const onSaveRuntime = useCallback(async () => {
     setSavingRuntime(true);
     try {
-      const config = await api.getConfig();
-      const nextAgents = {
-        ...withoutLegacyDefaultBackend(config?.agents),
-        [backend]: {
-          ...(config?.agents?.[backend] || {}),
-          enabled,
-          cli_path: cliPath || defaultCli,
+      // Patch-write shape: only THIS backend's fields. Rebuilding the
+      // whole agents section from a pre-save GET would overwrite a
+      // concurrent cross-process write (e.g. an installer updating
+      // another backend's cli_path) inside the locked merge, and the
+      // subsequent rolling refresh could switch the live backend to the
+      // obsolete path.
+      const saved = await api.saveConfig({
+        agents: {
+          [backend]: {
+            enabled,
+            cli_path: cliPath || defaultCli,
+          },
         },
-      };
-      const saved = await api.saveConfig({ agents: nextAgents });
+      });
       // The config boundary owns both persistence and live runtime
       // reconciliation. A second route-level restart would refresh the backend
       // twice and could interrupt a transport that was just rebuilt.
@@ -234,16 +233,9 @@ export function useBackendRuntime({
     void (async () => {
       let saved = false;
       try {
-        const config = await api.getConfig();
-        const nextAgents = {
-          ...withoutLegacyDefaultBackend(config?.agents),
-          [backend]: {
-            ...(config?.agents?.[backend] || {}),
-            enabled: next,
-          },
-        };
+        // Patch-write shape: only this backend's enabled flag.
         const savedConfig = await api.saveConfig({
-          agents: nextAgents,
+          agents: { [backend]: { enabled: next } },
         });
         saved = true;
         assertBackendRuntimeApplied(savedConfig, t('common.saveFailed'));
