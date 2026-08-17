@@ -8467,14 +8467,12 @@ def startup_show_page_prewarm_targets(limit: int | None = None) -> dict:
     candidates.sort(key=lambda page: (page.updated_at, page.session_id), reverse=True)
     pages = []
     for page in candidates[:resolved_limit]:
-        base_path = f"/p/{page.share_id}/" if page.visibility == VISIBILITY_PUBLIC and page.share_id else None
-        context = ShowRuntimeContext.SHARED if base_path else ShowRuntimeContext.PRIVATE
+        context = ShowRuntimeContext.SHARED if page.visibility == VISIBILITY_PUBLIC else ShowRuntimeContext.PRIVATE
         pages.append(
             {
                 "session_id": page.session_id,
                 "visibility": page.visibility,
                 "updated_at": page.updated_at,
-                "base_path": base_path,
                 "context": context.value,
             }
         )

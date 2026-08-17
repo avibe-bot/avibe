@@ -13005,16 +13005,23 @@ def _is_show_page_spa_route_request(asset_path: str, starlette_request: FastAPIR
     relative = _decode_show_page_asset_path(asset_path)
     if relative in {"", "index.html"}:
         return True
+    if "text/html" not in starlette_request.headers.get("accept", "").lower():
+        return False
     segments = [segment for segment in relative.split("/") if segment]
     if not segments or segments[0] in {"api", "__show"}:
         return False
-    if "." not in segments[-1]:
-        return True
+    return True
 
-    # The runtime gets first refusal for real files. After a 404, Accept is the
-    # remaining distinction between a dotted route parameter (document navigation)
-    # and a missing script/style/image asset.
-    return "text/html" in starlette_request.headers.get("accept", "").lower()
+
+def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
+    relative = _decode_show_page_asset_path(asset_path)
+    if not relative:
+        return False
+    candidate = paths.get_show_page_dir(session_id) / relative
+    try:
+        return candidate.is_file() or (candidate.is_dir() and (candidate / "index.html").is_file())
+    except OSError:
+        return False
 
 
 def _decode_show_page_asset_path(asset_path: str) -> str:
@@ -14117,9 +14124,6 @@ async def show_session_prewarm(session_id: str):
     if not _is_cli_show_event_request():
         return jsonify({"ok": False, "code": "forbidden"}), 403
     payload = _show_events_payload_from_request()
-    base_path = payload.get("base_path")
-    if base_path is not None and not isinstance(base_path, str):
-        return jsonify({"ok": False, "code": "invalid_base_path"}), 400
     from core.show_runtime import ShowRuntimeContext, prewarm_show_page_session
 
     try:
@@ -14127,7 +14131,7 @@ async def show_session_prewarm(session_id: str):
     except (TypeError, ValueError):
         return jsonify({"ok": False, "code": "invalid_show_runtime_context"}), 400
 
-    result = await prewarm_show_page_session(session_id, context=context, base_path=base_path)
+    result = await prewarm_show_page_session(session_id, context=context)
     status_code = 200 if result.available else 202
     return jsonify({"ok": result.available, "reason": result.reason, "base_url": result.base_url}), status_code
 
@@ -14294,10 +14298,16 @@ async def _show_page_runtime_response(
             path = f"{path}?{starlette_request.url.query}"
         return path
 
-    runtime_path = runtime_app_path(asset_path)
     forwarded_headers = _show_runtime_forwarded_headers(starlette_request.headers)
-    if external_prefix:
-        forwarded_headers["x-vibe-show-base"] = f"{external_prefix.rstrip('/')}/"
+    history_route_candidate = (
+        not _is_show_page_entry_asset(asset_path)
+        and _is_show_page_spa_route_request(asset_path, starlette_request)
+    )
+    served_entry_fallback = history_route_candidate and not _show_page_runtime_asset_exists(
+        session_id,
+        asset_path,
+    )
+    runtime_path = runtime_app_path("" if served_entry_fallback else asset_path)
     context = ShowRuntimeContext.SHARED if external_prefix else ShowRuntimeContext.PRIVATE
     envelope = ShowRuntimeProtocolEnvelope(context)
     body = await starlette_request.body()
@@ -14310,20 +14320,6 @@ async def _show_page_runtime_response(
         headers=forwarded_headers,
         body=body or None,
     )
-    served_entry_fallback = False
-    if proxied.status_code == 404 and _is_show_page_spa_route_request(asset_path, starlette_request):
-        # Compatibility fallback for runtimes predating History-mode serving.
-        # The requested file/handler had first refusal above; only a route-shaped
-        # miss retries the entry document under the same private/public base.
-        runtime_path = runtime_app_path("")
-        proxied = await manager.request(
-            starlette_request.method,
-            runtime_path,
-            envelope=envelope,
-            headers=forwarded_headers,
-            body=body or None,
-        )
-        served_entry_fallback = True
     proxy_duration_ms = int((time.monotonic() - request_started) * 1000)
     if (
         proxy_duration_ms >= SHOW_RUNTIME_SLOW_REQUEST_MS
@@ -15530,7 +15526,6 @@ async def _reconcile_startup_dependencies_task() -> None:
                     session_prewarm = await prewarm_show_page_session(
                         session_id,
                         context=context,
-                        base_path=page.get("base_path") if isinstance(page.get("base_path"), str) else None,
                     )
                     page_results.append(
                         {

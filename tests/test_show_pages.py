@@ -2392,10 +2392,9 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     assert public_payload["active_url"] == public_payload["public_url"]
     assert public_payload["public_url"].startswith("https://alex.avibe.bot/p/")
     assert public_payload["previous_private_url"] == "https://alex.avibe.bot/show/ses123/"
-    share_path = "/" + public_payload["public_url"].split("https://alex.avibe.bot/", 1)[1]
     assert prewarmed[-1] == (
         "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm",
-        {"context": "shared", "base_path": share_path},
+        {"context": "shared"},
     )
 
     args = parser.parse_args(["show", "update", "--session-id", "ses123", "--visibility", "private", "--json"])

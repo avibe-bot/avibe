@@ -1319,7 +1319,7 @@ def test_show_live_005_protocol_context_crosses_non_ascii_avibe_request_boundary
 
 @pytest.mark.parametrize("surface", ["private", "public"])
 @pytest.mark.parametrize("route_path", ["reports/daily", "users/alice@example.com"])
-def test_show_page_history_route_retries_entry_after_runtime_404(monkeypatch, tmp_path, surface, route_path):
+def test_show_page_history_route_requests_entry_directly(monkeypatch, tmp_path, surface, route_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     if surface == "private":
@@ -1336,14 +1336,12 @@ def test_show_page_history_route_retries_entry_after_runtime_404(monkeypatch, tm
             "environ_base": _remote_peer(),
         }
 
-    route_runtime_path = f"/sessions/ses123/app/{route_path}?vibe-embed=1"
     entry_runtime_path = "/sessions/ses123/app/?vibe-embed=1"
     entry = (
         '<!doctype html><html><head><base href="/show/ses123/"></head><body>'
         '<script type="module" src="/show/ses123/src/main.tsx"></script></body></html>'
     ).encode()
     manager = _FakeShowRuntimeManager(
-        status_code=404,
         status_by_path={entry_runtime_path: 200},
         bodies_by_path={entry_runtime_path: entry},
     )
@@ -1362,12 +1360,12 @@ def test_show_page_history_route_retries_entry_after_runtime_404(monkeypatch, tm
     assert f'<base href="{expected_base}">' in body
     assert f'"basePath":"{expected_base}"' in body
     assert response.headers["cache-control"] == "no-store"
-    assert [call[1] for call in manager.calls] == [route_runtime_path, entry_runtime_path]
+    assert [call[1] for call in manager.calls] == [entry_runtime_path]
     expected_context = "private" if surface == "private" else "shared"
     assert all(call[2]["X-Avibe-Show-Protocol"] == "1" for call in manager.calls)
     assert all(call[2]["X-Avibe-Show-Context"] == expected_context for call in manager.calls)
-    if surface == "public":
-        assert all(call[2]["x-vibe-show-base"] == expected_base for call in manager.calls)
+    assert manager.calls[0][2]["accept"] == "text/html"
+    assert all("x-vibe-show-base" not in call[2] for call in manager.calls)
 
 
 @pytest.mark.parametrize("surface", ["private", "public"])
@@ -1403,7 +1401,7 @@ def test_show_page_history_route_uses_recovery_when_runtime_unavailable(monkeypa
     assert b"standard shadcn variables" in response.content
     assert b"--background" in response.content
     assert b"components from @/components/ui and @avibe/show-ui" not in response.content
-    assert [call[1] for call in manager.calls] == ["/sessions/ses123/app/reports/daily"]
+    assert [call[1] for call in manager.calls] == ["/sessions/ses123/app/"]
 
 
 @pytest.mark.parametrize(
@@ -1444,6 +1442,7 @@ def test_private_show_page_real_extensionless_asset_precedes_spa_fallback(monkey
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
+    (paths.get_show_page_dir("ses123") / "robots").write_text("real extensionless asset", encoding="utf-8")
     asset_runtime_path = "/sessions/ses123/app/robots"
     manager = _FakeShowRuntimeManager(
         status_code=404,
@@ -4700,8 +4699,8 @@ def test_cli_show_prewarm_ingress_uses_ui_runtime_manager(monkeypatch, tmp_path)
     _save_config(tmp_path)
     calls = []
 
-    async def fake_prewarm(session_id, *, context, base_path=None):
-        calls.append((session_id, context, base_path))
+    async def fake_prewarm(session_id, *, context):
+        calls.append((session_id, context))
         return SimpleNamespace(available=True, reason=None, base_url="http://127.0.0.1:49200")
 
     monkeypatch.setattr("core.show_runtime.prewarm_show_page_session", fake_prewarm)
@@ -4719,7 +4718,7 @@ def test_cli_show_prewarm_ingress_uses_ui_runtime_manager(monkeypatch, tmp_path)
 
     assert response.status_code == 200
     assert response.get_json()["ok"] is True
-    assert calls == [("ses123", ShowRuntimeContext.SHARED, "/p/share123/")]
+    assert calls == [("ses123", ShowRuntimeContext.SHARED)]
 
 
 def test_show_live_017_cli_show_prewarm_rejects_missing_context_before_runtime(
@@ -5559,13 +5558,11 @@ def test_show_runtime_manager_prewarm_loads_entry_module(monkeypatch, tmp_path):
         manager.prewarm_session(
             "ses123",
             context=ShowRuntimeContext.PRIVATE,
-            base_path="/show/ses123/",
         )
     )
 
     assert result.available is True
     private_headers = {
-        "x-vibe-show-base": "/show/ses123/",
         "X-Avibe-Show-Protocol": "1",
         "X-Avibe-Show-Context": "private",
     }
@@ -5592,12 +5589,12 @@ def test_show_runtime_manager_prewarm_reports_nested_module_failures(monkeypatch
     responses = {
         "/sessions/ses123/app/": (
             200,
-            b'<script type="module" src="/p/share123/src/main.tsx"></script>',
+            b'<script type="module" src="/show/ses123/src/main.tsx"></script>',
             {"content-type": "text/html"},
         ),
         "/sessions/ses123/app/src/main.tsx": (
             200,
-            b'import App from "/p/share123/src/App.tsx";',
+            b'import App from "/show/ses123/src/App.tsx";',
             {"content-type": "text/javascript"},
         ),
         "/sessions/ses123/app/src/App.tsx": (
@@ -5624,7 +5621,6 @@ def test_show_runtime_manager_prewarm_reports_nested_module_failures(monkeypatch
         manager.prewarm_session(
             "ses123",
             context=ShowRuntimeContext.SHARED,
-            base_path="/p/share123/",
         )
     )
 
@@ -6698,8 +6694,8 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
         called["runtime"] += 1
         return SimpleNamespace(available=True, reason=None)
 
-    async def fake_session_prewarm(session_id, *, context, base_path=None):
-        called["sessions"].append((session_id, context, base_path))
+    async def fake_session_prewarm(session_id, *, context):
+        called["sessions"].append((session_id, context))
         return SimpleNamespace(available=True, reason=None)
 
     monkeypatch.setattr("vibe.api.reconcile_startup_dependencies", fake_reconcile)
@@ -6709,8 +6705,8 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
             "ok": True,
             "limit": 2,
             "pages": [
-                {"session_id": "ses_private", "context": "private", "base_path": None},
-                {"session_id": "ses_public", "context": "shared", "base_path": "/p/share123/"},
+                {"session_id": "ses_private", "context": "private"},
+                {"session_id": "ses_public", "context": "shared"},
             ],
         },
     )
@@ -6723,8 +6719,8 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
         "reconcile": 1,
         "runtime": 1,
         "sessions": [
-            ("ses_private", ShowRuntimeContext.PRIVATE, None),
-            ("ses_public", ShowRuntimeContext.SHARED, "/p/share123/"),
+            ("ses_private", ShowRuntimeContext.PRIVATE),
+            ("ses_public", ShowRuntimeContext.SHARED),
         ],
     }
 
@@ -7261,9 +7257,46 @@ def test_public_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
     assert b"Public Runtime Page" in response.content
     assert manager.calls[0][0] == "GET"
     assert manager.calls[0][1] == "/sessions/ses123/app/"
-    assert manager.calls[0][2]["x-vibe-show-base"] == f"/p/{share_id}/"
+    assert "x-vibe-show-base" not in manager.calls[0][2]
     assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
     assert manager.calls[0][2]["X-Avibe-Show-Context"] == "shared"
+
+
+def test_private_and_public_surfaces_share_one_stable_runtime_base(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager(
+        body=b'<script type="module" src="/show/ses123/src/main.tsx"></script>'
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        private_before = app.test_client().get(
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+        )
+        public = app.test_client().get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        private_after = app.test_client().get(
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert [response.status_code for response in (private_before, public, private_after)] == [200, 200, 200]
+    assert b'/show/ses123/src/main.tsx' in private_before.content
+    assert f'/p/{share_id}/src/main.tsx'.encode() in public.content
+    assert b'/show/ses123/src/main.tsx' in private_after.content
+    assert [call[2]["X-Avibe-Show-Context"] for call in manager.calls] == [
+        "private",
+        "shared",
+        "private",
+    ]
+    assert all("x-vibe-show-base" not in call[2] for call in manager.calls)
 
 
 def test_public_show_page_materializes_workspace_before_runtime_proxy(monkeypatch, tmp_path):
@@ -7287,7 +7320,7 @@ def test_public_show_page_materializes_workspace_before_runtime_proxy(monkeypatc
     assert b"Public Runtime Page" in response.content
     assert (page_dir / "src" / "App.tsx").exists()
     assert manager.calls[0][1] == "/sessions/ses123/app/"
-    assert manager.calls[0][2]["x-vibe-show-base"] == f"/p/{share_id}/"
+    assert "x-vibe-show-base" not in manager.calls[0][2]
 
 
 def test_public_show_page_rewrites_runtime_redirect_location(monkeypatch, tmp_path):
@@ -7339,7 +7372,7 @@ def test_public_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
     assert manager.calls[0][0] == "POST"
     assert manager.calls[0][1] == "/sessions/ses123/app/api/health"
     assert manager.calls[0][2]["content-type"] == "application/json"
-    assert manager.calls[0][2]["x-vibe-show-base"] == f"/p/{share_id}/"
+    assert "x-vibe-show-base" not in manager.calls[0][2]
     assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
     assert manager.calls[0][2]["X-Avibe-Show-Context"] == "shared"
     assert "cookie" not in manager.calls[0][2]
