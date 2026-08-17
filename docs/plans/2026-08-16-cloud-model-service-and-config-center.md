@@ -493,15 +493,19 @@ turns on.
 ### 8.4 Error codes (stable, machine-readable `code` field)
 
 - `model_service_not_configured` (503) — resolved scope lacks an enabled slot for the capability.
+- `model_service_api_key_required` (400) — an enabled save candidate has no submitted, retained,
+  or materialized API key. This client-input validation runs before managed custody validation and
+  never emits a custody alert.
 - `model_service_key_unavailable` (503) — an enabled save candidate cannot complete its managed
-  encrypt/decrypt round trip, or an enabled saved slot has neither decryptable custody nor an
-  eligible same-scope platform env recovery under the shared effectiveness predicate. The failure
-  is not overrideable by `force: true`, never maps to `model_service_not_configured`, makes no
-  upstream call, and persists no candidate change. For unrecovered saved-slot failures, status
-  marks the affected capability false with the same reason. Every saved-key decryption-failure
-  transition, including one masked by approved platform recovery, emits one scrubbed high-priority
-  Sentry event per scope/config revision/capability; repeated failures at the same active edge emit
-  none, and a successful managed-key validation clears the edge so a later failure can emit again.
+  encrypt/decrypt round trip after an actual key has been selected, or an enabled saved slot has
+  neither decryptable custody nor an eligible same-scope platform env recovery under the shared
+  effectiveness predicate. The failure is not overrideable by `force: true`, never maps to
+  `model_service_not_configured`, makes no upstream call, and persists no candidate change. For
+  unrecovered saved-slot failures, status marks the affected capability false with the same reason.
+  Every saved-key decryption-failure transition, including one masked by approved platform recovery,
+  emits one scrubbed high-priority Sentry event per scope/config revision/capability; repeated
+  failures at the same active edge emit none, and a successful managed-key validation clears the
+  edge so a later failure can emit again.
 - `model_service_unavailable` (503) — quota **reservation** persistence failed on an
   enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
   never produces this error: the response is served and the un-settled reservation is reaped as a
