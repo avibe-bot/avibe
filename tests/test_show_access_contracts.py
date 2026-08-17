@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from copy import deepcopy
@@ -59,6 +60,19 @@ def _canonical_emails(values: list[str]) -> list[str]:
     return sorted(set(canonical))
 
 
+def _serve_settings_read(
+    authorized_route_page_id: str,
+    request: dict[str, str],
+    controller_read: Any,
+) -> tuple[str, dict[str, Any] | None, bool]:
+    if authorized_route_page_id != request["page_id"]:
+        return "page_mismatch", None, False
+    result = controller_read(request)
+    if result["show_access"]["page_id"] != request["page_id"]:
+        return "internal_protocol_failure", None, True
+    return "ok", result, True
+
+
 def test_contract_directory_has_only_the_three_versioned_boundaries() -> None:
     assert {path.name for path in CONTRACTS.glob("*.json")} == {
         "identity-auth.json",
@@ -105,11 +119,63 @@ def test_show_access_is_one_closed_local_aggregate() -> None:
     assert contract["storage_boundary"]["transaction"] == "one_local_transaction"
     assert contract["storage_boundary"]["exact_email_persistence"] == "local_avibe_only"
     assert contract["page_identity"]["required_equality"] == (
-        "authorized_route_page_id == request.page_id == result.show_access.page_id"
+        "authorized_route_page_id == http_request.page_id == ipc_request.page_id == "
+        "ipc_result.show_access.page_id == http_result.show_access.page_id"
     )
-    settings = next(interface for interface in contract["interfaces"] if interface["id"] == "show_access_settings_read")
+    interfaces = {interface["id"]: interface for interface in contract["interfaces"]}
+    settings = interfaces["show_access_settings_read"]
+    assert settings["request"] == "#/$defs/SettingsReadRequest"
+    assert settings["result"] == "#/$defs/SettingsReadResult"
     assert settings["authorization"] == "owner_or_existing_sharing_control_authority"
     assert "cache_control_private_no_store" in settings["delivery"]
+    settings_ipc = interfaces["show_access_settings_read_ipc"]
+    assert settings_ipc["request"] == settings["request"]
+    assert settings_ipc["result"] == settings["result"]
+
+
+def test_settings_read_binds_route_request_and_result_before_returning_emails() -> None:
+    document = _load(ARTIFACTS["show"])
+    request = {"page_id": "page:alpha"}
+    alpha = {
+        "show_access": {
+            "page_id": "page:alpha",
+            "access_mode": "limited",
+            "share_id": "stable_alpha",
+            "revision": 5,
+            "normalized_emails": ["alice@example.com"],
+        }
+    }
+    beta = {
+        "show_access": {
+            "page_id": "page:beta",
+            "access_mode": "limited",
+            "share_id": "stable_beta",
+            "revision": 8,
+            "normalized_emails": ["bob@example.com"],
+        }
+    }
+    _validate(document, "#/$defs/SettingsReadRequest", request)
+    _validate(document, "#/$defs/SettingsReadResult", alpha)
+    _validate(document, "#/$defs/SettingsReadResult", beta)
+
+    reads = 0
+
+    def read_alpha(_request: dict[str, str]) -> dict[str, Any]:
+        nonlocal reads
+        reads += 1
+        return alpha
+
+    status, response, store_read = _serve_settings_read("page:alpha", request, read_alpha)
+    assert (status, response, store_read) == ("ok", alpha, True)
+    assert reads == 1
+
+    status, response, store_read = _serve_settings_read("page:beta", request, read_alpha)
+    assert (status, response, store_read) == ("page_mismatch", None, False)
+    assert reads == 1
+
+    status, response, store_read = _serve_settings_read("page:alpha", request, lambda _request: beta)
+    assert (status, response, store_read) == ("internal_protocol_failure", None, True)
+    assert response is None
 
 
 def test_show_access_mode_invariants_reject_invalid_points() -> None:
@@ -269,6 +335,65 @@ def test_identity_flow_has_one_fixed_lifetime_and_latest_flow_wins() -> None:
     assert state["exp"] - state["iat"] == 300
 
 
+def test_identity_session_wire_is_minimal_fixed_lifetime_and_identity_only() -> None:
+    document = _load(ARTIFACTS["identity"])
+    contract = document["x-contract"]
+    session = contract["identity_session"]
+    interfaces = {interface["id"]: interface for interface in contract["interfaces"]}
+
+    assert interfaces["show_identity_session_cookie"]["result"] == "#/$defs/IdentitySessionCookie"
+    assert interfaces["show_identity_session_lookup"]["request"] == "#/$defs/IdentitySessionLookup"
+    assert interfaces["show_identity_session_lookup"]["result"] == "#/$defs/IdentitySessionRecord"
+    assert session["cookie_name"] == "__Host-avibe_show_identity_session"
+    assert session["cookie_entropy_bytes"] == 32
+    assert session["cookie_attributes"] == {
+        "host_only": True,
+        "domain_attribute_allowed": False,
+        "secure": True,
+        "http_only": True,
+        "same_site": "Lax",
+        "path": "/",
+        "maximum_age_seconds": 2_592_000,
+    }
+    assert session["fixed_lifetime_seconds"] == 2_592_000
+    assert session["lookup_invariant"] == (
+        "sha256_utf8(request.session_token) == record.token_sha256 && "
+        "request.instance_id == record.instance_id && "
+        "request.callback_origin == record.callback_origin && now < record.expires_at"
+    )
+    assert session["sliding_refresh"] is False
+    assert session["session_family"] is False
+    assert session["cross_session_revocation"] is False
+    assert session["older_bearer_records"] == "may_remain_valid_until_their_fixed_expiry"
+    assert session["later_limited_navigation"].endswith("current_local_show_access_and_membership_once")
+
+    examples = {example["name"]: example["value"] for example in document["x-examples"]}
+    cookie = examples["identity_session_cookie"]
+    lookup = examples["identity_session_lookup"]
+    record = examples["identity_session_record"]
+    assert lookup["session_token"] == cookie["value"]
+    assert record["token_sha256"] == hashlib.sha256(cookie["value"].encode("ascii")).hexdigest()
+    assert record["expires_at"] - record["created_at"] == 2_592_000
+    assert set(record) == {
+        "token_sha256",
+        "instance_id",
+        "callback_origin",
+        "subject",
+        "normalized_verified_email",
+        "created_at",
+        "expires_at",
+    }
+    assert set(record).isdisjoint(session["session_forbidden_authority"])
+
+    invalid_record = {**record, "page_id": "page:alpha"}
+    with pytest.raises(ValidationError):
+        _validate(document, "#/$defs/IdentitySessionRecord", invalid_record)
+
+    invalid_cookie = {**cookie, "same_site": "None"}
+    with pytest.raises(ValidationError):
+        _validate(document, "#/$defs/IdentitySessionCookie", invalid_cookie)
+
+
 def test_runtime_protocol_constants_match_frozen_contract() -> None:
     contract = _load(ARTIFACTS["runtime"])["x-contract"]
     protocol = contract["protocol"]
@@ -401,6 +526,10 @@ def test_cache_and_runtime_release_boundaries_are_closed() -> None:
     release = runtime["release_gate"]
 
     assert cache["limited_all_surfaces"] == "private, no-store"
+    assert cache["public_access_dependent_redirects"] == {
+        "surfaces": ["resource_viewer_p_to_canonical_show", "resource_editor_p_to_canonical_show"],
+        "response_headers": {"Cache-Control": "private, no-store"},
+    }
     assert cache["public_versioned_asset_exception"] == "public, max-age=31536000, immutable"
     assert cache["public_versioned_asset_constraint"] == (
         "contains_only_public_bytes_and_no_identity_or_page_private_data"
@@ -438,3 +567,7 @@ def test_superseded_contract_and_scenario_artifacts_are_absent() -> None:
     auth_catalog = Path("tests/scenarios/auth_setup/catalog.yaml").read_text(encoding="utf-8")
     assert "test_show_identity_scenario.py" not in scenario_index
     assert "AUTH-SETUP-404" not in auth_catalog
+    assert "ShowIdentityLimitedPageScenarioTests::test_identity_session_rechecks_limited_membership_on_navigation" in (
+        auth_catalog
+    )
+    assert "backend: show_page_email" not in auth_catalog

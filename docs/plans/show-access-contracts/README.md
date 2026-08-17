@@ -29,8 +29,10 @@ durable mutation receipt. After a lost response, the client reads current state.
 
 The Backend returns only a short-lived RS256 identity assertion. That assertion
 does not contain page, share, membership, role, or resource-access claims. The
-local identity session proves identity only. Page admission remains a fresh local
-decision at each new top-level navigation or manual refresh.
+local identity session is one host-only `__Host-` cookie containing 32 random
+bytes plus a local record keyed only by the token's SHA-256 digest. It lasts a
+fixed 30 days without sliding refresh and proves identity only. Page admission
+remains a fresh local decision at each new top-level navigation or manual refresh.
 
 After admission, the opaque document capability remains valid for that loaded
 document and its subresources while its Runtime namespace and document handle
@@ -53,9 +55,11 @@ active polling or forced-close protocol; later connections authorize again.
 ## Evidence Boundary
 
 The focused tests validate all three schemas and examples, exact interface fields,
-closed vocabularies, local-only membership, identity-only claims, Runtime protocol
-constants, keyed-context fail-closed behavior, admission lifetime, worker denial,
-and cache boundaries.
+closed vocabularies, local-only membership, identity-only claims and session
+record, Runtime protocol constants, keyed-context fail-closed behavior, admission
+lifetime, worker denial, and cache boundaries. `AUTH-SETUP-401` supplies a small
+closed-loop contract scenario from limited entry through identity callback and a
+later membership-rechecked navigation.
 
 This repository does not yet prove production Avibe, Backend, Runtime, browser,
 or Incus conformance. Those consumers must implement the same contract version

@@ -23,10 +23,20 @@
         "request": "#/$defs/CallbackForm"
       },
       {
-        "id": "show_identity_session",
+        "id": "show_identity_session_cookie",
         "producer": "avibe.local_http.ShowIdentityCallback",
-        "consumer": "avibe.local_http.SharedNavigationAdmission",
-        "delivery": "opaque_host_only_secure_http_only_cookie_plus_server_record",
+        "consumer": "show_identity_browser",
+        "delivery": "http_set_cookie",
+        "result": "#/$defs/IdentitySessionCookie",
+        "authority": "identity_only"
+      },
+      {
+        "id": "show_identity_session_lookup",
+        "producer": "avibe.local_http.SharedNavigationAdmission",
+        "consumer": "avibe.local.IdentitySessionStore",
+        "delivery": "local_sha256_digest_lookup",
+        "request": "#/$defs/IdentitySessionLookup",
+        "result": "#/$defs/IdentitySessionRecord",
         "authority": "identity_only"
       }
     ],
@@ -96,6 +106,33 @@
       "session_purpose": "identity_only",
       "page_authorization": "new_limited_navigation_reresolves_local_show_access_and_current_membership_once"
     },
+    "identity_session": {
+      "cookie_name": "__Host-avibe_show_identity_session",
+      "cookie_value": "base64url_without_padding_of_32_csprng_bytes",
+      "cookie_entropy_bytes": 32,
+      "cookie_attributes": {
+        "host_only": true,
+        "domain_attribute_allowed": false,
+        "secure": true,
+        "http_only": true,
+        "same_site": "Lax",
+        "path": "/",
+        "maximum_age_seconds": 2592000
+      },
+      "server_record": "#/$defs/IdentitySessionRecord",
+      "server_storage": "sha256_of_cookie_value_utf8_only_never_plain_bearer",
+      "lookup_invariant": "sha256_utf8(request.session_token) == record.token_sha256 && request.instance_id == record.instance_id && request.callback_origin == record.callback_origin && now < record.expires_at",
+      "fixed_lifetime_seconds": 2592000,
+      "expiry_invariant": "expires_at == created_at + fixed_lifetime_seconds",
+      "sliding_refresh": false,
+      "session_family": false,
+      "cross_session_revocation": false,
+      "successful_callback": "overwrite_browser_cookie_with_new_session_token",
+      "older_bearer_records": "may_remain_valid_until_their_fixed_expiry",
+      "logout": "delete_presented_record_and_expire_presented_cookie",
+      "later_limited_navigation": "validate_identity_session_then_reresolve_current_local_show_access_and_membership_once",
+      "session_forbidden_authority": ["page_id", "share_id", "page_membership", "instance_role", "resource_authority"]
+    },
     "backend_forbidden_behavior": ["receive_local_whitelist", "decide_page_membership", "derive_instance_role", "create_instance_access_context"],
     "privileged_surfaces_never_granted_by_identity_session": ["show", "workbench", "resource_api", "hmr", "annotations", "agents"]
   },
@@ -119,6 +156,21 @@
       "name": "signed_state_claims",
       "schema_ref": "#/$defs/SignedStateClaims",
       "value": {"flow_id": "flow-1", "instance_id": "instance-1", "nonce": "nonce-value", "callback_origin": "https://show.example.test", "safe_return_path": "/p/stable_alpha/", "iat": 1786935600, "exp": 1786935900}
+    },
+    {
+      "name": "identity_session_cookie",
+      "schema_ref": "#/$defs/IdentitySessionCookie",
+      "value": {"name": "__Host-avibe_show_identity_session", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "host_only": true, "domain": null, "secure": true, "http_only": true, "same_site": "Lax", "path": "/", "maximum_age_seconds": 2592000}
+    },
+    {
+      "name": "identity_session_lookup",
+      "schema_ref": "#/$defs/IdentitySessionLookup",
+      "value": {"session_token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "instance_id": "instance-1", "callback_origin": "https://show.example.test"}
+    },
+    {
+      "name": "identity_session_record",
+      "schema_ref": "#/$defs/IdentitySessionRecord",
+      "value": {"token_sha256": "0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a", "instance_id": "instance-1", "callback_origin": "https://show.example.test", "subject": "user-1", "normalized_verified_email": "alice@example.com", "created_at": 1786935600, "expires_at": 1789527600}
     }
   ],
   "$defs": {
@@ -170,6 +222,52 @@
         "nonce": {"type": "string", "minLength": 1, "maxLength": 256},
         "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "verified_email": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+$"}
+      }
+    },
+    "IdentitySessionToken": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "IdentitySessionCookie": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "host_only", "domain", "secure", "http_only", "same_site", "path", "maximum_age_seconds"],
+      "properties": {
+        "name": {"const": "__Host-avibe_show_identity_session"},
+        "value": {"$ref": "#/$defs/IdentitySessionToken"},
+        "host_only": {"const": true},
+        "domain": {"type": "null"},
+        "secure": {"const": true},
+        "http_only": {"const": true},
+        "same_site": {"const": "Lax"},
+        "path": {"const": "/"},
+        "maximum_age_seconds": {"const": 2592000}
+      }
+    },
+    "IdentitySessionLookup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_token", "instance_id", "callback_origin"],
+      "properties": {
+        "session_token": {"$ref": "#/$defs/IdentitySessionToken"},
+        "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "callback_origin": {"type": "string", "format": "uri", "pattern": "^https://[^/?#]+$"}
+      }
+    },
+    "IdentitySessionRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token_sha256", "instance_id", "callback_origin", "subject", "normalized_verified_email", "created_at", "expires_at"],
+      "properties": {
+        "token_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "callback_origin": {"type": "string", "format": "uri", "pattern": "^https://[^/?#]+$"},
+        "subject": {"type": "string", "minLength": 1, "maxLength": 512},
+        "normalized_verified_email": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+$"},
+        "created_at": {"type": "integer"},
+        "expires_at": {"type": "integer"}
       }
     }
   }

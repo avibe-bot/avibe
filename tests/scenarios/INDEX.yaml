@@ -159,6 +159,7 @@ capabilities:
     unit_or_contract_tests:
       - tests/test_agent_auth_service.py
       - tests/test_cloud_management.py
+      - tests/test_show_access_contracts.py
   - id: message_delivery
     name: scheduled result delivery
     status: active

@@ -51,6 +51,9 @@ Email normalization is ASCII surrounding-whitespace trim, ASCII lowercase,
 syntax validation, deduplication, and lexical sort. The canonical set is persisted
 only in Avibe. Settings reads require owner or existing sharing-control authority,
 are delivered with `Cache-Control: private, no-store`, and never leave local Avibe.
+Their explicit request is `{page_id}` and their result is `{show_access}`. The
+authorized route, controller request, and returned `show_access.page_id` must be
+equal; a controller mismatch returns no email data.
 
 Mode behavior:
 
@@ -92,9 +95,17 @@ for that login attempt. Refresh is scoped by the paired issuer, never by an
 attacker-selected `kid`. Failure asks the visitor to sign in again. Version 1 does
 not promise seamless key rotation or previous-key overlap.
 
-The resulting local session is opaque and identity-only. Every new limited `/p`
-navigation or manual refresh still re-resolves the local page and membership. It
-never creates `InstanceAccessContext`, an Instance role, or access to `/show`,
+The resulting local session uses one host-only Secure, HttpOnly, SameSite=Lax
+`__Host-avibe_show_identity_session` cookie at Path `/`. Its value is 32 random
+bytes; Avibe stores only the SHA-256 digest, paired instance, configured callback
+origin, subject, normalized verified email, creation time, and expiration time.
+The lifetime is a fixed 30 days with no sliding refresh, session family, or
+cross-session revocation. A successful callback overwrites the browser cookie;
+older bearer records may expire naturally. Logout deletes only the presented
+record. Every new limited `/p` navigation or manual refresh still validates the
+identity session, re-resolves the local page, and checks current membership once.
+The session never contains page, share, membership, or role claims and never
+creates `InstanceAccessContext`, an Instance role, or access to `/show`,
 Workbench, resource APIs, HMR, annotations, or Agents.
 
 ### 3. Runtime Private/Shared Containment
@@ -156,9 +167,11 @@ permission monitor, or formal pin/reclaim race protocol.
 ## Cache Boundary
 
 All limited responses are `private, no-store`. Public shell, document, fallback,
-API, error, and redirect surfaces are also non-cacheable. A separately named,
-versioned asset may use `public, max-age=31536000, immutable` only when it contains
-public bytes and no page-private or identity data.
+API, error, and redirect surfaces are also non-cacheable. This includes every
+access-dependent resource-viewer or resource-editor redirect from `/p` to
+canonical `/show`. A separately named, versioned asset may use
+`public, max-age=31536000, immutable` only when it contains public bytes and no
+page-private or identity data.
 
 ## Direct Retirement
 
@@ -190,6 +203,8 @@ This PR proves only contract conformance:
 - interface fields and closed vocabularies match across the three boundaries;
 - existing Avibe Runtime protocol constants equal the frozen values;
 - local membership never becomes Backend or Instance authorization;
+- `AUTH-SETUP-401` executes limited entry, identity `form_post`, local session
+  creation, later session reuse, and next-navigation membership removal;
 - admitted shared documents use admission-time, not continuous, authorization;
 - admitted capabilities and namespaces never expire because of time or permission changes;
 - shared code has no privileged surface and all worker kinds are unsupported;

@@ -42,17 +42,26 @@
       },
       {
         "id": "show_access_settings_read",
-        "producer": "avibe.local_http.ShowAccessSettingsRead",
-        "consumer": "avibe.ui.SharingSettings",
+        "producer": "avibe.ui.SharingSettings",
+        "consumer": "avibe.local_http.ShowAccessSettingsRead",
         "delivery": "authenticated_local_http_json_with_cache_control_private_no_store",
-        "result": "#/$defs/ShowAccess",
+        "request": "#/$defs/SettingsReadRequest",
+        "result": "#/$defs/SettingsReadResult",
         "authorization": "owner_or_existing_sharing_control_authority"
+      },
+      {
+        "id": "show_access_settings_read_ipc",
+        "producer": "avibe.ui_process.ShowAccessSettingsReadClient",
+        "consumer": "avibe.controller.ShowAccessStore",
+        "delivery": "authenticated_internal_socket_json",
+        "request": "#/$defs/SettingsReadRequest",
+        "result": "#/$defs/SettingsReadResult"
       }
     ],
     "page_identity": {
-      "required_equality": "authorized_route_page_id == request.page_id == result.show_access.page_id",
+      "required_equality": "authorized_route_page_id == http_request.page_id == ipc_request.page_id == ipc_result.show_access.page_id == http_result.show_access.page_id",
       "route_or_request_mismatch": "reject_before_controller_ipc_or_store_read",
-      "controller_result_mismatch": "internal_protocol_failure_without_response_data"
+      "controller_result_mismatch": "internal_protocol_failure_before_returning_any_email_data"
     },
     "apply": {
       "cas_field": "expected_revision",
@@ -106,6 +115,16 @@
       "name": "stale_apply",
       "schema_ref": "#/$defs/ApplyResult",
       "value": {"status": "conflict", "show_access": {"page_id": "page:alpha", "access_mode": "public", "share_id": "stable_alpha", "revision": 6, "normalized_emails": []}}
+    },
+    {
+      "name": "settings_read_request",
+      "schema_ref": "#/$defs/SettingsReadRequest",
+      "value": {"page_id": "page:alpha"}
+    },
+    {
+      "name": "settings_read_result",
+      "schema_ref": "#/$defs/SettingsReadResult",
+      "value": {"show_access": {"page_id": "page:alpha", "access_mode": "limited", "share_id": "stable_alpha", "revision": 5, "normalized_emails": ["alice@example.com"]}}
     }
   ],
   "$defs": {
@@ -152,6 +171,22 @@
       "required": ["status", "show_access"],
       "properties": {
         "status": {"enum": ["applied", "no_change", "conflict", "share_id_taken", "invalid"]},
+        "show_access": {"$ref": "#/$defs/ShowAccess"}
+      }
+    },
+    "SettingsReadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page_id"],
+      "properties": {
+        "page_id": {"$ref": "#/$defs/PageId"}
+      }
+    },
+    "SettingsReadResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["show_access"],
+      "properties": {
         "show_access": {"$ref": "#/$defs/ShowAccess"}
       }
     }

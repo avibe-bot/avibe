@@ -108,6 +108,10 @@
     "cache_policy": {
       "limited_all_surfaces": "private, no-store",
       "public_shell_document_fallback_api_errors": "private, no-store",
+      "public_access_dependent_redirects": {
+        "surfaces": ["resource_viewer_p_to_canonical_show", "resource_editor_p_to_canonical_show"],
+        "response_headers": {"Cache-Control": "private, no-store"}
+      },
       "public_versioned_asset_exception": "public, max-age=31536000, immutable",
       "public_versioned_asset_constraint": "contains_only_public_bytes_and_no_identity_or_page_private_data"
     },

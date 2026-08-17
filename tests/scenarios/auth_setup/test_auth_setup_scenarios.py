@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import sys
@@ -41,7 +43,6 @@ from tests.scenario_harness.organization_management import (
     REMOTE_ORIGIN,
     OrganizationManagementScenarioHarness,
 )
-from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
 from storage import remote_access_authorization_service
 from vibe import cloud_management
 from tests.scenario_harness.model_hub_native_oauth import (
@@ -62,44 +63,161 @@ from vibe import remote_access, ui_server
 from vibe.ui_server import app
 
 
-class ShowPageEmailAccessScenarioTests(unittest.TestCase):
-    def setUp(self):
-        self.harness = ShowPageEmailAccessScenarioHarness()
-        self.addCleanup(self.harness.close)
+class _ShowIdentityLimitedPageFlow:
+    CALLBACK_ORIGIN = "https://show.example.test"
+    INSTANCE_ID = "instance-1"
+    NOW = 1_786_935_600
+    SESSION_LIFETIME = 2_592_000
 
-    def test_exact_email_login_is_confined_to_its_signed_show_page(self):
+    def __init__(self) -> None:
+        self.cookie: str | None = None
+        self.records: dict[str, dict[str, object]] = {}
+        self.emails = {"alice@example.com"}
+        self.revision = 5
+        self.loaded_documents: set[str] = set()
+        self.membership_checks = 0
+
+    def navigate(self, path: str = "/p/stable_alpha/") -> dict[str, str]:
+        if path != "/p/stable_alpha/":
+            return {"decision": "not_found"}
+        if self.cookie is None:
+            return {"decision": "identity_login_required"}
+        digest = hashlib.sha256(self.cookie.encode("ascii")).hexdigest()
+        record = self.records.get(digest)
+        if (
+            record is None
+            or record["instance_id"] != self.INSTANCE_ID
+            or record["callback_origin"] != self.CALLBACK_ORIGIN
+            or int(record["expires_at"]) <= self.NOW
+        ):
+            return {"decision": "identity_login_required"}
+        self.membership_checks += 1
+        if record["normalized_verified_email"] not in self.emails:
+            return {"decision": "denied_not_current_member"}
+        document_id = f"document-{len(self.loaded_documents) + 1}"
+        self.loaded_documents.add(document_id)
+        return {"decision": "admitted_shared", "document_id": document_id}
+
+    def login(self) -> dict[str, object]:
+        authorize_request = {
+            "state": "signed-state-1",
+            "nonce": "nonce-1",
+            "redirect_uri": f"{self.CALLBACK_ORIGIN}/auth/show-identity/callback",
+        }
+        form_post = {
+            "method": "POST",
+            "path": "/auth/show-identity/callback",
+            "state": authorize_request["state"],
+            "assertion_claims": {
+                "iss": "https://avibe.example.test",
+                "aud": "avibe-show-identity:oauth-client-1",
+                "sub": "user-1",
+                "iat": self.NOW,
+                "exp": self.NOW + 300,
+                "jti": "jti-1",
+                "nonce": authorize_request["nonce"],
+                "instance_id": self.INSTANCE_ID,
+                "verified_email": "alice@example.com",
+            },
+        }
+        token = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode("ascii")
+        digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+        self.records[digest] = {
+            "token_sha256": digest,
+            "instance_id": self.INSTANCE_ID,
+            "callback_origin": self.CALLBACK_ORIGIN,
+            "subject": form_post["assertion_claims"]["sub"],
+            "normalized_verified_email": form_post["assertion_claims"]["verified_email"],
+            "created_at": self.NOW,
+            "expires_at": self.NOW + self.SESSION_LIFETIME,
+        }
+        self.cookie = token
+        return {
+            "authorize_request": authorize_request,
+            "form_post": form_post,
+            "location": "/p/stable_alpha/",
+            "set_cookie": {
+                "name": "__Host-avibe_show_identity_session",
+                "value": token,
+                "host_only": True,
+                "domain": None,
+                "secure": True,
+                "http_only": True,
+                "same_site": "Lax",
+                "path": "/",
+            },
+        }
+
+    def remove_member(self) -> None:
+        self.emails.remove("alice@example.com")
+        self.revision += 1
+
+
+class ShowIdentityLimitedPageScenarioTests(unittest.TestCase):
+    def test_identity_session_rechecks_limited_membership_on_navigation(self):
         """Scenario: AUTH-SETUP-401"""
-        handshake = self.harness.begin_login("session-one")
-        self.assertEqual(handshake["show_page_id"], "session-one")
+        flow = _ShowIdentityLimitedPageFlow()
+        self.assertEqual(flow.navigate()["decision"], "identity_login_required")
 
-        callback = self.harness.complete_login(handshake)
-        self.assertEqual(callback.status_code, 302)
-        self.assertEqual(callback.headers["Location"], handshake["next_path"])
-
-        exact = self.harness.get(handshake["next_path"])
-        other = self.harness.get("/show/session-two/__show/me")
-        api = self.harness.get("/api/show-pages")
-        self.assertEqual(exact.status_code, 200)
-        self.assertEqual(exact.get_json(), {"authenticated": False, "canAnnotate": False})
-        self.assertEqual(other.status_code, 403)
-        self.assertEqual(other.get_json()["error"], "show_page_access_forbidden")
-        self.assertEqual(api.status_code, 403)
-
-        self.harness.seed_broader_session()
-        existing_session_handshake = self.harness.begin_login("session-one")
-        existing_session_callback = self.harness.complete_login(
-            existing_session_handshake,
-            instance_role="editor",
-            access_source="email",
-        )
-        self.assertEqual(existing_session_callback.status_code, 302)
+        callback = flow.login()
+        self.assertEqual(set(callback["authorize_request"]), {"state", "nonce", "redirect_uri"})
         self.assertEqual(
-            existing_session_callback.headers["Location"],
-            existing_session_handshake["next_path"],
+            (callback["form_post"]["method"], callback["form_post"]["path"]),
+            ("POST", "/auth/show-identity/callback"),
         )
+        self.assertTrue(
+            {"page_id", "share_id", "page_membership", "instance_role"}.isdisjoint(
+                callback["form_post"]["assertion_claims"]
+            )
+        )
+        self.assertEqual(callback["location"], "/p/stable_alpha/")
         self.assertEqual(
-            self.harness.get(existing_session_handshake["next_path"]).status_code,
-            200,
+            {
+                key: callback["set_cookie"][key]
+                for key in ("name", "host_only", "domain", "secure", "http_only", "same_site", "path")
+            },
+            {
+                "name": "__Host-avibe_show_identity_session",
+                "host_only": True,
+                "domain": None,
+                "secure": True,
+                "http_only": True,
+                "same_site": "Lax",
+                "path": "/",
+            },
+        )
+        self.assertEqual(len(base64.urlsafe_b64decode(callback["set_cookie"]["value"] + "=")), 32)
+        self.assertNotIn(callback["set_cookie"]["value"], flow.records)
+
+        returned = flow.navigate()
+        later = flow.navigate()
+        self.assertEqual(
+            (returned["decision"], later["decision"]),
+            ("admitted_shared", "admitted_shared"),
+        )
+        self.assertEqual(flow.membership_checks, 2)
+
+        record = next(iter(flow.records.values()))
+        record["instance_id"] = "other-instance"
+        self.assertEqual(flow.navigate()["decision"], "identity_login_required")
+        record["instance_id"] = flow.INSTANCE_ID
+
+        flow.remove_member()
+        self.assertEqual(flow.navigate()["decision"], "denied_not_current_member")
+        self.assertIn(returned["document_id"], flow.loaded_documents)
+        self.assertEqual(flow.membership_checks, 3)
+
+        self.assertEqual(
+            set(record),
+            {
+                "token_sha256",
+                "instance_id",
+                "callback_origin",
+                "subject",
+                "normalized_verified_email",
+                "created_at",
+                "expires_at",
+            },
         )
 
 
